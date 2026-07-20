@@ -11,10 +11,14 @@ Comparison contract, stated exactly:
 
 - exit status must match (0 accept, 1 refuse);
 - on refusal, the baseline CLI's stderr must equal the port's exception
-  message byte for byte after masking OpenSSL 3's per-process error-queue id
-  at the start of embedded error lines (the only volatile token; error codes,
-  routines, files, and line numbers still compare exactly), and the baseline
-  must print nothing to stdout;
+  message byte for byte after two normalizations, and the baseline must print
+  nothing to stdout: (a) surrounding whitespace is stripped from the baseline's
+  captured streams (the CLI's trailing newline; applied to both sides equally,
+  so it cannot mask a message divergence, only a purely whitespace-only diff);
+  (b) OpenSSL 3's per-process error-queue id — an 8–16 hex prefix before
+  ``:error:`` that necessarily differs between processes — is masked at the
+  start of embedded error lines. Error codes, routines, files, and line
+  numbers still compare exactly;
 - on acceptance, the baseline CLI's stdout summary must equal the summary
   composed from the port's return value byte for byte, and the baseline must
   print nothing to stderr;
@@ -68,6 +72,17 @@ LEDGER_BRANCH = "codex/thesis-ledger-facts"
 BASELINE_SCRIPT_SHA256 = (
     "7f73e6921ca40e41e556c8e37a634e2780e7e8eeb3ab203ecdb9b7bd4b15a844"
 )
+# The baseline verifier imports scripts/canonical_json.py at runtime, so the
+# oracle is only trustworthy if that dependency is pinned too: a semantically
+# altered canonical serializer with the exact verifier bytes would otherwise
+# pass authentication and vouch for the port (Sol re-review P1).
+BASELINE_CANONICAL_SHA256 = (
+    "562bf267b7686bce8cb71f3c13f34825c21cd4ef0aba1c0c46aff16962a6cadd"
+)
+BASELINE_AUTHENTICATED_FILES = {
+    "scripts/verify_release_chain.py": BASELINE_SCRIPT_SHA256,
+    "scripts/canonical_json.py": BASELINE_CANONICAL_SHA256,
+}
 
 # The consumer pin: every value below is committed verifier configuration,
 # transcribed from scripts/verify_release_chain.py at LEDGER_PIN. Anchor
@@ -125,17 +140,21 @@ RELEASE_2_STEM = "0002-a69272175b73c83b"
 
 
 def _authenticated_baseline_tree(tree: pathlib.Path) -> pathlib.Path:
-    """Refuse to treat ``tree`` as the oracle unless its verifier is pinned."""
+    """Refuse to treat ``tree`` as the oracle unless the verifier AND every
+    source file it executes are byte-pinned (receipts/ledger-pin-source-hashes.txt).
+    Authenticating only the entry script would let a swapped canonical_json.py
+    silently change the oracle's behavior."""
 
-    script = tree / "scripts" / "verify_release_chain.py"
-    digest = hashlib.sha256(script.read_bytes()).hexdigest()
-    if digest != BASELINE_SCRIPT_SHA256:
-        raise RuntimeError(
-            "baseline oracle is not the pinned verifier: "
-            f"{script} has SHA-256 {digest}, expected {BASELINE_SCRIPT_SHA256} "
-            "(receipts/ledger-pin-source-hashes.txt). A stale or altered local "
-            "baseline must not silently vouch for the port."
-        )
+    for relative, expected in BASELINE_AUTHENTICATED_FILES.items():
+        path = tree / relative
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if digest != expected:
+            raise RuntimeError(
+                "baseline oracle is not the pinned verifier: "
+                f"{path} has SHA-256 {digest}, expected {expected} "
+                "(receipts/ledger-pin-source-hashes.txt). A stale or altered "
+                "baseline must not silently vouch for the port."
+            )
     return tree
 
 
@@ -343,6 +362,26 @@ def test_clean_chain_verdicts_match(
     assert port_message == baseline_out
 
 
+def test_swapped_canonical_dependency_fails_authentication(
+    pinned_tree: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """A tree with the exact verifier but an altered canonical_json.py must be
+    rejected as an oracle — the verifier imports and executes it, so pinning
+    only the entry script would let a swapped serializer vouch for the port
+    (Sol re-review P1 regression)."""
+
+    fake = tmp_path / "tree"
+    (fake / "scripts").mkdir(parents=True)
+    for relative in BASELINE_AUTHENTICATED_FILES:
+        shutil.copyfile(pinned_tree / relative, fake / relative)
+    # Semantically alter the imported serializer (any byte change breaks the pin).
+    canonical = fake / "scripts" / "canonical_json.py"
+    canonical.write_bytes(canonical.read_bytes() + b"\n# tampered\n")
+
+    with pytest.raises(RuntimeError, match=r"canonical_json\.py"):
+        _authenticated_baseline_tree(fake)
+
+
 # --- full-chain mutation battery -------------------------------------------
 #
 # Each mutation corrupts a fresh copy of the pinned tree and returns the
@@ -460,21 +499,19 @@ def unknown_file_in_manifest_dir(root: pathlib.Path) -> str:
     return "unknown file in closed release manifest directory: junk.txt"
 
 
-def symlink_manifest(root: pathlib.Path) -> tuple[str, str]:
-    """Binds: closed-directory surface via the rename-and-symlink swap attack
-    (an in-directory symlink plus its renamed target). Two anomalous entries
-    exist, so which check fires first follows directory iteration order; both
-    markers are acceptable. The tuple cannot mask a baseline/port divergence:
-    full-message equality is asserted before the marker, so if the two scans
-    ever disagreed the test would fail there first."""
+def symlink_manifest(root: pathlib.Path) -> str:
+    """Binds: the closed-directory unknown-file check via a rename-and-symlink
+    swap. Renaming the manifest to a ``.real`` sibling leaves that unexpected
+    filename in the closed directory, which the verifier reaches before the
+    non-regular-entry check — confirmed deterministic across probes (Sol
+    re-review P2). The non-regular-entry branch itself is bound separately and
+    deterministically by external_symlink_manifest, whose symlink is the only
+    anomalous entry."""
 
     target = manifest_paths(root)[-1]
     target.rename(target.with_suffix(".real"))
     target.symlink_to(target.with_suffix(".real").name)
-    return (
-        f"unknown file in closed release manifest directory: {RELEASE_2_STEM}.real",
-        "release manifest directory contains a non-regular entry",
-    )
+    return f"unknown file in closed release manifest directory: {RELEASE_2_STEM}.real"
 
 
 def external_symlink_manifest(root: pathlib.Path) -> str:
@@ -529,6 +566,22 @@ def payload_index_vs_filename(root: pathlib.Path) -> str:
     payload["releaseIndex"] = 2
     recanonicalize_and_rename(root, path, payload)
     return "manifest releaseIndex 2 does not match filename index 1"
+
+
+def payload_index_two_to_one(root: pathlib.Path) -> str:
+    """Binds: payload releaseIndex vs filename in the REVERSE direction.
+
+    payload_index_vs_filename edits release 1 (1->2, i.e. payload > filename);
+    this edits release 2 (2->1, payload < filename). A `>`-for-`!=` bug at the
+    index check would refuse the first and silently fall through to signature
+    verification on this one, so the pair pins the exact comparator (Sol
+    re-review residual gap)."""
+
+    path = manifest_paths(root)[2]
+    payload = json.loads(path.read_text())
+    payload["releaseIndex"] = 1
+    recanonicalize_and_rename(root, path, payload)
+    return "manifest releaseIndex 1 does not match filename index 2"
 
 
 def prev_pointer_mismatch(root: pathlib.Path) -> str:
@@ -595,6 +648,7 @@ MUTATIONS: dict[str, Callable[[pathlib.Path], str | tuple[str, ...]]] = {
     "noncontiguous_release_index": noncontiguous_release_index,
     "filename_digest_mismatch": filename_digest_mismatch,
     "payload_index_vs_filename": payload_index_vs_filename,
+    "payload_index_two_to_one": payload_index_two_to_one,
     "prev_pointer_mismatch": prev_pointer_mismatch,
     "flip_covered_ledger_prefix": flip_covered_ledger_prefix,
     "append_uncovered_ledger_row": append_uncovered_ledger_row,
@@ -656,13 +710,18 @@ def test_mutation_refused_identically(
 # commits it with an isolated git config, then tampers with the working tree
 # (or the ref) and returns (base_ref, branch marker).
 #
-# TODO(differential coverage): verify_base_release_chain and
-# materialize_base_tree remain unbound. The baseline CLI never invokes them —
-# its main() runs only verify_release_history_immutable plus
-# verify_release_chain — so the byte-equivalence contract (unmodified script
-# CLI vs port) has no baseline surface to compare against. Binding them would
-# require importing the pinned script as a module, a different oracle mode
-# this harness deliberately does not adopt.
+# Deliberately out of scope for THIS PR (Sol re-review P1, scoped not deferred):
+# verify_base_release_chain and materialize_base_tree are unbound here because
+# verify_release_chain.py's own CLI never invokes them — its main() runs only
+# verify_release_history_immutable plus verify_release_chain, so the
+# byte-equivalence contract (unmodified script CLI vs port) has no baseline
+# surface for them in this module. Their real caller is the append gate,
+# check_thesis_facts_append.py, whose CLI DOES invoke verify_base_release_chain
+# (base-tree materialization + trusted-base verification). They get their
+# differential coverage when that gate is extracted in the next PR, where the
+# baseline CLI exercises them directly. Binding them earlier would require a
+# second oracle mode (import the pinned script as a module) that this harness
+# deliberately does not adopt.
 
 BASE_MANIFEST_RELATIVE = f"releases/manifests/{RELEASE_1_STEM}.json"
 BASE_RECEIPT_RELATIVE = f"releases/manifests/{RELEASE_1_STEM}.freetsa.tsr"
