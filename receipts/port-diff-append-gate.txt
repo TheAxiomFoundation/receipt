@@ -1,5 +1,5 @@
---- .extraction/ledger-0798427/scripts/check_thesis_facts_append.py	2026-07-18 12:40:39
-+++ src/vidimus/append_gate.py	2026-07-20 08:29:01
+--- .extraction/ledger-9dafe81/scripts/check_thesis_facts_append.py	2026-07-20 12:32:33
++++ src/vidimus/append_gate.py	2026-07-20 12:48:34
 @@ -1,5 +1,4 @@
 -#!/usr/bin/env python3
 -"""Gate every change to the thesis-facts observation ledger.
@@ -18,7 +18,7 @@
 +
 +Extracted nearly verbatim from PolicyEngine/ledger
 +scripts/check_thesis_facts_append.py at commit
-+07984278503b8e06c48c539327f6f1d01c035510 (branch
++9dafe8174f42a06c00817fe596d5a8e686cb17b7 (branch
 +codex/thesis-ledger-facts). The only intended behavioral change is
 +parameterization: every repo-specific constant moved into ``AppendGateSpec``,
 +supplied by the consumer's committed code. Behavior is gated by the
@@ -302,7 +302,7 @@
          version = row.get("assertionVersion")
          supersedes = None
          if version is not None:
-@@ -436,11 +433,15 @@
+@@ -454,11 +451,15 @@
          active_by_record_id[str(record_id)] = (number, effective_id)
  
  
@@ -321,7 +321,7 @@
          )
      except subprocess.CalledProcessError as exc:
          raise AppendError(f"cannot read {relative} at base {base_ref}") from exc
-@@ -459,20 +460,24 @@
+@@ -477,20 +478,24 @@
      return len(lines) - len(base_lines)
  
  
@@ -353,7 +353,7 @@
      """Require the frozen prefix manifest to be unchanged from the base.
  
      The immutable-prefix manifest lives beside the ledger and is candidate-
-@@ -484,7 +489,7 @@
+@@ -502,7 +507,7 @@
      Returns the BASE prefix line count, which callers use as the post-cutover
      binding boundary so a candidate-controlled count can never move it.
      """
@@ -362,7 +362,7 @@
      for field in ("prefixLineCount", "prefixSha256", "lineSha256s"):
          if candidate_prefix.get(field) != base_prefix.get(field):
              raise AppendError(
-@@ -499,6 +504,7 @@
+@@ -517,6 +522,7 @@
      new_files: set[str],
      expected_index: int,
      *,
@@ -370,7 +370,7 @@
      allowed_support_files: set[str] | None = None,
  ) -> pathlib.Path:
      """Require exactly one manifest, producer signature, and two receipts."""
-@@ -506,7 +512,7 @@
+@@ -524,7 +530,7 @@
      manifest_files = [
          relative
          for relative in new_files
@@ -379,7 +379,7 @@
          and MANIFEST_RE.fullmatch(pathlib.PurePosixPath(relative).name)
      ]
      if len(manifest_files) != 1:
-@@ -526,26 +532,30 @@
+@@ -544,26 +550,30 @@
      stem = pathlib.PurePosixPath(manifest_name).stem
      expected = {
          manifest_relative,
@@ -421,7 +421,7 @@
  
  
  def _check_exact_byte_append(base_bytes: bytes, candidate_bytes: bytes) -> bytes:
-@@ -560,6 +570,7 @@
+@@ -578,6 +588,7 @@
  def check_release_proposal(
      base_ref: str,
      *,
@@ -429,7 +429,7 @@
      anchor_dir: pathlib.Path | None = None,
      enforce_production_pins: bool | None = None,
  ) -> int | None:
-@@ -573,22 +584,30 @@
+@@ -591,22 +602,30 @@
      """
  
      try:
@@ -469,7 +469,7 @@
      appended_bytes = _check_exact_byte_append(base_bytes, candidate_bytes)
      ledger_changed = bool(appended_bytes)
      if enforce_production_pins is None:
-@@ -607,11 +626,13 @@
+@@ -625,11 +644,13 @@
          _release_triple(
              new_files,
              0,
@@ -485,7 +485,7 @@
                  anchor_dir=anchor_dir,
                  require_chain=True,
                  verify_state=True,
-@@ -627,9 +648,10 @@
+@@ -645,9 +666,10 @@
  
      try:
          base_verification = verify_base_release_chain(
@@ -497,7 +497,7 @@
              anchor_dir=anchor_dir,
              enforce_production_pins=enforce_production_pins,
          )
-@@ -639,7 +661,7 @@
+@@ -657,7 +679,7 @@
      expected_index = base_verification.head.release_index + 1
  
      if ledger_changed:
@@ -506,7 +506,7 @@
      elif new_files:
          raise AppendError(
              "release-only proposal is forbidden after genesis; a next release "
-@@ -648,7 +670,8 @@
+@@ -666,7 +688,8 @@
  
      try:
          candidate_verification = verify_release_chain(
@@ -516,7 +516,7 @@
              anchor_dir=anchor_dir,
              require_chain=True,
              verify_state=True,
-@@ -667,19 +690,21 @@
+@@ -685,19 +708,21 @@
  
  def check_release_chain_without_base(
      *,
@@ -540,7 +540,7 @@
              anchor_dir=anchor_dir,
              require_chain=True,
              verify_state=True,
-@@ -691,84 +716,79 @@
+@@ -709,84 +734,79 @@
      return verification.head.release_index
  
  

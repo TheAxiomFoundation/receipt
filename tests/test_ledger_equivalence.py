@@ -63,7 +63,7 @@ from vidimus.release_chain import (
     verify_release_history_immutable,
 )
 
-LEDGER_PIN = "07984278503b8e06c48c539327f6f1d01c035510"
+LEDGER_PIN = "9dafe8174f42a06c00817fe596d5a8e686cb17b7"
 LEDGER_REPO_URL = "https://github.com/PolicyEngine/ledger.git"
 LEDGER_BRANCH = "codex/thesis-ledger-facts"
 

@@ -50,13 +50,13 @@ from vidimus.append_gate import (
 )
 from vidimus.canonical import canonical_bytes
 
-LEDGER_PIN = "07984278503b8e06c48c539327f6f1d01c035510"
+LEDGER_PIN = "9dafe8174f42a06c00817fe596d5a8e686cb17b7"
 LEDGER_REPO_URL = "https://github.com/PolicyEngine/ledger.git"
 LEDGER_BRANCH = "codex/thesis-ledger-facts"
 
 BASELINE_AUTHENTICATED_FILES = {
     "scripts/check_thesis_facts_append.py": (
-        "233ea076d72928b737017b2d43711e1dd9722b0ee159ae8a53bfecc28aeda3e8"
+        "46727ab22186b8f150fc7dbee8222cee729a6ddb4ba8e8cbe4a3dda702cbc427"
     ),
     "scripts/verify_release_chain.py": (
         "7f73e6921ca40e41e556c8e37a634e2780e7e8eeb3ab203ecdb9b7bd4b15a844"
@@ -573,9 +573,52 @@ def duplicate_without_supersedes(root: pathlib.Path, _base: str) -> str:
     )
 
 
-def target_hash_without_projection(root: pathlib.Path, _base: str) -> str:
+def invalid_target_content_hash(root: pathlib.Path, _base: str) -> str:
+    def mutate(row: dict) -> None:
+        row["targetContentHash"] = "not-a-sha256"
+        row["sourceBindingProjection"] = {
+            "responseSha256": row["responseArchive"]["sha256"],
+            "unit": row["measure"]["unit"],
+        }
+
+    _replace_jsonl_row(root, 146, mutate)
+    return (
+        "appended line 146 "
+        "(bls.cpi.u.headline_mom.june_2026.first_print) "
+        "targetContentHash is not a SHA-256 hex digest"
+    )
+
+
+def empty_source_binding_projection(root: pathlib.Path, _base: str) -> str:
     def mutate(row: dict) -> None:
         row["targetContentHash"] = "0" * 64
+        row["sourceBindingProjection"] = {}
+
+    _replace_jsonl_row(root, 146, mutate)
+    return (
+        "appended line 146 "
+        "(bls.cpi.u.headline_mom.june_2026.first_print) "
+        "sourceBindingProjection must be a non-empty object"
+    )
+
+
+def non_dict_source_binding_projection(root: pathlib.Path, _base: str) -> str:
+    def mutate(row: dict) -> None:
+        row["targetContentHash"] = "0" * 64
+        row["sourceBindingProjection"] = "not-an-object"
+
+    _replace_jsonl_row(root, 146, mutate)
+    return (
+        "appended line 146 "
+        "(bls.cpi.u.headline_mom.june_2026.first_print) "
+        "sourceBindingProjection must be a non-empty object"
+    )
+
+
+def binding_presence_xor_empty_hash_only(root: pathlib.Path, _base: str) -> str:
+    def mutate(row: dict) -> None:
+        row["targetContentHash"] = ""
+        row.pop("sourceBindingProjection", None)
 
     _replace_jsonl_row(
         root,
@@ -650,16 +693,19 @@ def mixed_data_and_gate(root: pathlib.Path, _base: str) -> str:
 MUTATIONS: dict[str, Callable[[pathlib.Path, str], str]] = {
     "altered_new_release_manifest": altered_new_release_manifest,
     "base_release_file_changed": base_release_file_changed,
+    "binding_presence_xor_empty_hash_only": binding_presence_xor_empty_hash_only,
     "duplicate_without_supersedes": duplicate_without_supersedes,
+    "empty_source_binding_projection": empty_source_binding_projection,
     "frozen_prefix_rewrite": frozen_prefix_rewrite,
     "historical_non_append": historical_non_append,
+    "invalid_target_content_hash": invalid_target_content_hash,
     "missing_assertion_version": missing_assertion_version,
     "missing_new_release_manifest": missing_new_release_manifest,
     "mixed_data_and_gate": mixed_data_and_gate,
+    "non_dict_source_binding_projection": non_dict_source_binding_projection,
     "prefix_manifest_changed": prefix_manifest_changed,
     "projection_without_target_hash": projection_without_target_hash,
     "release_only_proposal": release_only_proposal,
-    "target_hash_without_projection": target_hash_without_projection,
 }
 
 

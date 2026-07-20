@@ -29,7 +29,7 @@ enforced; without it only the full-file invariants run.
 
 Extracted nearly verbatim from PolicyEngine/ledger
 scripts/check_thesis_facts_append.py at commit
-07984278503b8e06c48c539327f6f1d01c035510 (branch
+9dafe8174f42a06c00817fe596d5a8e686cb17b7 (branch
 codex/thesis-ledger-facts). The only intended behavioral change is
 parameterization: every repo-specific constant moved into ``AppendGateSpec``,
 supplied by the consumer's committed code. Behavior is gated by the
@@ -391,14 +391,32 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
                 raise AppendError(
                     f"appended line {number} responseArchive lacks a digest"
                 )
-            has_hash = bool(row.get("targetContentHash"))
-            projection = row.get("sourceBindingProjection")
-            if has_hash != bool(projection):
+            # Key PRESENCE pairs the binding, and present values must be
+            # shape-valid: truthiness accepted targetContentHash "" with a
+            # missing (or {}) projection, silently waiving the contract
+            # binding (found during the vidimus extraction review).
+            has_hash = "targetContentHash" in row
+            has_projection = "sourceBindingProjection" in row
+            if has_hash != has_projection:
                 raise AppendError(
                     f"appended line {number} ({record_id}) must carry "
                     "targetContentHash and sourceBindingProjection together"
                 )
-            if projection:
+            if has_hash:
+                content_hash = row["targetContentHash"]
+                if not isinstance(content_hash, str) or not re.fullmatch(
+                    r"[0-9a-f]{64}", content_hash
+                ):
+                    raise AppendError(
+                        f"appended line {number} ({record_id}) "
+                        "targetContentHash is not a SHA-256 hex digest"
+                    )
+                projection = row["sourceBindingProjection"]
+                if not isinstance(projection, dict) or not projection:
+                    raise AppendError(
+                        f"appended line {number} ({record_id}) "
+                        "sourceBindingProjection must be a non-empty object"
+                    )
                 if projection.get("responseSha256") != archive.get("sha256"):
                     raise AppendError(
                         f"appended line {number} projection digest does not "
