@@ -147,6 +147,14 @@ def run_port(root: pathlib.Path) -> tuple[int, str]:
     )
 
 
+def _normalize_openssl_ids(message: str) -> str:
+    """Mask OpenSSL 3's per-process error-queue id at the start of error lines."""
+
+    import re
+
+    return re.sub(r"(?m)^[0-9A-Fa-f]{8,16}(?=:error:)", "<openssl-err-id>", message)
+
+
 def mutable_copy(tree: pathlib.Path, destination: pathlib.Path) -> pathlib.Path:
     """Copy only the custody surface; the baseline script runs via --root."""
 
@@ -249,8 +257,15 @@ def test_mutation_refused_identically(
         f"port ACCEPTED mutation {mutation}: fail-closed property broken"
     )
     # The baseline prints exactly one message to stderr; it may span lines
-    # (openssl ASN.1 diagnostics are embedded verbatim). Compare in full.
-    assert port_message == baseline_err, (
+    # (openssl ASN.1 diagnostics are embedded verbatim). Compare in full,
+    # after normalizing the one volatile token: OpenSSL 3 prefixes each
+    # error line with a per-process error-queue id (e.g. 40374933CF7F0000),
+    # which necessarily differs between the baseline subprocess and this
+    # process. Error codes, routines, files, and line numbers still compare
+    # byte for byte.
+    assert _normalize_openssl_ids(port_message) == _normalize_openssl_ids(
+        baseline_err
+    ), (
         f"divergent refusal for {mutation}:\n"
         f"  baseline: {baseline_err}\n"
         f"  port:     {port_message}"
