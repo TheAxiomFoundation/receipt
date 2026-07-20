@@ -5,7 +5,9 @@ the pinned commit. Candidate = vidimus.release_chain with LEDGER_SPEC (the
 consumer pin, committed here). Equivalence is judged on the live chain, on a
 mutation battery, and on the --base-ref immutability surface: for every
 mutation both verifiers must refuse, and their refusals must match byte for
-byte after one normalization (below).
+byte after the two normalizations stated in the comparison contract below
+(whitespace stripping of the baseline CLI streams, and OpenSSL error-queue-id
+masking).
 
 Comparison contract, stated exactly:
 
