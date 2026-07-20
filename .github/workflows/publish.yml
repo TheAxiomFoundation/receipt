@@ -1,0 +1,25 @@
+name: Publish to PyPI
+
+# Trusted publishing (OIDC): no tokens stored anywhere. Requires the pending
+# publisher registered on pypi.org for project "vidimus" with owner
+# TheAxiomFoundation, repository vidimus, workflow publish.yml,
+# environment pypi.
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+      - run: uv build
+      - uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1
