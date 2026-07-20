@@ -499,19 +499,26 @@ def unknown_file_in_manifest_dir(root: pathlib.Path) -> str:
     return "unknown file in closed release manifest directory: junk.txt"
 
 
-def symlink_manifest(root: pathlib.Path) -> str:
-    """Binds: the closed-directory unknown-file check via a rename-and-symlink
-    swap. Renaming the manifest to a ``.real`` sibling leaves that unexpected
-    filename in the closed directory, which the verifier reaches before the
-    non-regular-entry check — confirmed deterministic across probes (Sol
-    re-review P2). The non-regular-entry branch itself is bound separately and
-    deterministically by external_symlink_manifest, whose symlink is the only
-    anomalous entry."""
+def symlink_manifest(root: pathlib.Path) -> tuple[str, str]:
+    """Binds the closed-directory surface via a rename-and-symlink swap: the
+    renamed ``.real`` target and the ``.json`` symlink are both anomalous, so
+    which check fires first depends on directory-iteration order, which is
+    filesystem-dependent (macOS/APFS reached the unknown-file branch; Linux/ext4
+    reaches the non-regular-entry branch — CI caught the narrowing to one
+    marker). Either marker is correct; the branch that fires is not fixed. This
+    tuple cannot mask a baseline/port divergence: full normalized-message
+    equality is asserted BEFORE the marker, and it passed on both platforms
+    (baseline and port always agree on which branch fires for a given FS).
+    external_symlink_manifest binds the non-regular-entry branch
+    deterministically, so coverage does not depend on this platform accident."""
 
     target = manifest_paths(root)[-1]
     target.rename(target.with_suffix(".real"))
     target.symlink_to(target.with_suffix(".real").name)
-    return f"unknown file in closed release manifest directory: {RELEASE_2_STEM}.real"
+    return (
+        f"unknown file in closed release manifest directory: {RELEASE_2_STEM}.real",
+        "release manifest directory contains a non-regular entry",
+    )
 
 
 def external_symlink_manifest(root: pathlib.Path) -> str:
