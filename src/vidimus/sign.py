@@ -107,6 +107,7 @@ def _verify_producer_signature_with_openssl(
     public_key_pem: bytes,
     *,
     public_key_filename: str,
+    temporary_public_key_filename: str | None = None,
     spki_sha256: str | None,
     label: str,
 ) -> None:
@@ -119,7 +120,12 @@ def _verify_producer_signature_with_openssl(
         signature_path = temporary / "producer.sig"
         # Release-chain diagnostics carry the full anchor path. The upstream
         # temporary file nevertheless uses only the configured filename.
-        public_key_path = temporary / pathlib.Path(public_key_filename).name
+        temporary_key_name = (
+            temporary_public_key_filename
+            if temporary_public_key_filename is not None
+            else pathlib.Path(public_key_filename).name
+        )
+        public_key_path = temporary / temporary_key_name
         manifest_path.write_bytes(payload)
         signature_path.write_bytes(signature)
         public_key_path.write_bytes(public_key_pem)

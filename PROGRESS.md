@@ -2,7 +2,7 @@
 
 ## State
 
-Layer 1 now exists in `src/vidimus/sign.py` as a standalone copy of the producer-signature primitives. Release-chain delegation is the next step; the existing implementation remains intact until that boundary is verified.
+`release_chain` now delegates producer-key reading and verification to `vidimus.sign` through exception-translating compatibility wrappers. Both pinned differential harnesses pass after the extraction.
 
 ## Done
 
@@ -12,8 +12,11 @@ Layer 1 now exists in `src/vidimus/sign.py` as a standalone copy of the producer
 - Read the release-chain implementation, both differential harnesses, and the pinned upstream oracle.
 - Confirmed the clean baseline: 57 tests pass.
 - Added `SignError`, `ProducerKeySpec`, producer-key reading, exact input validation, cryptography verification, and the OpenSSL fallback to `vidimus.sign`.
+- Preserved the old `release_chain` producer helper signatures and its importable cryptography gate/names while replacing their implementations with one-way delegation.
+- Preserved input-check ordering and full anchor-path diagnostics; every `SignError` crossing the boundary is re-raised as `ReleaseChainError(str(exc)) from exc`.
+- Confirmed 54 release-chain and append-gate equivalence tests pass with byte-identical verdicts after the existing normalizations.
 
 ## Next
 
-- Delegate the frozen `release_chain` producer-verification surface to `vidimus.sign`, preserving old helper signatures and exception types.
-- Re-run the differential suites before adding sign-side capability.
+- Add sign-side key generation/signing and its round-trip/OpenSSL tests.
+- Add the three producer-public-key differential mutations.
