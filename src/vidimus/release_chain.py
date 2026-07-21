@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import pathlib
 import re
 import subprocess
@@ -31,20 +30,11 @@ from typing import Any
 
 from vidimus import sign as _sign
 from vidimus.canonical import canonical_bytes
-from vidimus.sign import SignError, _openssl_environment
 
-try:
-    from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-    from cryptography.hazmat.primitives.serialization import (
-        Encoding,
-        PublicFormat,
-        load_pem_public_key,
-    )
-except ImportError:  # Bare pre-sync CI falls back to the OpenSSL 3 CLI below.
-    CRYPTOGRAPHY_AVAILABLE = False
-else:
-    CRYPTOGRAPHY_AVAILABLE = True
+# One availability gate for the whole package: producer-signature verification
+# lives in vidimus.sign, and this module's only remaining cryptography use is
+# choosing between sign's cryptography and OpenSSL 3 CLI paths.
+from vidimus.sign import CRYPTOGRAPHY_AVAILABLE, SignError, _openssl_environment
 
 MAX_RELEASE_INDEX = 9_999
 DEFAULT_CLOCK_SKEW_SECONDS = 300

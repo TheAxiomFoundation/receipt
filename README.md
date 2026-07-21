@@ -6,13 +6,13 @@ Verifiable custody of agent-produced records.
 
 ## Status
 
-Pre-release extraction target — nothing here verifies anything yet. The machinery arrives by extraction from three production systems that each built it independently (pre-registered forecast records, an observation-ledger release chain, a signed statute corpus), behind a byte-equivalence gate: the extracted verifier must reproduce the source verifier's verdict, pass and fail alike, on the live production chain at a pinned commit before any system consumes the package.
+Shipped so far: the release-chain verifier, the append gate, ECMAScript-compatible canonical JSON, and standalone Ed25519 signing with consumer-pinned threshold keyrings. The machinery arrives by extraction from three production systems that each built it independently (pre-registered forecast records, an observation-ledger release chain, a signed statute corpus), behind a byte-equivalence gate: the extracted verifier must reproduce the source verifier's verdict, pass and fail alike, on the live production chain at a pinned commit before any system consumes the package. That gate has held end to end — the observation ledger consumes the package in production, with the differential harnesses re-proving equivalence on every package change.
 
-## What it will provide
+## What it provides (shipped rows) and what is still arriving
 
 - `vidimus.chain` — append-only hash-chained manifests over record sets: enumerated genesis, content-addressed links, immutable-prefix verification
 - `vidimus.tsa` — RFC 3161 timestamps from independent authorities, two per record, with per-witness honest degradation (an unavailable witness is recorded with a reason, never silently skipped)
-- `vidimus.sign` — Ported ledger signature-verification primitives, Ed25519 sign-side helpers, N-of-M keyrings, and rotation by reviewed spec change
+- `vidimus.sign` — Ed25519 producer signatures verified against fingerprints pinned in the consumer's own committed code (shipped: ported ledger primitives, sign-side helpers, N-of-M keyrings, rotation by reviewed spec change)
 - `vidimus.attest` — CI push attestation with self-anchoring enforcement epochs and a completeness sweep over every record-touching commit
 - `vidimus.ratchet` — shrink-only exception registries recomputed from live state; an excused failure that starts passing is an error until removed
 - `vidimus.chronology` — record-vs-event ordering tiers: does witnessed time prove the record existed *ante quem* — before the event it predicts or observes?
