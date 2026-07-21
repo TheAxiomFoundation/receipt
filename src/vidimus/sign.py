@@ -22,10 +22,16 @@ from dataclasses import dataclass
 
 try:
     from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+        Ed25519PrivateKey,
+        Ed25519PublicKey,
+    )
     from cryptography.hazmat.primitives.serialization import (
         Encoding,
+        NoEncryption,
+        PrivateFormat,
         PublicFormat,
+        load_pem_private_key,
         load_pem_public_key,
     )
 except ImportError:  # Bare pre-sync CI falls back to the OpenSSL 3 CLI below.
@@ -241,3 +247,46 @@ def verify_signature_bytes(
         raise SignError(
             f"producer Ed25519 signature verification failed for {label}"
         ) from exc
+
+
+def sign_payload(
+    private_key_pem: bytes,
+    payload: bytes,
+    *,
+    domain: bytes = b"",
+) -> bytes:
+    """Return a raw Ed25519 signature over ``domain + payload``."""
+
+    if type(private_key_pem) is not bytes:
+        raise SignError("Ed25519 private key PEM must be bytes")
+    if type(payload) is not bytes:
+        raise SignError("signature payload must be bytes")
+    if type(domain) is not bytes:
+        raise SignError("signature domain must be bytes")
+    if not CRYPTOGRAPHY_AVAILABLE:
+        raise SignError("Ed25519 signing requires cryptography")
+    try:
+        private_key = load_pem_private_key(private_key_pem, password=None)
+    except (TypeError, ValueError, UnsupportedAlgorithm) as exc:
+        raise SignError("cannot decode Ed25519 private key") from exc
+    if not isinstance(private_key, Ed25519PrivateKey):
+        raise SignError("private key is not Ed25519")
+    return private_key.sign(domain + payload)
+
+
+def generate_signing_keypair() -> tuple[bytes, bytes]:
+    """Ceremony/test helper; the package never stores or reads key material."""
+
+    if not CRYPTOGRAPHY_AVAILABLE:
+        raise SignError("Ed25519 key generation requires cryptography")
+    private_key = Ed25519PrivateKey.generate()
+    private_pem = private_key.private_bytes(
+        Encoding.PEM,
+        PrivateFormat.PKCS8,
+        NoEncryption(),
+    )
+    public_pem = private_key.public_key().public_bytes(
+        Encoding.PEM,
+        PublicFormat.SubjectPublicKeyInfo,
+    )
+    return private_pem, public_pem

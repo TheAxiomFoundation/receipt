@@ -2,7 +2,7 @@
 
 ## State
 
-`release_chain` now delegates producer-key reading and verification to `vidimus.sign` through exception-translating compatibility wrappers. Both pinned differential harnesses pass after the extraction.
+The extracted verifier is differential-green, and Layer 2 supplies in-memory Ed25519 key generation and domain-separated signing with cryptography/OpenSSL round-trip coverage.
 
 ## Done
 
@@ -15,8 +15,11 @@
 - Preserved the old `release_chain` producer helper signatures and its importable cryptography gate/names while replacing their implementations with one-way delegation.
 - Preserved input-check ordering and full anchor-path diagnostics; every `SignError` crossing the boundary is re-raised as `ReleaseChainError(str(exc)) from exc`.
 - Confirmed 54 release-chain and append-gate equivalence tests pass with byte-identical verdicts after the existing normalizations.
+- Added `sign_payload` and `generate_signing_keypair`; both require cryptography and never read or store caller key material.
+- Added Layer 1–2 unit coverage for pinned and explicitly unpinned verification, exact refusal messages, domain separation, forced OpenSSL parity, key-file checks, and an independent OpenSSL CLI verification.
+- Confirmed all 9 current `tests/test_sign.py` cases pass on the cryptography and OpenSSL 3 paths.
 
 ## Next
 
-- Add sign-side key generation/signing and its round-trip/OpenSSL tests.
 - Add the three producer-public-key differential mutations.
+- Implement the multi-root keyring and extend `tests/test_sign.py` with threshold semantics.
