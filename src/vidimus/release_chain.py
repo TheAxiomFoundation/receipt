@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import pathlib
 import re
 import subprocess
@@ -29,20 +28,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from vidimus import sign as _sign
 from vidimus.canonical import canonical_bytes
 
-try:
-    from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-    from cryptography.hazmat.primitives.serialization import (
-        Encoding,
-        PublicFormat,
-        load_pem_public_key,
-    )
-except ImportError:  # Bare pre-sync CI falls back to the OpenSSL 3 CLI below.
-    CRYPTOGRAPHY_AVAILABLE = False
-else:
-    CRYPTOGRAPHY_AVAILABLE = True
+# One availability gate for the whole package: producer-signature verification
+# lives in vidimus.sign, and this module's only remaining cryptography use is
+# choosing between sign's cryptography and OpenSSL 3 CLI paths.
+from vidimus.sign import CRYPTOGRAPHY_AVAILABLE, SignError, _openssl_environment
 
 MAX_RELEASE_INDEX = 9_999
 DEFAULT_CLOCK_SKEW_SECONDS = 300
@@ -52,7 +44,7 @@ MANIFEST_RE = re.compile(r"(?P<index>[0-9]{4})-(?P<digest>[0-9a-f]{16})\.json\Z"
 PRODUCER_SIGNATURE_RE = re.compile(
     r"(?P<stem>[0-9]{4}-[0-9a-f]{16})\.producer\.sig\Z"
 )
-PRODUCER_SIGNATURE_BYTES = 64
+PRODUCER_SIGNATURE_BYTES = _sign.PRODUCER_SIGNATURE_BYTES
 STRICT_UTC_RE = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:"
     r"[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z\Z"
@@ -426,19 +418,6 @@ def _enumerate_manifest_files(
     )
 
 
-def _openssl_environment(empty_ca_dir: pathlib.Path) -> dict[str, str]:
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "LC_ALL": "C",
-            "OPENSSL_CONF": "/dev/null",
-            "SSL_CERT_DIR": str(empty_ca_dir),
-            "SSL_CERT_FILE": "/dev/null",
-        }
-    )
-    return environment
-
-
 def _command_error(completed: subprocess.CompletedProcess[str]) -> str:
     details = (completed.stderr or completed.stdout).strip()
     return details[-1000:] if details else "no OpenSSL diagnostic"
@@ -536,25 +515,13 @@ def _producer_openssl_binary(
     label: str,
 ) -> bytes:
     try:
-        completed = subprocess.run(
-            ["openssl", *arguments],
-            check=False,
-            capture_output=True,
-            env=environment,
+        return _sign._producer_openssl_binary(
+            arguments,
+            environment=environment,
+            label=label,
         )
-    except FileNotFoundError as exc:
-        raise ReleaseChainError(
-            "producer signature verification requires cryptography or OpenSSL 3"
-        ) from exc
-    if completed.returncode != 0:
-        diagnostic = (completed.stderr or completed.stdout).decode(
-            "utf-8", errors="replace"
-        )
-        raise ReleaseChainError(
-            f"OpenSSL producer {label} failed (exit {completed.returncode}): "
-            f"{diagnostic.strip()[-1000:]}"
-        )
-    return completed.stdout
+    except SignError as exc:
+        raise ReleaseChainError(str(exc)) from exc
 
 
 def _verify_producer_signature_with_openssl(
@@ -566,59 +533,20 @@ def _verify_producer_signature_with_openssl(
     enforce_production_pin: bool,
     label: str,
 ) -> None:
-    with tempfile.TemporaryDirectory(prefix="thesis-release-producer-") as name:
-        temporary = pathlib.Path(name)
-        empty_ca_dir = temporary / "empty-ca"
-        empty_ca_dir.mkdir()
-        environment = _openssl_environment(empty_ca_dir)
-        manifest_path = temporary / "manifest.json"
-        signature_path = temporary / "producer.sig"
-        public_key_path = temporary / spec.producer_public_key_filename
-        manifest_path.write_bytes(manifest)
-        signature_path.write_bytes(signature)
-        public_key_path.write_bytes(public_key_pem)
-
-        spki_der = _producer_openssl_binary(
-            [
-                "pkey",
-                "-pubin",
-                "-in",
-                str(public_key_path),
-                "-outform",
-                "DER",
-            ],
-            environment=environment,
-            label=f"public-key decoding for {label}",
+    try:
+        _sign._verify_producer_signature_with_openssl(
+            manifest,
+            signature,
+            public_key_pem,
+            public_key_filename=spec.producer_public_key_filename,
+            temporary_public_key_filename=spec.producer_public_key_filename,
+            spki_sha256=(
+                spec.producer_spki_sha256 if enforce_production_pin else None
+            ),
+            label=label,
         )
-        if enforce_production_pin:
-            spki_sha256 = sha256_bytes(spki_der)
-            if spki_sha256 != spec.producer_spki_sha256:
-                raise ReleaseChainError(
-                    "producer public-key SPKI is not code-pinned: "
-                    f"{spki_sha256}"
-                )
-
-        try:
-            _producer_openssl_binary(
-                [
-                    "pkeyutl",
-                    "-verify",
-                    "-pubin",
-                    "-inkey",
-                    str(public_key_path),
-                    "-rawin",
-                    "-in",
-                    str(manifest_path),
-                    "-sigfile",
-                    str(signature_path),
-                ],
-                environment=environment,
-                label=f"Ed25519 signature verification for {label}",
-            )
-        except ReleaseChainError as exc:
-            raise ReleaseChainError(
-                f"producer Ed25519 signature verification failed for {label}"
-            ) from exc
+    except SignError as exc:
+        raise ReleaseChainError(str(exc)) from exc
 
 
 def verify_producer_signature_bytes(
@@ -632,58 +560,39 @@ def verify_producer_signature_bytes(
 ) -> None:
     """Verify one raw Ed25519 signature over exact manifest bytes."""
 
-    if type(manifest) is not bytes:
-        raise ReleaseChainError("producer-signed manifest payload must be bytes")
-    if type(signature) is not bytes or len(signature) != PRODUCER_SIGNATURE_BYTES:
-        actual = len(signature) if isinstance(signature, bytes) else "non-bytes"
-        raise ReleaseChainError(
-            f"producer signature for {label} must be exactly "
-            f"{PRODUCER_SIGNATURE_BYTES} raw bytes; found={actual}"
-        )
-    public_key_path = anchor_dir / spec.producer_public_key_filename
-    if public_key_path.is_symlink() or not public_key_path.is_file():
-        raise ReleaseChainError(
-            f"missing or non-regular producer public key: {public_key_path}"
-        )
-    public_key_pem = public_key_path.read_bytes()
-
-    if not CRYPTOGRAPHY_AVAILABLE:
-        _verify_producer_signature_with_openssl(
+    key_spec = _sign.ProducerKeySpec(
+        public_key_filename=spec.producer_public_key_filename,
+        spki_sha256=spec.producer_spki_sha256,
+    )
+    public_key_path = anchor_dir / key_spec.public_key_filename
+    try:
+        # Preserve the upstream branch order: bad payload/signature inputs
+        # refuse before a missing producer-key path is inspected.
+        _sign._validate_signature_inputs(manifest, signature, label)
+        public_key_pem = _sign.read_producer_public_key(anchor_dir, key_spec)
+        if not CRYPTOGRAPHY_AVAILABLE:
+            _sign._verify_producer_signature_with_openssl(
+                manifest,
+                signature,
+                public_key_pem,
+                public_key_filename=str(public_key_path),
+                temporary_public_key_filename=key_spec.public_key_filename,
+                spki_sha256=(
+                    key_spec.spki_sha256 if enforce_production_pin else None
+                ),
+                label=label,
+            )
+            return
+        _sign.verify_signature_bytes(
             manifest,
             signature,
             public_key_pem,
-            spec=spec,
-            enforce_production_pin=enforce_production_pin,
+            public_key_filename=str(public_key_path),
+            spki_sha256=(key_spec.spki_sha256 if enforce_production_pin else None),
             label=label,
         )
-        return
-
-    try:
-        public_key = load_pem_public_key(public_key_pem)
-    except (TypeError, ValueError, UnsupportedAlgorithm) as exc:
-        raise ReleaseChainError(
-            f"cannot decode producer Ed25519 public key: {public_key_path}"
-        ) from exc
-    if not isinstance(public_key, Ed25519PublicKey):
-        raise ReleaseChainError(
-            f"producer public key is not Ed25519: {public_key_path}"
-        )
-    spki_der = public_key.public_bytes(
-        Encoding.DER,
-        PublicFormat.SubjectPublicKeyInfo,
-    )
-    if enforce_production_pin:
-        spki_sha256 = sha256_bytes(spki_der)
-        if spki_sha256 != spec.producer_spki_sha256:
-            raise ReleaseChainError(
-                f"producer public-key SPKI is not code-pinned: {spki_sha256}"
-            )
-    try:
-        public_key.verify(signature, manifest)
-    except InvalidSignature as exc:
-        raise ReleaseChainError(
-            f"producer Ed25519 signature verification failed for {label}"
-        ) from exc
+    except SignError as exc:
+        raise ReleaseChainError(str(exc)) from exc
 
 
 def verify_producer_signature(
