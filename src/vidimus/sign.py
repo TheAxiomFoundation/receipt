@@ -18,6 +18,7 @@ import os
 import pathlib
 import subprocess
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 try:
@@ -290,3 +291,169 @@ def generate_signing_keypair() -> tuple[bytes, bytes]:
         PublicFormat.SubjectPublicKeyInfo,
     )
     return private_pem, public_pem
+
+
+def _load_ed25519_public_key(public_key: bytes) -> Ed25519PublicKey:
+    if type(public_key) is not bytes:
+        raise SignError("Ed25519 public key must be bytes")
+    if not CRYPTOGRAPHY_AVAILABLE:
+        raise SignError("Ed25519 public-key normalization requires cryptography")
+    if len(public_key) == 32:
+        try:
+            return Ed25519PublicKey.from_public_bytes(public_key)
+        except ValueError as exc:
+            raise SignError("cannot decode Ed25519 public key") from exc
+    try:
+        loaded = load_pem_public_key(public_key)
+    except (TypeError, ValueError, UnsupportedAlgorithm) as exc:
+        raise SignError("cannot decode Ed25519 public key") from exc
+    if not isinstance(loaded, Ed25519PublicKey):
+        raise SignError("public key is not Ed25519")
+    return loaded
+
+
+def spki_sha256(public_key: bytes) -> str:
+    """Return SHA-256 of a PEM or raw Ed25519 key's DER SPKI encoding."""
+
+    normalized = _load_ed25519_public_key(public_key)
+    spki_der = normalized.public_bytes(
+        Encoding.DER,
+        PublicFormat.SubjectPublicKeyInfo,
+    )
+    return hashlib.sha256(spki_der).hexdigest()
+
+
+def raw_public_key_sha256(public_key: bytes) -> str:
+    """Return SHA-256 of a PEM or raw Ed25519 key's 32-byte encoding."""
+
+    normalized = _load_ed25519_public_key(public_key)
+    raw = normalized.public_bytes(Encoding.Raw, PublicFormat.Raw)
+    return hashlib.sha256(raw).hexdigest()
+
+
+@dataclass(frozen=True)
+class KeySpec:
+    key_id: str
+    fingerprint: str
+    scheme: str
+
+    def __post_init__(self) -> None:
+        if self.scheme not in ("spki-sha256", "raw-sha256"):
+            raise SignError(f"unsupported key fingerprint scheme: {self.scheme!r}")
+
+
+@dataclass(frozen=True)
+class KeyringSpec:
+    keys: tuple[KeySpec, ...]
+    threshold: int
+
+    def __post_init__(self) -> None:
+        if not self.keys:
+            raise SignError("keyring must contain at least one key")
+        if self.threshold < 1:
+            raise SignError(
+                f"keyring threshold must be at least 1; found={self.threshold}"
+            )
+        if self.threshold > len(self.keys):
+            raise SignError(
+                f"keyring threshold {self.threshold} exceeds key count "
+                f"{len(self.keys)}"
+            )
+        seen_key_ids: set[str] = set()
+        seen_fingerprints: set[str] = set()
+        for key in self.keys:
+            if key.key_id in seen_key_ids:
+                raise SignError(f"duplicate key_id in keyring: {key.key_id!r}")
+            if key.fingerprint in seen_fingerprints:
+                raise SignError(
+                    f"duplicate fingerprint in keyring: {key.fingerprint!r}"
+                )
+            seen_key_ids.add(key.key_id)
+            seen_fingerprints.add(key.fingerprint)
+
+
+@dataclass(frozen=True)
+class ThresholdVerification:
+    satisfied: tuple[str, ...]
+    failed: tuple[str, ...]
+    absent: tuple[str, ...]
+
+
+def _key_fingerprint(public_key: Ed25519PublicKey, scheme: str) -> str:
+    if scheme == "spki-sha256":
+        encoded = public_key.public_bytes(
+            Encoding.DER,
+            PublicFormat.SubjectPublicKeyInfo,
+        )
+    else:
+        encoded = public_key.public_bytes(Encoding.Raw, PublicFormat.Raw)
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def verify_threshold(
+    payload: bytes,
+    signatures: Mapping[str, bytes],
+    public_keys: Mapping[str, bytes],
+    keyring: KeyringSpec,
+    *,
+    domain: bytes,
+    label: str,
+) -> ThresholdVerification:
+    """Verify a closed-world threshold over ``domain + payload``."""
+
+    if type(payload) is not bytes:
+        raise SignError("signature payload must be bytes")
+    if type(domain) is not bytes:
+        raise SignError("signature domain must be bytes")
+
+    specs = {key.key_id: key for key in keyring.keys}
+    unknown_key_ids = sorted((set(signatures) | set(public_keys)) - set(specs))
+    if unknown_key_ids:
+        raise SignError(f"unknown key_id: {unknown_key_ids[0]!r}")
+
+    normalized_public_keys: dict[str, Ed25519PublicKey] = {}
+    for key_id in sorted(set(public_keys)):
+        key_spec = specs[key_id]
+        normalized = _load_ed25519_public_key(public_keys[key_id])
+        computed = _key_fingerprint(normalized, key_spec.scheme)
+        if computed != key_spec.fingerprint:
+            raise SignError(
+                f"public key fingerprint mismatch for {key_id!r} "
+                f"({key_spec.scheme}): expected={key_spec.fingerprint}, "
+                f"computed={computed}"
+            )
+        normalized_public_keys[key_id] = normalized
+
+    message = domain + payload
+    satisfied: list[str] = []
+    failed: list[str] = []
+    absent: list[str] = []
+    for key_spec in keyring.keys:
+        key_id = key_spec.key_id
+        if key_id not in signatures or key_id not in normalized_public_keys:
+            absent.append(key_id)
+            continue
+        signature = signatures[key_id]
+        if type(signature) is not bytes or len(signature) != PRODUCER_SIGNATURE_BYTES:
+            failed.append(key_id)
+            continue
+        try:
+            normalized_public_keys[key_id].verify(signature, message)
+        except InvalidSignature:
+            failed.append(key_id)
+        else:
+            satisfied.append(key_id)
+
+    verification = ThresholdVerification(
+        satisfied=tuple(sorted(satisfied)),
+        failed=tuple(sorted(failed)),
+        absent=tuple(sorted(absent)),
+    )
+    if len(verification.satisfied) < keyring.threshold:
+        raise SignError(
+            f"signature threshold not satisfied for {label}: "
+            f"threshold={keyring.threshold}; "
+            f"satisfied={verification.satisfied}; "
+            f"failed={verification.failed}; absent={verification.absent}"
+        )
+    return verification

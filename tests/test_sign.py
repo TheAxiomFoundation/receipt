@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import itertools
 import pathlib
 import shutil
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import FrozenInstanceError
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -24,12 +26,18 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 
 import vidimus.sign as sign_module
 from vidimus.sign import (
+    KeyringSpec,
+    KeySpec,
     ProducerKeySpec,
     SignError,
+    ThresholdVerification,
     generate_signing_keypair,
+    raw_public_key_sha256,
     read_producer_public_key,
     sign_payload,
+    spki_sha256,
     verify_signature_bytes,
+    verify_threshold,
 )
 
 
@@ -388,3 +396,470 @@ def test_sign_payload_cross_checks_with_openssl_cli(
         ):
             pytest.skip(f"openssl lacks Ed25519 pkeyutl support: {diagnostic}")
         pytest.fail(f"openssl rejected the generated signature: {diagnostic}")
+
+
+def _raw_public_key(public_key_pem: bytes) -> bytes:
+    public_key = serialization.load_pem_public_key(public_key_pem)
+    assert isinstance(public_key, Ed25519PublicKey)
+    return public_key.public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+
+
+def _three_keyring() -> tuple[
+    dict[str, tuple[bytes, bytes]],
+    KeyringSpec,
+]:
+    material = {
+        key_id: generate_signing_keypair()
+        for key_id in ("key-a", "key-b", "key-c")
+    }
+    # Deliberately non-lexical: result tuples must still be sorted.
+    keyring = KeyringSpec(
+        keys=tuple(
+            KeySpec(key_id, spki_sha256(material[key_id][1]), "spki-sha256")
+            for key_id in ("key-c", "key-a", "key-b")
+        ),
+        threshold=2,
+    )
+    return material, keyring
+
+
+def _present_subset(
+    material: Mapping[str, tuple[bytes, bytes]],
+    subset: tuple[str, ...],
+    *,
+    payload: bytes,
+    domain: bytes,
+) -> tuple[dict[str, bytes], dict[str, bytes]]:
+    signatures = {
+        key_id: sign_payload(material[key_id][0], payload, domain=domain)
+        for key_id in reversed(subset)
+    }
+    public_keys = {key_id: material[key_id][1] for key_id in subset}
+    return signatures, public_keys
+
+
+def test_fingerprint_helpers_normalize_pem_and_raw() -> None:
+    _, public_key_pem = generate_signing_keypair()
+    raw = _raw_public_key(public_key_pem)
+    public_key = serialization.load_pem_public_key(public_key_pem)
+    assert isinstance(public_key, Ed25519PublicKey)
+    spki_der = public_key.public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+
+    expected_spki = hashlib.sha256(spki_der).hexdigest()
+    expected_raw = hashlib.sha256(raw).hexdigest()
+    assert spki_sha256(public_key_pem) == expected_spki
+    assert spki_sha256(raw) == expected_spki
+    assert raw_public_key_sha256(public_key_pem) == expected_raw
+    assert raw_public_key_sha256(raw) == expected_raw
+
+
+def test_fingerprint_helper_refusals() -> None:
+    with pytest.raises(SignError, match="^Ed25519 public key must be bytes$"):
+        spki_sha256(bytearray(32))  # type: ignore[arg-type]
+    with pytest.raises(SignError, match="^cannot decode Ed25519 public key$"):
+        spki_sha256(b"not a public key")
+
+    ec_public_pem = ec.generate_private_key(ec.SECP256R1()).public_key().public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    with pytest.raises(SignError, match="^public key is not Ed25519$"):
+        raw_public_key_sha256(ec_public_pem)
+
+
+def test_keyring_construction_refusals_and_frozen_specs() -> None:
+    assert issubclass(SignError, ValueError)
+
+    with pytest.raises(
+        SignError,
+        match="^unsupported key fingerprint scheme: 'sha256'$",
+    ):
+        KeySpec("root", "fingerprint", "sha256")
+
+    with pytest.raises(SignError, match="^keyring must contain at least one key$"):
+        KeyringSpec((), 1)
+
+    key_a = KeySpec("key-a", "fingerprint-a", "spki-sha256")
+    for threshold in (0, -1):
+        with pytest.raises(SignError) as caught:
+            KeyringSpec((key_a,), threshold)
+        assert str(caught.value) == (
+            f"keyring threshold must be at least 1; found={threshold}"
+        )
+
+    with pytest.raises(SignError) as caught:
+        KeyringSpec((key_a,), 2)
+    assert str(caught.value) == "keyring threshold 2 exceeds key count 1"
+
+    duplicate_id = KeySpec("key-a", "fingerprint-b", "raw-sha256")
+    with pytest.raises(SignError) as caught:
+        KeyringSpec((key_a, duplicate_id), 1)
+    assert str(caught.value) == "duplicate key_id in keyring: 'key-a'"
+
+    duplicate_fingerprint = KeySpec(
+        "key-b",
+        "fingerprint-a",
+        "raw-sha256",
+    )
+    with pytest.raises(SignError) as caught:
+        KeyringSpec((key_a, duplicate_fingerprint), 1)
+    assert str(caught.value) == (
+        "duplicate fingerprint in keyring: 'fingerprint-a'"
+    )
+
+    keyring = KeyringSpec((key_a,), 1)
+    verification = ThresholdVerification(("key-a",), (), ())
+    producer = ProducerKeySpec("producer.pub", "fingerprint")
+    for instance, attribute, replacement in (
+        (key_a, "key_id", "changed"),
+        (keyring, "threshold", 2),
+        (verification, "satisfied", ()),
+        (producer, "public_key_filename", "changed.pub"),
+    ):
+        with pytest.raises(FrozenInstanceError):
+            setattr(instance, attribute, replacement)
+
+
+THRESHOLD_KEY_IDS = ("key-a", "key-b", "key-c")
+ACCEPTING_SUBSETS = tuple(
+    subset
+    for size in (2, 3)
+    for subset in itertools.combinations(THRESHOLD_KEY_IDS, size)
+)
+
+
+@pytest.mark.parametrize("subset", ACCEPTING_SUBSETS)
+def test_two_of_three_accepts_every_satisfying_subset(
+    subset: tuple[str, ...],
+) -> None:
+    material, keyring = _three_keyring()
+    payload = b"threshold payload"
+    domain = b"threshold/v1\0"
+    signatures, public_keys = _present_subset(
+        material,
+        subset,
+        payload=payload,
+        domain=domain,
+    )
+
+    verification = verify_threshold(
+        payload,
+        signatures,
+        public_keys,
+        keyring,
+        domain=domain,
+        label="record",
+    )
+    assert verification == ThresholdVerification(
+        satisfied=tuple(sorted(subset)),
+        failed=(),
+        absent=tuple(sorted(set(THRESHOLD_KEY_IDS) - set(subset))),
+    )
+
+
+@pytest.mark.parametrize("key_id", THRESHOLD_KEY_IDS)
+def test_two_of_three_refuses_every_one_key_subset(key_id: str) -> None:
+    material, keyring = _three_keyring()
+    payload = b"threshold payload"
+    domain = b"threshold/v1\0"
+    signatures, public_keys = _present_subset(
+        material,
+        (key_id,),
+        payload=payload,
+        domain=domain,
+    )
+
+    with pytest.raises(SignError) as caught:
+        verify_threshold(
+            payload,
+            signatures,
+            public_keys,
+            keyring,
+            domain=domain,
+            label="record",
+        )
+    message = str(caught.value)
+    assert "threshold=2" in message
+    assert f"satisfied={(key_id,)!r}" in message
+    assert "failed=()" in message
+    absent = tuple(sorted(set(THRESHOLD_KEY_IDS) - {key_id}))
+    assert f"absent={absent!r}" in message
+
+
+class _DuplicatePresentation(Mapping[str, bytes]):
+    def __init__(self, key_id: str, value: bytes) -> None:
+        self.key_id = key_id
+        self.value = value
+
+    def __getitem__(self, key: str) -> bytes:
+        if key != self.key_id:
+            raise KeyError(key)
+        return self.value
+
+    def __iter__(self) -> Iterator[str]:
+        yield self.key_id
+        yield self.key_id
+
+    def __len__(self) -> int:
+        return 2
+
+
+def test_duplicate_presentation_counts_one_key_once() -> None:
+    material, keyring = _three_keyring()
+    payload = b"threshold payload"
+    domain = b"threshold/v1\0"
+    key_id = "key-a"
+    signature = sign_payload(material[key_id][0], payload, domain=domain)
+
+    with pytest.raises(SignError) as caught:
+        verify_threshold(
+            payload,
+            _DuplicatePresentation(key_id, signature),
+            _DuplicatePresentation(key_id, material[key_id][1]),
+            keyring,
+            domain=domain,
+            label="record",
+        )
+    message = str(caught.value)
+    assert "satisfied=('key-a',)" in message
+    assert "absent=('key-b', 'key-c')" in message
+
+
+@pytest.mark.parametrize("unknown_mapping", ("signatures", "public_keys"))
+def test_unknown_key_id_refuses_even_when_threshold_is_met(
+    unknown_mapping: str,
+) -> None:
+    material, keyring = _three_keyring()
+    payload = b"threshold payload"
+    domain = b"threshold/v1\0"
+    signatures, public_keys = _present_subset(
+        material,
+        ("key-a", "key-b"),
+        payload=payload,
+        domain=domain,
+    )
+    if unknown_mapping == "signatures":
+        signatures["unknown-root"] = b"0" * 64
+    else:
+        public_keys["unknown-root"] = material["key-c"][1]
+
+    with pytest.raises(SignError) as caught:
+        verify_threshold(
+            payload,
+            signatures,
+            public_keys,
+            keyring,
+            domain=domain,
+            label="record",
+        )
+    assert str(caught.value) == "unknown key_id: 'unknown-root'"
+
+
+def test_fingerprint_mismatch_refuses_with_computed_value_after_threshold_met() -> None:
+    material, keyring = _three_keyring()
+    payload = b"threshold payload"
+    domain = b"threshold/v1\0"
+    signatures, public_keys = _present_subset(
+        material,
+        ("key-a", "key-b"),
+        payload=payload,
+        domain=domain,
+    )
+    public_keys["key-c"] = material["key-a"][1]
+    computed = spki_sha256(material["key-a"][1])
+
+    with pytest.raises(SignError) as caught:
+        verify_threshold(
+            payload,
+            signatures,
+            public_keys,
+            keyring,
+            domain=domain,
+            label="record",
+        )
+    message = str(caught.value)
+    assert "public key fingerprint mismatch for 'key-c' (spki-sha256)" in message
+    assert f"computed={computed}" in message
+
+
+def test_spki_and_raw_fingerprint_keyrings_verify_the_same_key() -> None:
+    private_key_pem, public_key_pem = generate_signing_keypair()
+    raw_public_key = _raw_public_key(public_key_pem)
+    payload = b"threshold payload"
+    domain = b"threshold/v1\0"
+    signature = sign_payload(private_key_pem, payload, domain=domain)
+
+    cases = (
+        (
+            "spki-sha256",
+            spki_sha256(public_key_pem),
+            public_key_pem,
+        ),
+        (
+            "raw-sha256",
+            raw_public_key_sha256(public_key_pem),
+            raw_public_key,
+        ),
+    )
+    for scheme, fingerprint, supplied_key in cases:
+        keyring = KeyringSpec(
+            (KeySpec("root", fingerprint, scheme),),
+            threshold=1,
+        )
+        verification = verify_threshold(
+            payload,
+            {"root": signature},
+            {"root": supplied_key},
+            keyring,
+            domain=domain,
+            label="record",
+        )
+        assert verification == ThresholdVerification(("root",), (), ())
+
+
+def test_threshold_reports_failed_and_absent_keys() -> None:
+    material, keyring = _three_keyring()
+    payload = b"threshold payload"
+    domain = b"threshold/v1\0"
+    signatures, public_keys = _present_subset(
+        material,
+        ("key-a", "key-b"),
+        payload=payload,
+        domain=domain,
+    )
+    signatures["key-c"] = b"0" * 64
+    public_keys["key-c"] = material["key-c"][1]
+    verification = verify_threshold(
+        payload,
+        signatures,
+        public_keys,
+        keyring,
+        domain=domain,
+        label="record",
+    )
+    assert verification == ThresholdVerification(
+        ("key-a", "key-b"),
+        ("key-c",),
+        (),
+    )
+
+    signatures = {
+        "key-a": sign_payload(material["key-a"][0], payload, domain=domain),
+        "key-b": b"0" * 64,
+    }
+    public_keys = {
+        "key-a": material["key-a"][1],
+        "key-b": material["key-b"][1],
+    }
+    with pytest.raises(SignError) as caught:
+        verify_threshold(
+            payload,
+            signatures,
+            public_keys,
+            keyring,
+            domain=domain,
+            label="record",
+        )
+    message = str(caught.value)
+    assert "satisfied=('key-a',)" in message
+    assert "failed=('key-b',)" in message
+    assert "absent=('key-c',)" in message
+
+
+def test_signature_or_public_key_alone_counts_as_absent() -> None:
+    material, keyring = _three_keyring()
+    payload = b"threshold payload"
+    domain = b"threshold/v1\0"
+    signature = sign_payload(material["key-a"][0], payload, domain=domain)
+
+    with pytest.raises(SignError) as caught:
+        verify_threshold(
+            payload,
+            {"key-a": signature},
+            {"key-b": material["key-b"][1]},
+            keyring,
+            domain=domain,
+            label="record",
+        )
+    message = str(caught.value)
+    assert "satisfied=()" in message
+    assert "failed=()" in message
+    assert "absent=('key-a', 'key-b', 'key-c')" in message
+
+
+def test_threshold_domain_separation() -> None:
+    private_key_pem, public_key_pem = generate_signing_keypair()
+    payload = b"threshold payload"
+    domain_a = b"consumer/a\0"
+    domain_b = b"consumer/b\0"
+    signature = sign_payload(private_key_pem, payload, domain=domain_a)
+    keyring = KeyringSpec(
+        (KeySpec("root", spki_sha256(public_key_pem), "spki-sha256"),),
+        threshold=1,
+    )
+
+    assert verify_threshold(
+        payload,
+        {"root": signature},
+        {"root": public_key_pem},
+        keyring,
+        domain=domain_a,
+        label="record",
+    ) == ThresholdVerification(("root",), (), ())
+
+    with pytest.raises(SignError) as caught:
+        verify_threshold(
+            payload,
+            {"root": signature},
+            {"root": public_key_pem},
+            keyring,
+            domain=domain_b,
+            label="record",
+        )
+    message = str(caught.value)
+    assert "satisfied=()" in message
+    assert "failed=('root',)" in message
+    assert "absent=()" in message
+
+
+def test_threshold_requires_exact_bytes_and_explicit_domain() -> None:
+    _, public_key_pem = generate_signing_keypair()
+    keyring = KeyringSpec(
+        (KeySpec("root", spki_sha256(public_key_pem), "spki-sha256"),),
+        threshold=1,
+    )
+    parameter = inspect.signature(verify_threshold).parameters["domain"]
+    assert parameter.default is inspect.Parameter.empty
+
+    with pytest.raises(SignError, match="^signature payload must be bytes$"):
+        verify_threshold(
+            bytearray(),  # type: ignore[arg-type]
+            {},
+            {},
+            keyring,
+            domain=b"",
+            label="record",
+        )
+    with pytest.raises(SignError, match="^signature domain must be bytes$"):
+        verify_threshold(
+            b"",
+            {},
+            {},
+            keyring,
+            domain=bytearray(),  # type: ignore[arg-type]
+            label="record",
+        )
+    with pytest.raises(TypeError, match="domain"):
+        verify_threshold(  # type: ignore[call-arg]
+            b"",
+            {},
+            {},
+            keyring,
+            label="record",
+        )

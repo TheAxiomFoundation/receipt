@@ -2,7 +2,7 @@
 
 ## State
 
-The extracted verifier and Layer 2 are green. The three new producer-key mutations refuse identically under the authenticated oracle and port.
+All three signing layers are implemented and their focused suite is green. Packaging/docs and the final full differential run remain.
 
 ## Done
 
@@ -20,8 +20,12 @@ The extracted verifier and Layer 2 are green. The three new producer-key mutatio
 - Confirmed all 9 current `tests/test_sign.py` cases pass on the cryptography and OpenSSL 3 paths.
 - Added fresh-key swap, deterministic PEM-header corruption, and valid P-256 producer-key mutations to the ledger differential battery.
 - Empirically confirmed all three markers: SPKI pin mismatch, PEM decode failure, and non-Ed25519 key type.
+- Added PEM/raw fingerprint normalization, frozen key/keyring/result specs, construction validation, and sorted threshold classification.
+- Unknown IDs and mismatched fingerprints are preflight refusals even when other keys already satisfy the threshold.
+- Added exhaustive 2-of-3 acceptance/refusal tests, duplicate-presentation protection, both fingerprint schemes, absent/failed reporting, and domain separation.
+- Confirmed all 28 `tests/test_sign.py` cases pass.
 
 ## Next
 
-- Implement the multi-root keyring and extend `tests/test_sign.py` with threshold semantics.
 - Update package metadata and README after all capability tests pass.
+- Run the complete suite and sanity import, then write the final report.
