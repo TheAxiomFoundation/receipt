@@ -1022,6 +1022,36 @@ def test_legacy_key_refused_for_new_material() -> None:
         )
     assert str(caught.value) == "legacy key_id refused for new material: 'old-root'"
 
+    # Supplying only the legacy SIGNATURE (no public key) refuses too — an
+    # implementation guarding just public_keys would miss this branch.
+    with pytest.raises(SignError) as caught:
+        verify_threshold(
+            payload,
+            {"old-root": signature},
+            {},
+            keyring,
+            domain=domain,
+            label="record",
+            allow_legacy=False,
+        )
+    assert str(caught.value) == "legacy key_id refused for new material: 'old-root'"
+
+    # An extra legacy signature refuses even when the CURRENT key already
+    # forms a valid quorum: legacy presence on new material is itself the
+    # refusal, not merely a failure to count.
+    current_signature = sign_payload(material["new-root"][0], payload, domain=domain)
+    with pytest.raises(SignError) as caught:
+        verify_threshold(
+            payload,
+            {"new-root": current_signature, "old-root": signature},
+            {"new-root": material["new-root"][1]},
+            keyring,
+            domain=domain,
+            label="record",
+            allow_legacy=False,
+        )
+    assert str(caught.value) == "legacy key_id refused for new material: 'old-root'"
+
 
 def test_legacy_counts_for_history_and_is_reported() -> None:
     material, keyring = _rotated_keyring()
@@ -1193,6 +1223,37 @@ def test_verify_any_generation_malformed_is_fatal() -> None:
     )
 
 
+def test_verify_any_generation_validates_all_material_eagerly() -> None:
+    """A VALID current signature with mispinned LEGACY material must refuse.
+
+    This is the discriminating direction (cross-family review of this PR): a
+    lazy implementation that validated keys only as the fallback reached them
+    would verify the current signature and return without ever touching the
+    bad legacy key. Eager validation rejects the keyring wholesale — bad key
+    material is never carried, even when nothing needed it."""
+
+    material, keyring = _rotated_keyring()
+    payload = b"artifact"
+    domain = b"consumer/v1\0"
+    current_signature = sign_payload(material["new-root"][0], payload, domain=domain)
+    _, wrong_public_key = generate_signing_keypair()
+    computed = spki_sha256(wrong_public_key)
+
+    with pytest.raises(SignError) as caught:
+        verify_any_generation(
+            payload,
+            current_signature,
+            {"new-root": material["new-root"][1], "old-root": wrong_public_key},
+            keyring,
+            domain=domain,
+            label="record",
+        )
+    assert str(caught.value) == (
+        "public key fingerprint mismatch for 'old-root' (spki-sha256): "
+        f"expected={keyring.legacy_keys[0].fingerprint}, computed={computed}"
+    )
+
+
 def test_verify_any_generation_requires_material_and_threshold_one() -> None:
     material, keyring = _rotated_keyring()
     payload = b"artifact"
@@ -1320,3 +1381,118 @@ def test_rotation_round_trip_story() -> None:
     )
     assert verification.satisfied == ("root-2026b",)
     assert verification.legacy_satisfied == ()
+
+
+class _RecordingKey:
+    """Delegating wrapper that logs which key_id attempted verification."""
+
+    def __init__(self, inner: Ed25519PublicKey, key_id: str, calls: list[str]) -> None:
+        self._inner = inner
+        self._key_id = key_id
+        self._calls = calls
+
+    def verify(self, signature: bytes, message: bytes) -> None:
+        self._calls.append(self._key_id)
+        self._inner.verify(signature, message)
+
+
+def test_verify_any_generation_attempt_order_is_declaration_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the actual verify-call order with spies and NON-lexical ids.
+
+    The ids are chosen so declaration order (current "zz-current" before
+    legacy "aa-legacy") is the reverse of sorted order — a reimplementation
+    that iterated a sorted or set-ordered collection would log the wrong
+    sequence even while returning identical results (cross-family review of
+    this PR: results alone cannot distinguish loop order, because each
+    signature verifies under exactly one key)."""
+
+    material = {
+        "zz-current": generate_signing_keypair(),
+        "aa-legacy": generate_signing_keypair(),
+    }
+    keyring = KeyringSpec(
+        keys=(
+            KeySpec("zz-current", spki_sha256(material["zz-current"][1]), "spki-sha256"),
+        ),
+        threshold=1,
+        legacy_keys=(
+            KeySpec("aa-legacy", spki_sha256(material["aa-legacy"][1]), "spki-sha256"),
+        ),
+    )
+    public_keys = {
+        "zz-current": material["zz-current"][1],
+        "aa-legacy": material["aa-legacy"][1],
+    }
+    payload = b"artifact"
+    domain = b"consumer/v1\0"
+
+    calls: list[str] = []
+    real_normalize = sign_module._normalize_pinned_public_keys
+
+    def recording_normalize(supplied, specs):  # type: ignore[no-untyped-def]
+        normalized = real_normalize(supplied, specs)
+        return {
+            key_id: _RecordingKey(key, key_id, calls)
+            for key_id, key in normalized.items()
+        }
+
+    monkeypatch.setattr(
+        sign_module, "_normalize_pinned_public_keys", recording_normalize
+    )
+
+    # Legacy-signed artifact: the current key is genuinely attempted first
+    # and cleanly mismatches before the legacy key vouches.
+    legacy_signature = sign_payload(
+        material["aa-legacy"][0], payload, domain=domain
+    )
+    assert (
+        verify_any_generation(
+            payload,
+            legacy_signature,
+            public_keys,
+            keyring,
+            domain=domain,
+            label="record",
+        )
+        == "aa-legacy"
+    )
+    assert calls == ["zz-current", "aa-legacy"]
+
+    # Exhaustion visits every generation in declaration order, not sorted.
+    calls.clear()
+    stranger_private, _ = generate_signing_keypair()
+    stranger_signature = sign_payload(stranger_private, payload, domain=domain)
+    with pytest.raises(SignError) as caught:
+        verify_any_generation(
+            payload,
+            stranger_signature,
+            public_keys,
+            keyring,
+            domain=domain,
+            label="record",
+        )
+    assert calls == ["zz-current", "aa-legacy"]
+    assert str(caught.value) == (
+        "signature does not verify under any keyring generation for record: "
+        "tried=['zz-current', 'aa-legacy']"
+    )
+
+    # Current-signed artifact stops at the first (current) attempt.
+    calls.clear()
+    current_signature = sign_payload(
+        material["zz-current"][0], payload, domain=domain
+    )
+    assert (
+        verify_any_generation(
+            payload,
+            current_signature,
+            public_keys,
+            keyring,
+            domain=domain,
+            label="record",
+        )
+        == "zz-current"
+    )
+    assert calls == ["zz-current"]
