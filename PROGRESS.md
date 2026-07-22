@@ -1,35 +1,32 @@
-# TSA and attestation extraction progress
+# receipt.attest equivalence and 0.4.0 progress
 
 ## State
 
-The extraction is in progress on `extract-tsa-attest`. The spec-parameterized
-TSA library port is implemented and its focused tests pass. The authenticated
-brier witness differential is the next active slice.
+The extraction audit is in progress on `extract-tsa-attest` at the verified
+starting commit `9950307`. The TSA and attestation ports and the authenticated
+brier witness differential are committed and green. The offline attestation
+equivalence harness is the active slice.
 
 ## Done
 
-- Read the design note and the pinned brier witness and attestation sources in
-  the requested order.
-- Read the existing ledger differential harness and package house-style
-  modules.
-- Confirmed the branch starts at the `0.3.0` release head and the existing
-  brier source-hash receipt is present.
-- Mapped the extraction boundary: `receipt.tsa` owns token, trust-bundle, and
-  witness behavior; harness-local code owns brier's chain walk and composes
-  `receipt.sign`; `receipt.attest` owns the deterministic git/`gh` provenance
-  surface.
-- Added frozen `TrustBundleSpec`, `TsaIdentitySpec`, and `TsaSpec` objects with
-  no package-side trust defaults.
-- Ported OpenSSL token verification, the DER walk, creation-claim time checks,
-  trust-bundle transitions, supplemental outcomes, and v1/v2 witness evidence.
-- Added focused TSA spec, lifecycle, time-refusal, and dependency-direction
-  tests: 12 passed.
-- Re-ran the unchanged package/ledger/append-gate tests: 60 passed.
+- Verified the requested branch and starting head exactly:
+  `extract-tsa-attest` at `9950307d96b0e0d2213e2657275a20300c974f0d`.
+- Confirmed the worktree was clean before resuming.
+- The spec-parameterized RFC 3161 verifier is committed in `receipt.tsa` with
+  12 focused tests.
+- The authenticated pinned-upstream brier witness equivalence audit is
+  committed with 17 clean-tree/divergence cases.
+- The spec-parameterized workflow-provenance verifier is committed in
+  `receipt.attest` with focused unit coverage.
+- Confirmed the GitNexus repository index exists but is stale relative to the
+  requested starting head; repository-native dependency inspection remains
+  available while it is refreshed.
 
 ## Next
 
-1. Build the authenticated witness differential and bind its mutation battery.
-2. Review and commit the frozen attestation specs and provenance port.
-3. Build the offline attestation differential and `gh` stub coverage.
-4. Move packaging and documentation to `0.4.0`, run the full suite, and write
-   the final self-audit report.
+1. Authenticate and inspect the pinned attestation reference and its imports.
+2. Build and commit the offline deterministic attestation equivalence audit.
+3. Move the package/version/docs pin group to `0.4.0` and remove this
+   build-scratch progress file in that release commit.
+4. Run the full suite and Ruff, cross-audit the TSA/attestation merge result,
+   and write the final report to the requested output file.
