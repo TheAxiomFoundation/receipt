@@ -84,7 +84,9 @@ class VerificationSpec:
     name: str
     chain: ChainSpec
     corpus: CorpusSpec
-    journal_relative: pathlib.PurePosixPath = field(default=None)  # type: ignore[assignment]
+    # Derived, never supplied: init=False so a consumer cannot even appear to
+    # set it. See __post_init__ for why it is not a choice.
+    journal_relative: pathlib.PurePosixPath = field(init=False, default=None)  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         if type(self.name) is not str or not self.name:
@@ -323,9 +325,10 @@ def result_to_dict(result: VerifyResult) -> dict[str, Any]:
 
     payload: dict[str, Any] = {
         "verdict": "PASS" if result.ok else "FAIL",
-        "verifiedOffline": [
-            item.name for item in result.passes if item.ok
-        ],
+        # Named for what it is: passes that completed. "verifiedOffline" would
+        # invite a reader to hear "the gates were verified", which is the one
+        # thing this command never does.
+        "passesCompleted": [item.name for item in result.passes if item.ok],
         "spec": {
             "name": result.spec_name,
             "path": str(result.spec_path),
