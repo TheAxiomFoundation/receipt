@@ -4,7 +4,7 @@ Verifiable custody of agent-produced records.
 
 ## Status
 
-Shipped so far: the release-chain verifier, the append gate, ECMAScript-compatible canonical JSON, standalone Ed25519 signing with consumer-pinned threshold keyrings, RFC 3161 dual-witness verification, and workflow-provenance verification. The machinery arrives by extraction from three production systems that each built it independently (pre-registered forecast records, an observation-ledger release chain, a signed statute corpus), behind a byte-equivalence gate: the extracted verifier must reproduce the source verifier's verdict, pass and fail alike, on the live production chain at a pinned commit before any system consumes the package. That gate has held end to end — the observation ledger consumes the package in production, with the differential harnesses re-proving equivalence on every package change.
+Shipped so far: the release-chain verifier, the append gate, ECMAScript-compatible canonical JSON, standalone Ed25519 signing with consumer-pinned threshold keyrings, RFC 3161 dual-witness verification, workflow-provenance verification, closed-world corpus binding, and the spanning `receipt verify` command. The machinery arrives by extraction from three production systems that each built it independently (pre-registered forecast records, an observation-ledger release chain, a signed statute corpus), behind a byte-equivalence gate: the extracted verifier must reproduce the source verifier's verdict, pass and fail alike, on the live production chain at a pinned commit before any system consumes the package. That gate has held end to end — the observation ledger consumes the package in production, with the differential harnesses re-proving equivalence on every package change.
 
 ## What it provides (shipped rows) and what is still arriving
 
@@ -12,9 +12,20 @@ Shipped so far: the release-chain verifier, the append gate, ECMAScript-compatib
 - `receipt.tsa` — RFC 3161 dual-witness verification against consumer-committed trust bundles and signer identities, with explicit unavailable-witness outcomes
 - `receipt.sign` — Ed25519 producer signatures verified against fingerprints pinned in the consumer's own committed code (shipped: ported ledger primitives, sign-side helpers, N-of-M keyrings with legacy verification generations — retired keys verify immutable history only; rotation by reviewed spec change)
 - `receipt.attest` — workflow-provenance verification with self-anchoring enforcement epochs and a full-history sweep over every protected-tree commit
-- `receipt.ratchet` — shrink-only exception registries recomputed from live state; an excused failure that starts passing is an error until removed
-- `receipt.chronology` — record-vs-event ordering tiers: does witnessed time prove the record existed *ante quem* — before the event it predicts or observes?
+- `receipt.corpus` — closed-world binding of a witnessed journal to a working tree: every content file bound, every bound file present, every digest exact, and per-gate reproducibility tiers so a declaration is never mistaken for a verification
 - `receipt verify` — the outside auditor's command: a clone, commodity tools, one offline fail-closed verdict
+- `receipt.ratchet` — shrink-only exception registries recomputed from live state; an excused failure that starts passing is an error until removed (still arriving)
+- `receipt.chronology` — record-vs-event ordering tiers: does witnessed time prove the record existed *ante quem* — before the event it predicts or observes? (still arriving)
+
+`receipt.corpus` and `receipt verify` are composition over the extracted modules rather than a fourth extraction: they add no cryptography and no trust anchors, and every cryptographic verdict they report comes from a module that passed its own differential gate. Their gate is a refusal battery — each way a published corpus can fail to be what it claims, exercised against a real chain with real signatures and two real RFC 3161 authorities.
+
+## Using it
+
+```bash
+receipt verify --spec path/to/your/spec.py
+```
+
+`TheAxiomFoundation/rulespec-nz` is the reference consumer: its `verification/spec.py` is the whole trust configuration, and its `VERIFY.md` is the third-party procedure. The command needs no network, no credentials, and no cooperation from the producer — `openssl`, `git`, and Python are the only dependencies.
 
 ## Design principle
 
