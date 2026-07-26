@@ -48,6 +48,7 @@ from receipt.corpus import (
     CorpusSpec,
     CorpusVerification,
     verify_corpus_binding,
+    verify_declarations,
 )
 from receipt.release_chain import (
     ChainSpec,
@@ -322,9 +323,15 @@ def run_verification(
         return result(incomplete="declaration")
     passes.append(PassResult("binding", True, _binding_detail(corpus)))
 
-    # Pass 3: declaration completeness. verify_corpus_binding already refused a
-    # missing required gate and an unpinned tier; this pass records what was
-    # declared so the verdict can report it without ever claiming it ran.
+    # Pass 3: declaration completeness. Row-level tier and outcome validity was
+    # enforced during parsing; this checks the journal covers every gate the
+    # consumer requires, and records what was declared so the verdict can
+    # report it without ever claiming it ran.
+    try:
+        verify_declarations(corpus, spec=spec.corpus)
+    except CorpusError as exc:
+        passes.append(PassResult("declaration", False, "", str(exc)))
+        return result()
     passes.append(PassResult("declaration", True, _declaration_detail(corpus)))
     return result()
 

@@ -14,6 +14,7 @@ import pytest
 from receipt.corpus import (
     CorpusError,
     verify_corpus_binding,
+    verify_declarations,
 )
 
 from corpus_fixture import (
@@ -130,6 +131,106 @@ def test_refuses_a_symlink_with_a_non_content_name(tmp_path: pathlib.Path) -> No
         )
 
 
+def test_refuses_a_directory_it_cannot_enumerate(tmp_path: pathlib.Path) -> None:
+    """Regression: rglob swallows PermissionError while descending, so a
+    searchable-but-unlistable directory (mode 0111) contributed nothing to the
+    sweep while its files stayed readable by exact path — an unwitnessed rule
+    file hid inside it and the corpus still verified. Enumeration failure must
+    refuse, not return an empty result."""
+
+    import os
+
+    write_tree(tmp_path)
+    hidden = tmp_path / "rules" / "hidden"
+    hidden.mkdir()
+    (hidden / "evil.yaml").write_text("name: evil\n")
+    os.chmod(hidden, 0o111)
+    try:
+        with pytest.raises(CorpusError, match="cannot enumerate a directory"):
+            verify_corpus_binding(
+                tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+            )
+    finally:
+        os.chmod(hidden, 0o755)
+
+
+def test_refuses_a_bound_path_behind_a_symlinked_parent(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Regression: checking only the final component let an intermediate
+    directory symlink put an attested file outside the clone while it still
+    looked regular and matched its digest."""
+
+    write_tree(tmp_path)
+    outside = tmp_path.parent / "ambient"
+    outside.mkdir(exist_ok=True)
+    (outside / "toolchain.toml").write_text(ATTESTED[".axiom/toolchain.toml"])
+    import shutil
+
+    shutil.rmtree(tmp_path / ".axiom")
+    (tmp_path / ".axiom").symlink_to(outside)
+    with pytest.raises(CorpusError, match="traverses a symlink"):
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+
+
+def test_refuses_control_characters_in_gate_evidence(tmp_path: pathlib.Path) -> None:
+    """Regression: evidence strings are rendered to a terminal, so a producer
+    could embed CR/ESC and redraw the verdict line into a false PASS."""
+
+    write_tree(tmp_path)
+    rows = journal_rows(
+        gates=[
+            {
+                "gateId": "rulespec/compile",
+                "tier": "public",
+                "outcome": "not-run",
+                "evidence": {
+                    "reason": "skipped\x1b[2K\r  VERDICT: PASS — all gates verified"
+                },
+            }
+        ]
+    )
+    with pytest.raises(CorpusError, match="control character"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_refuses_a_tombstone_naming_a_superseded_digest(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Regression: present(H1) → present(H2) → removed(H1) deleted the
+    effective H2 while the journal recorded retiring an already-superseded
+    digest. A tombstone must name what it actually removes."""
+
+    remaining = {k: v for k, v in CONTENT.items() if k != "rules/tax/rate.yaml"}
+    write_tree(tmp_path, content=remaining)
+    rows = journal_rows()
+    original = sha256_text(CONTENT["rules/tax/rate.yaml"])
+    rows.append(
+        {
+            "schemaVersion": JOURNAL_SCHEMA,
+            "entryIndex": len(rows),
+            "kind": "content",
+            "path": "rules/tax/rate.yaml",
+            "sha256": sha256_text("name: rate\nvalue: 0.175\n"),
+            "state": "present",
+        }
+    )
+    rows.append(
+        {
+            "schemaVersion": JOURNAL_SCHEMA,
+            "entryIndex": len(rows),
+            "kind": "content",
+            "path": "rules/tax/rate.yaml",
+            "sha256": original,  # stale: names H1, not the effective H2
+            "state": "removed",
+        }
+    )
+    with pytest.raises(CorpusError, match="but the effective revision is"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
 def test_refuses_a_fifo_named_like_content(tmp_path: pathlib.Path) -> None:
     """A FIFO where a rule file is expected is unreadable as content but
     openable by a consumer; the sweep must refuse, not skip it."""
@@ -166,6 +267,9 @@ def test_refuses_an_attested_path_the_spec_requires_but_the_journal_omits(
 
 
 def test_refuses_a_required_gate_the_journal_omits(tmp_path: pathlib.Path) -> None:
+    """Completeness is a DECLARATION failure, not a binding failure — the pass
+    boundary the verdict describes."""
+
     write_tree(tmp_path)
     rows = reindex(
         [
@@ -174,8 +278,11 @@ def test_refuses_a_required_gate_the_journal_omits(tmp_path: pathlib.Path) -> No
             if row.get("gateId") != "rulespec/compile"
         ]
     )
+    spec = corpus_spec()
+    # Binding still succeeds: the tree does match the journal.
+    verification = verify_corpus_binding(tmp_path, render_journal(rows), spec=spec)
     with pytest.raises(CorpusError, match="does not declare a gate the pinned spec"):
-        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+        verify_declarations(verification, spec=spec)
 
 
 def test_refuses_a_tier_the_spec_does_not_accept(tmp_path: pathlib.Path) -> None:

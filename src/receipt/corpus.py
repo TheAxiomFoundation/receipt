@@ -208,6 +208,27 @@ class CorpusVerification:
         return tuple(gate for gate in self.gates if not gate.independently_reproducible)
 
 
+def _reject_control_characters(value: str, label: str) -> str:
+    """Refuse any C0/C1 control character or DEL in producer-supplied text.
+
+    Every string in this schema is written by a producer and later rendered to
+    a terminal. A carriage return, an ESC, or a line feed inside one lets the
+    producer redraw the verdict: a witnessed "reason" carrying
+    ``\\x1b[2K\\r  VERDICT: PASS`` overwrites the line that was about to say the
+    gate did not run. The verdict is the product here, so the sanitising
+    belongs at the schema boundary where the text enters, not only at the
+    point where it is printed. (Found by cross-family review.)
+    """
+
+    for character in value:
+        code = ord(character)
+        if code < 0x20 or code == 0x7F or 0x80 <= code <= 0x9F:
+            raise CorpusError(
+                f"{label} contains a control character ({code:#04x}): {value!r}"
+            )
+    return value
+
+
 def _validate_relative_path(value: Any, label: str) -> str:
     """Reject anything that could escape the root or alias another entry."""
 
@@ -223,8 +244,7 @@ def _validate_relative_path(value: Any, label: str) -> str:
             raise CorpusError(f"{label} has an empty path segment: {value!r}")
         if segment in (".", ".."):
             raise CorpusError(f"{label} contains a relative segment: {value!r}")
-    if any(character in value for character in ("\x00", "\n", "\r")):
-        raise CorpusError(f"{label} contains a control character: {value!r}")
+    _reject_control_characters(value, label)
     if ":" in value:
         # On Windows, "C:/x" survives every relative-path check above yet
         # joins drive-absolute under pathlib, letting a row reference a file
@@ -327,6 +347,12 @@ def _validate_gate(row: dict[str, Any], number: int, spec: CorpusSpec) -> GateDe
                 f"journal row {number} gate {gate_id!r} evidence must map "
                 "strings to strings"
             )
+        _reject_control_characters(
+            key, f"journal row {number} gate {gate_id!r} evidence key"
+        )
+        _reject_control_characters(
+            value, f"journal row {number} gate {gate_id!r} evidence value {key!r}"
+        )
     # A waiver is the one outcome that admits a known failure. It has to name
     # the waiver set it was excused under, or "waived" is unfalsifiable.
     if outcome == WAIVED and not evidence.get("waiverSetSha256"):
@@ -429,53 +455,140 @@ def parse_journal(
                 raise CorpusError(
                     f"journal row {number} removes {path!r}, which was never present"
                 )
+            # The tombstone must name the revision it retires. Otherwise
+            # present(H1) → present(H2) → removed(H1) verifies, deleting the
+            # effective H2 while the journal records the removal of a digest
+            # that had already been superseded. (Found by cross-family review.)
+            if target[path].sha256 != digest:
+                raise CorpusError(
+                    f"journal row {number} removes {path!r} naming digest "
+                    f"{digest}, but the effective revision is "
+                    f"{target[path].sha256}"
+                )
             del target[path]
             removed.add(path)
 
     return content, attested, tuple(gates), tuple(sorted(removed))
 
 
+def _list_directory(directory: pathlib.Path, relative: str) -> list[pathlib.Path]:
+    """List one directory, refusing to continue if it cannot be read.
+
+    ``Path.rglob`` swallows ``PermissionError`` while descending, so a
+    directory that is searchable but not listable (mode 0111) silently
+    contributes nothing to a walk while its files stay readable by exact path.
+    A closed-world sweep built on that behaviour reports "no extra files"
+    when it simply could not look. Enumeration failure must be a refusal, not
+    an empty result. (Found by cross-family review.)
+    """
+
+    try:
+        return sorted(directory.iterdir(), key=lambda entry: entry.name)
+    except OSError as exc:
+        raise CorpusError(
+            f"cannot enumerate a directory under a content root, so the file "
+            f"set cannot be closed: {relative or '.'} ({exc.strerror})"
+        ) from exc
+
+
 def _tree_content_paths(root: pathlib.Path, spec: CorpusSpec) -> dict[str, pathlib.Path]:
-    """Enumerate every regular file the spec calls content, refusing symlinks."""
+    """Enumerate every regular file the spec calls content.
+
+    Walks explicitly rather than globbing: every directory is listed with
+    errors surfaced, every symlink refuses, and every non-regular entry
+    refuses. What this returns is the complete set of content files, or the
+    call raises — there is no third outcome where it returns a partial set.
+    """
 
     found: dict[str, pathlib.Path] = {}
     for content_root in spec.content_roots:
         base = root / content_root
+        base_relative = content_root.as_posix()
+        if base.is_symlink():
+            raise CorpusError(f"pinned content root is a symlink: {base_relative}")
         if not base.exists():
-            raise CorpusError(f"pinned content root is absent from the tree: {content_root}")
-        if base.is_symlink() or not base.is_dir():
-            raise CorpusError(f"pinned content root is not a directory: {content_root}")
-        for candidate in sorted(base.rglob("*")):
-            relative = candidate.relative_to(root).as_posix()
-            if candidate.is_symlink():
-                # ANY symlink under a content root defeats the closed-world
-                # claim, whatever it is named: rglob does not descend
-                # symlinked directories, so a linked tree of suffix-named
-                # files would be invisible to this sweep while remaining
-                # reachable to any consumer that resolves links. (Found by
-                # cross-family review: a suffix-only refusal here produced a
-                # demonstrated false PASS with a symlinked directory of
-                # unwitnessed rule files.)
-                raise CorpusError(f"content root contains a symlink: {relative}")
-            if candidate.is_dir():
-                continue
-            if not candidate.is_file():
-                # FIFOs, sockets, devices: not bindable, yet a reader could
-                # still open them where a rule file is expected. Refuse.
-                raise CorpusError(
-                    f"content root contains a non-regular file: {relative}"
-                )
-            if not any(relative.endswith(suffix) for suffix in spec.content_suffixes):
-                continue
-            found[relative] = candidate
+            raise CorpusError(
+                f"pinned content root is absent from the tree: {base_relative}"
+            )
+        if not base.is_dir():
+            raise CorpusError(f"pinned content root is not a directory: {base_relative}")
+
+        pending: list[tuple[pathlib.Path, str]] = [(base, base_relative)]
+        while pending:
+            directory, directory_relative = pending.pop()
+            for candidate in _list_directory(directory, directory_relative):
+                relative = candidate.relative_to(root).as_posix()
+                if candidate.is_symlink():
+                    # ANY symlink under a content root defeats the closed-world
+                    # claim, whatever it is named: a walk does not descend
+                    # symlinked directories, so a linked tree of suffix-named
+                    # files would be invisible here while remaining reachable
+                    # to any consumer that resolves links.
+                    raise CorpusError(f"content root contains a symlink: {relative}")
+                if candidate.is_dir():
+                    pending.append((candidate, relative))
+                    continue
+                if not candidate.is_file():
+                    # FIFOs, sockets, devices: not bindable, yet a reader could
+                    # still open them where a rule file is expected. Refuse.
+                    raise CorpusError(
+                        f"content root contains a non-regular file: {relative}"
+                    )
+                if not any(
+                    relative.endswith(suffix) for suffix in spec.content_suffixes
+                ):
+                    continue
+                found[relative] = candidate
     return found
 
 
+def _assert_no_symlinked_component(root: pathlib.Path, relative: str) -> pathlib.Path:
+    """Walk every component, refusing if any of them is a symlink.
+
+    Checking only the final component lets an intermediate directory symlink
+    put a bound file outside the clone entirely: replace ``.axiom/`` with a
+    link to an ambient directory and ``.axiom/toolchain.toml`` still looks like
+    a regular file and still matches its digest, while not being part of what
+    the auditor cloned. (Found by cross-family review.)
+    """
+
+    current = root
+    for segment in relative.split("/"):
+        current = current / segment
+        if current.is_symlink():
+            raise CorpusError(
+                f"bound path traverses a symlink at "
+                f"{current.relative_to(root).as_posix()!r}: {relative}"
+            )
+    return current
+
+
 def _regular_file_digest(root: pathlib.Path, relative: str) -> str:
-    path = root / relative
-    if path.is_symlink() or not path.is_file():
+    path = _assert_no_symlinked_component(root, relative)
+    if not path.is_file():
         raise CorpusError(f"bound file is missing or not a regular file: {relative}")
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def verify_declarations(
+    verification: CorpusVerification, *, spec: CorpusSpec
+) -> tuple[GateDeclaration, ...]:
+    """Check the journal declares every gate the consumer's spec requires.
+
+    Separate from :func:`verify_corpus_binding` so a missing declaration is
+    reported as a declaration failure rather than a binding failure — the pass
+    boundary the verdict describes. Row-level tier and outcome validity is
+    already enforced during parsing; this is the completeness half.
+    """
+
+    declared = {gate.gate_id for gate in verification.gates}
+    missing = sorted(spec.required_gates - declared)
+    if missing:
+        raise CorpusError(
+            "the witnessed journal does not declare a gate the pinned spec "
+            f"requires: {missing[0]!r}"
+        )
+    return verification.gates
 
 
 def verify_corpus_binding(
@@ -532,14 +645,6 @@ def verify_corpus_binding(
                 f"attested file {path!r} does not match its witnessed digest: "
                 f"tree has {digest}, journal binds {attested[path].sha256}"
             )
-
-    declared_gates = {gate.gate_id for gate in gates}
-    missing_gates = sorted(spec.required_gates - declared_gates)
-    if missing_gates:
-        raise CorpusError(
-            "the witnessed journal does not declare a gate the pinned spec "
-            f"requires: {missing_gates[0]!r}"
-        )
 
     return CorpusVerification(
         content=tuple(content[path] for path in sorted(content)),
