@@ -225,6 +225,12 @@ def _validate_relative_path(value: Any, label: str) -> str:
             raise CorpusError(f"{label} contains a relative segment: {value!r}")
     if any(character in value for character in ("\x00", "\n", "\r")):
         raise CorpusError(f"{label} contains a control character: {value!r}")
+    if ":" in value:
+        # On Windows, "C:/x" survives every relative-path check above yet
+        # joins drive-absolute under pathlib, letting a row reference a file
+        # outside the root. No path in this schema legitimately contains a
+        # colon; refuse rather than special-case the platform.
+        raise CorpusError(f"{label} contains ':': {value!r}")
     return value
 
 
@@ -442,15 +448,23 @@ def _tree_content_paths(root: pathlib.Path, spec: CorpusSpec) -> dict[str, pathl
         for candidate in sorted(base.rglob("*")):
             relative = candidate.relative_to(root).as_posix()
             if candidate.is_symlink():
-                # A symlink under a content root can point outside the tree;
-                # refuse rather than resolve it.
-                if any(relative.endswith(suffix) for suffix in spec.content_suffixes):
-                    raise CorpusError(
-                        f"content path is a symlink, not a regular file: {relative}"
-                    )
+                # ANY symlink under a content root defeats the closed-world
+                # claim, whatever it is named: rglob does not descend
+                # symlinked directories, so a linked tree of suffix-named
+                # files would be invisible to this sweep while remaining
+                # reachable to any consumer that resolves links. (Found by
+                # cross-family review: a suffix-only refusal here produced a
+                # demonstrated false PASS with a symlinked directory of
+                # unwitnessed rule files.)
+                raise CorpusError(f"content root contains a symlink: {relative}")
+            if candidate.is_dir():
                 continue
             if not candidate.is_file():
-                continue
+                # FIFOs, sockets, devices: not bindable, yet a reader could
+                # still open them where a rule file is expected. Refuse.
+                raise CorpusError(
+                    f"content root contains a non-regular file: {relative}"
+                )
             if not any(relative.endswith(suffix) for suffix in spec.content_suffixes):
                 continue
             found[relative] = candidate

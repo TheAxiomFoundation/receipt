@@ -94,6 +94,66 @@ def test_refuses_a_content_symlink(tmp_path: pathlib.Path) -> None:
         )
 
 
+def test_refuses_a_symlinked_directory_of_unwitnessed_rules(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Regression for a demonstrated false PASS (cross-family review).
+
+    rglob does not descend symlinked directories, so a suffix-only symlink
+    refusal left a linked tree of rule files invisible to the sweep while any
+    consumer that resolves links would read them as verified corpus content.
+    Every symlink under a content root must refuse, whatever its name.
+    """
+
+    write_tree(tmp_path)
+    outside = tmp_path.parent / "smuggled-rules"
+    outside.mkdir()
+    (outside / "evil.yaml").write_text("name: evil\nvalue: 999\n")
+    (tmp_path / "rules/injected").symlink_to(outside)
+    with pytest.raises(CorpusError, match="symlink"):
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+
+
+def test_refuses_a_symlink_with_a_non_content_name(tmp_path: pathlib.Path) -> None:
+    """Even a symlink named nothing like content refuses — the invariant is
+    "no symlinks under a content root", not "no suspicious-looking ones"."""
+
+    write_tree(tmp_path)
+    outside = tmp_path.parent / "elsewhere.txt"
+    outside.write_text("x\n")
+    (tmp_path / "rules/readme.txt").symlink_to(outside)
+    with pytest.raises(CorpusError, match="symlink"):
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+
+
+def test_refuses_a_fifo_named_like_content(tmp_path: pathlib.Path) -> None:
+    """A FIFO where a rule file is expected is unreadable as content but
+    openable by a consumer; the sweep must refuse, not skip it."""
+
+    import os
+
+    write_tree(tmp_path)
+    os.mkfifo(tmp_path / "rules/tax/pipe.yaml")
+    with pytest.raises(CorpusError, match="non-regular"):
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+
+
+def test_refuses_a_path_with_a_colon(tmp_path: pathlib.Path) -> None:
+    """"C:/x" joins drive-absolute under Windows pathlib; refuse everywhere."""
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+    rows[3]["path"] = "C:/outside.toml"  # the attested row
+    with pytest.raises(CorpusError, match="':'"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
 def test_refuses_an_attested_path_the_spec_requires_but_the_journal_omits(
     tmp_path: pathlib.Path,
 ) -> None:

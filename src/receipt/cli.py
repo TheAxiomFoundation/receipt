@@ -141,24 +141,37 @@ def _format_text(result: VerifyResult) -> str:
 
     lines.append("")
     if result.ok:
+        # The witness clause is derived from what was actually verified, not
+        # asserted: a spec pinning one anchor must not be described as two.
+        witnesses = sorted(result.witness_times())
+        count = len(witnesses)
+        noun = "authorities" if count != 1 else "authority"
         lines.append("VERDICT: PASS — custody and corpus binding")
         lines.append(
             "  This proves the published rule files are exactly the bytes a "
             "code-pinned"
         )
         lines.append(
-            "  producer key signed and two independent RFC 3161 authorities "
-            "witnessed,"
+            f"  producer key signed and the {count} pinned RFC 3161 {noun} "
+            f"({', '.join(witnesses)})"
         )
         lines.append(
-            "  and that nothing in the recorded history was rewritten. It does "
-            "NOT prove"
+            "  witnessed, and that nothing in the recorded history was "
+            "rewritten. It does"
         )
         lines.append(
-            "  that any declared gate passed, and it does NOT prove the "
-            "encodings are a"
+            "  NOT prove that any declared gate passed, it does NOT prove the "
+            "encodings"
         )
-        lines.append("  correct reading of the law.")
+        lines.append(
+            "  are a correct reading of the law, and it does NOT prove this "
+            "clone holds"
+        )
+        lines.append(
+            "  the producer's newest release — a stale, honestly witnessed "
+            "clone also"
+        )
+        lines.append("  passes. Check freshness out of band or via --base-ref.")
     else:
         failure = next((item for item in result.passes if not item.ok), None)
         detail = failure.failure if failure is not None else "unknown failure"

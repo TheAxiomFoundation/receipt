@@ -71,6 +71,15 @@ class VerifySpecError(ValueError):
     """The consumer's committed spec is missing, malformed, or not a spec."""
 
 
+#: What each completed pass establishes, in the verdict's own words. Keyed by
+#: pass name so the JSON scope block can be built from actual results.
+_PASS_CLAIMS = {
+    "history": "immutability of every published release object since the given base ref",
+    "custody": "custody of the release chain",
+    "binding": "binding of the witnessed journal to this working tree",
+}
+
+
 @dataclass(frozen=True)
 class VerificationSpec:
     """Everything the consumer's committed code pins, in one object.
@@ -346,13 +355,19 @@ def result_to_dict(result: VerifyResult) -> dict[str, Any]:
             for item in result.passes
         ],
         "scope": {
+            # Built from the passes that actually completed — a FAIL run must
+            # not carry a field named "established" listing things it did not
+            # establish (cross-family review finding).
             "established": [
-                "custody of the release chain",
-                "binding of the witnessed journal to this working tree",
+                _PASS_CLAIMS[item.name]
+                for item in result.passes
+                if item.ok and item.name in _PASS_CLAIMS
             ],
             "notEstablished": [
                 "that any declared gate actually passed",
                 "that the encoded rules are a correct reading of the law",
+                "that this clone holds the producer's newest release "
+                "(freshness needs an out-of-band reference or --base-ref)",
             ],
         },
     }

@@ -105,6 +105,12 @@ def test_json_output_marks_gates_as_not_re_run(
     assert payload["scope"]["notEstablished"] == [
         "that any declared gate actually passed",
         "that the encoded rules are a correct reading of the law",
+        "that this clone holds the producer's newest release "
+        "(freshness needs an out-of-band reference or --base-ref)",
+    ]
+    assert payload["scope"]["established"] == [
+        "custody of the release chain",
+        "binding of the witnessed journal to this working tree",
     ]
     assert payload["chain"]["releases"] == 1
     assert len(payload["chain"]["witnesses"]) == 2
@@ -251,6 +257,45 @@ def test_refuses_an_edited_rule_file(
 def test_refuses_a_rule_file_added_without_witnessing(repo: pathlib.Path) -> None:
     (repo / "rules/tax/extra.yaml").write_text("name: extra\n")
     assert run(repo) == EXIT_FAIL
+
+
+def test_refuses_a_symlinked_directory_under_a_content_root(
+    repo: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """End-to-end regression for the demonstrated symlinked-directory false
+    PASS: the full command must fail closed, not just the library."""
+
+    outside = tmp_path / "smuggled"
+    outside.mkdir()
+    (outside / "evil.yaml").write_text("name: evil\n")
+    (repo / "rules/injected").symlink_to(outside)
+    assert run(repo) == EXIT_FAIL
+
+
+def test_scope_established_on_failure_json(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A FAIL verdict must not carry an "established" list claiming the
+    binding it never proved (cross-family review finding)."""
+
+    (repo / "rules/tax/rate.yaml").write_text("tampered\n")
+    assert run(repo, "--json") == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
+    assert payload["scope"]["established"] == ["custody of the release chain"]
+    assert any("newest release" in item for item in payload["scope"]["notEstablished"])
+
+
+def test_pass_verdict_derives_the_witness_clause(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The witness sentence names the anchors that actually verified, rather
+    than asserting a hardcoded count."""
+
+    assert run(repo) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "the 2 pinned RFC 3161 authorities (alpha, beta)" in out
+    assert "newest release" in out  # staleness is named, not implied away
 
 
 def test_refuses_an_edited_attested_file(repo: pathlib.Path) -> None:
