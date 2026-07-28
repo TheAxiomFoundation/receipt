@@ -1,0 +1,34 @@
+{% extends "default/module.html.jinja2" %}
+{# Kicker above the sidebar, mirroring the axiom-foundation.org/receipt
+   header. The absolute /receipt href resolves to the package page when
+   the reference is served at axiom-foundation.org/receipt/api. #}
+{% block nav_title %}
+<a class="axiom-home" href="/receipt">
+    <span class="axiom-kicker"><span class="axiom-kicker-mark">&sect;</span>receipt</span>
+    <span class="axiom-org">the Axiom Foundation</span>
+</a>
+{% endblock %}
+{# Module-level path constants resolve at import time, so their reprs
+   embed the build machine's filesystem layout (a GitHub runner path in
+   CI). That is build trivia, not API surface: suppress absolute-path
+   reprs and let View Source show the real expression. Relative paths
+   and every other default still render. Body copied from the default
+   template's default_value macro, minus the suppressed case. #}
+{% macro default_value(var) -%}
+    {%- if var.default_value_str and not var.default_value_str.startswith(("PosixPath('/", "WindowsPath('")) %}
+        =
+        {% if var.default_value_str | length > 100 -%}
+            <input id="{{ var.qualname }}-view-value" class="view-value-toggle-state" type="checkbox" aria-hidden="true" tabindex="-1">
+            <label class="view-value-button pdoc-button" for="{{ var.qualname }}-view-value"></label>
+        {%- endif -%}
+        <span class="default_value">{{ var.default_value_str | escape | linkify }}</span>
+    {%- endif -%}
+{% endmacro %}
+
+{# Same block as the default template, retitled to sentence case. #}
+{% block nav_members %}
+    {% if module.members %}
+        <h2>API documentation</h2>
+        {{ nav_members(module.members.values()) }}
+    {% endif %}
+{% endblock %}
