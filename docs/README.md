@@ -9,15 +9,16 @@ tokens from axiom-foundation.org, where the reference is served at
 [axiom-foundation.org/receipt/api](https://axiom-foundation.org/receipt/api/)
 (a rewrite of this repository's GitHub Pages deployment).
 
-Build locally:
+Build locally (the same pinned invocation CI runs):
 
 ```bash
-uv venv && uv pip install . pdoc
-uv run pdoc receipt --docformat restructuredtext -t docs/pdoc-template \
-    --favicon https://axiom-foundation.org/favicon.svg \
-    -e "receipt=https://github.com/TheAxiomFoundation/receipt/blob/main/src/receipt/" \
-    -o _site
+uv run --no-dev --with pdoc==16.0.0 python docs/build.py
 ```
+
+`build.py` wraps pdoc's API: it rebinds absolute-path parameter
+defaults to their source constant's name (so signatures never embed a
+build machine's filesystem layout) and fails the build if any absolute
+build path leaks into the rendered pages.
 
 `.github/workflows/docs.yml` runs the same build on pushes to main and
 deploys it to GitHub Pages. No version numbers appear in the rendered

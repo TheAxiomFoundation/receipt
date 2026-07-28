@@ -12,10 +12,10 @@
    embed the build machine's filesystem layout (a GitHub runner path in
    CI). That is build trivia, not API surface: suppress absolute-path
    reprs and let View Source show the real expression. Relative paths
-   and every other default still render. Body copied from the default
-   template's default_value macro, minus the suppressed case. #}
+   and every other default still render; the build runs on POSIX CI, and
+   docs/build.py sweeps the output as the fail-closed backstop. #}
 {% macro default_value(var) -%}
-    {%- if var.default_value_str and not var.default_value_str.startswith(("PosixPath('/", "WindowsPath('")) %}
+    {%- if var.default_value_str and not var.default_value_str.startswith("PosixPath('/") %}
         =
         {% if var.default_value_str | length > 100 -%}
             <input id="{{ var.qualname }}-view-value" class="view-value-toggle-state" type="checkbox" aria-hidden="true" tabindex="-1">
