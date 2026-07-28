@@ -7,3 +7,4 @@ build/
 .pytest_cache/
 uv.lock
 .extraction/
+_site/
