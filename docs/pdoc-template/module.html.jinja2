@@ -8,22 +8,11 @@
     <span class="axiom-org">the Axiom Foundation</span>
 </a>
 {% endblock %}
-{# Module-level path constants resolve at import time, so their reprs
-   embed the build machine's filesystem layout (a GitHub runner path in
-   CI). That is build trivia, not API surface: suppress absolute-path
-   reprs and let View Source show the real expression. Relative paths
-   and every other default still render; the build runs on POSIX CI, and
-   docs/build.py sweeps the output as the fail-closed backstop. #}
-{% macro default_value(var) -%}
-    {%- if var.default_value_str and not var.default_value_str.startswith("PosixPath('/") %}
-        =
-        {% if var.default_value_str | length > 100 -%}
-            <input id="{{ var.qualname }}-view-value" class="view-value-toggle-state" type="checkbox" aria-hidden="true" tabindex="-1">
-            <label class="view-value-button pdoc-button" for="{{ var.qualname }}-view-value"></label>
-        {%- endif -%}
-        <span class="default_value">{{ var.default_value_str | escape | linkify }}</span>
-    {%- endif -%}
-{% endmacro %}
+{# Absolute-path values (import-time constants like CODE_ROOT) are
+   sanitized before rendering by docs/build.py, which covers every
+   surface pdoc serializes them into — HTML and the search.js index —
+   and sweeps the output fail-closed. No template-level value filtering
+   is needed here. #}
 
 {# Same block as the default template, retitled to sentence case. #}
 {% block nav_members %}

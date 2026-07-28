@@ -12,15 +12,16 @@ tokens from axiom-foundation.org, where the reference is served at
 Build locally (the same pinned invocation CI runs):
 
 ```bash
-uv run --no-dev --with pdoc==16.0.0 python docs/build.py
+uv run --no-dev --with pdoc==16.0.0 python docs/build.py _site
 ```
 
-`build.py` wraps pdoc's API: it rebinds absolute-path parameter
-defaults to their source constant's name (so signatures never embed a
-build machine's filesystem layout) and fails the build if any absolute
-build path leaks into the rendered pages.
+`build.py` wraps pdoc's API: it rebinds absolute-path values —
+parameter defaults to their source constant's name, module constants to
+`...` — so no generated asset embeds a build machine's filesystem
+layout, and it fails the build if an absolute build path leaks into any
+rendered page or the search index.
 
 `.github/workflows/docs.yml` runs the same build on pushes to main and
-deploys it to GitHub Pages. No version numbers appear in the rendered
-pages or this file: the reference always describes the commit it was
-built from.
+deploys it to GitHub Pages. No receipt version number appears in the
+rendered pages or this file: the reference always describes the commit
+it was built from.
