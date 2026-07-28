@@ -22,6 +22,8 @@ layout, and it fails the build if an absolute build path leaks into any
 rendered page or the search index.
 
 `.github/workflows/docs.yml` runs the same build on pushes to main and
-deploys it to GitHub Pages. No receipt version number appears in the
-rendered pages or this file: the reference always describes the commit
-it was built from.
+deploys it to GitHub Pages. The reference carries no separately
+maintained version label: the one version string in the rendered pages
+is the `__version__` assignment inside the collapsed source view, which
+is whatever the built commit says. The reference always describes the
+commit it was built from.
