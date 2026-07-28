@@ -1,0 +1,23 @@
+{% extends "default/module.html.jinja2" %}
+{# Kicker above the sidebar, mirroring the axiom-foundation.org/receipt
+   header. The absolute /receipt href resolves to the package page when
+   the reference is served at axiom-foundation.org/receipt/api. #}
+{% block nav_title %}
+<a class="axiom-home" href="/receipt">
+    <span class="axiom-kicker"><span class="axiom-kicker-mark">&sect;</span>receipt</span>
+    <span class="axiom-org">the Axiom Foundation</span>
+</a>
+{% endblock %}
+{# Absolute-path values (import-time constants like CODE_ROOT) are
+   sanitized before rendering by docs/build.py, which covers every
+   surface pdoc serializes them into — HTML and the search.js index —
+   and sweeps the output fail-closed. No template-level value filtering
+   is needed here. #}
+
+{# Same block as the default template, retitled to sentence case. #}
+{% block nav_members %}
+    {% if module.members %}
+        <h2>API documentation</h2>
+        {{ nav_members(module.members.values()) }}
+    {% endif %}
+{% endblock %}
