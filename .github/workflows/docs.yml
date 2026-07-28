@@ -1,8 +1,12 @@
-# Renders the API reference (pdoc over the module docstrings, with the
-# Axiom template in docs/pdoc-template) and deploys it to GitHub Pages;
-# axiom-foundation.org/receipt/api rewrites to the deployment. The build
-# is offline and deterministic: no model calls, and no credentials
-# beyond the Pages OIDC deployment — the same posture as publish.yml.
+# Renders the API reference (docs/build.py: pdoc over the module
+# docstrings, with the Axiom template in docs/pdoc-template) and deploys
+# it to GitHub Pages; axiom-foundation.org/receipt/api rewrites to the
+# deployment. The build makes no model calls and holds no stored
+# secrets: its only privileges are the read-only checkout token and the
+# Pages OIDC deployment (the posture of publish.yml). pdoc is pinned;
+# project dependencies float per this repo's norm (uv.lock is
+# gitignored). build.py fails closed if a build machine's absolute
+# paths leak into the rendered pages.
 #
 # One-time prerequisite (repo admin), before first merge to main:
 #   gh api -X POST repos/TheAxiomFoundation/receipt/pages -f build_type=workflow
@@ -26,17 +30,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           python-version: "3.13"
-      - run: uv sync --no-dev
-      - run: >-
-          uv run --with pdoc==16.0.0 pdoc receipt
-          --docformat restructuredtext
-          -t docs/pdoc-template
-          --favicon https://axiom-foundation.org/favicon.svg
-          -e "receipt=https://github.com/TheAxiomFoundation/receipt/blob/main/src/receipt/"
-          -o _site
+      - run: uv run --no-dev --with pdoc==16.0.0 python docs/build.py _site
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: _site
