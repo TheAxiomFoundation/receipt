@@ -15,6 +15,14 @@ Build locally (the same pinned invocation CI runs):
 uv run --no-dev --with pdoc==16.0.0 python docs/build.py _site
 ```
 
+`pdoc-template/` carries the axiom.org site chrome — the fixed nav
+bar and footer, vendored from the site's `packages/ui` (`nav.tsx`,
+`footer.tsx`, `tokens.css`) with absolute `https://axiom.org` hrefs,
+so the reference reads as one site at axiom.org/receipt/api and the
+GitHub Pages origin stays a working mirror. Sync the chrome blocks in
+`module.html.jinja2` and `custom.css` when the site nav or footer
+change.
+
 `build.py` wraps pdoc's API: it rebinds absolute-path values —
 parameter defaults to their source constant's name, module constants to
 `...` — so no generated asset embeds a build machine's filesystem
