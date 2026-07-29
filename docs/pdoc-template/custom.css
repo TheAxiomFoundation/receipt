@@ -4,7 +4,7 @@
    reference reads as a native page at axiom-foundation.org/receipt/api.
    Overrides only: pdoc's own layout and markup stay untouched. */
 
-@import url("https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;1,400&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,wght@1,400&display=swap");
 
 :root {
     --pdoc-background: #faf9f6; /* --color-paper */
@@ -209,4 +209,300 @@ nav.pdoc input[type="search"]:focus-visible {
 
 .pdoc .o {
     color: #57534e;
+}
+
+/* ── Site chrome ──
+   The fixed nav bar and footer from axiom.org, vendored from the
+   site's packages/ui (nav.tsx / footer.tsx / tokens.css) so the
+   reference reads as one site with axiom.org/receipt. Sync when the
+   site chrome changes. pdoc's fixed sidebar and mobile hamburger are
+   offset below the bar. */
+
+:root {
+    --axiom-nav-h: 61px;
+}
+
+body {
+    padding-top: var(--axiom-nav-h);
+}
+
+@media (min-width: 770px) {
+    nav.pdoc {
+        top: var(--axiom-nav-h);
+        height: calc(100vh - var(--axiom-nav-h));
+    }
+}
+
+@media (max-width: 769px) {
+    #navtoggle {
+        top: calc(var(--axiom-nav-h) + 1rem);
+    }
+}
+
+/* pdoc's layout.css styles the bare `header` element (sidebar-offset
+   padding and a fixed width); neutralize those on the site bar. */
+.axiom-site-nav {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 100;
+    width: auto;
+    max-width: none;
+    margin: 0;
+    padding: 0.75rem 0;
+    background: rgba(250, 249, 246, 0.88);
+    backdrop-filter: blur(12px) saturate(140%);
+    -webkit-backdrop-filter: blur(12px) saturate(140%);
+    border-bottom: 1px solid #e7e5e4;
+}
+
+.axiom-site-nav-inner {
+    max-width: 1280px;
+    margin: 0 auto;
+    padding: 0 2rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.axiom-site-logo img {
+    height: 36px;
+    width: auto;
+    display: block;
+}
+
+.axiom-site-logo {
+    display: inline-flex;
+    transition: opacity 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.axiom-site-logo:hover {
+    opacity: 0.78;
+}
+
+.axiom-site-right {
+    display: flex;
+    align-items: center;
+    gap: 2rem;
+}
+
+.axiom-site-links {
+    display: flex;
+    align-items: center;
+    gap: 2rem;
+}
+
+.axiom-site-links a {
+    position: relative;
+    font-family: "Geist", -apple-system, sans-serif;
+    font-size: 0.9rem;
+    font-weight: 300;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: #1c1917;
+    text-decoration: none;
+    opacity: 0.7;
+    transition: opacity 220ms cubic-bezier(0.16, 1, 0.3, 1),
+        transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.axiom-site-links a::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -6px;
+    height: 1px;
+    background: #92400e;
+    transform: scaleX(0);
+    transform-origin: left center;
+    transition: transform 320ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.axiom-site-links a:hover {
+    opacity: 1;
+    transform: translateY(-1px);
+}
+
+.axiom-site-links a:hover::after {
+    transform: scaleX(1);
+}
+
+.axiom-site-gh {
+    display: inline-flex;
+    align-items: center;
+    color: #1c1917;
+    opacity: 0.7;
+    transition: opacity 220ms cubic-bezier(0.16, 1, 0.3, 1),
+        transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.axiom-site-gh:hover {
+    opacity: 1;
+    transform: scale(1.08);
+}
+
+.axiom-site-cta {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 9999px;
+    background: #92400e;
+    padding: 0.5rem 1.25rem;
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #ffffff !important;
+    text-decoration: none;
+    transition: background-color 150ms;
+    white-space: nowrap;
+}
+
+.axiom-site-cta:hover {
+    background: #7c2d12;
+}
+
+@media (max-width: 900px) {
+    .axiom-site-links {
+        display: none;
+    }
+}
+
+/* Footer spans the full page under the fixed sidebar rail; solid
+   paper + top rule so the overlap at page end reads as intentional. */
+.axiom-site-footer {
+    position: relative;
+    z-index: 10;
+    background: #faf9f6;
+    border-top: 1px solid #e7e5e4;
+    padding: 0 2rem;
+    font-family: "Geist", -apple-system, sans-serif;
+}
+
+.axiom-site-footer-inner {
+    max-width: 1280px;
+    margin: 0 auto;
+    padding: 4rem 0;
+}
+
+.axiom-footer-grid {
+    display: grid;
+    grid-template-columns: 1.6fr 1fr 1fr 1fr;
+    gap: 3.5rem;
+    margin-bottom: 3.5rem;
+}
+
+@media (max-width: 769px) {
+    .axiom-footer-grid {
+        grid-template-columns: 1fr;
+        gap: 3rem;
+    }
+}
+
+.axiom-footer-brand img {
+    height: 36px;
+    width: auto;
+    margin-bottom: 1.25rem;
+}
+
+.axiom-footer-tagline {
+    margin: 0;
+    font-family: "Newsreader", "Georgia", serif;
+    font-style: italic;
+    font-size: 0.95rem;
+    color: #57534e;
+    line-height: 1.6;
+    max-width: 280px;
+}
+
+.axiom-footer-blurb {
+    margin: 1rem 0 0;
+    font-size: 0.8rem;
+    color: #78716c;
+    line-height: 1.6;
+    max-width: 280px;
+}
+
+.axiom-footer-socials {
+    margin-top: 1.5rem;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.axiom-footer-socials a {
+    color: #78716c;
+    transition: color 150ms;
+    display: inline-flex;
+}
+
+.axiom-footer-socials a:hover {
+    color: #92400e;
+}
+
+.axiom-footer-col h3 {
+    margin: 0 0 1rem;
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 0.65rem;
+    font-weight: 500;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: #78716c;
+}
+
+.axiom-footer-col ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.625rem;
+}
+
+.axiom-footer-col a {
+    display: inline-block;
+    font-size: 0.9rem;
+    color: #57534e;
+    text-decoration: none;
+    background-image: linear-gradient(currentColor, currentColor);
+    background-position: 0 100%;
+    background-repeat: no-repeat;
+    background-size: 0% 1px;
+    padding-bottom: 1px;
+    transition: background-size 220ms cubic-bezier(0.16, 1, 0.3, 1),
+        color 150ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.axiom-footer-col a:hover {
+    background-size: 100% 1px;
+    color: #92400e;
+}
+
+.axiom-footer-bottom {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid #f5f5f4;
+    flex-wrap: wrap;
+}
+
+.axiom-footer-bottom p {
+    margin: 0;
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.08em;
+    color: #78716c;
+}
+
+.axiom-footer-motto {
+    letter-spacing: 0.18em !important;
+    text-transform: uppercase;
+}
+
+.axiom-glyph {
+    color: #92400e;
+    font-family: "Geist", -apple-system, sans-serif;
 }
