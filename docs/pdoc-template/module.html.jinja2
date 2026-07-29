@@ -81,6 +81,33 @@
 </footer>
 <script>document.getElementById("axiom-year").textContent = new Date().getFullYear();</script>
 {% endblock %}
+{# Editorial page header, mirroring the /receipt hero order exactly:
+   kicker with hairlines, the disambiguation caption, then the
+   headline. Vendored from pdoc 16.0.0's module_info block (pinned in
+   docs.yml) so the edit link can join the kicker row and the caption
+   can sit above the h1. #}
+{% block module_info %}
+    <section class="module-info">
+        <div class="axiom-page-topline">
+            <span class="axiom-page-kicker"><span class="axiom-kicker-mark">&sect;</span>&nbsp;receipt &middot; API reference</span>
+            {% block edit_button %}
+                {% if edit_url %}
+                    <a class="axiom-edit-link" href="{{ edit_url }}">Edit on GitHub</a>
+                {% endif %}
+            {% endblock %}
+        </div>
+        <p class="axiom-disambig">
+            This is the package&rsquo;s API reference. Looking for the
+            overview?
+            <a href="https://axiom.org/receipt">axiom.org/receipt</a>
+        </p>
+        {{ module_name() }}
+        {{ docstring(module) }}
+        {{ view_source_state(module) }}
+        {{ view_source_button(module) }}
+        {{ view_source_code(module) }}
+    </section>
+{% endblock %}
 {# Kicker above the sidebar, mirroring the axiom.org/receipt header;
    links back to the package page for the seamless return path. #}
 {% block nav_title %}

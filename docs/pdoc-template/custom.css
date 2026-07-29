@@ -1,13 +1,23 @@
-/* Axiom theme for the pdoc-rendered receipt API reference.
-   Values come from the site's shared design tokens
-   (axiom-foundation.org packages/ui/src/styles/tokens.css) so the
-   reference reads as a native page at axiom-foundation.org/receipt/api.
-   Overrides only: pdoc's own layout and markup stay untouched. */
+/* Axiom editorial theme for the pdoc-rendered receipt API reference.
+   Every value comes from the site's shared design tokens
+   (axiom-foundation.org packages/ui/src/styles/tokens.css) and the
+   /receipt page's own patterns — kicker, disambiguation caption,
+   gradient display headline, hairline-divided rows, dark code panels —
+   so the reference reads as the same hand at axiom.org/receipt/api.
+   Sync with the site tokens when the brand changes. */
 
 @import url("https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,wght@1,400&display=swap");
 
 :root {
     --pdoc-background: #faf9f6; /* --color-paper */
+    --axiom-nav-h: 61px;
+}
+
+/* Warm amber wash over the paper, echoing the site's page-wide mesh. */
+html {
+    background:
+        radial-gradient(circle at 75% -5%, rgba(251, 191, 36, 0.055), transparent 55%),
+        #faf9f6;
 }
 
 .pdoc {
@@ -16,25 +26,26 @@
     --muted: #78716c;          /* --color-ink-muted */
     --link: #92400e;           /* --color-accent */
     --link-hover: #7c2d12;     /* --color-accent-hover */
-    --code: #ffffff;           /* --color-paper-elevated (pre blocks) */
+    --code: #f5f5f4;           /* inline code chips on rule-subtle */
     --active: rgba(146, 64, 14, 0.12);
 
-    /* pdoc uses --accent for the sidebar + inline-code fill and
-       --accent2 for hairline borders; map them to the rule scale. */
+    /* pdoc uses --accent for fills and --accent2 for hairlines; map
+       them to the rule scale so nothing reads as a panel. */
     --accent: #f5f5f4;         /* --color-rule-subtle */
     --accent2: #e7e5e4;        /* --color-rule */
 
     --nav-hover: rgba(146, 64, 14, 0.06); /* --color-accent-light */
     --name: #92400e;           /* member names carry the accent */
     --def: #57534e;            /* def / class keywords, quiet */
-    --annotation: #166534;     /* --color-success, annotations recede */
+    --annotation: #57534e;     /* annotations recede */
 
     font-family: "Geist", -apple-system, sans-serif;
-    line-height: 1.6;
+    line-height: 1.65;
 }
 
 body {
     font-family: "Geist", -apple-system, sans-serif;
+    padding-top: var(--axiom-nav-h);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
 }
@@ -56,6 +67,13 @@ body::before {
     color: #1c1917;
 }
 
+a:focus-visible,
+label:focus-visible,
+input:focus-visible {
+    outline: 2px solid #92400e; /* --color-focus-ring */
+    outline-offset: 2px;
+}
+
 .pdoc code,
 .pdoc pre,
 .pdoc .attr,
@@ -64,22 +82,151 @@ nav.pdoc {
     font-family: "JetBrains Mono", "Fira Code", monospace;
 }
 
-/* Prose headings: Geist, site weight and tracking. Identifier headings
-   (module / member names) stay mono via their inner spans. */
-.pdoc h1, .pdoc h2, .pdoc h3, .pdoc h4, .pdoc h5, .pdoc h6 {
-    font-family: "Geist", -apple-system, sans-serif;
-    font-weight: 700;
-    line-height: 1.15;
-    letter-spacing: -0.04em;
+/* ── Page header: kicker · caption · headline, the /receipt order ── */
+
+.axiom-page-topline {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    margin-bottom: 1.4rem;
+}
+
+.axiom-page-kicker {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 0.7rem;
+    font-weight: 500;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: #78716c;
+}
+
+.axiom-page-kicker::before,
+.axiom-page-kicker::after {
+    content: "";
+    width: 1.75rem;
+    height: 1px;
+    background: #e7e5e4;
+}
+
+.axiom-page-kicker .axiom-kicker-mark {
+    font-family: "Newsreader", "Georgia", serif;
+    font-style: italic;
+    font-size: 0.95rem;
+    letter-spacing: 0;
+    text-transform: none;
+    color: #92400e;
+}
+
+/* pdoc renders the View Source text via ::before on the label (the
+   span is visibility-hidden), so style the label — the pseudo-element
+   inherits; the disclosure marker stays as the open/closed signal. */
+.axiom-edit-link,
+.pdoc .view-source-button {
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 0.68rem;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: #92400e;
+    text-decoration: none;
+    cursor: pointer;
+    transition: color 150ms;
+}
+
+.axiom-edit-link {
+    margin-left: auto;
+    white-space: nowrap;
+}
+
+.axiom-edit-link:hover,
+.pdoc .view-source-button:hover {
+    color: #7c2d12;
+}
+
+.axiom-disambig {
+    margin: 0 0 1.1rem;
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: #78716c;
+}
+
+.axiom-disambig a {
+    color: #92400e;
+    text-decoration: none;
+}
+
+.axiom-disambig a:hover {
+    text-decoration: underline;
+}
+
+/* Headline: the identifier set in the site's gradient display system,
+   mono because it is an identifier — the type system speaking code. */
+.pdoc h1.modulename {
+    margin: 0 0 1.4rem;
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-weight: 400;
+    font-size: clamp(1.9rem, 3.2vw, 2.5rem);
+    line-height: 1.12;
+    letter-spacing: -0.01em;
+    background: linear-gradient(to right, #92400e, #1c1917);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
     color: #1c1917;
 }
 
-.pdoc h1 .modulename, .pdoc .modulename {
-    font-family: "JetBrains Mono", "Fira Code", monospace;
-    letter-spacing: -0.01em;
+.pdoc h1.modulename a {
+    color: inherit;
+    text-decoration: none;
 }
 
-/* Links: accent with the site's underline geometry. */
+.pdoc h1.modulename a:hover {
+    text-decoration: underline;
+    text-decoration-color: #92400e;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 0.2em;
+}
+
+/* Lede: the docstring's first paragraph reads like the /receipt hero
+   paragraph. */
+.module-info > .docstring > p:first-child {
+    font-size: 1.18rem;
+    line-height: 1.6;
+    color: #57534e;
+    max-width: 46rem;
+    text-wrap: pretty;
+}
+
+/* ── Prose ── */
+
+.pdoc .docstring {
+    color: #44403c;
+    max-width: 46rem;
+}
+
+.pdoc h2, .pdoc h3, .pdoc h4 {
+    font-family: "Geist", -apple-system, sans-serif;
+    font-weight: 300;
+    line-height: 1.15;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    background: linear-gradient(to right, #92400e, #1c1917);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: #1c1917;
+}
+
+.pdoc .docstring h2 {
+    font-size: 1.35rem;
+    margin-top: 2.5rem;
+}
+
 .pdoc a {
     text-decoration: underline;
     text-underline-offset: 0.15em;
@@ -92,50 +239,201 @@ nav.pdoc a,
     text-decoration: none;
 }
 
-/* Member definition blocks: elevated paper cards with hairline rules,
-   like the install block on /receipt. */
-.pdoc .attr {
-    background-color: #ffffff;
-    border: 1px solid #e7e5e4;
-    border-radius: 4px;
-}
-
-/* Code: elevated paper, hairline rules. */
-.pdoc pre {
-    border: 1px solid #e7e5e4;
-    border-radius: 4px;
-}
-
+/* Inline code: quiet chips on rule-subtle, like the site's inline
+   receipt verify mentions. */
 .pdoc code {
     border-radius: 3px;
+    font-size: 0.88em;
 }
 
-/* Sidebar: subtle paper tint, hairline right rule. */
-nav.pdoc {
-    font-size: 0.9rem;
+/* ── Members as statute rows: hairline-divided, no boxes ── */
+
+.pdoc main section {
+    border-top: 1px solid #e7e5e4;
+    margin-top: 2.1rem;
+    padding-top: 2.1rem;
 }
 
-/* Sidebar section headings: kicker treatment instead of display type. */
-nav.pdoc h2 {
-    font-family: "JetBrains Mono", "Fira Code", monospace;
-    font-size: 0.72rem;
+.pdoc main section.module-info {
+    border-top: none;
+    margin-top: 0;
+    padding-top: 0;
+}
+
+.pdoc .attr {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0 0 0.4rem 0;
+    margin: 0;
+    font-size: 0.95rem;
+}
+
+/* Nested class members: a hairline in the left margin, the site's
+   divide-y idiom turned sideways. */
+.pdoc .classattr {
+    border-left: 1px solid #e7e5e4;
+    margin-left: 0.15rem;
+    padding-left: 1.6rem;
+    margin-top: 1.6rem;
+}
+
+.pdoc .classattr .attr {
+    padding-top: 0;
+}
+
+.pdoc .attr .name {
+    color: #92400e;
     font-weight: 600;
-    letter-spacing: 0.08em;
+}
+
+.pdoc .attr .def {
+    color: #57534e;
+    font-weight: 400;
+}
+
+.pdoc .attr .annotation {
+    color: #57534e;
+}
+
+.pdoc .headerlink {
+    opacity: 0;
+    transition: opacity 150ms;
+    color: #78716c;
+}
+
+.pdoc .attr:hover .headerlink,
+.pdoc h2:hover .headerlink {
+    opacity: 1;
+}
+
+.pdoc .inherited h5 {
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 0.68rem;
+    font-weight: 500;
+    letter-spacing: 0.18em;
     text-transform: uppercase;
     color: #78716c;
-    margin: 1.5rem 0 0.5rem;
+}
+
+/* ── Code panels: the site's dark statute-ink surface ── */
+
+.pdoc pre {
+    background: #1c1917;       /* --color-code-bg */
+    color: #e7e5e4;            /* --color-code-text */
+    border: none;
+    border-radius: 6px;
+    padding: 1.1rem 1.3rem;
+    line-height: 1.6;
+    font-size: 0.85rem;
+}
+
+.pdoc .pdoc-code {
+    background: transparent;
+    border: none;
+}
+
+.pdoc pre .linenos,
+.pdoc pre .lineno,
+.pdoc pre a.linenos span {
+    color: #78716c;
+}
+
+/* Dark pygments map — the site's code tokens. */
+.pdoc pre .k, .pdoc pre .kn, .pdoc pre .kd, .pdoc pre .kc,
+.pdoc pre .ow, .pdoc pre .nd { color: #fbbf24; }          /* keywords */
+.pdoc pre .s, .pdoc pre .s1, .pdoc pre .s2, .pdoc pre .sa,
+.pdoc pre .se { color: #fdba74; }                          /* strings */
+.pdoc pre .sd { color: #a8a29e; font-style: italic; }      /* docstrings */
+.pdoc pre .c, .pdoc pre .c1, .pdoc pre .cm,
+.pdoc pre .ch { color: #a8a29e; font-style: italic; }      /* comments */
+.pdoc pre .mi, .pdoc pre .mf { color: #7dd3fc; }           /* numbers */
+.pdoc pre .nb, .pdoc pre .bp { color: #7dd3fc; }           /* builtins */
+.pdoc pre .nc, .pdoc pre .nf, .pdoc pre .fm {
+    color: #86efac;                                        /* callables */
+    font-weight: 500;
+}
+.pdoc pre .n { color: #e7e5e4; }
+.pdoc pre .o { color: #d6d3d1; }                           /* operators */
+.pdoc pre .p { color: #a8a29e; }                           /* punctuation */
+
+/* Signatures stay on paper: light pygments map scoped to the member
+   rows (pre's dark map outranks it inside source views). */
+.pdoc .attr .k, .pdoc .attr .kn, .pdoc .attr .kd,
+.pdoc .attr .kc, .pdoc .attr .ow { color: #92400e; }
+.pdoc .attr .nb, .pdoc .attr .bp { color: #7c2d12; }
+.pdoc .attr .s, .pdoc .attr .s1, .pdoc .attr .s2,
+.pdoc .attr .sa { color: #7c2d12; }
+.pdoc .attr .mi, .pdoc .attr .mf { color: #166534; }
+.pdoc .attr .o { color: #57534e; }
+.pdoc .attr .n { color: #1c1917; }
+
+/* ── Rail: an editorial margin, not app chrome ── */
+
+nav.pdoc {
+    font-size: 0.86rem;
+    background: transparent;
+    border-right: 1px solid #e7e5e4;
+}
+
+nav.pdoc h2 {
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 0.68rem;
+    font-weight: 500;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    background: none;
+    -webkit-text-fill-color: currentColor;
+    color: #78716c;
+    margin: 1.6rem 0 0.5rem;
+}
+
+nav.pdoc a {
+    font-size: 0.82rem;
+    color: #57534e;
+}
+
+nav.pdoc a:hover {
+    color: #92400e;
 }
 
 nav.pdoc input[type="search"] {
-    background: #ffffff;
-    border: 1px solid #78716c; /* --color-rule-strong: interactive boundary */
-    border-radius: 4px;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid #78716c; /* --color-rule-strong */
+    border-radius: 0;
+    padding: 0.35rem 0;
+    font-size: 0.78rem;
+    letter-spacing: 0.08em;
     color: #1c1917;
 }
 
+nav.pdoc input[type="search"]::placeholder {
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    font-size: 0.68rem;
+    color: #78716c;
+}
+
 nav.pdoc input[type="search"]:focus-visible {
-    outline: 2px solid #92400e; /* --color-focus-ring */
-    outline-offset: 1px;
+    outline: none;
+    border-bottom-color: #92400e;
+}
+
+nav.pdoc .module-list-button {
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 0.68rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: #92400e;
+    background: transparent;
+    border: 1px solid #e7e5e4;
+    border-radius: 9999px;
+    padding: 0.3rem 0.9rem;
+}
+
+nav.pdoc .module-list-button:hover {
+    border-color: #92400e;
 }
 
 /* Home kicker above the sidebar, echoing the /receipt page header. */
@@ -174,62 +472,29 @@ nav.pdoc input[type="search"]:focus-visible {
     color: #92400e;
 }
 
-/* Pygments, warmed to the paper palette: keywords and builtins in the
-   brand sienna, strings deeper, comments muted italic, docstrings quiet. */
-.pdoc .k, .pdoc .kn, .pdoc .kd, .pdoc .kc, .pdoc .ow {
-    color: #92400e;
-}
-
-.pdoc .nb, .pdoc .bp {
-    color: #7c2d12;
-}
-
-.pdoc .nc, .pdoc .nf, .pdoc .fm {
-    color: #1c1917;
-    font-weight: 600;
-}
-
-.pdoc .s, .pdoc .s1, .pdoc .s2, .pdoc .sa {
-    color: #7c2d12;
-}
-
-.pdoc .sd {
-    color: #57534e;
-    font-style: italic;
-}
-
-.pdoc .c, .pdoc .c1, .pdoc .cm, .pdoc .ch {
-    color: #78716c;
-    font-style: italic;
-}
-
-.pdoc .mi, .pdoc .mf {
-    color: #166534;
-}
-
-.pdoc .o {
-    color: #57534e;
+/* pdoc attribution: caption-quiet. */
+nav.pdoc .attribution {
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 0.62rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #a8a29e;
 }
 
 /* ── Site chrome ──
    The fixed nav bar and footer from axiom.org, vendored from the
-   site's packages/ui (nav.tsx / footer.tsx / tokens.css) so the
-   reference reads as one site with axiom.org/receipt. Sync when the
-   site chrome changes. pdoc's fixed sidebar and mobile hamburger are
-   offset below the bar. */
-
-:root {
-    --axiom-nav-h: 61px;
-}
-
-body {
-    padding-top: var(--axiom-nav-h);
-}
+   site's packages/ui (nav.tsx / footer.tsx / tokens.css). pdoc's
+   fixed sidebar and mobile hamburger are offset below the bar. */
 
 @media (min-width: 770px) {
     nav.pdoc {
         top: var(--axiom-nav-h);
         height: calc(100vh - var(--axiom-nav-h));
+    }
+
+    .pdoc main,
+    .pdoc header {
+        padding-top: 2.4rem;
     }
 }
 
