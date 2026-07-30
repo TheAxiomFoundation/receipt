@@ -32,7 +32,18 @@
         </div>
     </div>
 </header>
-{{ super() }}
+{# Centered shell: the rail and content share the site's 1280px
+   container, like every other axiom.org page — no viewport-docked
+   sidebar. frame.html.jinja2's body internals are vendored from pdoc
+   16.0.0 (pinned in docs.yml) so both columns get one flex parent. #}
+<div class="axiom-shell">
+    <nav class="pdoc">
+        <label id="navtoggle" for="togglestate" class="pdoc-button">{% include 'resources/navtoggle.svg' %}</label>
+        <input id="togglestate" type="checkbox" aria-hidden="true" tabindex="-1">
+        <div>{{ self.nav() }}</div>
+    </nav>
+    {{ self.content() }}
+</div>
 <footer class="axiom-site-footer">
     <div class="axiom-site-footer-inner">
         <div class="axiom-footer-grid">
