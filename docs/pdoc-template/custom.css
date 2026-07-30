@@ -6,7 +6,7 @@
    so the reference reads as the same hand at axiom.org/receipt/api.
    Sync with the site tokens when the brand changes. */
 
-@import url("https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,wght@1,400&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&family=Newsreader:ital,wght@1,400&display=swap");
 
 :root {
     --pdoc-background: #faf9f6; /* --color-paper */
@@ -167,10 +167,10 @@ nav.pdoc {
 /* Headline: the identifier set in the site's gradient display system,
    mono because it is an identifier — the type system speaking code. */
 .pdoc h1.modulename {
-    margin: 0 0 1.4rem;
+    margin: 0.6rem 0 1.8rem;
     font-family: "JetBrains Mono", "Fira Code", monospace;
-    font-weight: 400;
-    font-size: clamp(1.9rem, 3.2vw, 2.5rem);
+    font-weight: 300;
+    font-size: clamp(2.5rem, 4.2vw, 3.3rem);
     line-height: 1.12;
     letter-spacing: -0.01em;
     background: linear-gradient(to right, #92400e, #1c1917);
@@ -207,6 +207,8 @@ nav.pdoc {
 .pdoc .docstring {
     color: #44403c;
     max-width: 46rem;
+    font-size: 1.02rem;
+    line-height: 1.7;
 }
 
 .pdoc h2, .pdoc h3, .pdoc h4 {
@@ -373,7 +375,7 @@ nav.pdoc a,
 nav.pdoc {
     font-size: 0.86rem;
     background: transparent;
-    border-right: 1px solid #e7e5e4;
+    box-shadow: none; /* pdoc's inset panel shadow reads as app chrome */
 }
 
 nav.pdoc h2 {
@@ -486,21 +488,53 @@ nav.pdoc .attribution {
    site's packages/ui (nav.tsx / footer.tsx / tokens.css). pdoc's
    fixed sidebar and mobile hamburger are offset below the bar. */
 
+/* Centered composition: rail + content inside the site's container,
+   the rail a sticky column rather than a viewport-docked panel.
+   Overrides pdoc layout.css's fixed nav and sidebar-offset main. */
 @media (min-width: 770px) {
-    nav.pdoc {
-        top: var(--axiom-nav-h);
-        height: calc(100vh - var(--axiom-nav-h));
+    .axiom-shell {
+        max-width: 1280px;
+        margin: 0 auto;
+        padding: 0 2rem;
+        display: flex;
+        align-items: flex-start;
+        gap: 3.5rem;
     }
 
-    .pdoc main,
-    .pdoc header {
-        padding-top: 2.4rem;
+    .axiom-shell nav.pdoc {
+        position: sticky;
+        top: var(--axiom-nav-h);
+        height: auto;
+        max-height: calc(100vh - var(--axiom-nav-h));
+        overflow-y: auto;
+        flex: 0 0 14.5rem;
+        width: 14.5rem;
+        padding: 2.8rem 0 2rem;
+    }
+
+    .axiom-shell main.pdoc {
+        flex: 1;
+        min-width: 0;
+        width: auto;
+        max-width: none;
+        padding: 2.8rem 0 4.5rem;
     }
 }
 
 @media (max-width: 769px) {
     #navtoggle {
         top: calc(var(--axiom-nav-h) + 1rem);
+    }
+
+    /* Clear pdoc's hamburger; let the kicker and edit link stack. */
+    .axiom-page-topline {
+        flex-wrap: wrap;
+        row-gap: 0.6rem;
+        padding-right: 3.6rem;
+    }
+
+    .axiom-edit-link {
+        margin-left: 0;
     }
 }
 
