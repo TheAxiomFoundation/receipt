@@ -21,6 +21,8 @@ classifiers = [
 dependencies = ["cryptography>=42"]
 
 [project.urls]
+Homepage = "https://axiom.org/receipt"
+Documentation = "https://axiom.org/receipt/api/"
 Repository = "https://github.com/TheAxiomFoundation/receipt"
 
 [dependency-groups]
