@@ -24,6 +24,8 @@ dependencies = ["cryptography>=42"]
 receipt = "receipt.cli:main"
 
 [project.urls]
+Homepage = "https://axiom.org/receipt"
+Documentation = "https://axiom.org/receipt/api/"
 Repository = "https://github.com/TheAxiomFoundation/receipt"
 
 [dependency-groups]

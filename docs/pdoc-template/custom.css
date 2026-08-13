@@ -1,0 +1,807 @@
+/* Axiom editorial theme for the pdoc-rendered receipt API reference.
+   Every value comes from the site's shared design tokens
+   (axiom-foundation.org packages/ui/src/styles/tokens.css) and the
+   /receipt page's own patterns — kicker, disambiguation caption,
+   gradient display headline, hairline-divided rows, dark code panels —
+   so the reference reads as the same hand at axiom.org/receipt/api.
+   Sync with the site tokens when the brand changes. */
+
+@import url("https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&family=Newsreader:ital,wght@1,400&display=swap");
+
+:root {
+    --pdoc-background: #faf9f6; /* --color-paper */
+    --axiom-nav-h: 61px;
+}
+
+/* Warm amber wash over the paper, echoing the site's page-wide mesh. */
+html {
+    background:
+        radial-gradient(circle at 75% -5%, rgba(251, 191, 36, 0.055), transparent 55%),
+        #faf9f6;
+}
+
+.pdoc {
+    /* Statute paper & legal ink */
+    --text: #1c1917;           /* --color-ink */
+    --muted: #78716c;          /* --color-ink-muted */
+    --link: #92400e;           /* --color-accent */
+    --link-hover: #7c2d12;     /* --color-accent-hover */
+    --code: #f5f5f4;           /* inline code chips on rule-subtle */
+    --active: rgba(146, 64, 14, 0.12);
+
+    /* pdoc uses --accent for fills and --accent2 for hairlines; map
+       them to the rule scale so nothing reads as a panel. */
+    --accent: #f5f5f4;         /* --color-rule-subtle */
+    --accent2: #e7e5e4;        /* --color-rule */
+
+    --nav-hover: rgba(146, 64, 14, 0.06); /* --color-accent-light */
+    --name: #92400e;           /* member names carry the accent */
+    --def: #57534e;            /* def / class keywords, quiet */
+    --annotation: #57534e;     /* annotations recede */
+
+    font-family: "Geist", -apple-system, sans-serif;
+    line-height: 1.65;
+}
+
+body {
+    font-family: "Geist", -apple-system, sans-serif;
+    padding-top: var(--axiom-nav-h);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+/* Paper grain — same fixed noise the site lays over the cream stock. */
+body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 1;
+    opacity: 0.85;
+    mix-blend-mode: multiply;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.11  0 0 0 0 0.10  0 0 0 0 0.09  0 0 0 0.085 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+}
+
+::selection {
+    background: rgba(146, 64, 14, 0.15);
+    color: #1c1917;
+}
+
+a:focus-visible,
+label:focus-visible,
+input:focus-visible {
+    outline: 2px solid #92400e; /* --color-focus-ring */
+    outline-offset: 2px;
+}
+
+.pdoc code,
+.pdoc pre,
+.pdoc .attr,
+.pdoc input[type="search"],
+nav.pdoc {
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+}
+
+/* ── Page header: kicker · caption · headline, the /receipt order ── */
+
+.axiom-page-topline {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    margin-bottom: 1.4rem;
+}
+
+.axiom-page-kicker {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 0.7rem;
+    font-weight: 500;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: #78716c;
+}
+
+.axiom-page-kicker::before,
+.axiom-page-kicker::after {
+    content: "";
+    width: 1.75rem;
+    height: 1px;
+    background: #e7e5e4;
+}
+
+.axiom-page-kicker .axiom-kicker-mark {
+    font-family: "Newsreader", "Georgia", serif;
+    font-style: italic;
+    font-size: 0.95rem;
+    letter-spacing: 0;
+    text-transform: none;
+    color: #92400e;
+}
+
+/* pdoc renders the View Source text via ::before on the label (the
+   span is visibility-hidden), so style the label — the pseudo-element
+   inherits; the disclosure marker stays as the open/closed signal. */
+.axiom-edit-link,
+.pdoc .view-source-button {
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 0.68rem;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: #92400e;
+    text-decoration: none;
+    cursor: pointer;
+    transition: color 150ms;
+}
+
+.axiom-edit-link {
+    margin-left: auto;
+    white-space: nowrap;
+}
+
+.axiom-edit-link:hover,
+.pdoc .view-source-button:hover {
+    color: #7c2d12;
+}
+
+.axiom-disambig {
+    margin: 0 0 1.1rem;
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: #78716c;
+}
+
+.axiom-disambig a {
+    color: #92400e;
+    text-decoration: none;
+}
+
+.axiom-disambig a:hover {
+    text-decoration: underline;
+}
+
+/* Headline: the identifier set in the site's gradient display system,
+   mono because it is an identifier — the type system speaking code. */
+.pdoc h1.modulename {
+    margin: 0.6rem 0 1.8rem;
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-weight: 300;
+    font-size: clamp(2.5rem, 4.2vw, 3.3rem);
+    line-height: 1.12;
+    letter-spacing: -0.01em;
+    background: linear-gradient(to right, #92400e, #1c1917);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: #1c1917;
+}
+
+.pdoc h1.modulename a {
+    color: inherit;
+    text-decoration: none;
+}
+
+.pdoc h1.modulename a:hover {
+    text-decoration: underline;
+    text-decoration-color: #92400e;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 0.2em;
+}
+
+/* Lede: the docstring's first paragraph reads like the /receipt hero
+   paragraph. */
+.module-info > .docstring > p:first-child {
+    font-size: 1.18rem;
+    line-height: 1.6;
+    color: #57534e;
+    max-width: 46rem;
+    text-wrap: pretty;
+}
+
+/* ── Prose ── */
+
+.pdoc .docstring {
+    color: #44403c;
+    max-width: 46rem;
+    font-size: 1.02rem;
+    line-height: 1.7;
+}
+
+.pdoc h2, .pdoc h3, .pdoc h4 {
+    font-family: "Geist", -apple-system, sans-serif;
+    font-weight: 300;
+    line-height: 1.15;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    background: linear-gradient(to right, #92400e, #1c1917);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: #1c1917;
+}
+
+.pdoc .docstring h2 {
+    font-size: 1.35rem;
+    margin-top: 2.5rem;
+}
+
+.pdoc a {
+    text-decoration: underline;
+    text-underline-offset: 0.15em;
+    text-decoration-thickness: 0.08em;
+    transition: color 150ms;
+}
+
+nav.pdoc a,
+.pdoc .attr a {
+    text-decoration: none;
+}
+
+/* Inline code: quiet chips on rule-subtle, like the site's inline
+   receipt verify mentions. */
+.pdoc code {
+    border-radius: 3px;
+    font-size: 0.88em;
+}
+
+/* ── Members as statute rows: hairline-divided, no boxes ── */
+
+.pdoc main section {
+    border-top: 1px solid #e7e5e4;
+    margin-top: 2.1rem;
+    padding-top: 2.1rem;
+}
+
+.pdoc main section.module-info {
+    border-top: none;
+    margin-top: 0;
+    padding-top: 0;
+}
+
+.pdoc .attr {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0 0 0.4rem 0;
+    margin: 0;
+    font-size: 0.95rem;
+}
+
+/* Nested class members: a hairline in the left margin, the site's
+   divide-y idiom turned sideways. */
+.pdoc .classattr {
+    border-left: 1px solid #e7e5e4;
+    margin-left: 0.15rem;
+    padding-left: 1.6rem;
+    margin-top: 1.6rem;
+}
+
+.pdoc .classattr .attr {
+    padding-top: 0;
+}
+
+.pdoc .attr .name {
+    color: #92400e;
+    font-weight: 600;
+}
+
+.pdoc .attr .def {
+    color: #57534e;
+    font-weight: 400;
+}
+
+.pdoc .attr .annotation {
+    color: #57534e;
+}
+
+.pdoc .headerlink {
+    opacity: 0;
+    transition: opacity 150ms;
+    color: #78716c;
+}
+
+.pdoc .attr:hover .headerlink,
+.pdoc h2:hover .headerlink {
+    opacity: 1;
+}
+
+.pdoc .inherited h5 {
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 0.68rem;
+    font-weight: 500;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: #78716c;
+}
+
+/* ── Code panels: the site's dark statute-ink surface ── */
+
+.pdoc pre {
+    background: #1c1917;       /* --color-code-bg */
+    color: #e7e5e4;            /* --color-code-text */
+    border: none;
+    border-radius: 6px;
+    padding: 1.1rem 1.3rem;
+    line-height: 1.6;
+    font-size: 0.85rem;
+}
+
+.pdoc .pdoc-code {
+    background: transparent;
+    border: none;
+}
+
+.pdoc pre .linenos,
+.pdoc pre .lineno,
+.pdoc pre a.linenos span {
+    color: #78716c;
+}
+
+/* Dark pygments map — the site's code tokens. */
+.pdoc pre .k, .pdoc pre .kn, .pdoc pre .kd, .pdoc pre .kc,
+.pdoc pre .ow, .pdoc pre .nd { color: #fbbf24; }          /* keywords */
+.pdoc pre .s, .pdoc pre .s1, .pdoc pre .s2, .pdoc pre .sa,
+.pdoc pre .se { color: #fdba74; }                          /* strings */
+.pdoc pre .sd { color: #a8a29e; font-style: italic; }      /* docstrings */
+.pdoc pre .c, .pdoc pre .c1, .pdoc pre .cm,
+.pdoc pre .ch { color: #a8a29e; font-style: italic; }      /* comments */
+.pdoc pre .mi, .pdoc pre .mf { color: #7dd3fc; }           /* numbers */
+.pdoc pre .nb, .pdoc pre .bp { color: #7dd3fc; }           /* builtins */
+.pdoc pre .nc, .pdoc pre .nf, .pdoc pre .fm {
+    color: #86efac;                                        /* callables */
+    font-weight: 500;
+}
+.pdoc pre .n { color: #e7e5e4; }
+.pdoc pre .o { color: #d6d3d1; }                           /* operators */
+.pdoc pre .p { color: #a8a29e; }                           /* punctuation */
+
+/* Signatures stay on paper: light pygments map scoped to the member
+   rows (pre's dark map outranks it inside source views). */
+.pdoc .attr .k, .pdoc .attr .kn, .pdoc .attr .kd,
+.pdoc .attr .kc, .pdoc .attr .ow { color: #92400e; }
+.pdoc .attr .nb, .pdoc .attr .bp { color: #7c2d12; }
+.pdoc .attr .s, .pdoc .attr .s1, .pdoc .attr .s2,
+.pdoc .attr .sa { color: #7c2d12; }
+.pdoc .attr .mi, .pdoc .attr .mf { color: #166534; }
+.pdoc .attr .o { color: #57534e; }
+.pdoc .attr .n { color: #1c1917; }
+
+/* ── Rail: an editorial margin, not app chrome ── */
+
+nav.pdoc {
+    font-size: 0.86rem;
+    background: transparent;
+    box-shadow: none; /* pdoc's inset panel shadow reads as app chrome */
+}
+
+nav.pdoc h2 {
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 0.68rem;
+    font-weight: 500;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    background: none;
+    -webkit-text-fill-color: currentColor;
+    color: #78716c;
+    margin: 1.6rem 0 0.5rem;
+}
+
+nav.pdoc a {
+    font-size: 0.82rem;
+    color: #57534e;
+}
+
+nav.pdoc a:hover {
+    color: #92400e;
+}
+
+nav.pdoc input[type="search"] {
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid #78716c; /* --color-rule-strong */
+    border-radius: 0;
+    padding: 0.35rem 0;
+    font-size: 0.78rem;
+    letter-spacing: 0.08em;
+    color: #1c1917;
+}
+
+nav.pdoc input[type="search"]::placeholder {
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    font-size: 0.68rem;
+    color: #78716c;
+}
+
+nav.pdoc input[type="search"]:focus-visible {
+    outline: none;
+    border-bottom-color: #92400e;
+}
+
+nav.pdoc .module-list-button {
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 0.68rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: #92400e;
+    background: transparent;
+    border: 1px solid #e7e5e4;
+    border-radius: 9999px;
+    padding: 0.3rem 0.9rem;
+}
+
+nav.pdoc .module-list-button:hover {
+    border-color: #92400e;
+}
+
+/* Home kicker above the sidebar, echoing the /receipt page header. */
+.axiom-home {
+    display: block;
+    padding: 0.25rem 0 0.75rem;
+    text-decoration: none;
+}
+
+.axiom-kicker {
+    display: block;
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 0.85rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #1c1917;
+}
+
+.axiom-kicker-mark {
+    color: #92400e;
+    margin-right: 0.35rem;
+}
+
+.axiom-org {
+    display: block;
+    margin-top: 0.3rem;
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 0.68rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #78716c;
+}
+
+.axiom-home:hover .axiom-kicker {
+    color: #92400e;
+}
+
+/* pdoc attribution: caption-quiet. */
+nav.pdoc .attribution {
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 0.62rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #a8a29e;
+}
+
+/* ── Site chrome ──
+   The fixed nav bar and footer from axiom.org, vendored from the
+   site's packages/ui (nav.tsx / footer.tsx / tokens.css). pdoc's
+   fixed sidebar and mobile hamburger are offset below the bar. */
+
+/* Centered composition: rail + content inside the site's container,
+   the rail a sticky column rather than a viewport-docked panel.
+   Overrides pdoc layout.css's fixed nav and sidebar-offset main. */
+@media (min-width: 770px) {
+    .axiom-shell {
+        max-width: 1280px;
+        margin: 0 auto;
+        padding: 0 2rem;
+        display: flex;
+        align-items: flex-start;
+        gap: 3.5rem;
+    }
+
+    .axiom-shell nav.pdoc {
+        position: sticky;
+        top: var(--axiom-nav-h);
+        height: auto;
+        max-height: calc(100vh - var(--axiom-nav-h));
+        overflow-y: auto;
+        flex: 0 0 14.5rem;
+        width: 14.5rem;
+        padding: 2.8rem 0 2rem;
+    }
+
+    .axiom-shell main.pdoc {
+        flex: 1;
+        min-width: 0;
+        width: auto;
+        max-width: none;
+        padding: 2.8rem 0 4.5rem;
+    }
+}
+
+@media (max-width: 769px) {
+    #navtoggle {
+        top: calc(var(--axiom-nav-h) + 1rem);
+    }
+
+    /* Clear pdoc's hamburger; let the kicker and edit link stack. */
+    .axiom-page-topline {
+        flex-wrap: wrap;
+        row-gap: 0.6rem;
+        padding-right: 3.6rem;
+    }
+
+    .axiom-edit-link {
+        margin-left: 0;
+    }
+}
+
+/* pdoc's layout.css styles the bare `header` element (sidebar-offset
+   padding and a fixed width); neutralize those on the site bar. */
+.axiom-site-nav {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 100;
+    width: auto;
+    max-width: none;
+    margin: 0;
+    padding: 0.75rem 0;
+    background: rgba(250, 249, 246, 0.88);
+    backdrop-filter: blur(12px) saturate(140%);
+    -webkit-backdrop-filter: blur(12px) saturate(140%);
+    border-bottom: 1px solid #e7e5e4;
+}
+
+.axiom-site-nav-inner {
+    max-width: 1280px;
+    margin: 0 auto;
+    padding: 0 2rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.axiom-site-logo img {
+    height: 36px;
+    width: auto;
+    display: block;
+}
+
+.axiom-site-logo {
+    display: inline-flex;
+    transition: opacity 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.axiom-site-logo:hover {
+    opacity: 0.78;
+}
+
+.axiom-site-right {
+    display: flex;
+    align-items: center;
+    gap: 2rem;
+}
+
+.axiom-site-links {
+    display: flex;
+    align-items: center;
+    gap: 2rem;
+}
+
+.axiom-site-links a {
+    position: relative;
+    font-family: "Geist", -apple-system, sans-serif;
+    font-size: 0.9rem;
+    font-weight: 300;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: #1c1917;
+    text-decoration: none;
+    opacity: 0.7;
+    transition: opacity 220ms cubic-bezier(0.16, 1, 0.3, 1),
+        transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.axiom-site-links a::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -6px;
+    height: 1px;
+    background: #92400e;
+    transform: scaleX(0);
+    transform-origin: left center;
+    transition: transform 320ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.axiom-site-links a:hover {
+    opacity: 1;
+    transform: translateY(-1px);
+}
+
+.axiom-site-links a:hover::after {
+    transform: scaleX(1);
+}
+
+.axiom-site-gh {
+    display: inline-flex;
+    align-items: center;
+    color: #1c1917;
+    opacity: 0.7;
+    transition: opacity 220ms cubic-bezier(0.16, 1, 0.3, 1),
+        transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.axiom-site-gh:hover {
+    opacity: 1;
+    transform: scale(1.08);
+}
+
+.axiom-site-cta {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 9999px;
+    background: #92400e;
+    padding: 0.5rem 1.25rem;
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #ffffff !important;
+    text-decoration: none;
+    transition: background-color 150ms;
+    white-space: nowrap;
+}
+
+.axiom-site-cta:hover {
+    background: #7c2d12;
+}
+
+@media (max-width: 900px) {
+    .axiom-site-links {
+        display: none;
+    }
+}
+
+/* Footer spans the full page under the fixed sidebar rail; solid
+   paper + top rule so the overlap at page end reads as intentional. */
+.axiom-site-footer {
+    position: relative;
+    z-index: 10;
+    background: #faf9f6;
+    border-top: 1px solid #e7e5e4;
+    padding: 0 2rem;
+    font-family: "Geist", -apple-system, sans-serif;
+}
+
+.axiom-site-footer-inner {
+    max-width: 1280px;
+    margin: 0 auto;
+    padding: 4rem 0;
+}
+
+.axiom-footer-grid {
+    display: grid;
+    grid-template-columns: 1.6fr 1fr 1fr 1fr;
+    gap: 3.5rem;
+    margin-bottom: 3.5rem;
+}
+
+@media (max-width: 769px) {
+    .axiom-footer-grid {
+        grid-template-columns: 1fr;
+        gap: 3rem;
+    }
+}
+
+.axiom-footer-brand img {
+    height: 36px;
+    width: auto;
+    margin-bottom: 1.25rem;
+}
+
+.axiom-footer-tagline {
+    margin: 0;
+    font-family: "Newsreader", "Georgia", serif;
+    font-style: italic;
+    font-size: 0.95rem;
+    color: #57534e;
+    line-height: 1.6;
+    max-width: 280px;
+}
+
+.axiom-footer-blurb {
+    margin: 1rem 0 0;
+    font-size: 0.8rem;
+    color: #78716c;
+    line-height: 1.6;
+    max-width: 280px;
+}
+
+.axiom-footer-socials {
+    margin-top: 1.5rem;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.axiom-footer-socials a {
+    color: #78716c;
+    transition: color 150ms;
+    display: inline-flex;
+}
+
+.axiom-footer-socials a:hover {
+    color: #92400e;
+}
+
+.axiom-footer-col h3 {
+    margin: 0 0 1rem;
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 0.65rem;
+    font-weight: 500;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: #78716c;
+}
+
+.axiom-footer-col ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.625rem;
+}
+
+.axiom-footer-col a {
+    display: inline-block;
+    font-size: 0.9rem;
+    color: #57534e;
+    text-decoration: none;
+    background-image: linear-gradient(currentColor, currentColor);
+    background-position: 0 100%;
+    background-repeat: no-repeat;
+    background-size: 0% 1px;
+    padding-bottom: 1px;
+    transition: background-size 220ms cubic-bezier(0.16, 1, 0.3, 1),
+        color 150ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.axiom-footer-col a:hover {
+    background-size: 100% 1px;
+    color: #92400e;
+}
+
+.axiom-footer-bottom {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid #f5f5f4;
+    flex-wrap: wrap;
+}
+
+.axiom-footer-bottom p {
+    margin: 0;
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.08em;
+    color: #78716c;
+}
+
+.axiom-footer-motto {
+    letter-spacing: 0.18em !important;
+    text-transform: uppercase;
+}
+
+.axiom-glyph {
+    color: #92400e;
+    font-family: "Geist", -apple-system, sans-serif;
+}
