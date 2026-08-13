@@ -623,12 +623,20 @@ def _regular_file_digest(root: pathlib.Path, relative: str) -> str:
     removes the swap-to-symlink race, and fstat-ing the open descriptor
     confirms what was actually opened is a regular file — never a directory,
     device, or FIFO reachable by the same name. (Cross-family review finding.)
+
+    Residual, bounded: ``O_NOFOLLOW`` covers the final component only, so an
+    intermediate directory swapped to a symlink *between* the component guard
+    and this open is not caught here. Closing that fully needs descent by
+    ``dir_fd``; it is left because the precondition is an adversary with write
+    access to the auditor's clone *during* verification, who can already defeat
+    a local check by other means. The post-hash re-enumeration in
+    :func:`verify_corpus_binding` still catches any resulting set change.
     """
 
-    parent = _assert_no_symlinked_component(root, relative)
+    path = _assert_no_symlinked_component(root, relative)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     try:
-        fd = os.open(parent, flags)
+        fd = os.open(path, flags)
     except OSError as exc:
         raise CorpusError(
             f"bound file is missing or not a regular file: {relative}"
