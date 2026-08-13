@@ -34,6 +34,27 @@ receipt verify --spec path/to/your/spec.py
 
 `TheAxiomFoundation/rulespec-nz` is the reference consumer: its `verification/spec.py` is the whole trust configuration, and its `VERIFY.md` is the third-party procedure. The command needs no network, no credentials, and no cooperation from the producer — `openssl`, `git`, and Python are the only dependencies.
 
+## Install
+
+Requires Python 3.11+, `git`, and `openssl` on the path.
+
+```bash
+uv pip install receipt
+```
+
+Or with pip:
+
+```bash
+pip install receipt
+```
+
+From a clone, for development:
+
+```bash
+uv venv && uv pip install -e ".[dev]"
+uv run pytest
+```
+
 ## Design principle
 
 Trust anchors live in the consumer's committed code, never in runtime configuration a producer could swap. The package ships machinery; consumers pin roots.

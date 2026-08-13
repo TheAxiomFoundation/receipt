@@ -40,8 +40,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
 import re
+import stat
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -501,6 +504,31 @@ def _list_directory(directory: pathlib.Path, relative: str) -> list[pathlib.Path
         ) from exc
 
 
+def _path_fold(relative: str) -> str:
+    """A filesystem-insensitivity-proof key for a relative path.
+
+    NFC folds NFD/NFC spellings of the same characters together; casefold folds
+    case together. Two distinct declared paths sharing a fold key would alias on
+    some real filesystem, so the fold key is what closed-world uniqueness is
+    checked over.
+    """
+
+    return unicodedata.normalize("NFC", relative).casefold()
+
+
+def _reject_aliasing_paths(relatives: list[str]) -> None:
+    seen: dict[str, str] = {}
+    for relative in relatives:
+        key = _path_fold(relative)
+        if key in seen and seen[key] != relative:
+            raise CorpusError(
+                "two declared paths would alias on a case- or "
+                "normalization-insensitive filesystem, so the closed-world set "
+                f"is ambiguous: {seen[key]!r} and {relative!r}"
+            )
+        seen[key] = relative
+
+
 def _tree_content_paths(root: pathlib.Path, spec: CorpusSpec) -> dict[str, pathlib.Path]:
     """Enumerate every regular file the spec calls content.
 
@@ -512,10 +540,13 @@ def _tree_content_paths(root: pathlib.Path, spec: CorpusSpec) -> dict[str, pathl
 
     found: dict[str, pathlib.Path] = {}
     for content_root in spec.content_roots:
-        base = root / content_root
         base_relative = content_root.as_posix()
-        if base.is_symlink():
-            raise CorpusError(f"pinned content root is a symlink: {base_relative}")
+        # Guard every component of the root, not just its last segment: an
+        # empty or suffix-empty root behind a symlinked parent would enumerate
+        # nothing and silently pass. (Cross-family review finding.)
+        base = _assert_no_symlinked_component(
+            root, base_relative, what="pinned content root"
+        )
         if not base.exists():
             raise CorpusError(
                 f"pinned content root is absent from the tree: {base_relative}"
@@ -552,32 +583,69 @@ def _tree_content_paths(root: pathlib.Path, spec: CorpusSpec) -> dict[str, pathl
     return found
 
 
-def _assert_no_symlinked_component(root: pathlib.Path, relative: str) -> pathlib.Path:
-    """Walk every component, refusing if any of them is a symlink.
+def _assert_no_symlinked_component(
+    root: pathlib.Path, relative: str, *, what: str = "bound path"
+) -> pathlib.Path:
+    """Walk every component, refusing if any of them is a symlink or reparse.
 
     Checking only the final component lets an intermediate directory symlink
     put a bound file outside the clone entirely: replace ``.axiom/`` with a
     link to an ambient directory and ``.axiom/toolchain.toml`` still looks like
     a regular file and still matches its digest, while not being part of what
     the auditor cloned. (Found by cross-family review.)
+
+    The same hole exists one level up for a content root: an empty or
+    suffix-empty root behind a symlinked *parent* would enumerate no files and
+    silently pass, so this guards content roots too.
     """
 
     current = root
     for segment in relative.split("/"):
         current = current / segment
-        if current.is_symlink():
+        # is_symlink() catches POSIX symlinks; on Windows a junction/reparse
+        # point is not a symlink but is reported by st_reparse_tag, so refuse
+        # any reparse point as well.
+        reparse = getattr(current.lstat(), "st_reparse_tag", 0) if current.exists() else 0
+        if current.is_symlink() or reparse:
             raise CorpusError(
-                f"bound path traverses a symlink at "
+                f"{what} traverses a symlink or reparse point at "
                 f"{current.relative_to(root).as_posix()!r}: {relative}"
             )
     return current
 
 
 def _regular_file_digest(root: pathlib.Path, relative: str) -> str:
-    path = _assert_no_symlinked_component(root, relative)
-    if not path.is_file():
-        raise CorpusError(f"bound file is missing or not a regular file: {relative}")
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    """Hash a bound file, closing the check/open race by opening no-follow.
+
+    Validating the path then opening it by name leaves a window in which a
+    symlink is swapped in between the check and the read. Opening with
+    ``O_NOFOLLOW`` on the final component (after the parent-component guard)
+    removes the swap-to-symlink race, and fstat-ing the open descriptor
+    confirms what was actually opened is a regular file — never a directory,
+    device, or FIFO reachable by the same name. (Cross-family review finding.)
+    """
+
+    parent = _assert_no_symlinked_component(root, relative)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        fd = os.open(parent, flags)
+    except OSError as exc:
+        raise CorpusError(
+            f"bound file is missing or not a regular file: {relative}"
+        ) from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise CorpusError(f"bound file is not a regular file: {relative}")
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            digest.update(chunk)
+    finally:
+        os.close(fd)
+    return digest.hexdigest()
 
 
 def verify_declarations(
@@ -617,6 +685,13 @@ def verify_corpus_binding(
     root = root.resolve()
     content, attested, gates, removed = parse_journal(journal_bytes, spec=spec)
 
+    # Two declared paths that a case- or normalization-insensitive filesystem
+    # would treat as one make the closed-world claim ambiguous: which file did
+    # the auditor actually get? Detect the collision host-independently — under
+    # Unicode NFC plus case folding — and refuse. A single legitimate path
+    # never collides with itself, so this cannot false-refuse a real corpus.
+    _reject_aliasing_paths(list(content) + list(attested))
+
     tree = _tree_content_paths(root, spec)
     journal_paths = set(content)
     tree_paths = set(tree)
@@ -655,6 +730,17 @@ def verify_corpus_binding(
                 f"attested file {path!r} does not match its witnessed digest: "
                 f"tree has {digest}, journal binds {attested[path].sha256}"
             )
+
+    # Closed-world means the set proven equal to the journal must not have
+    # changed while it was being proven. Re-enumerate after hashing and require
+    # the identical content set: a file unlisted-and-inserted, or a bound file
+    # deleted, after the first enumeration would otherwise slip past the
+    # set-equality check above. (Cross-family review finding.)
+    if set(_tree_content_paths(root, spec)) != tree_paths:
+        raise CorpusError(
+            "the content tree changed during verification; the closed-world "
+            "set is not stable and the verdict is refused"
+        )
 
     return CorpusVerification(
         content=tuple(content[path] for path in sorted(content)),

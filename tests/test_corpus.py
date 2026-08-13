@@ -595,3 +595,75 @@ def test_reproducible_and_unreproducible_gates_are_separated(
         "oracle/licensed-parity",
         "ci/repository-checks",
     }
+
+
+def test_refuses_an_empty_content_root_behind_a_symlinked_parent(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A suffix-empty root behind a symlinked parent must not enumerate to an
+    empty set and silently pass. (Cross-family review finding.)"""
+
+    write_tree(tmp_path)
+    # Nested content root corpus/rules, with corpus a symlink to an ambient dir.
+    ambient = tmp_path / "ambient"
+    (ambient / "rules").mkdir(parents=True)
+    (tmp_path / "corpus").symlink_to("ambient", target_is_directory=True)
+    spec = corpus_spec(content_roots=(pathlib.PurePosixPath("corpus/rules"),))
+    # Journal binds nothing under corpus/rules; without the parent guard the
+    # empty enumeration would match an empty journal content set and pass.
+    rows = [r for r in journal_rows() if r.get("kind") != "content"]
+    reindex(rows)
+    with pytest.raises(CorpusError, match="symlink or reparse point"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=spec)
+
+
+def test_refuses_a_content_file_inserted_after_first_enumeration(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Closed-world means stable: a file that appears between the first
+    enumeration and the post-hash re-enumeration must refuse, not pass."""
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+
+    import receipt.corpus as corpus_mod
+
+    real = corpus_mod._tree_content_paths
+    calls = {"n": 0}
+
+    def enumerate_then_inject(root: pathlib.Path, spec: object) -> dict:
+        result = real(root, spec)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # Simulate an unlisted file landing after the closed-world set was
+            # taken but before verification finished.
+            (root / "rules" / "sneaked.yaml").write_text("name: x\nvalue: 1\n")
+        return result
+
+    monkeypatch.setattr(corpus_mod, "_tree_content_paths", enumerate_then_inject)
+    with pytest.raises(CorpusError, match="changed during verification"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_refuses_paths_that_alias_under_case_or_normalization(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Two declared paths a case-insensitive filesystem would merge make the
+    closed-world set ambiguous, host-independently. (Cross-family review.)"""
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+    # Duplicate an existing content row under a case-variant of a middle
+    # segment — same content root, same suffix, so it clears every earlier
+    # check and only the alias guard can catch it.
+    content_rows = [r for r in rows if r.get("kind") == "content"]
+    victim = dict(content_rows[0])
+    original = victim["path"]  # e.g. rules/benefit/amount.yaml
+    segments = original.split("/")
+    segments[1] = segments[1].capitalize()  # rules/Benefit/amount.yaml
+    victim["path"] = "/".join(segments)
+    assert victim["path"] != original
+    rows.append(victim)
+    reindex(rows)
+    with pytest.raises(CorpusError, match="would alias"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())

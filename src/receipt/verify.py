@@ -157,6 +157,17 @@ def load_spec(spec_path: pathlib.Path) -> tuple[VerificationSpec, str]:
     have already cloned, and the spec's own SHA-256 is returned so the exact
     configuration a verdict was produced under can be quoted and re-pinned.
 
+    Trust direction, stated plainly: a spec committed in the *producer's*
+    repository is the producer's proposal, not the auditor's trust root.
+    Verified against a producer-shipped spec as found, a verdict establishes
+    only internal consistency with a policy the producer chose. For independent
+    custody the auditor reads the spec once, out of band, and pins it — at
+    minimum the ``spec_sha256`` this function returns — in the auditor's own
+    records, after which every later verdict is against anchors the producer
+    cannot silently swap. Reading the spec is part of that one-time review;
+    a future inert, schema-validated spec format would remove even the need to
+    execute it, and is tracked as follow-up work.
+
     The source is read once and compiled from those exact bytes, deliberately
     bypassing the import system. Going through ``importlib`` would consult
     ``__pycache__``, whose staleness check is (source mtime, source size) at
