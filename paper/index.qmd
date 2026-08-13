@@ -7,9 +7,10 @@ author:
 date: 2026-08-11
 date-format: "MMMM D, YYYY"
 abstract: |
-  Software agents produce the Axiom Foundation's pre-registered
-  forecasts, observation-ledger entries, and encoded statutes; no
-  person witnesses every record at the rate agents write them. The
+  Software agents produce pre-registered forecasts at the Thesis
+  Institute, an observation ledger of data pulls in Chronicle, and the
+  Axiom Foundation's encoded statutes; no person witnesses every
+  record at the rate agents write them. The
   receipt package makes those records checkable after the fact. From a
   clone of the repository and trust anchors committed in the verifier's
   own code, a verifier composes four checks over the saved evidence —
@@ -45,10 +46,12 @@ API reference: [axiom.org/receipt/api](https://axiom.org/receipt/api/).
 
 Whoever relies on an agent-produced record later — an auditor, a
 researcher, the producer's own future systems — needs a way to check
-it that does not depend on having watched it being made. At the Axiom
-Foundation, software agents write three record surfaces this paper
-concerns: pre-registered forecasts, an append-only observation ledger,
-and statutes encoded as executable rules. People review samples and
+it that does not depend on having watched it being made. Software
+agents write the three record surfaces this paper concerns: the Thesis
+Institute's pre-registered forecasts, Chronicle's append-only
+observation ledger of data pulls, and the Axiom Foundation's statutes
+encoded as executable rules. The Axiom Foundation maintains the
+package. People review samples and
 deterministic gates decide what merges; no person witnesses every
 record at the rate agents produce them.
 
@@ -62,11 +65,15 @@ The receipt package takes the custody route. The producer writes
 verifiable records as it works — chained manifests, timestamp tokens,
 signatures, attestations — and a verifier with a clone of the
 repository later checks the saved evidence against trust anchors the
-verifier committed in its own code. This paper states what those
-checks establish (@sec-guarantees), why the design follows from the
-threat model (@sec-design), how the machinery earned its way into one
-package (@sec-extraction), who adopts it (@sec-adoption), and where it
-sits among adjacent systems (@sec-related).
+verifier committed in its own code. The paper makes three
+contributions: it states precisely what a composed offline check of
+agent-produced records establishes and refuses to establish
+(@sec-guarantees, @sec-design); it catalogs the four evidence classes
+under which production verification machinery moved into one package,
+with the evidence published (@sec-extraction); and it reports the
+adoption pattern and the open corpus-verification design that extends
+custody to published rule corpora (@sec-adoption), placing the package
+among adjacent integrity systems (@sec-related).
 
 # What a verifier can conclude {#sec-guarantees}
 
@@ -188,9 +195,9 @@ meaningful exit codes) [@receipt-pr14].
 # How the machinery earned its way in {#sec-extraction}
 
 Three production systems built this machinery before the package
-existed: pre-registered forecast records [@brier-repo], an observation
-ledger's release chain [@ledger-repo], and a signed statute corpus
-[@axiom-corpus-431]. The forecast and ledger systems supplied verifier
+existed: the Thesis Institute's pre-registered forecast records
+[@brier-repo], Chronicle's release chain [@ledger-repo], and the Axiom
+Foundation's signed statute corpus [@axiom-corpus-431]. The forecast and ledger systems supplied verifier
 surfaces; the statute corpus supplied key-rotation semantics that the
 package adapted and tested. Extraction, rather than reimplementation,
 preserved what the harnesses could hold it to: on the ported surfaces,
@@ -254,15 +261,15 @@ requests that carried them (receipt's own and the corpus incident's
 As of August 11, 2026, three codebases pin released versions of the
 package and call it from their verification paths: the Axiom encoder
 delegates its apply-manifest verification to the package's threshold
-keyring check on its default branch; the forecast system's verifier
-and signer import the package's signature primitives under a custody
-extra on its default branch; and the observation ledger's custody
+keyring check on its default branch; the Thesis Institute's forecast
+verifier and signer import the package's signature primitives under a
+custody extra on its default branch; and Chronicle's custody
 branch replaces its local verifier and append gate with thin shims
 over the package, with the differential harnesses re-run on every
 package change. Dependency pins and call sites are checkable in each
 repository; this paper claims code-level adoption, and the receipt
-repository separately states that the ledger consumes the package in
-production.
+repository separately states that the observation ledger consumes the
+package in production.
 
 The open corpus-verification pull requests propose extending the same
 custody discipline to a published rule corpus. The New Zealand pilot
