@@ -12,7 +12,7 @@ The three passes, in the order a skeptic should want them:
 1. **Custody** (:mod:`receipt.release_chain`) — the release manifests are
    contiguous from genesis, canonically serialized, hash-linked, signed by the
    Ed25519 key whose SPKI is pinned in the consumer's committed spec, and
-   witnessed by two independently pinned RFC 3161 anchors. The journal's
+   witnessed by the consumer's configured RFC 3161 anchor set. The journal's
    historical byte prefixes match every manifest that ever described them.
 
 2. **Binding** (:mod:`receipt.corpus`) — the journal the chain just proved
@@ -289,6 +289,10 @@ def run_verification(
             spec=spec.chain,
             require_chain=True,
             verify_state=True,
+            # Never inferred: the spanning verifier exists for outside
+            # auditors, and its pins are on unconditionally regardless of
+            # how the anchor path resolves on this machine.
+            enforce_production_pins=True,
         )
     except (OSError, ReleaseChainError) as exc:
         passes.append(PassResult("custody", False, "", str(exc)))
@@ -375,6 +379,9 @@ def result_to_dict(result: VerifyResult) -> dict[str, Any]:
                 "that the encoded rules are a correct reading of the law",
                 "that this clone holds the producer's newest release "
                 "(freshness needs an out-of-band reference or --base-ref)",
+                "that this is the only history the producer maintains "
+                "(equivocation is undetectable from a single clone; compare "
+                "head digests out of band)",
             ],
         },
     }

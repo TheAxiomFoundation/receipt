@@ -146,32 +146,72 @@ def _format_text(result: VerifyResult) -> str:
         witnesses = sorted(result.witness_times())
         count = len(witnesses)
         noun = "authorities" if count != 1 else "authority"
+        # Whether a trusted base reference was verified changes what the
+        # timing clause may claim: without one, the witnessed times bound
+        # only when each recorded prefix existed, not that the history was
+        # never rewritten (a producer holding the signing key can regenerate
+        # and re-witness a whole chain, and a first-contact check passes).
+        history = next(
+            (p for p in result.passes if p.name == "history" and p.ok), None
+        )
         lines.append("VERDICT: PASS — custody and corpus binding")
         lines.append(
             "  This proves the published rule files are exactly the bytes a "
             "code-pinned"
         )
         lines.append(
-            f"  producer key signed and the {count} pinned RFC 3161 {noun} "
+            f"  producer key signed, and the {count} pinned RFC 3161 {noun} "
             f"({', '.join(witnesses)})"
         )
-        lines.append(
-            "  witnessed, and that nothing in the recorded history was "
-            "rewritten. It does"
-        )
+        if history is not None:
+            lines.append(
+                "  witnessed that each recorded prefix existed no later than "
+                "those times,"
+            )
+            lines.append(
+                "  and that no published release object changed since the "
+                "supplied base"
+            )
+            lines.append("  reference. It does")
+        else:
+            lines.append(
+                "  witnessed that each recorded prefix existed no later than "
+                "those times."
+            )
+            lines.append(
+                "  It does NOT prove the history was never rewritten — a "
+                "producer holding"
+            )
+            lines.append(
+                "  the signing key can regenerate and re-witness a whole "
+                "chain, and this"
+            )
+            lines.append(
+                "  first-contact check would still pass; supply --base-ref "
+                "against a head"
+            )
+            lines.append("  you recorded earlier to bind against that. It does")
         lines.append(
             "  NOT prove that any declared gate passed, it does NOT prove the "
             "encodings"
         )
         lines.append(
-            "  are a correct reading of the law, and it does NOT prove this "
-            "clone holds"
+            "  are a correct reading of the law, it does NOT prove this clone "
+            "holds the"
         )
         lines.append(
-            "  the producer's newest release — a stale, honestly witnessed "
-            "clone also"
+            "  producer's newest release, and it does NOT prove this is the "
+            "only history"
         )
-        lines.append("  passes. Check freshness out of band or via --base-ref.")
+        lines.append(
+            "  the producer maintains — a stale or equivocated but honestly "
+            "witnessed"
+        )
+        lines.append(
+            "  clone also passes. Check freshness and uniqueness out of band "
+            "or via"
+        )
+        lines.append("  --base-ref.")
     else:
         failure = next((item for item in result.passes if not item.ok), None)
         detail = failure.failure if failure is not None else "unknown failure"

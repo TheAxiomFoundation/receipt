@@ -2,7 +2,7 @@
 
 ``receipt.release_chain`` proves custody of a journal — that the manifests are
 hash-chained, canonically serialized, signed by a code-pinned producer key, and
-witnessed by two independently pinned RFC 3161 anchors. It says nothing about
+witnessed by the consumer's configured RFC 3161 anchor set. It says nothing about
 what the journal's rows *mean*.
 
 This module supplies the missing half for a published rule corpus: the journal

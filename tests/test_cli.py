@@ -21,6 +21,7 @@ import shutil
 import pytest
 
 from receipt.cli import EXIT_FAIL, EXIT_OK, EXIT_USAGE, main
+from receipt.sign import generate_signing_keypair, sign_payload
 from receipt.verify import load_spec
 
 from corpus_fixture import CONTENT, append_release, build_corpus
@@ -107,6 +108,9 @@ def test_json_output_marks_gates_as_not_re_run(
         "that the encoded rules are a correct reading of the law",
         "that this clone holds the producer's newest release "
         "(freshness needs an out-of-band reference or --base-ref)",
+        "that this is the only history the producer maintains "
+        "(equivocation is undetectable from a single clone; compare "
+        "head digests out of band)",
     ]
     assert payload["scope"]["established"] == [
         "custody of the release chain",
@@ -349,6 +353,32 @@ def test_refuses_a_swapped_trust_anchor(
     anchor.write_bytes(beta.read_bytes())
     assert run(repo) == EXIT_FAIL
     assert "not code-pinned" in capsys.readouterr().err
+
+
+def test_refuses_substituted_key_behind_symlinked_anchor_parent(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A symlinked anchor parent must not turn production pinning off.
+
+    The replacement directory contains a valid alternate producer key and the
+    original TSA roots, so every cryptographic operation is internally valid.
+    Only the consumer's out-of-band pins and path-confinement policy distinguish
+    it from the committed trust configuration.
+    """
+
+    private_pem, public_pem = generate_signing_keypair()
+    anchors = repo / "releases/anchors"
+    (anchors / "producer-ed25519.pub").write_bytes(public_pem)
+    manifest = manifest_stem(repo)
+    manifest.with_suffix(".producer.sig").write_bytes(
+        sign_payload(private_pem, manifest.read_bytes(), domain=b"")
+    )
+    substituted = repo / "releases/substituted-anchors"
+    anchors.rename(substituted)
+    anchors.symlink_to(substituted.name, target_is_directory=True)
+
+    assert run(repo) == EXIT_FAIL
+    assert "symlink or reparse point" in capsys.readouterr().err
 
 
 def test_refuses_a_deleted_release_chain(repo: pathlib.Path) -> None:
