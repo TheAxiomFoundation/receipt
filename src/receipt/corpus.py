@@ -288,7 +288,10 @@ def _parse_row(line: str, number: int, spec: CorpusSpec) -> dict[str, Any]:
     if type(parsed) is not dict:
         raise CorpusError(f"journal row {number} is not a JSON object")
     kind = parsed.get("kind")
-    if kind not in ROW_KINDS:
+    # Check the type before set membership: an unhashable JSON value such as
+    # [] or {} would make `kind not in ROW_KINDS` raise TypeError instead of
+    # refusing with the documented CorpusError.
+    if type(kind) is not str or kind not in ROW_KINDS:
         raise CorpusError(
             f"journal row {number} has unknown kind {kind!r}; "
             f"expected one of {', '.join(sorted(ROW_KINDS))}"
@@ -354,18 +357,25 @@ def _validate_gate(row: dict[str, Any], number: int, spec: CorpusSpec) -> GateDe
             value, f"journal row {number} gate {gate_id!r} evidence value {key!r}"
         )
     # A waiver is the one outcome that admits a known failure. It has to name
-    # the waiver set it was excused under, or "waived" is unfalsifiable.
-    if outcome == WAIVED and not evidence.get("waiverSetSha256"):
-        raise CorpusError(
-            f"journal row {number} gate {gate_id!r} is waived without naming "
-            "evidence.waiverSetSha256"
+    # the waiver set it was excused under by digest, or "waived" is
+    # unfalsifiable — and a placeholder like "x" is no more falsifiable than a
+    # missing field, so the value must be a real SHA-256.
+    if outcome == WAIVED:
+        if "waiverSetSha256" not in evidence:
+            raise CorpusError(
+                f"journal row {number} gate {gate_id!r} is waived without naming "
+                "evidence.waiverSetSha256"
+            )
+        _sha256(
+            evidence["waiverSetSha256"],
+            f"journal row {number} gate {gate_id!r} evidence.waiverSetSha256",
         )
     # Same principle for a gate that did not run: state why, or the
-    # declaration is decoration.
-    if outcome == NOT_RUN and not evidence.get("reason"):
+    # declaration is decoration. A whitespace-only reason is no reason.
+    if outcome == NOT_RUN and not evidence.get("reason", "").strip():
         raise CorpusError(
             f"journal row {number} gate {gate_id!r} is declared not-run "
-            "without naming evidence.reason"
+            "without a non-empty evidence.reason"
         )
     return GateDeclaration(
         gate_id=gate_id,

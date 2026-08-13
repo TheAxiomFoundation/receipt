@@ -366,7 +366,53 @@ def test_refuses_a_not_run_gate_that_does_not_say_why(tmp_path: pathlib.Path) ->
             }
         ]
     )
-    with pytest.raises(CorpusError, match="not-run without naming"):
+    with pytest.raises(CorpusError, match="not-run without a non-empty"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_refuses_a_waiver_whose_digest_is_a_placeholder(tmp_path: pathlib.Path) -> None:
+    """A short/invalid waiverSetSha256 is no more falsifiable than a missing one."""
+
+    write_tree(tmp_path)
+    rows = journal_rows(
+        gates=[
+            {
+                "gateId": "rulespec/compile",
+                "tier": "public",
+                "outcome": "waived",
+                "evidence": {"waiverSetSha256": "x"},
+            }
+        ]
+    )
+    with pytest.raises(CorpusError, match="waiverSetSha256"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_refuses_a_not_run_reason_that_is_only_whitespace(
+    tmp_path: pathlib.Path,
+) -> None:
+    write_tree(tmp_path)
+    rows = journal_rows(
+        gates=[
+            {
+                "gateId": "rulespec/compile",
+                "tier": "public",
+                "outcome": "not-run",
+                "evidence": {"reason": "   "},
+            }
+        ]
+    )
+    with pytest.raises(CorpusError, match="not-run without a non-empty"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_refuses_a_row_whose_kind_is_not_a_string(tmp_path: pathlib.Path) -> None:
+    """An unhashable JSON kind must refuse with CorpusError, not raise TypeError."""
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+    rows.append({"kind": [], "entryIndex": len(rows)})
+    with pytest.raises(CorpusError, match="unknown kind"):
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
 
 

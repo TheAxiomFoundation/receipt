@@ -266,21 +266,37 @@ def run_verification(
             corpus=corpus,
         )
 
+    # Every pass — the verification call AND the detail builder that reports
+    # it — runs inside a boundary that converts *any* exception, expected or
+    # not, into a failed pass. The documented contract is that a verification
+    # failure is the return value and never an escaping exception (so a --json
+    # consumer always receives a {"verdict": "FAIL"} object); an unforeseen
+    # exception here would otherwise leave the CLI to exit 1 with no verdict at
+    # all. Expected domain errors carry their own message; anything else names
+    # its type so the surprise is legible.
+    def failed(name: str, exc: BaseException, expected: type[Exception]) -> str:
+        if isinstance(exc, expected):
+            return str(exc)
+        return f"{type(exc).__name__}: {exc}"
+
     # Pass 0 (optional): the published history is immutable relative to a base
     # git ref. Needs git and a repository; requested explicitly, never implied.
     if base_ref is not None:
         try:
             verify_release_history_immutable(root, base_ref, spec=spec.chain)
-        except (OSError, ReleaseChainError) as exc:
+            history_detail = f"no published release object changed since {base_ref}"
+        except Exception as exc:  # noqa: BLE001 - any failure is a FAIL verdict
             passes.append(
-                PassResult("history", False, "", f"release history is not immutable: {exc}")
+                PassResult(
+                    "history",
+                    False,
+                    "",
+                    f"release history is not immutable: "
+                    f"{failed('history', exc, ReleaseChainError)}",
+                )
             )
             return result(incomplete="custody")
-        passes.append(
-            PassResult(
-                "history", True, f"no published release object changed since {base_ref}"
-            )
-        )
+        passes.append(PassResult("history", True, history_detail))
 
     # Pass 1: custody.
     try:
@@ -294,10 +310,13 @@ def run_verification(
             # how the anchor path resolves on this machine.
             enforce_production_pins=True,
         )
-    except (OSError, ReleaseChainError) as exc:
-        passes.append(PassResult("custody", False, "", str(exc)))
+        custody_detail = _custody_detail(chain, spec)
+    except Exception as exc:  # noqa: BLE001 - any failure is a FAIL verdict
+        passes.append(
+            PassResult("custody", False, "", failed("custody", exc, ReleaseChainError))
+        )
         return result(incomplete="binding")
-    passes.append(PassResult("custody", True, _custody_detail(chain, spec)))
+    passes.append(PassResult("custody", True, custody_detail))
 
     # Pass 2: binding. Read the journal once, here, and hand the same bytes to
     # the binding pass that the custody pass just proved the digest of.
@@ -322,10 +341,13 @@ def run_verification(
                 f"{actual_digest} != witnessed {witnessed_digest}"
             )
         corpus = verify_corpus_binding(root, journal_bytes, spec=spec.corpus)
-    except (OSError, CorpusError) as exc:
-        passes.append(PassResult("binding", False, "", str(exc)))
+        binding_detail = _binding_detail(corpus)
+    except Exception as exc:  # noqa: BLE001 - any failure is a FAIL verdict
+        passes.append(
+            PassResult("binding", False, "", failed("binding", exc, CorpusError))
+        )
         return result(incomplete="declaration")
-    passes.append(PassResult("binding", True, _binding_detail(corpus)))
+    passes.append(PassResult("binding", True, binding_detail))
 
     # Pass 3: declaration completeness. Row-level tier and outcome validity was
     # enforced during parsing; this checks the journal covers every gate the
@@ -333,10 +355,13 @@ def run_verification(
     # report it without ever claiming it ran.
     try:
         verify_declarations(corpus, spec=spec.corpus)
-    except CorpusError as exc:
-        passes.append(PassResult("declaration", False, "", str(exc)))
+        declaration_detail = _declaration_detail(corpus)
+    except Exception as exc:  # noqa: BLE001 - any failure is a FAIL verdict
+        passes.append(
+            PassResult("declaration", False, "", failed("declaration", exc, CorpusError))
+        )
         return result()
-    passes.append(PassResult("declaration", True, _declaration_detail(corpus)))
+    passes.append(PassResult("declaration", True, declaration_detail))
     return result()
 
 

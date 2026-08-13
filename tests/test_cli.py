@@ -517,3 +517,38 @@ def test_failure_output_goes_to_stderr_not_stdout(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "VERDICT: FAIL" in captured.err
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "verify_release_chain",
+        "_custody_detail",
+        "verify_corpus_binding",
+        "_binding_detail",
+        "verify_declarations",
+        "_declaration_detail",
+    ],
+)
+def test_unexpected_exception_in_any_pass_is_a_fail_verdict_not_an_escape(
+    repo: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> None:
+    """The documented fail-closed contract: any exception a pass or its detail
+    builder raises becomes a FAIL verdict object, never an escape that leaves a
+    --json consumer with no verdict at all."""
+
+    def boom(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("injected surprise")
+
+    monkeypatch.setattr(f"receipt.verify.{target}", boom)
+
+    assert run(repo, "--json") == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
+    # The surprising type is surfaced, not swallowed.
+    failed = [p for p in payload["passes"] if not p["ok"]]
+    assert failed
+    assert any("RuntimeError: injected surprise" in p["failure"] for p in failed)
