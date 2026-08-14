@@ -4,7 +4,7 @@ author:
   - name: Max Ghenis
     affiliations:
       - name: the Axiom Foundation
-date: 2026-08-13
+date: 2026-08-14
 date-format: "MMMM D, YYYY"
 abstract: |
   Software agents produce pre-registered forecasts at the Thesis
@@ -20,9 +20,9 @@ abstract: |
   evidence standards this paper catalogs: a byte-identical port,
   differential extraction against unmodified source verifiers, a
   semantic adaptation of a production key-rotation incident, and new
-  composition under review. Three codebases pin and call the package
-  today, and an open corpus-verification release extends the same
-  discipline to published rule corpora.
+  composition reviewed to approval. Three codebases pin and call the
+  package today, and the 0.5.0 corpus-verification release extends the
+  same discipline to published rule corpora.
 format:
   html:
     toc: true
@@ -35,9 +35,10 @@ bibliography: references.bib
 ---
 
 ::: {.callout-note appearance="simple"}
-Working paper. It describes `receipt` 0.4.0 on PyPI and the 0.5.0
-corpus-verification changes open for review as of August 13, 2026;
-statements about open pull requests are marked as such. Code:
+Working paper. It describes `receipt` 0.5.0 on PyPI, whose
+corpus-verification layer merged August 14, 2026 after four rounds of
+independent review; statements about still-open pull requests are
+marked as such. Code:
 [github.com/TheAxiomFoundation/receipt](https://github.com/TheAxiomFoundation/receipt).
 API reference: [axiom.org/receipt/api](https://axiom.org/receipt/api/).
 :::
@@ -90,7 +91,7 @@ agent-produced records establishes and refuses to establish
 (@sec-guarantees, @sec-design); it catalogs the four evidence classes
 under which production verification machinery moved into one package,
 with the evidence published (@sec-extraction); and it reports the
-adoption pattern and the open corpus-verification design that extends
+adoption pattern and the corpus-verification design that extends
 custody to published rule corpora (@sec-adoption), placing the package
 among adjacent integrity systems (@sec-related).
 
@@ -162,8 +163,8 @@ compose the provided helpers (protected-history enumeration,
 enforcement epochs) into a full-history sweep; the package supplies
 the pieces, not a single spanning call.
 
-The 0.5.0 changes, open for review as of this writing, propose a fifth
-layer [@receipt-pr14]: a closed-world binding between a witnessed
+The 0.5.0 release, merged August 14, 2026 after four rounds of
+independent review, adds a fifth layer [@receipt-pr14]: a closed-world binding between a witnessed
 journal and the configured corpus — within the specification's content
 roots, an unlisted file, a missing file, a rewritten byte, or a symlink
 where a regular file was recorded each refuses, as do two listed paths
@@ -171,8 +172,8 @@ that collide under Unicode normalization or case folding and a bound
 file whose identity changes while verification runs — and a spanning
 `receipt verify` command that runs custody, binding, and
 declaration-completeness passes in order, stopping at the first
-failure. Its verdict is fail-closed in the strict sense the proposed
-verifier documents: pass only if every stage completed and every
+failure. Its verdict is fail-closed in the strict sense the verifier
+documents: pass only if every stage completed and every
 required declaration was found; anything else — an exception the
 verifier did not anticipate, a verdict it cannot render — is a
 failure. The command renders
@@ -232,14 +233,14 @@ scoped accordingly (@sec-extraction).
 keys, out-of-range times, unlistable directories, paths that escape
 the configured roots: the verifiers refuse each with a typed error.
 On the ported surfaces the refusal text is the production system's
-own, preserved through extraction; the proposed corpus surface ships a
+own, preserved through extraction; the corpus surface ships a
 new refusal battery with the same posture. The libraries own no
 stdout or stderr; callers render acceptance and refusal, and exit
 codes carry the verdict.
 
 # The machinery {#sec-machinery}
 
-Together the six modules shipping in 0.4.0 verify a record set's
+Together the six modules shipped through 0.4.0 verify a record set's
 history, timing, and authorship from saved evidence; the API reference
 at [axiom.org/receipt/api](https://axiom.org/receipt/api/) documents
 their public interfaces.
@@ -253,7 +254,7 @@ their public interfaces.
 | `tsa` | One RFC 3161 token matches one consumer-pinned anchor — root bytes, policy, imprint, signed time, signer identity — via OpenSSL; witness sidecars follow the trust-bundle transition rules. |
 | `attest` | GitHub's attestation service accepted the canonical subject for a commit under an anchored workflow identity; helpers enumerate protected-tree history and its enforcement epoch for callers to compose. |
 
-The open 0.5.0 review adds `corpus` (the closed-world journal binding
+The 0.5.0 release adds `corpus` (the closed-world journal binding
 and gate-declaration parsing), `verify` (the spanning pass ordering),
 and `cli` (`receipt verify`, with text and JSON rendering and
 meaningful exit codes) [@receipt-pr14].
@@ -320,7 +321,7 @@ they signed, only the current generation signs anything new, malformed
 key material is always fatal — entered the package as a design
 adaptation with direct tests and no differential oracle.
 
-**New composition.** The proposed corpus binding, spanning verifier,
+**New composition.** The corpus binding, spanning verifier,
 and CLI are new code composed from the extracted parts. They add no
 cryptography and no trust anchors of their own; their evidence is a
 refusal battery over the closed-world binding rules, then four rounds
@@ -352,14 +353,14 @@ strength:
 | Thesis Institute forecast tooling | default | `receipt==0.3.0` (custody extra) | signature primitives in verifier and signer |
 | Chronicle | custody branch (unmerged) | `receipt==0.2.0` | release-chain and append-gate shims, differential harnesses re-run on package change |
 
-No adopter yet pins 0.4.0, the release this paper describes; the
+No adopter yet pins 0.4.0 or the just-published 0.5.0; the
 receipt repository's own README states that the observation ledger
 consumes the package in production, a producer claim this paper
 reports without independent runtime observation.
 
-The open corpus-verification pull requests propose extending the same
-custody discipline to a published rule corpus. The New Zealand pilot
-commits a verification specification — custody key, two
+The 0.5.0 release extends the same custody discipline to a published
+rule corpus; the New Zealand pilot pull request, open as of this
+writing, commits a verification specification — custody key, two
 timestamp-authority anchors, content roots, required declarations —
 and a witnessed journal of 104 rows binding 80 content files, 7
 digest-pinned paths, and 17 gate declarations, so an auditor can run
@@ -374,7 +375,7 @@ records, after which every later check runs against anchors the
 producer cannot swap. The specification is executable Python by
 design; auditors treat reading it as part of that one-time review, and
 an inert data format is candidate future work. Gate rows are
-declarations: the proposed verifier proves they were made and bound,
+declarations: the verifier proves they were made and bound,
 and states plainly that it did not rerun them; declarations concern
 the subject commit, and the pilot documents which event-context
 outcomes do not transfer across the journal's own publication commit.
@@ -383,7 +384,7 @@ outcomes do not transfer across the journal's own publication commit.
 
 receipt assembles per-consumer custody policy in committed code,
 multi-anchor timestamp composition, record-level history checks, and
-(in the open 0.5.0 review) closed-world corpus binding under one
+(since 0.5.0) closed-world corpus binding under one
 fail-closed verdict that names its non-conclusions. Each neighboring
 system solves an adjacent problem, and several share individual
 features; the differences below are checkable against their
@@ -432,7 +433,7 @@ Sigstore-backed attestation service as a trusted third party
 authenticate commit objects under locally configured trust, including
 a repository-relative allowed-signers file; receipt additionally
 verifies the domain-specific chain, witnessed time, historical file
-bytes and modes, and (proposed) corpus binding.
+bytes and modes, and corpus binding.
 
 **Process attestation.** in-toto [@TorresArias2019InToto] verifies
 that supply-chain steps matched an owner-signed layout, records the
@@ -507,8 +508,7 @@ and journals come from the producers' own tooling, and a
 producer-side reference implementation plus an inert specification
 format are the two pieces a second organization would most need. The
 waiver ratchet and chronology tiers remain in their source systems
-pending extraction, and the spanning CLI is part of the open 0.5.0
-review. The package is Python; producers on other stacks interoperate
+pending extraction. The package is Python; producers on other stacks interoperate
 at the artifact layer (canonical JSON, manifests, tokens, signatures)
 rather than the library layer.
 
