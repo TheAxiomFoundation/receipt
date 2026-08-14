@@ -166,13 +166,16 @@ The 0.5.0 changes, open for review as of this writing, propose a fifth
 layer [@receipt-pr14]: a closed-world binding between a witnessed
 journal and the configured corpus — within the specification's content
 roots, an unlisted file, a missing file, a rewritten byte, or a symlink
-where a regular file was recorded each refuses — and a spanning
+where a regular file was recorded each refuses, as do two listed paths
+that collide under Unicode normalization or case folding and a bound
+file whose identity changes while verification runs — and a spanning
 `receipt verify` command that runs custody, binding, and
 declaration-completeness passes in order, stopping at the first
 failure. Its verdict is fail-closed in the strict sense the proposed
 verifier documents: pass only if every stage completed and every
-required declaration was found; anything else, including an exception
-the verifier did not anticipate, is a failure. The command renders
+required declaration was found; anything else — an exception the
+verifier did not anticipate, a verdict it cannot render — is a
+failure. The command renders
 what it did not establish just as plainly — that any declared gate
 actually passed, that encoded rules read the law correctly, or that
 the presented history is the only one the producer maintains.
@@ -287,8 +290,8 @@ requires the package to reproduce the oracle's verdicts, accepted and
 refused alike, down to message bytes after two disclosed
 normalizations (surrounding whitespace and volatile OpenSSL
 error-queue identifiers). At the current review head the four
-harnesses run 94 cases, all passing.^[Local run at commit `c711adc`,
-2026-08-10: 36 release-chain, 21 append-gate, 17 witness, and 20
+harnesses run 94 cases, all passing.^[Local run at commit `8c5570c`,
+2026-08-13: 36 release-chain, 21 append-gate, 17 witness, and 20
 attestation differential tests. The attestation harness compares
 command construction and outcome handling against a local `gh` stub
 and claims no live-network equivalence; the witness harness documents
@@ -320,7 +323,13 @@ adaptation with direct tests and no differential oracle.
 **New composition.** The proposed corpus binding, spanning verifier,
 and CLI are new code composed from the extracted parts. They add no
 cryptography and no trust anchors of their own; their evidence is a
-refusal battery over the closed-world binding rules [@receipt-pr14].
+refusal battery over the closed-world binding rules, then four rounds
+of independent adversarial review — seventeen findings narrowing to
+approval, each fix behind a regression test that fails on the pre-fix
+code [@receipt-pr14]. The worst finding shows why composition needs
+its own review: the spanning verifier inferred whether to enforce the
+production pins from how the anchor path resolved, so a symlinked
+anchor directory silently turned them off. Proven parts, new seams.
 
 The published evidence is uneven in exactly the way the classes
 predict, and the repository states which is which: the ledger lane has
@@ -463,8 +472,9 @@ of the resulting records.
 A pass establishes custody, not truth: the verifier recognizes gate
 declarations but does not rerun them, and nothing in a verdict says
 encoded rules read the law correctly. An honestly witnessed stale
-clone can pass; a base reference adds immutability relative to the
-specified ancestor, and freshness requires an out-of-band expectation.
+clone can pass; a base reference proves the release objects present at
+the specified ancestor are unchanged — objects added later sit outside
+that claim — and freshness requires an out-of-band expectation.
 The practical recipe for both the freshness and regeneration limits is
 trust on first use: record the chain head digest and witness times at
 first contact, and supply that ancestor as the base reference in every
