@@ -4,8 +4,9 @@ The verifier treats manifest, signature, and receipt bytes as an append-only
 journal. It does not trust manifest provenance or timestamps supplied by the
 producer: each manifest is canonical and content-addressed, every state and
 append digest is recomputed from the current append-only JSONL, every manifest
-has a valid signature from the pinned producer key, and both RFC 3161 receipts
-are verified against separate, committed trust anchors.
+has a valid signature from the pinned producer key, and every RFC 3161 receipt
+in the consumer's configured anchor set is verified against its committed trust
+anchor.
 
 Extracted nearly verbatim from PolicyEngine/ledger scripts/verify_release_chain.py
 at commit 07984278503b8e06c48c539327f6f1d01c035510 (branch
@@ -994,9 +995,25 @@ def verify_release_chain(
 
     root = root.resolve()
     default_anchor_dir = root / spec.anchor_relative
+    if anchor_dir is None:
+        # The spec-pinned anchor path must be physically canonical: a
+        # symlinked component would let the tree under audit substitute a
+        # sibling directory of internally valid but unpinned trust material
+        # (and, before this walk existed, flip pin enforcement off via the
+        # resolved-vs-lexical comparison below). Caller-supplied anchor
+        # directories are exempt — they are the caller's own trust choice
+        # and legitimately live behind symlinks (temp dirs, materialized
+        # base trees).
+        probe = root
+        for part in pathlib.PurePosixPath(spec.anchor_relative).parts:
+            probe = probe / part
+            if probe.is_symlink():
+                raise ReleaseChainError(
+                    f"anchor path component is a symlink or reparse point: {probe}"
+                )
     selected_anchors = (anchor_dir or default_anchor_dir).resolve()
     if enforce_production_pins is None:
-        enforce_production_pins = selected_anchors == default_anchor_dir
+        enforce_production_pins = selected_anchors == default_anchor_dir.resolve()
     if type(clock_skew_seconds) is not int or clock_skew_seconds < 0:
         raise ReleaseChainError("clock_skew_seconds must be a non-negative integer")
 

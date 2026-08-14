@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "receipt"
-version = "0.4.0"
-description = "Verifiable custody of agent-produced records: chained manifests, dual RFC 3161 witnesses, pinned Ed25519 signatures, push attestation, chronology tiers, shrink-only waivers — one offline verification command"
+version = "0.5.0"
+description = "Verifiable custody of agent-produced records: chained manifests, RFC 3161 witnesses, pinned Ed25519 signatures, workflow attestation, closed-world corpus binding — one offline verification command"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -13,6 +13,7 @@ authors = [{ name = "The Axiom Foundation" }]
 classifiers = [
     "Development Status :: 1 - Planning",
     "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Security :: Cryptography",
@@ -20,13 +21,21 @@ classifiers = [
 
 dependencies = ["cryptography>=42"]
 
+# The dev extra is the one documented install path for contributors
+# (`uv pip install -e ".[dev]"` in the README) and the one CI uses, so the
+# two cannot drift apart. A PEP 735 dependency group would satisfy `uv sync`
+# but silently install nothing under `pip install -e ".[dev]"` — a fresh-venv
+# review round caught exactly that.
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+receipt = "receipt.cli:main"
+
 [project.urls]
 Homepage = "https://axiom.org/receipt"
 Documentation = "https://axiom.org/receipt/api/"
 Repository = "https://github.com/TheAxiomFoundation/receipt"
-
-[dependency-groups]
-dev = ["pytest>=8"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

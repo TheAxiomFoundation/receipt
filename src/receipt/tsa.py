@@ -133,7 +133,16 @@ class TsaIdentitySpec:
 
 @dataclass(frozen=True)
 class TsaSpec:
-    """All repository-specific TSA trust, committed in consumer code."""
+    """All repository-specific TSA trust, committed in consumer code.
+
+    Scope limitation (tracked for a later release): a TSA identity pins one
+    signer per authority and carries no legacy signer generations of its own.
+    If a timestamp authority rotates its *own* signing key, tokens witnessed
+    before and after the rotation verify only under different pinned
+    identities, so the consumer spec must carry both eras explicitly (an added
+    identity for the new signer) rather than the package spanning the rotation
+    automatically the way producer-key legacy generations do.
+    """
 
     trust_bundles: tuple[TrustBundleSpec, ...]
     tsa_identities: tuple[TsaIdentitySpec, ...]
