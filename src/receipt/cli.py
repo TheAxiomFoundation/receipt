@@ -79,7 +79,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "additionally prove every release object present at this git ref "
-            "is unchanged in the working tree (requires git and a repository)"
+            "is byte- and mode-identical in the working tree (requires git "
+            "and a repository)"
         ),
     )
     verify.add_argument(

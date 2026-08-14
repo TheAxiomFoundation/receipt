@@ -673,11 +673,12 @@ def test_refuses_paths_that_alias_under_case_or_normalization(
 
 
 def test_refuses_a_fifo_at_an_attested_path_without_blocking(
-    tmp_path: pathlib.Path,
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Attested paths sit outside the content roots, so the tree walk never
     screens them — the hashing guard is their only non-regular check. A FIFO
-    there must refuse by name, before any open a reader could block on."""
+    there must refuse by name, before any open a reader could block on: the
+    sentinel turns a reintroduced open into a loud failure, never a hang."""
 
     import os
 
@@ -687,10 +688,96 @@ def test_refuses_a_fifo_at_an_attested_path_without_blocking(
     victim = tmp_path / ".axiom/toolchain.toml"
     victim.unlink()
     os.mkfifo(victim)
+
+    real_open = os.open
+
+    def refuse_to_open_the_fifo(
+        path: object, flags: int, *args: object, **kwargs: object
+    ) -> int:
+        assert str(path) != str(victim), (
+            "open() reached a FIFO the by-name screen should have refused"
+        )
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr("os.open", refuse_to_open_the_fifo)
     with pytest.raises(CorpusError, match="not a regular file"):
         verify_corpus_binding(
             tmp_path, render_journal(journal_rows()), spec=corpus_spec()
         )
+
+
+def test_hashing_opens_non_blocking_and_no_follow(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The open flags are load-bearing: O_NONBLOCK is what keeps a raced FIFO
+    from parking the verifier, O_NOFOLLOW (where the platform has it) what
+    keeps a raced symlink from being followed. Capture the flags actually
+    used for a bound file so removing either one fails here, not in an
+    unbounded hang somewhere else."""
+
+    import os
+
+    write_tree(tmp_path)
+    captured: list[tuple[str, int]] = []
+    real_open = os.open
+
+    def recording_open(
+        path: object, flags: int, *args: object, **kwargs: object
+    ) -> int:
+        captured.append((str(path), flags))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr("os.open", recording_open)
+    verify_corpus_binding(tmp_path, render_journal(journal_rows()), spec=corpus_spec())
+    flagged = [flags for path, flags in captured if path.endswith("rate.yaml")]
+    assert flagged
+    assert all(flags & os.O_NONBLOCK for flags in flagged)
+    if hasattr(os, "O_NOFOLLOW"):
+        assert all(flags & os.O_NOFOLLOW for flags in flagged)
+
+
+def test_a_fifo_raced_in_after_the_name_check_refuses_without_blocking(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The window the flags exist for: the name check saw a regular file, the
+    open lands on a FIFO. The non-blocking open must return a descriptor
+    immediately and fstat must refuse it. The alarm converts a reintroduced
+    blocking open into a loud failure instead of a hung suite."""
+
+    import os
+    import signal
+
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("platform has no FIFOs")
+    write_tree(tmp_path)
+    victim = tmp_path / ".axiom/toolchain.toml"
+    decoy = tmp_path / "decoy-regular-file"
+    decoy.write_text("looks fine\n")
+    victim.unlink()
+    os.mkfifo(victim)
+
+    real_lstat = os.lstat
+
+    def masking_lstat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+        if str(path) == str(victim):
+            return real_lstat(decoy)
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr("os.lstat", masking_lstat)
+
+    def blocked(_signum: int, _frame: object) -> None:
+        raise RuntimeError("the open blocked: the non-blocking guard is gone")
+
+    previous = signal.signal(signal.SIGALRM, blocked)
+    signal.alarm(10)
+    try:
+        with pytest.raises(CorpusError, match="not a regular file"):
+            verify_corpus_binding(
+                tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+            )
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def test_refuses_a_file_swapped_between_lstat_and_open(
@@ -808,9 +895,21 @@ def test_refuses_a_bound_file_replaced_after_hashing_even_with_identical_bytes(
     victim = tmp_path / "rules/tax/rate.yaml"
 
     def replace() -> None:
+        before = os.lstat(victim)
         stand_in = tmp_path / "stand-in"
         stand_in.write_bytes(victim.read_bytes())
         os.replace(stand_in, victim)
+        # Restore every identity field the sweep compares except the inode,
+        # so only the inode comparison can catch this — removing just that
+        # comparison from the sweep fails this test.
+        os.utime(victim, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = os.lstat(victim)
+        assert after.st_ino != before.st_ino
+        assert (after.st_dev, after.st_size, after.st_mtime_ns) == (
+            before.st_dev,
+            before.st_size,
+            before.st_mtime_ns,
+        )
 
     _mutate_after_hashing(monkeypatch, "rules/tax/rate.yaml", replace)
     with pytest.raises(CorpusError, match="changed during verification"):

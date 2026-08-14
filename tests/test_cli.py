@@ -808,3 +808,109 @@ def test_text_render_failure_refuses_instead_of_escaping(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "treat the run as unverified" in captured.err
+
+
+# --- third round: isolating each boundary the second round left shared -------
+
+
+def test_base_ref_help_is_snapshot_scoped(capsys: pytest.CaptureFixture[str]) -> None:
+    """The help text is part of the claim surface: bytes and modes, nothing
+    broader."""
+
+    with pytest.raises(SystemExit):
+        main(["verify", "--help"])
+    assert "byte- and mode-identical" in capsys.readouterr().out
+
+
+def test_json_verdict_when_the_root_check_raises(
+    repo: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Root resolution has its own boundary; this is its removal detector."""
+
+    def boom(*_args: object, **_kwargs: object) -> object:
+        raise PermissionError("stat denied")
+
+    monkeypatch.setattr("receipt.cli._default_root", boom)
+    assert (
+        main(["verify", "--spec", str(repo / "verification/spec.py"), "--json"])
+        == EXIT_USAGE
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
+    assert payload["stage"] == "root"
+    assert "PermissionError" in payload["failure"]
+
+
+def test_json_verdict_when_serialization_itself_fails(
+    repo: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """result_to_dict succeeds and json.dumps of the full payload fails; the
+    fallback object must still reach stdout via the second dumps call. This
+    isolates the dumps leg of the render boundary from the dict-construction
+    leg the earlier test covers."""
+
+    real = json.dumps
+    state = {"calls": 0}
+
+    def flaky(obj: object, **kwargs: object) -> str:
+        state["calls"] += 1
+        if state["calls"] == 1:
+            raise TypeError("unserializable payload")
+        return real(obj, **kwargs)
+
+    monkeypatch.setattr("receipt.cli.json.dumps", flaky)
+    assert run(repo, "--json") == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
+    assert payload["stage"] == "render"
+    assert "treat the run as unverified" in payload["failure"]
+
+
+def test_history_pass_detail_is_snapshot_scoped(
+    committed_repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """passes[].detail carries the claim independently of the PASS paragraph."""
+
+    assert run(committed_repo, "--base-ref", "HEAD", "--json") == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    (history,) = [p for p in payload["passes"] if p["name"] == "history"]
+    assert history["ok"] is True
+    assert "byte- and mode-identical in this tree" in history["detail"]
+    assert "HEAD" in history["detail"]
+
+
+def test_base_ref_refuses_a_deleted_release_object(
+    committed_repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Deletion is inside the snapshot claim: an object present at the base
+    must still exist."""
+
+    manifest_stem(committed_repo).unlink()
+    assert run(committed_repo, "--base-ref", "HEAD", "--json") == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    (history,) = [p for p in payload["passes"] if p["name"] == "history"]
+    assert history["ok"] is False
+    assert "deleted" in history["failure"]
+
+
+def test_post_base_additions_are_outside_the_history_claim(
+    built: pathlib.Path,
+    committed_repo: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A release appended after the base ref verifies — the pass compares
+    objects present at the base and nothing newer, exactly as worded."""
+
+    corrected = dict(CONTENT)
+    corrected["rules/tax/rate.yaml"] = "name: rate\nvalue: 0.20\n"
+    append_release(
+        committed_repo, built.parent / "tsa-workspace", content=corrected
+    )
+    assert run(committed_repo, "--base-ref", "HEAD", "--json") == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert "history" in payload["passesCompleted"]
+    assert payload["chain"]["releases"] == 2
