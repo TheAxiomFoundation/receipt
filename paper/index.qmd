@@ -4,7 +4,7 @@ author:
   - name: Max Ghenis
     affiliations:
       - name: the Axiom Foundation
-date: 2026-08-11
+date: 2026-08-13
 date-format: "MMMM D, YYYY"
 abstract: |
   Software agents produce pre-registered forecasts at the Thesis
@@ -36,7 +36,7 @@ bibliography: references.bib
 
 ::: {.callout-note appearance="simple"}
 Working paper. It describes `receipt` 0.4.0 on PyPI and the 0.5.0
-corpus-verification changes open for review as of August 11, 2026;
+corpus-verification changes open for review as of August 13, 2026;
 statements about open pull requests are marked as such. Code:
 [github.com/TheAxiomFoundation/receipt](https://github.com/TheAxiomFoundation/receipt).
 API reference: [axiom.org/receipt/api](https://axiom.org/receipt/api/).
@@ -185,8 +185,8 @@ the presented history is the only one the producer maintains.
 A passing verdict is authentication-supporting technical evidence
 about the presented clone: integrity of the record set, authorship by
 the pinned keys, existence of each recorded prefix no later than its
-tokens' signed times, and (with a base reference) immutability since a
-trusted ancestor. It is not evidence of handler custody in the
+tokens' signed times, and (with a base reference) preservation of
+every release object present at a trusted ancestor. It is not evidence of handler custody in the
 forensic sense (@sec-guarantees defines the difference), not evidence
 that the history is unique (@sec-scope), not evidence of content
 correctness, and not evidence of freshness. Two properties serve a
@@ -197,8 +197,8 @@ which bytes; and the differential harnesses ship with their rerun
 commands and pins, so the tool's error behavior is itself examinable —
 the questions any serious challenge to a verification tool asks.
 The verifier must also be verifiable: releases publish to PyPI with
-provenance, and a consumer pins the package version in the same
-committed specification that pins everything else.
+provenance, and a consumer pins the package version in committed code
+alongside the specification that pins everything else.
 
 # Why the shape follows from the threat {#sec-design}
 
@@ -247,7 +247,7 @@ their public interfaces.
 | Module | A pass establishes |
 |---|---|
 | `canonical` | One byte stream per value: canonical JSON with UTF-16 code-unit key order and ECMAScript number formatting, byte-compatible with the producer's TypeScript implementation. |
-| `release_chain` | With default options: a contiguous, content-addressed, producer-signed, witness-receipted manifest history matching recorded state; with a trusted base reference: byte-and-mode immutability of all published release files since that ancestor. |
+| `release_chain` | With default options: a contiguous, content-addressed, producer-signed, witness-receipted manifest history matching recorded state; with a trusted base reference: byte-and-mode identity for every release file present at that ancestor. |
 | `append_gate` | With a base reference and a data-surface change: a candidate tree extends the trusted ledger exactly — prefix retained, rows valid, releases untouched, appends paired with exactly the next release set. Without a base reference, full-file invariants only. |
 | `sign` | Raw Ed25519 signatures over exact bytes; N-of-M thresholds over a domain-separated payload under consumer-pinned keyrings, with legacy generations governed by the caller's `allow_legacy` choice. |
 | `tsa` | One RFC 3161 token matches one consumer-pinned anchor — root bytes, policy, imprint, signed time, signer identity — via OpenSSL; witness sidecars follow the trust-bundle transition rules. |
@@ -324,9 +324,9 @@ adaptation with direct tests and no differential oracle.
 and CLI are new code composed from the extracted parts. They add no
 cryptography and no trust anchors of their own; their evidence is a
 refusal battery over the closed-world binding rules, then four rounds
-of independent adversarial review — seventeen findings narrowing to
-approval, each fix behind a regression test that fails on the pre-fix
-code [@receipt-pr14]. The worst finding shows why composition needs
+of independent adversarial review — seventeen findings in the first
+round, narrowing over three more to approval, each fix behind a
+regression test that fails on the pre-fix code [@receipt-pr14]. The worst finding shows why composition needs
 its own review: the spanning verifier inferred whether to enforce the
 production pins from how the anchor path resolved, so a symlinked
 anchor directory silently turned them off. Proven parts, new seams.
@@ -341,7 +341,7 @@ requests that carried them (receipt's own and the corpus incident's
 
 # Adoption {#sec-adoption}
 
-As of August 11, 2026, three codebases pin released versions of the
+As of August 13, 2026, three codebases pin released versions of the
 package and call it from their verification paths — code-level
 adoption, checkable at each pin, and stated here at exactly that
 strength:
