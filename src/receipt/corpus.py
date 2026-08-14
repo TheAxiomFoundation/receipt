@@ -47,7 +47,7 @@ import stat
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 GATE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._/-]{0,127}\Z")
@@ -614,27 +614,62 @@ def _assert_no_symlinked_component(
     return current
 
 
-def _regular_file_digest(root: pathlib.Path, relative: str) -> str:
-    """Hash a bound file, closing the check/open race by opening no-follow.
+class _FileIdentity(NamedTuple):
+    """What the descriptor said about a file at the moment it was hashed."""
+
+    device: int
+    inode: int
+    size: int
+    mtime_ns: int
+
+
+def _regular_file_digest(root: pathlib.Path, relative: str) -> tuple[str, _FileIdentity]:
+    """Hash a bound file, closing the check/open race at the final component.
 
     Validating the path then opening it by name leaves a window in which a
-    symlink is swapped in between the check and the read. Opening with
-    ``O_NOFOLLOW`` on the final component (after the parent-component guard)
-    removes the swap-to-symlink race, and fstat-ing the open descriptor
-    confirms what was actually opened is a regular file — never a directory,
-    device, or FIFO reachable by the same name. (Cross-family review finding.)
+    symlink is swapped in between the check and the read. Three layers close
+    it portably (cross-family review findings, two rounds):
 
-    Residual, bounded: ``O_NOFOLLOW`` covers the final component only, so an
-    intermediate directory swapped to a symlink *between* the component guard
-    and this open is not caught here. Closing that fully needs descent by
-    ``dir_fd``; it is left because the precondition is an adversary with write
-    access to the auditor's clone *during* verification, who can already defeat
-    a local check by other means. The post-hash re-enumeration in
-    :func:`verify_corpus_binding` still catches any resulting set change.
+    - ``os.lstat`` of the final component must show a regular file before the
+      open — a symlink, FIFO, or device reachable by the name refuses without
+      ever being opened, on every platform.
+    - The open adds ``O_NOFOLLOW`` where the platform provides it and
+      ``O_NONBLOCK`` unconditionally, so a FIFO raced into place between the
+      ``lstat`` and the open cannot block the verifier (a read-only
+      non-blocking FIFO open returns immediately; regular-file reads ignore
+      the flag).
+    - ``os.fstat`` of the open descriptor must agree with the ``lstat`` on
+      device and inode and show a regular file — so even without
+      ``O_NOFOLLOW``, a name swapped between the two calls resolves to a
+      different inode and refuses.
+
+    Residual, bounded: an intermediate directory swapped to a symlink
+    *between* the component guard and this open is not caught here. Closing
+    that fully needs descent by ``dir_fd``; it is left because the
+    precondition is an adversary with write access to the auditor's clone
+    *during* verification, who can already defeat a local check by other
+    means. The post-hash sweeps in :func:`verify_corpus_binding` (membership
+    re-enumeration plus per-file identity re-check) catch a resulting set
+    change or file swap after the fact; a same-inode rewrite that also
+    restores size and ``mtime_ns`` is beneath their resolution, which is one
+    reason the verdict speaks of the bytes as they existed when hashed.
     """
 
     path = _assert_no_symlinked_component(root, relative)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        before = os.lstat(path)
+    except OSError as exc:
+        raise CorpusError(
+            f"bound file is missing or not a regular file: {relative}"
+        ) from exc
+    if not stat.S_ISREG(before.st_mode):
+        raise CorpusError(f"bound file is not a regular file: {relative}")
+    flags = (
+        os.O_RDONLY
+        | os.O_NONBLOCK
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
     try:
         fd = os.open(path, flags)
     except OSError as exc:
@@ -645,15 +680,22 @@ def _regular_file_digest(root: pathlib.Path, relative: str) -> str:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise CorpusError(f"bound file is not a regular file: {relative}")
+        if (info.st_dev, info.st_ino) != (before.st_dev, before.st_ino):
+            raise CorpusError(
+                f"bound file changed identity while being opened: {relative}"
+            )
         digest = hashlib.sha256()
         while True:
             chunk = os.read(fd, 1 << 20)
             if not chunk:
                 break
             digest.update(chunk)
+        identity = _FileIdentity(
+            info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+        )
     finally:
         os.close(fd)
-    return digest.hexdigest()
+    return digest.hexdigest(), identity
 
 
 def verify_declarations(
@@ -696,8 +738,11 @@ def verify_corpus_binding(
     # Two declared paths that a case- or normalization-insensitive filesystem
     # would treat as one make the closed-world claim ambiguous: which file did
     # the auditor actually get? Detect the collision host-independently — under
-    # Unicode NFC plus case folding — and refuse. A single legitimate path
-    # never collides with itself, so this cannot false-refuse a real corpus.
+    # Unicode NFC plus case folding — and refuse. Deliberately conservative: a
+    # case-sensitive filesystem can hold two genuinely distinct files whose
+    # names collide only after folding, and such a corpus is refused by design,
+    # because its closed-world claim would depend on which filesystem the
+    # auditor cloned onto.
     _reject_aliasing_paths(list(content) + list(attested))
 
     tree = _tree_content_paths(root, spec)
@@ -717,13 +762,16 @@ def verify_corpus_binding(
             f"from the tree, starting with {absent[0]!r}"
         )
 
+    hashed: dict[str, _FileIdentity] = {}
+
     for path in sorted(journal_paths):
-        digest = _regular_file_digest(root, path)
+        digest, identity = _regular_file_digest(root, path)
         if digest != content[path].sha256:
             raise CorpusError(
                 f"content file {path!r} does not match its witnessed digest: "
                 f"tree has {digest}, journal binds {content[path].sha256}"
             )
+        hashed[path] = identity
 
     missing_required = sorted(spec.required_attested_paths - set(attested))
     if missing_required:
@@ -732,23 +780,49 @@ def verify_corpus_binding(
             f"requires: {missing_required[0]!r}"
         )
     for path in sorted(attested):
-        digest = _regular_file_digest(root, path)
+        digest, identity = _regular_file_digest(root, path)
         if digest != attested[path].sha256:
             raise CorpusError(
                 f"attested file {path!r} does not match its witnessed digest: "
                 f"tree has {digest}, journal binds {attested[path].sha256}"
             )
+        hashed[path] = identity
 
     # Closed-world means the set proven equal to the journal must not have
-    # changed while it was being proven. Re-enumerate after hashing and require
-    # the identical content set: a file unlisted-and-inserted, or a bound file
-    # deleted, after the first enumeration would otherwise slip past the
-    # set-equality check above. (Cross-family review finding.)
+    # changed while it was being proven. Two sweeps after hashing, because
+    # they catch different things (cross-family review findings, two rounds):
+    # membership re-enumeration catches a file unlisted-and-inserted or a
+    # bound file deleted after the first walk; the per-file identity re-check
+    # catches a hashed file replaced or rewritten in place afterwards — for
+    # every bound file, content and attested alike, the path must still be a
+    # regular file with the device, inode, size, and mtime the hashing
+    # descriptor saw. A same-inode rewrite that also restores size and
+    # mtime_ns is beneath this sweep's resolution; re-reading every byte
+    # would double the verifier's IO to move that boundary, not remove it.
     if set(_tree_content_paths(root, spec)) != tree_paths:
         raise CorpusError(
             "the content tree changed during verification; the closed-world "
             "set is not stable and the verdict is refused"
         )
+    for path in sorted(hashed):
+        try:
+            after = os.lstat(_assert_no_symlinked_component(root, path))
+        except OSError as exc:
+            raise CorpusError(
+                f"bound file {path!r} disappeared during verification; the "
+                "verdict is refused"
+            ) from exc
+        seen = hashed[path]
+        if not stat.S_ISREG(after.st_mode) or (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ) != (seen.device, seen.inode, seen.size, seen.mtime_ns):
+            raise CorpusError(
+                f"bound file {path!r} changed during verification; the "
+                "verdict is refused"
+            )
 
     return CorpusVerification(
         content=tuple(content[path] for path in sorted(content)),

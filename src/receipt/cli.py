@@ -10,6 +10,11 @@ without hedging. What it *did not* establish — that any declared gate actually
 passed, that the encoded rules read the law correctly — is stated just as
 plainly, because a verdict that lets a reader infer more than was checked is
 worse than no verdict.
+
+With ``--json``, every exit path after argument parsing prints exactly one
+JSON object bearing a ``verdict`` key — a refused spec, an unusable root, an
+aborted run, and a result that cannot be rendered all included. A machine
+consumer that keys on ``verdict`` therefore fails closed with the command.
 """
 
 from __future__ import annotations
@@ -73,8 +78,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--base-ref",
         default=None,
         help=(
-            "additionally prove no published release object changed since this "
-            "git ref (requires git and a repository)"
+            "additionally prove every release object present at this git ref "
+            "is unchanged in the working tree (requires git and a repository)"
         ),
     )
     verify.add_argument(
@@ -168,11 +173,15 @@ def _format_text(result: VerifyResult) -> str:
                 "  witnessed that each recorded prefix existed no later than "
                 "those times,"
             )
+            # Scoped to what verify_release_history_immutable compares: release
+            # objects present at the base ref, byte and mode. Objects added
+            # after the base, and any state between then and now, are outside
+            # the claim — the wording must not stretch past the check.
             lines.append(
-                "  and that no published release object changed since the "
-                "supplied base"
+                "  and every release object present at the supplied base "
+                "reference is"
             )
-            lines.append("  reference. It does")
+            lines.append("  byte- and mode-identical in this tree. It does")
         else:
             lines.append(
                 "  witnessed that each recorded prefix existed no later than "
@@ -207,17 +216,47 @@ def _format_text(result: VerifyResult) -> str:
             "  the producer maintains — a stale or equivocated but honestly "
             "witnessed"
         )
+        # A base ref binds this clone against a checkpoint the auditor chose;
+        # it cannot make this clone the newest or the only history. Freshness
+        # and uniqueness have exactly one remedy, so name only that.
         lines.append(
-            "  clone also passes. Check freshness and uniqueness out of band "
-            "or via"
+            "  clone also passes. Check freshness and uniqueness by comparing "
+            "head"
         )
-        lines.append("  --base-ref.")
+        lines.append("  digests out of band.")
     else:
         failure = next((item for item in result.passes if not item.ok), None)
         detail = failure.failure if failure is not None else "unknown failure"
         lines.append(f"VERDICT: FAIL — {failure.name if failure else 'verification'}")
         lines.append(f"  {detail}")
     return "\n".join(lines)
+
+
+def _fail_payload(stage: str, message: str) -> dict[str, object]:
+    """A minimal machine verdict for aborts outside a completed verification.
+
+    Built from plain strings only, so its construction cannot itself raise.
+    It leads with the same ``verdict`` key as the full payload: a consumer
+    keying on that field sees fail-closed behavior on every exit path after
+    argument parsing, whether the run refused a spec, aborted mid-pass, or
+    could not render its own result.
+    """
+
+    return {
+        "verdict": "FAIL",
+        "stage": stage,
+        "failure": message,
+        "passesCompleted": [],
+    }
+
+
+def _refuse(as_json: bool, stage: str, message: str, code: int) -> int:
+    """Print a refusal, honoring the JSON contract, and return the exit code."""
+
+    print(f"receipt verify: {message}", file=sys.stderr)
+    if as_json:
+        print(json.dumps(_fail_payload(stage, message), indent=2, sort_keys=True))
+    return code
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -227,16 +266,36 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command != "verify":  # pragma: no cover - argparse enforces this
         parser.error(f"unknown command {args.command!r}")
 
+    # From here down the contract is: with --json, exactly one JSON object
+    # bearing a "verdict" key is printed on every path — spec refusals, root
+    # refusals, an aborted run, even a result that cannot be rendered. The
+    # only exits without one are argparse's own, before --json is knowable.
+    as_json = bool(args.json)
+
     try:
         spec, spec_sha256 = load_spec(args.spec)
     except VerifySpecError as exc:
-        print(f"receipt verify: {exc}", file=sys.stderr)
-        return EXIT_USAGE
+        return _refuse(as_json, "spec", str(exc), EXIT_USAGE)
+    except Exception as exc:  # noqa: BLE001 - reading the spec is fail-closed too
+        return _refuse(
+            as_json,
+            "spec",
+            f"unable to read the spec: {type(exc).__name__}: {exc}",
+            EXIT_USAGE,
+        )
 
-    root = args.root if args.root is not None else _default_root(args.spec)
-    if not root.is_dir():
-        print(f"receipt verify: root is not a directory: {root}", file=sys.stderr)
-        return EXIT_USAGE
+    try:
+        root = args.root if args.root is not None else _default_root(args.spec)
+        root_ok = root.is_dir()
+    except Exception as exc:  # noqa: BLE001 - resolving the root is fail-closed too
+        return _refuse(
+            as_json,
+            "root",
+            f"unable to resolve the root: {type(exc).__name__}: {exc}",
+            EXIT_USAGE,
+        )
+    if not root_ok:
+        return _refuse(as_json, "root", f"root is not a directory: {root}", EXIT_USAGE)
 
     try:
         result = run_verification(
@@ -247,18 +306,41 @@ def main(argv: Sequence[str] | None = None) -> int:
             base_ref=args.base_ref,
         )
     except Exception as exc:  # noqa: BLE001 - an unhandled error is still a refusal
-        print(
-            "receipt verify: verification aborted, refusing to return a verdict: "
+        return _refuse(
+            as_json,
+            "verification",
+            "verification aborted, refusing to return a verdict: "
             f"{type(exc).__name__}: {exc}",
-            file=sys.stderr,
+            EXIT_FAIL,
         )
-        return EXIT_FAIL
 
-    if args.json:
-        print(json.dumps(result_to_dict(result), indent=2, sort_keys=True))
+    # A verdict that cannot be rendered is not a deliverable PASS: refuse,
+    # even when the passes themselves succeeded.
+    if as_json:
+        try:
+            rendered = json.dumps(result_to_dict(result), indent=2, sort_keys=True)
+        except Exception as exc:  # noqa: BLE001 - rendering is inside the contract
+            return _refuse(
+                as_json,
+                "render",
+                "verdict could not be rendered; treat the run as unverified: "
+                f"{type(exc).__name__}: {exc}",
+                EXIT_FAIL,
+            )
+        print(rendered)
     else:
+        try:
+            text = _format_text(result)
+        except Exception as exc:  # noqa: BLE001 - rendering is inside the contract
+            return _refuse(
+                False,
+                "render",
+                "verdict could not be rendered; treat the run as unverified: "
+                f"{type(exc).__name__}: {exc}",
+                EXIT_FAIL,
+            )
         stream = sys.stdout if result.ok else sys.stderr
-        print(_format_text(result), file=stream)
+        print(text, file=stream)
     return EXIT_OK if result.ok else EXIT_FAIL
 
 

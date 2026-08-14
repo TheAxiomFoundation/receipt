@@ -13,12 +13,21 @@ authors = [{ name = "The Axiom Foundation" }]
 classifiers = [
     "Development Status :: 1 - Planning",
     "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Security :: Cryptography",
 ]
 
 dependencies = ["cryptography>=42"]
+
+# The dev extra is the one documented install path for contributors
+# (`uv pip install -e ".[dev]"` in the README) and the one CI uses, so the
+# two cannot drift apart. A PEP 735 dependency group would satisfy `uv sync`
+# but silently install nothing under `pip install -e ".[dev]"` — a fresh-venv
+# review round caught exactly that.
+[project.optional-dependencies]
+dev = ["pytest>=8"]
 
 [project.scripts]
 receipt = "receipt.cli:main"
@@ -27,9 +36,6 @@ receipt = "receipt.cli:main"
 Homepage = "https://axiom.org/receipt"
 Documentation = "https://axiom.org/receipt/api/"
 Repository = "https://github.com/TheAxiomFoundation/receipt"
-
-[dependency-groups]
-dev = ["pytest>=8"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

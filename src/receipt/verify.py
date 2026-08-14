@@ -75,7 +75,9 @@ class VerifySpecError(ValueError):
 #: What each completed pass establishes, in the verdict's own words. Keyed by
 #: pass name so the JSON scope block can be built from actual results.
 _PASS_CLAIMS = {
-    "history": "immutability of every published release object since the given base ref",
+    "history": "that every release object present at the given base ref is "
+    "byte- and mode-identical in this tree (objects added after that ref are "
+    "outside this claim)",
     "custody": "custody of the release chain",
     "binding": "binding of the witnessed journal to this working tree",
 }
@@ -295,7 +297,10 @@ def run_verification(
     if base_ref is not None:
         try:
             verify_release_history_immutable(root, base_ref, spec=spec.chain)
-            history_detail = f"no published release object changed since {base_ref}"
+            history_detail = (
+                f"every release object present at {base_ref} is byte- and "
+                "mode-identical in this tree"
+            )
         except Exception as exc:  # noqa: BLE001 - any failure is a FAIL verdict
             passes.append(
                 PassResult(
@@ -414,7 +419,8 @@ def result_to_dict(result: VerifyResult) -> dict[str, Any]:
                 "that any declared gate actually passed",
                 "that the encoded rules are a correct reading of the law",
                 "that this clone holds the producer's newest release "
-                "(freshness needs an out-of-band reference or --base-ref)",
+                "(--base-ref only bounds staleness against a head the auditor "
+                "recorded; newest needs an out-of-band comparison)",
                 "that this is the only history the producer maintains "
                 "(equivocation is undetectable from a single clone; compare "
                 "head digests out of band)",

@@ -667,3 +667,170 @@ def test_refuses_paths_that_alias_under_case_or_normalization(
     reindex(rows)
     with pytest.raises(CorpusError, match="would alias"):
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+# --- second cross-family round: races the first round's guards left open -----
+
+
+def test_refuses_a_fifo_at_an_attested_path_without_blocking(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Attested paths sit outside the content roots, so the tree walk never
+    screens them — the hashing guard is their only non-regular check. A FIFO
+    there must refuse by name, before any open a reader could block on."""
+
+    import os
+
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("platform has no FIFOs")
+    write_tree(tmp_path)
+    victim = tmp_path / ".axiom/toolchain.toml"
+    victim.unlink()
+    os.mkfifo(victim)
+    with pytest.raises(CorpusError, match="not a regular file"):
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+
+
+def test_refuses_a_file_swapped_between_lstat_and_open(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The descriptor must be the file the name check saw. The decoy carries
+    the correct bytes, so only the device/inode cross-check can refuse — this
+    is the removal detector for that comparison."""
+
+    import os
+
+    write_tree(tmp_path)
+    victim = tmp_path / "rules/tax/rate.yaml"
+    decoy = tmp_path / "decoy-with-identical-bytes"
+    decoy.write_bytes(victim.read_bytes())
+
+    real_open = os.open
+    state = {"armed": True}
+
+    def swap_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        if state["armed"] and str(path) == str(victim):
+            state["armed"] = False
+            return real_open(decoy, flags, *args, **kwargs)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr("os.open", swap_open)
+    with pytest.raises(CorpusError, match="changed identity while being opened"):
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+
+
+def test_refuses_paths_that_alias_under_unicode_normalization_alone(
+    tmp_path: pathlib.Path,
+) -> None:
+    """NFC and NFD spellings of the same name are one file on a normalizing
+    filesystem and two on others; a journal listing both is ambiguous
+    everywhere, case differences aside entirely."""
+
+    import unicodedata
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+    composed = "rules/tax/café.yaml"
+    decomposed = unicodedata.normalize("NFD", composed)
+    assert composed != decomposed
+    for path in (composed, decomposed):
+        rows.append(
+            {
+                "schemaVersion": JOURNAL_SCHEMA,
+                "kind": "content",
+                "path": path,
+                "sha256": sha256_text("name: café\n"),
+                "state": "present",
+            }
+        )
+    reindex(rows)
+    with pytest.raises(CorpusError, match="would alias"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def _mutate_after_hashing(
+    monkeypatch: pytest.MonkeyPatch, victim_relative: str, mutate: object
+) -> None:
+    """Run the real digest, then fire ``mutate`` once, right after the victim
+    was hashed — the exact window the post-hash sweeps exist to close."""
+
+    import receipt.corpus as corpus_mod
+
+    real = corpus_mod._regular_file_digest
+    state = {"armed": True}
+
+    def hash_then_mutate(root: pathlib.Path, relative: str):
+        result = real(root, relative)
+        if state["armed"] and relative == victim_relative:
+            state["armed"] = False
+            mutate()
+        return result
+
+    monkeypatch.setattr("receipt.corpus._regular_file_digest", hash_then_mutate)
+
+
+def test_refuses_a_bound_file_rewritten_in_place_after_hashing(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same path, same inode, same size, different bytes, written after the
+    digest was taken: membership re-enumeration cannot see it, so the per-file
+    identity sweep must."""
+
+    write_tree(tmp_path)
+    victim = tmp_path / "rules/tax/rate.yaml"
+
+    def rewrite() -> None:
+        tampered = b"name: rate\nvalue: 9.99\n"
+        assert len(tampered) == len(victim.read_bytes())
+        victim.write_bytes(tampered)
+
+    _mutate_after_hashing(monkeypatch, "rules/tax/rate.yaml", rewrite)
+    with pytest.raises(CorpusError, match="changed during verification"):
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+
+
+def test_refuses_a_bound_file_replaced_after_hashing_even_with_identical_bytes(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replacement with byte-identical content still changes the inode; the
+    sweep refuses on identity, not content, so it catches the swap that a
+    re-hash would wave through."""
+
+    import os
+
+    write_tree(tmp_path)
+    victim = tmp_path / "rules/tax/rate.yaml"
+
+    def replace() -> None:
+        stand_in = tmp_path / "stand-in"
+        stand_in.write_bytes(victim.read_bytes())
+        os.replace(stand_in, victim)
+
+    _mutate_after_hashing(monkeypatch, "rules/tax/rate.yaml", replace)
+    with pytest.raises(CorpusError, match="changed during verification"):
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+
+
+def test_refuses_an_attested_file_removed_after_hashing(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Attested paths sit outside the content roots, so membership
+    re-enumeration never sees them; the identity sweep is their only
+    post-hash guard and must cover them too."""
+
+    write_tree(tmp_path)
+    victim = tmp_path / ".axiom/toolchain.toml"
+
+    _mutate_after_hashing(monkeypatch, ".axiom/toolchain.toml", victim.unlink)
+    with pytest.raises(CorpusError, match="disappeared during verification"):
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )

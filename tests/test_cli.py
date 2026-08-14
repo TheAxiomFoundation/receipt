@@ -107,7 +107,8 @@ def test_json_output_marks_gates_as_not_re_run(
         "that any declared gate actually passed",
         "that the encoded rules are a correct reading of the law",
         "that this clone holds the producer's newest release "
-        "(freshness needs an out-of-band reference or --base-ref)",
+        "(--base-ref only bounds staleness against a head the auditor "
+        "recorded; newest needs an out-of-band comparison)",
         "that this is the only history the producer maintains "
         "(equivocation is undetectable from a single clone; compare "
         "head digests out of band)",
@@ -552,3 +553,258 @@ def test_unexpected_exception_in_any_pass_is_a_fail_verdict_not_an_escape(
     failed = [p for p in payload["passes"] if not p["ok"]]
     assert failed
     assert any("RuntimeError: injected surprise" in p["failure"] for p in failed)
+
+
+# --- second cross-family round: the coverage it found missing ----------------
+
+
+def test_run_verification_passes_production_pins_explicitly(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The literal True is load-bearing. Drop the keyword and path inference
+    decides instead — the exact discretion the spanning command exists to
+    remove — while every test on the default anchor layout still passes.
+    This spy is the removal detector."""
+
+    import receipt.verify as verify_module
+
+    seen: dict[str, object] = {}
+    real = verify_module.verify_release_chain
+
+    def spy(*args: object, **kwargs: object) -> object:
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("receipt.verify.verify_release_chain", spy)
+    assert run(repo) == EXIT_OK
+    assert seen.get("enforce_production_pins") is True
+
+
+def test_pin_inference_yields_only_to_an_explicit_choice(repo: pathlib.Path) -> None:
+    """The None fallback is exactly a fallback. A chain re-signed under a
+    substituted (internally valid) key refuses when enforcement is inferred on
+    the default anchor path, and verifies when a caller explicitly opts out —
+    so the boundary sits on "was a value supplied", nowhere else."""
+
+    from receipt.release_chain import ReleaseChainError, verify_release_chain
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    private_pem, public_pem = generate_signing_keypair()
+    (repo / "releases/anchors/producer-ed25519.pub").write_bytes(public_pem)
+    manifest = manifest_stem(repo)
+    manifest.with_suffix(".producer.sig").write_bytes(
+        sign_payload(private_pem, manifest.read_bytes(), domain=b"")
+    )
+
+    with pytest.raises(ReleaseChainError):
+        verify_release_chain(
+            repo, spec=spec.chain, require_chain=True, verify_state=True
+        )
+    verify_release_chain(
+        repo,
+        spec=spec.chain,
+        require_chain=True,
+        verify_state=True,
+        enforce_production_pins=False,
+    )
+
+
+def _git(repo: pathlib.Path, *args: str) -> None:
+    import subprocess
+
+    subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        env={
+            "PATH": "/usr/bin:/bin:/usr/local/bin",
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@t",
+            "HOME": str(repo),
+        },
+    )
+
+
+@pytest.fixture()
+def committed_repo(repo: pathlib.Path) -> pathlib.Path:
+    _git(repo, "init", "-q")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    return repo
+
+
+def test_history_pass_exception_is_a_fail_verdict_not_an_escape(
+    committed_repo: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The optional pass sits inside the same fail-closed boundary as the
+    mandatory ones."""
+
+    def boom(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("injected surprise")
+
+    monkeypatch.setattr("receipt.verify.verify_release_history_immutable", boom)
+    assert run(committed_repo, "--base-ref", "HEAD", "--json") == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
+    failed = [p for p in payload["passes"] if not p["ok"]]
+    assert failed
+    assert any("RuntimeError: injected surprise" in p["failure"] for p in failed)
+
+
+def test_pass_text_with_base_ref_claims_only_the_snapshot_comparison(
+    committed_repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """With a base ref the verdict claims byte- and mode-identity for objects
+    present at that ref — never blanket immutability, which the comparison
+    does not establish for objects added after the ref."""
+
+    assert run(committed_repo, "--base-ref", "HEAD") == EXIT_OK
+    out = capsys.readouterr().out
+    assert "VERDICT: PASS" in out
+    assert "present at the supplied base" in out
+    assert "byte- and mode-identical in this tree" in out
+    assert "no published release object changed" not in out
+    # The base ref cannot stand in for freshness or uniqueness.
+    assert "comparing head\n  digests out of band" in out
+    assert "or via\n  --base-ref" not in out
+
+
+def test_pass_text_without_base_ref_names_the_first_contact_limit(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run(repo) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "NOT prove the history was never rewritten" in out
+    assert "regenerate and re-witness" in out
+    assert "comparing head\n  digests out of band" in out
+
+
+def test_base_ref_json_reports_the_history_pass(
+    committed_repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run(committed_repo, "--base-ref", "HEAD", "--json") == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "PASS"
+    assert "history" in payload["passesCompleted"]
+    claimed = " ".join(payload["scope"]["established"])
+    assert "present at the given base ref" in claimed
+    assert "outside this claim" in claimed
+
+
+def test_base_ref_refusal_is_a_fail_verdict(
+    committed_repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An edited release file refuses the history pass through the CLI."""
+
+    stem = manifest_stem(committed_repo)
+    stem.write_bytes(stem.read_bytes() + b"\n")
+    assert run(committed_repo, "--base-ref", "HEAD", "--json") == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
+    assert "history" not in payload["passesCompleted"]
+
+
+# --- the --json contract holds on every exit path ----------------------------
+
+
+def test_json_verdict_on_a_missing_spec(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert (
+        main(["verify", "--spec", str(tmp_path / "absent.py"), "--json"])
+        == EXIT_USAGE
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
+    assert payload["stage"] == "spec"
+
+
+def test_json_verdict_when_reading_the_spec_raises_unexpectedly(
+    repo: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*_args: object, **_kwargs: object) -> object:
+        raise OSError("disk said no")
+
+    monkeypatch.setattr("receipt.cli.load_spec", boom)
+    assert run(repo, "--json") == EXIT_USAGE
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
+    assert payload["stage"] == "spec"
+    assert "OSError" in payload["failure"]
+
+
+def test_json_verdict_on_a_root_that_is_not_a_directory(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert (
+        main(
+            [
+                "verify",
+                "--spec",
+                str(repo / "verification/spec.py"),
+                "--root",
+                str(repo / "rules/tax/rate.yaml"),
+                "--json",
+            ]
+        )
+        == EXIT_USAGE
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
+    assert payload["stage"] == "root"
+
+
+def test_json_verdict_when_verification_itself_aborts(
+    repo: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("outer surprise")
+
+    monkeypatch.setattr("receipt.cli.run_verification", boom)
+    assert run(repo, "--json") == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
+    assert payload["stage"] == "verification"
+    assert "RuntimeError: outer surprise" in payload["failure"]
+
+
+def test_json_verdict_when_the_result_cannot_be_rendered(
+    repo: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A PASS the command cannot serialize is not a deliverable PASS."""
+
+    def boom(*_args: object, **_kwargs: object) -> object:
+        raise TypeError("unserializable")
+
+    monkeypatch.setattr("receipt.cli.result_to_dict", boom)
+    assert run(repo, "--json") == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
+    assert payload["stage"] == "render"
+    assert "treat the run as unverified" in payload["failure"]
+
+
+def test_text_render_failure_refuses_instead_of_escaping(
+    repo: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*_args: object, **_kwargs: object) -> object:
+        raise ValueError("no words")
+
+    monkeypatch.setattr("receipt.cli._format_text", boom)
+    assert run(repo) == EXIT_FAIL
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "treat the run as unverified" in captured.err
