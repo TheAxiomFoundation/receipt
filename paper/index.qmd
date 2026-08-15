@@ -7,10 +7,10 @@ author:
 date: 2026-08-14
 date-format: "MMMM D, YYYY"
 abstract: |
-  Software agents produce pre-registered forecasts at the Thesis
-  Institute, an observation ledger of data pulls in Chronicle, and the
-  Axiom Foundation's encoded statutes; no person witnesses every
-  record at the rate agents write them. The
+  The Axiom Foundation's software agents encode statutes into
+  executable rules, and the records that carry the work — signed rule
+  corpora, release histories, gate declarations — accumulate faster
+  than any person can witness them. The
   receipt package makes those records checkable after the fact. From a
   clone of the repository and trust anchors committed in the verifier's
   own code, a verifier composes four checks over the saved evidence —
@@ -45,21 +45,22 @@ API reference: [axiom.org/receipt/api](https://axiom.org/receipt/api/).
 
 Whoever relies on an agent-produced record later — an auditor, a
 researcher, the producer's own future systems — needs a way to check
-it that does not depend on having watched it being made. Software
-agents write the three record surfaces this paper concerns: the Thesis
-Institute's pre-registered forecasts, Chronicle's append-only
-observation ledger of data pulls, and the Axiom Foundation's statutes
-encoded as executable rules. The Axiom Foundation maintains the
-package. People review samples and
-deterministic gates decide what merges; no person witnesses every
-record at the rate agents produce them.
+it that does not depend on having watched it being made. The Axiom
+Foundation's software agents encode statutes into executable rules;
+people review samples and deterministic gates decide what merges, and
+no person witnesses every record at the rate agents produce them. The
+records that carry that work — signed rule corpora, the release
+histories behind them, the gate declarations that admitted them — are
+this paper's subject, and the foundation maintains the receipt package
+that checks them. Two production systems outside the foundation built
+much of the machinery first; they enter as extraction sources and
+adopters where their evidence appears (@sec-extraction,
+@sec-adoption).
 
 The question descends from the cryptographic audit-log literature:
 secure logs protect past entries after compromise and make append-only
 consistency auditable [@Schneier1999SecureAuditLogs;
-@Crosby2009TamperEvidentLogging], and preregistration protects the
-prediction-versus-postdiction distinction the forecast records exist
-to preserve [@Nosek2018Preregistration]. This setting asks the
+@Crosby2009TamperEvidentLogging]. This setting asks the
 consumer-side version: how an outside verifier checks a complete
 agent-produced record corpus from retained repository evidence.
 
@@ -258,12 +259,13 @@ meaningful exit codes) [@receipt-pr14].
 
 # How the machinery earned its way in {#sec-extraction}
 
-Three production systems built this machinery before the package
-existed: the Thesis Institute's pre-registered forecast records
-[@brier-repo], Chronicle's release chain [@ledger-repo], and the Axiom
-Foundation's signed statute corpus [@axiom-corpus-431]. The forecast and ledger systems supplied verifier
-surfaces; the statute corpus supplied key-rotation semantics that the
-package adapted and tested. Extraction, rather than reimplementation,
+The machinery predates the package. The Axiom Foundation's signed
+statute corpus supplied key-rotation semantics that the package
+adapted and tested [@axiom-corpus-431]; two production systems outside
+the foundation supplied the ported verifier surfaces — Chronicle's
+release chain [@ledger-repo] and the Thesis Institute's pre-registered
+forecast records [@brier-repo], whose preregistration preserves the
+prediction-versus-postdiction distinction [@Nosek2018Preregistration]. Extraction, rather than reimplementation,
 preserved what the harnesses could hold it to: on the ported surfaces,
 the refusal behavior of verifiers that had already caught real
 mistakes in production, to the extent the differential batteries
@@ -334,23 +336,8 @@ requests that carried them (receipt's own and the corpus incident's
 
 # Adoption {#sec-adoption}
 
-As of August 13, 2026, three codebases pin released versions of the
-package and call it from their verification paths — code-level
-adoption, checkable at each pin, and stated here at exactly that
-strength:
-
-| Adopter | Branch | Pin | Surface called |
-|---|---|---|---|
-| Axiom encoder | default | `receipt==0.3.0` | threshold keyring check on apply manifests |
-| Thesis Institute forecast tooling | default | `receipt==0.3.0` (custody extra) | signature primitives in verifier and signer |
-| Chronicle | custody branch (unmerged) | `receipt==0.2.0` | release-chain and append-gate shims, differential harnesses re-run on package change |
-
-No adopter yet pins 0.4.0 or the just-published 0.5.0; the
-receipt repository's own README states that the observation ledger
-consumes the package in production, a producer claim this paper
-reports without independent runtime observation.
-
-The 0.5.0 release extends the same custody discipline to a published
+Inside the foundation, the encoder pins the package for the threshold
+keyring check on its apply manifests, and the 0.5.0 release extends the same custody discipline to a published
 rule corpus; the New Zealand pilot pull request, open as of this
 writing, commits a verification specification — custody key, two
 timestamp-authority anchors, content roots, required declarations —
@@ -371,6 +358,22 @@ declarations: the verifier proves they were made and bound,
 and states plainly that it did not rerun them; declarations concern
 the subject commit, and the pilot documents which event-context
 outcomes do not transfer across the journal's own publication commit.
+
+As of August 13, 2026, three codebases pin released versions of the
+package and call it from their verification paths — code-level
+adoption, checkable at each pin, and stated here at exactly that
+strength:
+
+| Adopter | Branch | Pin | Surface called |
+|---|---|---|---|
+| Axiom encoder | default | `receipt==0.3.0` | threshold keyring check on apply manifests |
+| Thesis Institute forecast tooling | default | `receipt==0.3.0` (custody extra) | signature primitives in verifier and signer |
+| Chronicle | custody branch (unmerged) | `receipt==0.2.0` | release-chain and append-gate shims, differential harnesses re-run on package change |
+
+No adopter yet pins 0.4.0 or the just-published 0.5.0; the
+receipt repository's own README states that the observation ledger
+consumes the package in production, a producer claim this paper
+reports without independent runtime observation.
 
 # Related systems {#sec-related}
 
