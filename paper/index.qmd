@@ -20,7 +20,7 @@ abstract: |
   evidence standards this paper catalogs: a byte-identical port,
   differential extraction against unmodified source verifiers, a
   semantic adaptation of a production key-rotation incident, and new
-  composition reviewed to approval. Three codebases pin and call the
+  composition behind a refusal battery. Three codebases pin and call the
   package today, and the 0.5.0 corpus-verification release extends the
   same discipline to published rule corpora.
 format:
@@ -35,10 +35,8 @@ bibliography: references.bib
 ---
 
 ::: {.callout-note appearance="simple"}
-Working paper. It describes `receipt` 0.5.0 on PyPI, whose
-corpus-verification layer merged August 14, 2026 after four rounds of
-independent review; statements about still-open pull requests are
-marked as such. Code:
+Working paper. It describes `receipt` 0.5.0 on PyPI; statements
+about still-open pull requests are marked as such. Code:
 [github.com/TheAxiomFoundation/receipt](https://github.com/TheAxiomFoundation/receipt).
 API reference: [axiom.org/receipt/api](https://axiom.org/receipt/api/).
 :::
@@ -163,8 +161,7 @@ compose the provided helpers (protected-history enumeration,
 enforcement epochs) into a full-history sweep; the package supplies
 the pieces, not a single spanning call.
 
-The 0.5.0 release, merged August 14, 2026 after four rounds of
-independent review, adds a fifth layer [@receipt-pr14]: a closed-world binding between a witnessed
+The 0.5.0 release adds a fifth layer [@receipt-pr14]: a closed-world binding between a witnessed
 journal and the configured corpus — within the specification's content
 roots, an unlisted file, a missing file, a rewritten byte, or a symlink
 where a regular file was recorded each refuses, as do two listed paths
@@ -297,12 +294,11 @@ attestation differential tests. The attestation harness compares
 command construction and outcome handling against a local `gh` stub
 and claims no live-network equivalence; the witness harness documents
 its exclusions in the test file.] The extraction-time record is also
-published: the 633-line, 42-hunk release-chain port diff drew three
-adversarial review passes — two requesting changes, then approval —
-and the 695-line append-gate diff a separate approving review that
+published: the 633-line release-chain port diff with its review
+records, and the 695-line append-gate diff with a review that
 sabotaged base-tree materialization and watched 4 of 17 differential
-cases fail, evidence that the harness binds the base-tree behavior it
-claims to bind [@receipt-receipts]. The reviewer in those records is a
+cases fail — evidence that the harness binds the base-tree behavior
+it claims to bind [@receipt-receipts]. The reviewer in those records is a
 second frontier model lane the maintainers commissioned and ran
 adversarially; it is independent of the model that wrote the ports,
 not of the organization, and the published record lets a reader weigh
@@ -324,13 +320,9 @@ adaptation with direct tests and no differential oracle.
 **New composition.** The corpus binding, spanning verifier,
 and CLI are new code composed from the extracted parts. They add no
 cryptography and no trust anchors of their own; their evidence is a
-refusal battery over the closed-world binding rules, then four rounds
-of independent adversarial review — seventeen findings in the first
-round, narrowing over three more to approval, each fix behind a
-regression test that fails on the pre-fix code [@receipt-pr14]. The worst finding shows why composition needs
-its own review: the spanning verifier inferred whether to enforce the
-production pins from how the anchor path resolved, so a symlinked
-anchor directory silently turned them off. Proven parts, new seams.
+refusal battery over the closed-world binding rules, and every guard
+carries a regression test that fails with that guard removed
+[@receipt-pr14].
 
 The published evidence is uneven in exactly the way the classes
 predict, and the repository states which is which: the ledger lane has
