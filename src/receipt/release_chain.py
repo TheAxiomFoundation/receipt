@@ -6,11 +6,12 @@ producer: each manifest is canonical and content-addressed, every state and
 append digest is recomputed from the current append-only JSONL, every manifest
 has a valid signature from the pinned producer key, and every RFC 3161 receipt
 in the consumer's configured anchor set is verified against its committed trust
-anchor. (Byte-pin enforcement follows the effective pin mode: inferred on
-for the spec-resolved anchor directory and off for a caller-supplied one,
-and independently overrideable in either direction. With pins off,
-verification establishes signatures against whatever material the effective
-anchor directory holds — the caller's own trust choice.)
+anchor. (Byte-pin enforcement follows the effective pin mode: when not set
+explicitly, it is inferred on exactly when the effective anchor directory
+resolves to the spec's own, and independently overrideable in either
+direction. With pins off, verification establishes signatures against
+whatever material the effective anchor directory holds — the caller's own
+trust choice.)
 
 Extracted nearly verbatim from PolicyEngine/ledger scripts/verify_release_chain.py
 at commit 07984278503b8e06c48c539327f6f1d01c035510 (branch
@@ -58,6 +59,10 @@ STRICT_UTC_RE = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:"
     r"[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z\Z"
 )
+# A well-formed surrogate pair spelled explicitly inside a Python string:
+# JSON parsing rewrites it into the astral character, so a filename carrying
+# one could never be reproduced from JSON output (see _combined_anchor_digest).
+_SURROGATE_PAIR_RE = re.compile("[\ud800-\udbff][\udc00-\udfff]")
 TIME_STAMP_RE = re.compile(
     r"(?P<month>[A-Z][a-z]{2})\s+"
     r"(?P<day>[0-9]{1,2})\s+"
@@ -1099,7 +1104,7 @@ def _exact_filename(filename: Any) -> str:
         )
     try:
         decoded = os.fsdecode(filename)
-    except (TypeError, ValueError) as exc:
+    except Exception as exc:  # noqa: BLE001 - any failure here is a refusal
         raise ReleaseChainError(
             "anchor filename could not be decoded to a pathname: "
             f"{type(filename).__name__}: {exc}"
@@ -1189,16 +1194,27 @@ def _combined_anchor_digest(per_file: Mapping[str, str]) -> str:
     different mappings by design, because the mapping commits to the
     configuration, not to resolved path identity.
 
-    One edge is refused rather than encoded: a key holding an astral scalar
-    and a distinct key holding its explicit surrogate pair are different
-    Python strings but one and the same JSON string, so a verdict containing
-    both could never be faithfully reported or reconstructed from JSON
-    output. Their UTF-16 code units — the canonical key sort — are where
-    they collide, and that collision is the refusal condition.
+    One edge is refused rather than encoded: a filename containing an
+    explicit well-formed surrogate pair is a different Python string from
+    the astral character it spells, but one and the same string after any
+    JSON round trip — a verdict carrying it could never be reproduced from
+    ``--json`` output. Such a pair cannot come from ``os.fsdecode`` (its
+    escapes are unpaired low surrogates, which round-trip faithfully); only
+    a spec literally configuring one is refused, and the fix is to
+    configure the astral character directly.
     """
 
     from receipt.canonical import utf16_sort_key
 
+    for name in per_file:
+        if _SURROGATE_PAIR_RE.search(name):
+            raise ReleaseChainError(
+                "anchor filename spells an astral character as an explicit "
+                "surrogate pair, which JSON parsing would rewrite; configure "
+                f"the character directly: {name!r}"
+            )
+    # With well-formed pairs refused, UTF-16 code units are injective over
+    # the remaining strings; a tie would mean the refusal above regressed.
     sort_keys = [utf16_sort_key(name) for name in per_file]
     if len(set(sort_keys)) != len(sort_keys):
         raise ReleaseChainError(

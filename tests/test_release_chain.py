@@ -807,16 +807,41 @@ def test_the_combined_digest_is_injective_and_filename_agnostic() -> None:
     ).hexdigest()
 
 
-def test_python_distinct_but_json_identical_keys_refuse() -> None:
-    """An astral scalar and its explicit surrogate pair are distinct Python
-    strings but one and the same JSON string — a verdict containing both
-    could never be faithfully reported or reconstructed from --json, so the
-    digest refuses rather than encoding an ambiguity."""
+def test_explicit_surrogate_pair_filenames_refuse() -> None:
+    """A filename spelling an astral character as an explicit surrogate pair
+    is a different Python string from the astral spelling but one and the
+    same string after any JSON round trip — with or without the astral twin
+    present, a verdict carrying it could never be reproduced from --json,
+    so the digest refuses."""
 
     astral, pair = "\U00010000", "\ud800\udc00"
     assert astral != pair
-    with pytest.raises(ReleaseChainError, match="identical as JSON strings"):
+    with pytest.raises(ReleaseChainError, match="explicit\\s+surrogate pair"):
+        _combined_anchor_digest({pair: "cd" * 32})
+    with pytest.raises(ReleaseChainError, match="explicit\\s+surrogate pair"):
         _combined_anchor_digest({astral: "ab" * 32, pair: "cd" * 32})
+    # The astral spelling alone is fine — it round-trips as itself.
+    _combined_anchor_digest({astral: "ab" * 32})
+
+
+def test_the_reported_mapping_survives_a_json_round_trip() -> None:
+    """The auditor-facing property behind the refusals: for every mapping
+    the digest accepts — including lone surrogateescape names from
+    undecodable filesystem bytes — parsing the JSON rendering back
+    reproduces the exact mapping, and its recomputed digest matches."""
+
+    import json as _json
+
+    mapping = {
+        "plain.pem": "ab" * 32,
+        "ключ.pem": "cd" * 32,
+        "escape-a\udc80b.pem": "ef" * 32,
+        "\U00010000.pem": "12" * 32,
+    }
+    digest = _combined_anchor_digest(mapping)
+    round_tripped = _json.loads(_json.dumps(mapping))
+    assert round_tripped == mapping
+    assert _combined_anchor_digest(round_tripped) == digest
 
 
 def test_out_of_domain_filenames_refuse_cleanly() -> None:
@@ -835,6 +860,13 @@ def test_out_of_domain_filenames_refuse_cleanly() -> None:
 
     with pytest.raises(ReleaseChainError, match="could not be decoded"):
         _exact_filename(Malformed())
+
+    class Exploding:
+        def __fspath__(self) -> str:
+            raise RuntimeError("deliberately hostile")
+
+    with pytest.raises(ReleaseChainError, match="could not be decoded"):
+        _exact_filename(Exploding())
 
 
 def test_a_lazy_spec_mapping_cannot_alias_through_id_reuse(
