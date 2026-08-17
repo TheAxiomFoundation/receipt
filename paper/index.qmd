@@ -7,9 +7,9 @@ author:
 date: 2026-08-17
 date-format: iso
 kicker: working paper
-revision: "9"
+revision: "10"
 status: |
-  Working paper. It describes `receipt` 0.5.0 on PyPI; statements
+  Working paper. It describes `receipt` 0.5.1 on PyPI; statements
   about still-open pull requests are marked as such. Code:
   [github.com/TheAxiomFoundation/receipt](https://github.com/TheAxiomFoundation/receipt).
   API reference: [axiom.org/receipt/api](https://axiom.org/receipt/api/).
@@ -20,16 +20,16 @@ abstract: |
   than any person can witness them. The
   receipt package makes those records checkable after the fact. From a
   clone of the repository and trust anchors committed in the verifier's
-  own code, a verifier composes four checks over the saved evidence —
-  append-only history, witnessed time, producer signatures, and
-  workflow provenance — and each check refuses rather than warns when
-  its evidence falls short. The machinery reached one package under
+  own code, a verifier composes five checks over the saved evidence —
+  append-only history, witnessed time, producer signatures, workflow
+  provenance, and closed-world corpus binding — and each check
+  refuses rather than warns when its evidence falls short. The machinery reached one package under
   evidence standards this paper catalogs: a byte-identical port,
   differential extraction against unmodified source verifiers, a
   semantic adaptation of a production key-rotation incident, and new
   composition behind a refusal battery. Three codebases pin and call the
-  package today, and the 0.5.0 corpus-verification release extends the
-  same discipline to published rule corpora.
+  package today, and a published rule corpus ships the verification
+  specification an outside auditor runs against it.
 format:
   axiom-paper-pdf: default
   axiom-paper-html: default
@@ -54,7 +54,8 @@ adopters where their evidence appears (@sec-extraction,
 
 ## A motivating example {#sec-motivation}
 
-An encoded rule turns out to be wrong — a rate that should read 0.15.
+An encoded rule turns out to be wrong — a rate reads 0.15 where it
+should read 0.17.
 The foundation's discipline is to fix the pipeline and re-encode:
 adjust the encoder or its inputs, run it again, and let the corrected
 encoding arrive the way every encoding arrives — through the
@@ -192,7 +193,7 @@ compose the provided helpers (protected-history enumeration,
 enforcement epochs) into a full-history sweep; the package supplies
 the pieces, not a single spanning call.
 
-The 0.5.0 release adds a fifth layer [@receipt-pr14]: a closed-world binding between a witnessed
+The fifth layer [@receipt-pr14] is a closed-world binding between a witnessed
 journal and the configured corpus — within the specification's content
 roots, an unlisted file, a missing file, a rewritten byte, or a symlink
 where a regular file was recorded each refuses, as do two listed paths
@@ -220,9 +221,10 @@ forensic sense (@sec-guarantees defines the difference), not evidence
 that the history is unique (@sec-scope), not evidence of content
 correctness, and not evidence of freshness. Two properties serve a
 verifier who must defend a verdict to someone else: the verifier
-prints the specification digest and the chain head digest, so an
-assessment can quote exactly which policy produced which verdict over
-which bytes; and the differential harnesses ship with their rerun
+prints the specification digest, the chain head digest, and a digest
+of the anchor bytes custody consumed, so an assessment can quote
+exactly which policy and which trust material produced which verdict
+over which bytes; and the differential harnesses ship with their rerun
 commands and pins, so the tool's error behavior is itself examinable —
 the questions any serious challenge to a verification tool asks.
 The verifier must also be verifiable: releases publish to PyPI with
@@ -268,7 +270,7 @@ codes carry the verdict.
 
 # The machinery {#sec-machinery}
 
-Together the six modules shipped through 0.4.0 verify a record set's
+Six modules verify a record set's
 history, timing, and authorship from saved evidence; the API reference
 at [axiom.org/receipt/api](https://axiom.org/receipt/api/) documents
 their public interfaces.
@@ -282,10 +284,10 @@ their public interfaces.
 | `tsa` | One RFC 3161 token matches one consumer-pinned anchor — root bytes, policy, imprint, signed time, signer identity — via OpenSSL; witness sidecars follow the trust-bundle transition rules. |
 | `attest` | GitHub's attestation service accepted the canonical subject for a commit under an anchored workflow identity; helpers enumerate protected-tree history and its enforcement epoch for callers to compose. |
 
-The 0.5.0 release adds `corpus` (the closed-world journal binding
-and gate-declaration parsing), `verify` (the spanning pass ordering),
-and `cli` (`receipt verify`, with text and JSON rendering and
-meaningful exit codes) [@receipt-pr14].
+Three more compose them into one verdict: `corpus` (the closed-world
+journal binding and gate-declaration parsing), `verify` (the spanning
+pass ordering), and `cli` (`receipt verify`, with text and JSON
+rendering and meaningful exit codes) [@receipt-pr14].
 
 # How the machinery earned its way in {#sec-extraction}
 
@@ -367,8 +369,8 @@ requests that carried them (receipt's own and the corpus incident's
 # Adoption {#sec-adoption}
 
 Inside the foundation, the encoder pins the package for the threshold
-keyring check on its apply manifests, and the 0.5.0 release extends the same custody discipline to a published
-rule corpus; the New Zealand pilot pull request, open as of this
+keyring check on its apply manifests, and the same custody discipline
+covers a published rule corpus; the New Zealand pilot pull request, open as of this
 writing, commits a verification specification — custody key, two
 timestamp-authority anchors, content roots, required declarations —
 and a witnessed journal of 104 rows binding 80 content files, 7
@@ -389,18 +391,18 @@ and states plainly that it did not rerun them; declarations concern
 the subject commit, and the pilot documents which event-context
 outcomes do not transfer across the journal's own publication commit.
 
-As of August 13, 2026, three codebases pin released versions of the
+As of August 17, 2026, three codebases pin released versions of the
 package and call it from their verification paths — code-level
 adoption, checkable at each pin, and stated here at exactly that
 strength:
 
 | Adopter | Branch | Pin | Surface called |
 |---|---|---|---|
-| Axiom encoder | default | `receipt==0.3.0` | threshold keyring check on apply manifests |
-| Thesis Institute forecast tooling | default | `receipt==0.3.0` (custody extra) | signature primitives in verifier and signer |
-| Chronicle | custody branch (unmerged) | `receipt==0.2.0` | release-chain and append-gate shims, differential harnesses re-run on package change |
+| Axiom encoder | default | `receipt==0.5.1` | threshold keyring check on apply manifests |
+| Thesis Institute forecast tooling | default | `receipt==0.5.1` (custody extra) | signature primitives in verifier and signer |
+| Chronicle | custody branch (unmerged) | `receipt==0.5.1` | release-chain and append-gate shims, differential harnesses re-run on package change |
 
-No adopter yet pins 0.4.0 or the just-published 0.5.0; the
+Each pin is the current release; the
 receipt repository's own README states that the observation ledger
 consumes the package in production, a producer claim this paper
 reports without independent runtime observation.
@@ -409,7 +411,7 @@ reports without independent runtime observation.
 
 receipt assembles per-consumer custody policy in committed code,
 multi-anchor timestamp composition, record-level history checks, and
-(since 0.5.0) closed-world corpus binding under one
+closed-world corpus binding under one
 fail-closed verdict that names its non-conclusions. Each neighboring
 system solves an adjacent problem, and several share individual
 features; the differences below are checkable against their
