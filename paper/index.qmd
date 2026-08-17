@@ -4,10 +4,10 @@ author:
   - name: Max Ghenis
     affiliations:
       - name: Axiom Foundation
-date: 2026-08-14
+date: 2026-08-17
 date-format: iso
 kicker: working paper
-revision: "8"
+revision: "9"
 status: |
   Working paper. It describes `receipt` 0.5.0 on PyPI; statements
   about still-open pull requests are marked as such. Code:
@@ -36,7 +36,7 @@ format:
 bibliography: references.bib
 ---
 
-# Records that outrun their witnesses
+# Introduction {#sec-intro}
 
 Whoever relies on an agent-produced record later — an auditor, a
 researcher, the producer's own future systems — needs a way to check
@@ -51,6 +51,35 @@ that checks them. Two production systems outside the foundation built
 much of the machinery first; they enter as extraction sources and
 adopters where their evidence appears (@sec-extraction,
 @sec-adoption).
+
+## A motivating example {#sec-motivation}
+
+An encoded rule turns out to be wrong — a rate that should read 0.15.
+The foundation's discipline is to fix the pipeline and re-encode:
+adjust the encoder or its inputs, run it again, and let the corrected
+encoding arrive the way every encoding arrives — through the
+validation gates, in a fresh release, signed and witnessed. The
+tempting shortcut is to edit the published file by hand. The two
+paths produce the same YAML, and they differ in everything this paper
+is about. The pipeline path leaves a record: a new release in the
+chain, a gate declaration that validation ran, a workflow attestation
+naming the run that produced it. The hand edit leaves a hole: bytes
+that match no witnessed journal row, a release history that never
+mentions the change. `receipt verify` is the command that tells the
+two apart from a clone, after the fact.
+
+The extraction sources ran on the same discipline before the package
+existed. A forecast is pre-registered only if it entered through the
+registration pipeline before the outcome — the witnessed chain gives
+every recorded prefix a no-later-than time, so a prediction and a
+postdiction cannot trade places quietly. An observation ledger is an
+observation ledger only if corrections arrive as new pulls appended
+to the history, never as edits to old rows. In all three systems the
+rule is the same: when a record is wrong, the pipeline produces its
+successor, and the record set itself must show which path every
+change took.
+
+## The problem, and what this paper does
 
 The question descends from the cryptographic audit-log literature:
 secure logs protect past entries after compromise and make append-only
@@ -379,6 +408,25 @@ fail-closed verdict that names its non-conclusions. Each neighboring
 system solves an adjacent problem, and several share individual
 features; the differences below are checkable against their
 specifications.
+
+| system | trust root | verification setting | witnessed time | history and binding |
+|---|---|---|---|---|
+| receipt | consumer's committed code | offline, from a clone, no service | multi-anchor RFC 3161, pinned roots and signers | append-only record chain; closed-world corpus binding; gates stay declarations |
+| OpenTimestamps | blockchain consensus | proof against the chain | blockchain anchoring | existence proofs per document |
+| CT / Go checksum DB | log operators; client-pinned keys (Go) | log service plus monitors or gossip | log-assigned timing | public append-only log; split-view detection |
+| SCITT | transparency service | online registration, service in the loop | service countersignature | registry of signed statements |
+| TUF | client-side root metadata, thresholds | updater fetching current metadata | expiry-based freshness | current snapshot only |
+| Sigstore (keyless) | OIDC identity federation | bundles verify offline; log for inclusion | log timestamp | signature transparency, per artifact |
+| Signed Git commits | locally configured allowed signers | offline, from a clone | none | commit-object authentication over the DAG |
+| in-toto | owner-signed layout | offline against the layout | none | step materials and products; verifies steps ran |
+| Agent event receipts (obsigna, halo-record, tool receipts) | runtime or daemon-held keys | inside or against the live runtime | optional RFC 3161 checkpoints | per-event chains and single observations |
+
+: Each row restates the characterization the prose below gives that
+system, where the citations live. The scopes differ by design —
+several of these compose with receipt rather than compete with it —
+and the receipt column is the combination this setting needs:
+consumer-held trust, an offline clone, external time, and a record
+history checked closed-world. {#tbl-related tbl-colwidths="[19,19,21,19,22]"}
 
 **Timestamping.** Linked timestamping begins with Haber and Stornetta
 [@Haber1991Timestamp]; RFC 3161 [@rfc3161] defines the single-token
