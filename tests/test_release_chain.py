@@ -4,7 +4,7 @@ receipt#24's second half, in its post-review shape: digests are captured at
 the verification read sites themselves (OpenSSL is fed a snapshot of the
 digested bytes), the computation is opt-in so pre-existing callers keep
 byte-identical behavior, and the combined digest is receipt-canonical JSON —
-an injective encoding for any filename strings.
+an injective encoding for any accepted filename strings.
 """
 
 from __future__ import annotations
