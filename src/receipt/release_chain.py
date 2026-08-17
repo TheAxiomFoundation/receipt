@@ -6,7 +6,10 @@ producer: each manifest is canonical and content-addressed, every state and
 append digest is recomputed from the current append-only JSONL, every manifest
 has a valid signature from the pinned producer key, and every RFC 3161 receipt
 in the consumer's configured anchor set is verified against its committed trust
-anchor.
+anchor. (Pin enforcement is the default for the spec-resolved anchor
+directory; a caller supplying its own anchor directory is making its own
+trust choice, and verification then establishes signatures against whatever
+material that directory holds.)
 
 Extracted nearly verbatim from PolicyEngine/ledger scripts/verify_release_chain.py
 at commit 07984278503b8e06c48c539327f6f1d01c035510 (branch
@@ -588,11 +591,17 @@ def verify_producer_signature_bytes(
     """Verify one raw Ed25519 signature over exact manifest bytes."""
 
     key_spec = _sign.ProducerKeySpec(
-        # Normalized once, here: the join below, read_producer_public_key's
-        # own join, the observer key, and the fallback's temporary filename
-        # all flow from this one value, so no later __fspath__ call exists
-        # for a stateful PathLike to answer differently.
-        public_key_filename=_exact_filename(spec.producer_public_key_filename),
+        # When observing, normalized once here: the join below,
+        # read_producer_public_key's own join, the observer key, and the
+        # fallback's temporary filename all flow from this one value, so no
+        # later __fspath__ call exists for a stateful PathLike to answer
+        # differently. When not observing, the raw configured value flows
+        # exactly as it always has.
+        public_key_filename=(
+            _exact_filename(spec.producer_public_key_filename)
+            if anchor_observer is not None
+            else spec.producer_public_key_filename
+        ),
         spki_sha256=spec.producer_spki_sha256,
     )
     public_key_path = anchor_dir / key_spec.public_key_filename
@@ -764,9 +773,15 @@ def verify_receipt(
     if receipt.is_symlink() or not receipt.is_file():
         raise ReleaseChainError(f"missing or non-regular RFC 3161 receipt: {receipt}")
     anchor_spec = spec.anchors[tsa]
-    # One normalization for the join and the observer key alike — a stateful
-    # PathLike gets exactly one __fspath__ call per consumption.
-    anchor_filename = _exact_filename(anchor_spec.filename)
+    # When observing: one normalization for the join and the observer key
+    # alike — a stateful PathLike gets exactly one __fspath__ call per
+    # consumption. When not observing: the raw configured value joins
+    # exactly as it always has.
+    anchor_filename = (
+        _exact_filename(anchor_spec.filename)
+        if anchor_observer is not None
+        else anchor_spec.filename
+    )
     anchor = anchor_dir / anchor_filename
     if anchor.is_symlink() or not anchor.is_file():
         raise ReleaseChainError(f"missing or non-regular TSA anchor: {anchor}")
@@ -898,6 +913,10 @@ def verify_release_receipts(
         raise ReleaseChainError(
             f"release must have exactly {' and '.join(spec.anchors)} receipt paths"
         )
+    if anchor_observer is not None:
+        # Shared stateful filename objects across roles must yield one
+        # pathname; the memoized rewrite asks each object exactly once.
+        spec = _normalized_spec(spec)
     receipt_times = {
         tsa: verify_receipt(
             manifest_digest,
@@ -1059,10 +1078,42 @@ def _exact_filename(filename: Any) -> str:
     consumer shares this single normalization — and the forced built-in str
     strips subclasses whose overridden methods could diverge between
     hashing, sorting, and encoding.
+
+    Applied only on observing paths: default-mode joins consume the raw
+    configured values exactly as they always have (including parts-based
+    PurePath joining), so non-observing behavior never changes.
     """
 
     decoded = os.fsdecode(filename)
     return decoded if type(decoded) is str else str.__str__(decoded)
+
+
+def _normalized_spec(spec: ChainSpec) -> ChainSpec:
+    """Rewrite a spec's configured filenames to exact built-in strings.
+
+    Memoized by object identity: a single stateful PathLike shared between
+    the producer field and any number of TSA roles is asked for its pathname
+    exactly once, so shared-filename collision detection cannot be defeated
+    by per-role re-invocation. Idempotent — exact strings pass through
+    unchanged.
+    """
+
+    memo: dict[int, str] = {}
+
+    def normalize(filename: Any) -> str:
+        key = id(filename)
+        if key not in memo:
+            memo[key] = _exact_filename(filename)
+        return memo[key]
+
+    return replace(
+        spec,
+        producer_public_key_filename=normalize(spec.producer_public_key_filename),
+        anchors={
+            tsa: replace(anchor, filename=normalize(anchor.filename))
+            for tsa, anchor in spec.anchors.items()
+        },
+    )
 
 
 def _observe_anchor_bytes(
@@ -1127,11 +1178,16 @@ def verify_release_chain(
     digests the anchor bytes at its own read site (OpenSSL calls are then fed
     a private snapshot of those exact bytes), a filename whose bytes differ
     between two consumptions refuses, and the combined digest is documented
-    on _combined_anchor_digest. Off by default: existing callers keep
-    identical verification behavior — the same reads, the same acceptances,
-    the same refusals in the same order with the same messages. The returned
-    object does carry the two new (unset) fields, which is visible to
-    reflection such as ``dataclasses.asdict``.
+    on _combined_anchor_digest. Observing mode consumes each configured
+    filename as the single pathname ``os.fsdecode`` yields for it, asked of
+    the object exactly once per run — a cross-flavour PurePath whose
+    parts-based join would address a different file is consumed by pathname
+    here, by parts in default mode. Off by default: existing callers keep
+    identical verification behavior — the same reads through the same raw
+    configured values, the same acceptances, the same refusals in the same
+    order with the same messages. The returned object does carry the two new
+    (unset) fields, which is visible to reflection such as
+    ``dataclasses.asdict``.
     """
 
     root = root.resolve()
@@ -1159,21 +1215,6 @@ def verify_release_chain(
         raise ReleaseChainError("clock_skew_seconds must be a non-negative integer")
     if type(compute_anchor_set_digest) is not bool:
         raise ReleaseChainError("compute_anchor_set_digest must be a boolean")
-    # Normalize every configured filename exactly once for the whole run:
-    # each PathLike gets one __fspath__ call here, and every downstream join,
-    # observer key, receipt pattern, and the completeness check below reuse
-    # the same plain strings — so no consumer can be shown a different
-    # pathname than another.
-    spec = replace(
-        spec,
-        producer_public_key_filename=_exact_filename(
-            spec.producer_public_key_filename
-        ),
-        anchors={
-            tsa: replace(anchor, filename=_exact_filename(anchor.filename))
-            for tsa, anchor in spec.anchors.items()
-        },
-    )
     anchor_observer: dict[str, str] | None = (
         {} if compute_anchor_set_digest else None
     )
@@ -1183,6 +1224,16 @@ def verify_release_chain(
         if require_chain:
             raise ReleaseChainError("release chain is absent; genesis is required")
         return ChainVerification(())
+
+    if anchor_observer is not None:
+        # Observing only, and only once a chain exists: every configured
+        # filename is normalized exactly once for the whole run — each
+        # PathLike gets one __fspath__ call (memoized by object identity, so
+        # an object shared across roles is asked once), and every downstream
+        # join, observer key, and the completeness check below reuse the
+        # same plain strings. Default mode touches none of this: raw values
+        # flow to the joins exactly as on every earlier release.
+        spec = _normalized_spec(spec)
 
     records: list[ReleaseRecord] = []
     previous_hash: str | None = None

@@ -154,7 +154,7 @@ class VerifyResult:
         role: TSA anchor bytes are code-pinned exactly, while producer
         identity is pinned by SPKI — a byte-different serialization of the
         same producer key verifies and is recorded at its own digest here.
-        None before custody ran.
+        None unless custody completed successfully.
         """
         if self.chain is None:
             return None
@@ -163,7 +163,8 @@ class VerifyResult:
     @property
     def anchor_file_sha256s(self) -> dict[str, str]:
         """The per-file digests behind anchor_set_sha256, keyed by the
-        spec's configured filename strings; empty before custody ran."""
+        spec's configured filename strings; empty unless custody completed
+        successfully."""
         if self.chain is None:
             return {}
         return dict(self.chain.anchor_file_sha256s)

@@ -209,9 +209,11 @@ def test_the_producer_openssl_fallback_uses_a_private_leaf(
     ).read_bytes()
 
     captured: list[str | None] = []
+    fed_pems: list[bytes] = []
 
     def spying_fallback(*args, **kwargs):  # type: ignore[no-untyped-def]
         captured.append(kwargs.get("temporary_public_key_filename"))
+        fed_pems.append(args[2])
 
     monkeypatch.setattr(module, "CRYPTOGRAPHY_AVAILABLE", False)
     monkeypatch.setattr(
@@ -229,6 +231,8 @@ def test_the_producer_openssl_fallback_uses_a_private_leaf(
     )
     assert captured == ["producer-key-snapshot.pem"]
     assert absolute_name in observer
+    # The bytes handed to the fallback are the observed bytes exactly.
+    assert hashlib.sha256(fed_pems[0]).hexdigest() == observer[absolute_name]
 
     # Non-observing mode must keep origin's behavior exactly: the configured
     # name is forwarded as the temporary filename, absolute or not.
@@ -283,6 +287,10 @@ def test_the_producer_openssl_fallback_verifies_while_observing(
         manifests[0].name.replace(".json", ".producer.sig")
     ).read_bytes()
 
+    key_name = spec.chain.producer_public_key_filename
+    expected = hashlib.sha256(
+        (repo / ANCHOR_DIR / key_name).read_bytes()
+    ).hexdigest()
     observer: dict[str, str] = {}
     module.verify_producer_signature_bytes(
         manifest_bytes,
@@ -293,10 +301,6 @@ def test_the_producer_openssl_fallback_verifies_while_observing(
         label="genesis.producer.sig",
         anchor_observer=observer,
     )
-    key_name = spec.chain.producer_public_key_filename
-    expected = hashlib.sha256(
-        (repo / ANCHOR_DIR / key_name).read_bytes()
-    ).hexdigest()
     assert observer == {key_name: expected}
 
     # Non-observing mode keeps the original configured-name behavior.
@@ -404,16 +408,25 @@ def test_pathlike_configurations_traverse_end_to_end(
 
 
 def test_a_stateful_pathlike_gets_exactly_one_pathname_call(
-    repo: pathlib.Path,
+    tmp_path: pathlib.Path,
 ) -> None:
     """The attack round 5 named: a PathLike that answers __fspath__
     differently per call could show one pathname to the join and another to
-    the observer. Normalizing once per run means the object is asked once —
-    every consumer then shares that single answer."""
+    the observer. Normalizing once per run — not once per release — means
+    the object is asked exactly once over a multi-release chain, and every
+    consumer shares that single answer."""
 
     import dataclasses
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    root = tmp_path / "repo"
+    root.mkdir()
+    workspace = tmp_path / "tsa-workspace"
+    build_corpus(root, workspace)
+    corrected = dict(CONTENT)
+    corrected["rules/tax/rate.yaml"] = "name: rate\nvalue: 0.175\n"
+    append_release(root, workspace, content=corrected)
+
+    spec, _ = load_spec(root / "verification/spec.py")
     real_name = spec.chain.producer_public_key_filename
     calls = {"count": 0}
 
@@ -426,11 +439,77 @@ def test_a_stateful_pathlike_gets_exactly_one_pathname_call(
         spec.chain, producer_public_key_filename=TwoFaced()  # type: ignore[arg-type]
     )
     verification = verify_release_chain(
-        repo, spec=chain, compute_anchor_set_digest=True
+        root, spec=chain, compute_anchor_set_digest=True
     )
+    assert len(verification.releases) == 2
     assert calls["count"] == 1
     assert real_name in dict(verification.anchor_file_sha256s)
     assert "reported.pem" not in dict(verification.anchor_file_sha256s)
+
+
+def test_default_mode_keeps_parts_based_purepath_joins(
+    repo: pathlib.Path,
+) -> None:
+    """Origin joins a PurePath filename by its parts (a PureWindowsPath's
+    backslash component splits), and default mode must keep doing exactly
+    that — observing-mode pathname semantics never leak into it."""
+
+    import dataclasses
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    key_name = spec.chain.producer_public_key_filename
+    nested = repo / ANCHOR_DIR / "sub"
+    nested.mkdir()
+    (nested / key_name).write_bytes(
+        (repo / ANCHOR_DIR / key_name).read_bytes()
+    )
+    chain = dataclasses.replace(
+        spec.chain,
+        producer_public_key_filename=pathlib.PureWindowsPath(  # type: ignore[arg-type]
+            f"sub\\{key_name}"
+        ),
+    )
+    # Parts semantics address anchors/sub/<key>; pathname semantics would
+    # address a single "sub\<key>" component that does not exist. Default
+    # mode must verify — proving the raw value still reaches the join.
+    verification = verify_release_chain(repo, spec=chain)
+    assert verification.anchor_set_sha256 is None
+
+
+def test_a_filename_object_shared_across_roles_is_asked_once(
+    repo: pathlib.Path,
+) -> None:
+    """The memoized rewrite: producer and TSA roles sharing one stateful
+    object must collapse to a single pathname answer."""
+
+    from receipt.release_chain import _normalized_spec
+
+    calls = {"count": 0}
+
+    class Shared:
+        def __fspath__(self) -> str:
+            calls["count"] += 1
+            return "shared.pem" if calls["count"] == 1 else "other.pem"
+
+    import dataclasses
+
+    shared = Shared()
+    base, _ = load_spec(repo / "verification/spec.py")
+    base = base.chain
+    chain = dataclasses.replace(
+        base,
+        producer_public_key_filename=shared,  # type: ignore[arg-type]
+        anchors={
+            tsa: dataclasses.replace(anchor, filename=shared)  # type: ignore[arg-type]
+            for tsa, anchor in base.anchors.items()
+        },
+    )
+    normalized = _normalized_spec(chain)
+    assert calls["count"] == 1
+    names = {normalized.producer_public_key_filename} | {
+        anchor.filename for anchor in normalized.anchors.values()
+    }
+    assert names == {"shared.pem"}
 
 
 def test_a_caller_supplied_anchor_directory_still_gets_a_digest(
@@ -608,6 +687,71 @@ def test_the_combined_digest_is_injective_and_filename_agnostic() -> None:
     assert _combined_anchor_digest(
         {halfwidth: digest_b, astral: digest_a}
     ) == hashlib.sha256(expected).hexdigest()
+    # A lone surrogate — what os.fsdecode yields for undecodable bytes in a
+    # filename — encodes as a JSON escape rather than raising.
+    surrogate = {"a\udc80b.pem": digest_a}
+    expected_surrogate = (
+        b'{"a\\udc80b.pem":"' + digest_a.encode() + b'"}'
+    )
+    assert _combined_anchor_digest(surrogate) == hashlib.sha256(
+        expected_surrogate
+    ).hexdigest()
+
+
+def test_a_pathlike_yielding_a_str_subclass_is_normalized_exact() -> None:
+    from receipt.release_chain import _exact_filename
+
+    class Sneaky(str):
+        def encode(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("subclass method must never be reachable")
+
+        __hash__ = None  # type: ignore[assignment]
+
+    class Wrapper:
+        def __fspath__(self) -> str:
+            return Sneaky("anchor.pem")
+
+    normalized = _exact_filename(Wrapper())
+    assert type(normalized) is str
+    assert normalized == "anchor.pem"
+    normalized.encode("ascii")
+
+
+def test_an_empty_optional_chain_asks_no_pathnames(
+    repo: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """require_chain=False on an empty tree returned before touching any
+    configured filename on origin, and still must — even when observing."""
+
+    import dataclasses
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    calls = {"count": 0}
+
+    class Counting:
+        def __init__(self, name: str) -> None:
+            self._name = name
+
+        def __fspath__(self) -> str:
+            calls["count"] += 1
+            return self._name
+
+    chain = dataclasses.replace(
+        spec.chain,
+        producer_public_key_filename=Counting(  # type: ignore[arg-type]
+            spec.chain.producer_public_key_filename
+        ),
+    )
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    verification = verify_release_chain(
+        empty,
+        spec=chain,
+        require_chain=False,
+        compute_anchor_set_digest=True,
+    )
+    assert verification.releases == ()
+    assert calls["count"] == 0
 
 
 def test_verify_result_exposes_the_anchor_set(repo: pathlib.Path) -> None:
