@@ -26,7 +26,7 @@ from receipt.release_chain import (
 )
 from receipt.verify import load_spec, run_verification
 
-from corpus_fixture import build_corpus
+from corpus_fixture import CONTENT, append_release, build_corpus
 
 ANCHOR_DIR = "releases/anchors"
 
@@ -87,7 +87,7 @@ def test_a_verified_chain_names_the_consumed_anchor_set(
     combined, per_file = independent_digests(repo)
     assert verification.anchor_set_sha256 == combined
     assert dict(verification.anchor_file_sha256s) == per_file
-    assert "unrelated.pem" not in verification.anchor_file_sha256s
+    assert "unrelated.pem" not in dict(verification.anchor_file_sha256s)
 
 
 def test_by_default_no_digest_is_computed(repo: pathlib.Path) -> None:
@@ -130,7 +130,7 @@ def test_openssl_is_fed_the_digested_bytes(
     )
 
     assert consumed, "the run must have verified RFC 3161 receipts"
-    reported = set(verification.anchor_file_sha256s.values())
+    reported = set(dict(verification.anchor_file_sha256s).values())
     for path, digest in consumed:
         assert path.resolve().parent != repo_anchor_dir
         assert digest in reported
@@ -183,6 +183,72 @@ def test_the_producer_openssl_fallback_uses_a_private_leaf(
     assert absolute_name in observer
 
 
+def test_a_reserialized_producer_key_is_accepted_and_recorded(
+    repo: pathlib.Path,
+) -> None:
+    """The stated split semantics, pinned: producer identity is SPKI-pinned,
+    so a byte-different serialization of the same key verifies — and the
+    verdict records the serialization that was actually consumed."""
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    key_name = spec.chain.producer_public_key_filename
+    key_path = repo / ANCHOR_DIR / key_name
+    original = key_path.read_bytes()
+    reserialized = original.rstrip(b"\n") + b"\n\n"
+    assert reserialized != original
+    key_path.write_bytes(reserialized)
+
+    verification = verify_release_chain(
+        repo, spec=spec.chain, compute_anchor_set_digest=True
+    )
+    recorded = dict(verification.anchor_file_sha256s)[key_name]
+    assert recorded == hashlib.sha256(reserialized).hexdigest()
+    assert recorded != hashlib.sha256(original).hexdigest()
+
+
+def test_the_producer_openssl_fallback_verifies_while_observing(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fallback path runs for real — the private snapshot leaf must be
+    what OpenSSL consumes, in both observing and non-observing modes."""
+
+    import receipt.release_chain as module
+
+    monkeypatch.setattr(module, "CRYPTOGRAPHY_AVAILABLE", False)
+    spec, _ = load_spec(repo / "verification/spec.py")
+    manifests = sorted((repo / "releases/manifests").glob("*.json"))
+    manifest_bytes = manifests[0].read_bytes()
+    signature = manifests[0].with_name(
+        manifests[0].name.replace(".json", ".producer.sig")
+    ).read_bytes()
+
+    observer: dict[str, str] = {}
+    module.verify_producer_signature_bytes(
+        manifest_bytes,
+        signature,
+        spec=spec.chain,
+        anchor_dir=repo / ANCHOR_DIR,
+        enforce_production_pin=True,
+        label="genesis.producer.sig",
+        anchor_observer=observer,
+    )
+    key_name = spec.chain.producer_public_key_filename
+    expected = hashlib.sha256(
+        (repo / ANCHOR_DIR / key_name).read_bytes()
+    ).hexdigest()
+    assert observer == {key_name: expected}
+
+    # Non-observing mode keeps the original configured-name behavior.
+    module.verify_producer_signature_bytes(
+        manifest_bytes,
+        signature,
+        spec=spec.chain,
+        anchor_dir=repo / ANCHOR_DIR,
+        enforce_production_pin=True,
+        label="genesis.producer.sig",
+    )
+
+
 def test_a_caller_supplied_anchor_directory_still_gets_a_digest(
     repo: pathlib.Path, tmp_path: pathlib.Path
 ) -> None:
@@ -205,8 +271,8 @@ def test_a_caller_supplied_anchor_directory_still_gets_a_digest(
     assert substituted.anchor_set_sha256 == production.anchor_set_sha256
 
 
-def test_the_reported_mapping_cannot_be_mutated(repo: pathlib.Path) -> None:
-    """ChainVerification is frozen; a mutable mapping inside it could drift
+def test_the_reported_pairs_cannot_be_mutated(repo: pathlib.Path) -> None:
+    """ChainVerification is frozen; mutable state inside it could drift
     from the combined digest it backs."""
 
     spec, _ = load_spec(repo / "verification/spec.py")
@@ -214,7 +280,28 @@ def test_the_reported_mapping_cannot_be_mutated(repo: pathlib.Path) -> None:
         repo, spec=spec.chain, compute_anchor_set_digest=True
     )
     with pytest.raises(TypeError):
-        verification.anchor_file_sha256s["x"] = "y"  # type: ignore[index]
+        verification.anchor_file_sha256s[0] = ("x", "y")  # type: ignore[index]
+
+
+def test_chain_verification_stays_reflection_safe(repo: pathlib.Path) -> None:
+    """The 0.5.0 object was hashable, picklable, and asdict-safe; adding the
+    anchor-set fields must not regress that for any mode."""
+
+    import copy
+    import dataclasses
+    import pickle
+
+    from receipt.release_chain import ChainVerification
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    computed = verify_release_chain(
+        repo, spec=spec.chain, compute_anchor_set_digest=True
+    )
+    for verification in (ChainVerification(()), computed):
+        assert dataclasses.asdict(verification) is not None
+        assert copy.deepcopy(verification) == verification
+        assert pickle.loads(pickle.dumps(verification)) == verification
+    hash(ChainVerification(()))
 
 
 def test_bytes_that_change_between_consumptions_refuse() -> None:
@@ -223,6 +310,50 @@ def test_bytes_that_change_between_consumptions_refuse() -> None:
     _observe_anchor_bytes(observer, "root.pem", b"first bytes")
     with pytest.raises(ReleaseChainError, match="changed during verification"):
         _observe_anchor_bytes(observer, "root.pem", b"second bytes")
+
+
+def test_a_mid_run_anchor_change_refuses_end_to_end(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One observer spans releases and roles: over a two-release chain the
+    same anchor is consumed once per release, and bytes that differ between
+    those consumptions refuse — proving the wiring, not just the helper."""
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    workspace = tmp_path / "tsa-workspace"
+    build_corpus(root, workspace)
+    corrected = dict(CONTENT)
+    corrected["rules/tax/rate.yaml"] = "name: rate\nvalue: 0.175\n"
+    append_release(root, workspace, content=corrected)
+
+    spec, _ = load_spec(root / "verification/spec.py")
+    target = sorted(a.filename for a in spec.chain.anchors.values())[0]
+    aside = tmp_path / "anchors-copy"
+    shutil.copytree(root / ANCHOR_DIR, aside)
+
+    reads = {"count": 0}
+    original_read_bytes = pathlib.Path.read_bytes
+
+    def flipping_read_bytes(self: pathlib.Path) -> bytes:
+        data = original_read_bytes(self)
+        if self.name == target and self.parent.name == aside.name:
+            reads["count"] += 1
+            if reads["count"] >= 2:
+                return data + b"# drifted between consumptions\n"
+        return data
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", flipping_read_bytes)
+    with pytest.raises(ReleaseChainError, match="changed during verification"):
+        # The caller-supplied anchor directory turns pins off, so the
+        # observer — not the byte pin — must be what catches the drift.
+        verify_release_chain(
+            root,
+            spec=spec.chain,
+            anchor_dir=aside,
+            compute_anchor_set_digest=True,
+        )
+    assert reads["count"] >= 2, "the run must have consumed the anchor twice"
 
 
 def test_the_combined_digest_is_injective_and_filename_agnostic() -> None:

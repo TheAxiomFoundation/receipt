@@ -27,9 +27,8 @@ import pathlib
 import re
 import subprocess
 import tempfile
-import types
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -135,22 +134,25 @@ class ReleaseRecord:
 @dataclass(frozen=True)
 class ChainVerification:
     releases: tuple[ReleaseRecord, ...]
-    #: One SHA-256 naming the anchor bytes this run consumed — captured at the
-    #: read sites signature and receipt verification actually used, never
-    #: re-read afterward. None when the caller did not request it
+    #: One SHA-256 naming the anchor bytes this run consumed — captured at
+    #: the read sites signature and receipt verification actually used, not
+    #: re-read for that consumption (later releases and roles deliberately
+    #: re-read and re-observe). None when the caller did not request it
     #: (compute_anchor_set_digest=False, the default) or no chain was
     #: verified. Canonical form and the exact claim are documented on
-    #: _combined_anchor_digest. Pin semantics differ by role and are recorded,
-    #: not collapsed: TSA anchor bytes are code-pinned exactly, while producer
-    #: identity is pinned by SPKI — a byte-different serialization of the same
-    #: producer key verifies and is recorded at its own digest.
+    #: _combined_anchor_digest. What the digests establish depends on the
+    #: run's pin mode: with production pins enforced (always true under
+    #: receipt.verify's spanning verifier), TSA anchor bytes are code-pinned
+    #: exactly while producer identity is pinned by SPKI with its
+    #: serialization recorded; with pins off — a caller's own trust choice —
+    #: the mapping records consumed bytes and establishes no pin claim.
     anchor_set_sha256: str | None = None
-    #: The per-file digests behind anchor_set_sha256, keyed by the spec's
-    #: configured filename strings (not resolved path identities). Stored as
-    #: an immutable view so it cannot drift from the combined digest above.
-    anchor_file_sha256s: Mapping[str, str] = field(
-        default_factory=lambda: types.MappingProxyType({})
-    )
+    #: The per-file digests behind anchor_set_sha256 as a sorted tuple of
+    #: (filename, sha256) pairs — immutable and as hashable, picklable, and
+    #: asdict-safe as the rest of this object; ``dict(...)`` it for mapping
+    #: access. Keys are the spec's configured filenames coerced with str()
+    #: (not resolved path identities).
+    anchor_file_sha256s: tuple[tuple[str, str], ...] = ()
 
     @property
     def head(self) -> ReleaseRecord | None:
@@ -1051,6 +1053,9 @@ def _observe_anchor_bytes(
 
     if observer is None:
         return
+    # Coerce so PathLike configurations the older checks tolerate at runtime
+    # (ChainSpec does not enforce its annotations) stay total here too.
+    filename = str(filename)
     digest = sha256_bytes(payload)
     previous = observer.get(filename)
     if previous is not None and previous != digest:
@@ -1241,10 +1246,10 @@ def verify_release_chain(
             require_head_current=not allow_pending_append,
         )
     anchor_set_sha256: str | None = None
-    anchor_file_sha256s: dict[str, str] = {}
+    anchor_file_sha256s: tuple[tuple[str, str], ...] = ()
     if anchor_observer is not None:
-        configured = {spec.producer_public_key_filename} | {
-            anchor.filename for anchor in spec.anchors.values()
+        configured = {str(spec.producer_public_key_filename)} | {
+            str(anchor.filename) for anchor in spec.anchors.values()
         }
         never_consumed = sorted(configured - set(anchor_observer))
         if never_consumed:
@@ -1256,12 +1261,12 @@ def verify_release_chain(
                 "anchor files configured but never consumed by verification: "
                 + ", ".join(never_consumed)
             )
-        anchor_file_sha256s = dict(anchor_observer)
-        anchor_set_sha256 = _combined_anchor_digest(anchor_file_sha256s)
+        anchor_file_sha256s = tuple(sorted(anchor_observer.items()))
+        anchor_set_sha256 = _combined_anchor_digest(dict(anchor_file_sha256s))
     return ChainVerification(
         tuple(records),
         anchor_set_sha256=anchor_set_sha256,
-        anchor_file_sha256s=types.MappingProxyType(anchor_file_sha256s),
+        anchor_file_sha256s=anchor_file_sha256s,
     )
 
 
