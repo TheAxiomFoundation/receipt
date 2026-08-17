@@ -1019,6 +1019,13 @@ def _anchor_set_digests(
         pinned[anchor_spec.filename] = (tsa, anchor_spec.pem_sha256)
     per_file: dict[str, str] = {}
     for filename in sorted(filenames):
+        if "\n" in filename:
+            # The canonical form is newline-delimited; a filename embedding a
+            # newline could make two different sets share one canonical
+            # string, so it is refused rather than encoded.
+            raise ReleaseChainError(
+                f"anchor filename embeds a newline: {filename!r}"
+            )
         path = anchor_dir / filename
         if path.is_symlink() or not path.is_file():
             raise ReleaseChainError(f"missing or non-regular anchor file: {path}")

@@ -138,6 +138,26 @@ def test_a_symlinked_anchor_file_refuses(
         )
 
 
+def test_an_anchor_filename_embedding_a_newline_refuses(
+    repo: pathlib.Path,
+) -> None:
+    """The canonical form is newline-delimited lines; a filename that embeds
+    a newline could let two different sets share one canonical string."""
+
+    import dataclasses
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    tsa = sorted(spec.chain.anchors)[0]
+    anchors = dict(spec.chain.anchors)
+    anchors[tsa] = dataclasses.replace(anchors[tsa], filename="a\nb.pem")
+    chain = dataclasses.replace(spec.chain, anchors=anchors)
+
+    with pytest.raises(ReleaseChainError, match="embeds a newline"):
+        _anchor_set_digests(
+            repo / ANCHOR_DIR, chain, enforce_production_pins=False
+        )
+
+
 def test_a_missing_anchor_file_refuses(repo: pathlib.Path) -> None:
     spec, _ = load_spec(repo / "verification/spec.py")
     (repo / ANCHOR_DIR / spec.chain.producer_public_key_filename).unlink()
