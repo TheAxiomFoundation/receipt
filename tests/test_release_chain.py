@@ -101,6 +101,39 @@ def test_by_default_no_digest_is_computed(repo: pathlib.Path) -> None:
     assert dict(verification.anchor_file_sha256s) == {}
 
 
+def test_observing_adds_no_anchor_reads(built: pathlib.Path, tmp_path: pathlib.Path) -> None:
+    """Default mode reads each anchor exactly as 0.5.0 did (producer key once
+    per release for the signature, each TSA anchor once per receipt for the
+    byte pin); observing must ride those same reads, adding none."""
+
+    import pytest as _pytest
+
+    counts = {}
+    for mode, flag in (("default", False), ("observing", True)):
+        repo = tmp_path / mode
+        shutil.copytree(built, repo, symlinks=True)
+        spec, _ = load_spec(repo / "verification/spec.py")
+        reads = {"count": 0}
+        original_read_bytes = pathlib.Path.read_bytes
+
+        def counting_read_bytes(self: pathlib.Path) -> bytes:
+            if self.parent.name == "anchors":
+                reads["count"] += 1
+            return original_read_bytes(self)
+
+        monkeypatch = _pytest.MonkeyPatch()
+        try:
+            monkeypatch.setattr(pathlib.Path, "read_bytes", counting_read_bytes)
+            verify_release_chain(
+                repo, spec=spec.chain, compute_anchor_set_digest=flag
+            )
+        finally:
+            monkeypatch.undo()
+        counts[mode] = reads["count"]
+    # One release, one producer key, two TSA roles: three reads.
+    assert counts == {"default": 3, "observing": 3}
+
+
 def test_openssl_is_fed_the_digested_bytes(
     repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -134,6 +167,20 @@ def test_openssl_is_fed_the_digested_bytes(
     reported = set(dict(verification.anchor_file_sha256s).values())
     for path, digest in consumed:
         assert path.resolve().parent != repo_anchor_dir
+        assert digest in reported
+
+    # Same property with pins off (a caller-supplied anchor directory):
+    # snapshots, never the caller's directory.
+    aside = repo.parent / "anchors-aside"
+    shutil.copytree(repo / ANCHOR_DIR, aside)
+    consumed.clear()
+    verification = verify_release_chain(
+        repo, spec=spec.chain, anchor_dir=aside, compute_anchor_set_digest=True
+    )
+    reported = set(dict(verification.anchor_file_sha256s).values())
+    assert consumed
+    for path, digest in consumed:
+        assert path.resolve().parent not in (repo_anchor_dir, aside.resolve())
         assert digest in reported
 
 
@@ -263,6 +310,129 @@ def test_the_producer_openssl_fallback_verifies_while_observing(
     )
 
 
+def test_the_in_process_verifier_receives_the_observed_producer_bytes(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The producer digest must describe the bytes the signature check
+    consumed, not merely bytes read near it."""
+
+    import receipt.release_chain as module
+
+    seen: list[bytes] = []
+    real_verify = module._sign.verify_signature_bytes
+
+    def spying_verify(payload, signature, public_key_pem, **kwargs):  # type: ignore[no-untyped-def]
+        seen.append(public_key_pem)
+        return real_verify(payload, signature, public_key_pem, **kwargs)
+
+    monkeypatch.setattr(module._sign, "verify_signature_bytes", spying_verify)
+    spec, _ = load_spec(repo / "verification/spec.py")
+    verification = verify_release_chain(
+        repo, spec=spec.chain, compute_anchor_set_digest=True
+    )
+    key_name = spec.chain.producer_public_key_filename
+    reported = dict(verification.anchor_file_sha256s)[key_name]
+    assert seen, "the run must have verified a producer signature"
+    for pem in seen:
+        assert hashlib.sha256(pem).hexdigest() == reported
+
+
+def test_pins_off_observing_accepts_a_substitute_producer_identity(
+    repo: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """Pins off establishes no pin claim — a re-signed chain under a fresh
+    key verifies against a caller-supplied anchor set, and the verdict
+    records the substitute serialization. A regression that re-enabled the
+    SPKI pin whenever digests are computed would fail here."""
+
+    from receipt.sign import generate_signing_keypair, sign_payload
+
+    private_pem, public_pem = generate_signing_keypair()
+    for manifest in sorted((repo / "releases/manifests").glob("*.json")):
+        signature = manifest.with_name(
+            manifest.name.replace(".json", ".producer.sig")
+        )
+        signature.write_bytes(
+            sign_payload(private_pem, manifest.read_bytes(), domain=b"")
+        )
+    aside = tmp_path / "anchors-substitute"
+    shutil.copytree(repo / ANCHOR_DIR, aside)
+    spec, _ = load_spec(repo / "verification/spec.py")
+    key_name = spec.chain.producer_public_key_filename
+    (aside / key_name).write_bytes(public_pem)
+
+    verification = verify_release_chain(
+        repo, spec=spec.chain, anchor_dir=aside, compute_anchor_set_digest=True
+    )
+    recorded = dict(verification.anchor_file_sha256s)[key_name]
+    assert recorded == hashlib.sha256(public_pem).hexdigest()
+
+
+def test_pathlike_configurations_traverse_end_to_end(
+    repo: pathlib.Path,
+) -> None:
+    """PurePosixPath filenames — runtime-accepted by every older check —
+    must produce the same digest as the equivalent plain-string spec, with
+    exact built-in str keys in the output."""
+
+    import dataclasses
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    plain = verify_release_chain(
+        repo, spec=spec.chain, compute_anchor_set_digest=True
+    )
+    pathlike_chain = dataclasses.replace(
+        spec.chain,
+        producer_public_key_filename=pathlib.PurePosixPath(  # type: ignore[arg-type]
+            spec.chain.producer_public_key_filename
+        ),
+        anchors={
+            tsa: dataclasses.replace(
+                anchor,
+                filename=pathlib.PurePosixPath(anchor.filename),  # type: ignore[arg-type]
+            )
+            for tsa, anchor in spec.chain.anchors.items()
+        },
+    )
+    pathlike = verify_release_chain(
+        repo, spec=pathlike_chain, compute_anchor_set_digest=True
+    )
+    assert pathlike.anchor_set_sha256 == plain.anchor_set_sha256
+    assert pathlike.anchor_file_sha256s == plain.anchor_file_sha256s
+    for name, _digest in pathlike.anchor_file_sha256s:
+        assert type(name) is str
+
+
+def test_a_stateful_pathlike_gets_exactly_one_pathname_call(
+    repo: pathlib.Path,
+) -> None:
+    """The attack round 5 named: a PathLike that answers __fspath__
+    differently per call could show one pathname to the join and another to
+    the observer. Normalizing once per run means the object is asked once —
+    every consumer then shares that single answer."""
+
+    import dataclasses
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    real_name = spec.chain.producer_public_key_filename
+    calls = {"count": 0}
+
+    class TwoFaced:
+        def __fspath__(self) -> str:
+            calls["count"] += 1
+            return real_name if calls["count"] == 1 else "reported.pem"
+
+    chain = dataclasses.replace(
+        spec.chain, producer_public_key_filename=TwoFaced()  # type: ignore[arg-type]
+    )
+    verification = verify_release_chain(
+        repo, spec=chain, compute_anchor_set_digest=True
+    )
+    assert calls["count"] == 1
+    assert real_name in dict(verification.anchor_file_sha256s)
+    assert "reported.pem" not in dict(verification.anchor_file_sha256s)
+
+
 def test_a_caller_supplied_anchor_directory_still_gets_a_digest(
     repo: pathlib.Path, tmp_path: pathlib.Path
 ) -> None:
@@ -314,7 +484,8 @@ def test_chain_verification_stays_reflection_safe(repo: pathlib.Path) -> None:
     computed = verify_release_chain(
         repo, spec=spec.chain, compute_anchor_set_digest=True
     )
-    for verification in (ChainVerification(()), computed):
+    default_mode = verify_release_chain(repo, spec=spec.chain)
+    for verification in (ChainVerification(()), computed, default_mode):
         assert dataclasses.asdict(verification) is not None
         assert copy.deepcopy(verification) == verification
         assert pickle.loads(pickle.dumps(verification)) == verification
@@ -477,7 +648,6 @@ def test_an_absent_chain_names_no_anchor_set(
             empty,
             spec=spec.chain,
             require_chain=False,
-            verify_state=False,
             compute_anchor_set_digest=True,
         )
     finally:

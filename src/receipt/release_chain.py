@@ -29,7 +29,7 @@ import re
 import subprocess
 import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -588,7 +588,11 @@ def verify_producer_signature_bytes(
     """Verify one raw Ed25519 signature over exact manifest bytes."""
 
     key_spec = _sign.ProducerKeySpec(
-        public_key_filename=spec.producer_public_key_filename,
+        # Normalized once, here: the join below, read_producer_public_key's
+        # own join, the observer key, and the fallback's temporary filename
+        # all flow from this one value, so no later __fspath__ call exists
+        # for a stateful PathLike to answer differently.
+        public_key_filename=_exact_filename(spec.producer_public_key_filename),
         spki_sha256=spec.producer_spki_sha256,
     )
     public_key_path = anchor_dir / key_spec.public_key_filename
@@ -760,7 +764,10 @@ def verify_receipt(
     if receipt.is_symlink() or not receipt.is_file():
         raise ReleaseChainError(f"missing or non-regular RFC 3161 receipt: {receipt}")
     anchor_spec = spec.anchors[tsa]
-    anchor = anchor_dir / anchor_spec.filename
+    # One normalization for the join and the observer key alike — a stateful
+    # PathLike gets exactly one __fspath__ call per consumption.
+    anchor_filename = _exact_filename(anchor_spec.filename)
+    anchor = anchor_dir / anchor_filename
     if anchor.is_symlink() or not anchor.is_file():
         raise ReleaseChainError(f"missing or non-regular TSA anchor: {anchor}")
     anchor_bytes: bytes | None = None
@@ -776,7 +783,7 @@ def verify_receipt(
             )
     if anchor_observer is not None:
         assert anchor_bytes is not None
-        _observe_anchor_bytes(anchor_observer, anchor_spec.filename, anchor_bytes)
+        _observe_anchor_bytes(anchor_observer, anchor_filename, anchor_bytes)
 
     with tempfile.TemporaryDirectory(prefix="thesis-release-tsa-") as name:
         temporary = pathlib.Path(name)
@@ -1042,6 +1049,22 @@ def _verify_state_history(
             )
 
 
+def _exact_filename(filename: Any) -> str:
+    """Normalize a configured anchor filename to one exact built-in str.
+
+    ChainSpec does not enforce its annotations, so runtime-accepted values
+    include PathLike objects and str subclasses. os.fsdecode consumes a
+    PathLike through ``__fspath__`` exactly once — a stateful object cannot
+    show one pathname to a path join and another to the observer if every
+    consumer shares this single normalization — and the forced built-in str
+    strips subclasses whose overridden methods could diverge between
+    hashing, sorting, and encoding.
+    """
+
+    decoded = os.fsdecode(filename)
+    return decoded if type(decoded) is str else str.__str__(decoded)
+
+
 def _observe_anchor_bytes(
     observer: dict[str, str] | None, filename: str, payload: bytes
 ) -> None:
@@ -1056,12 +1079,7 @@ def _observe_anchor_bytes(
 
     if observer is None:
         return
-    # Coerce to the pathname the path joins actually consumed: os.fsdecode
-    # goes through __fspath__ for PathLike values (ChainSpec does not enforce
-    # its annotations), where str() could yield an object repr — two roles
-    # naming one file through distinct PathLike objects must collapse to one
-    # key, and the key must be process-stable.
-    filename = os.fsdecode(filename)
+    filename = _exact_filename(filename)
     digest = sha256_bytes(payload)
     previous = observer.get(filename)
     if previous is not None and previous != digest:
@@ -1141,6 +1159,21 @@ def verify_release_chain(
         raise ReleaseChainError("clock_skew_seconds must be a non-negative integer")
     if type(compute_anchor_set_digest) is not bool:
         raise ReleaseChainError("compute_anchor_set_digest must be a boolean")
+    # Normalize every configured filename exactly once for the whole run:
+    # each PathLike gets one __fspath__ call here, and every downstream join,
+    # observer key, receipt pattern, and the completeness check below reuse
+    # the same plain strings — so no consumer can be shown a different
+    # pathname than another.
+    spec = replace(
+        spec,
+        producer_public_key_filename=_exact_filename(
+            spec.producer_public_key_filename
+        ),
+        anchors={
+            tsa: replace(anchor, filename=_exact_filename(anchor.filename))
+            for tsa, anchor in spec.anchors.items()
+        },
+    )
     anchor_observer: dict[str, str] | None = (
         {} if compute_anchor_set_digest else None
     )
@@ -1254,8 +1287,10 @@ def verify_release_chain(
     anchor_set_sha256: str | None = None
     anchor_file_sha256s: tuple[tuple[str, str], ...] = ()
     if anchor_observer is not None:
-        configured = {os.fsdecode(spec.producer_public_key_filename)} | {
-            os.fsdecode(anchor.filename) for anchor in spec.anchors.values()
+        # The spec's filenames were normalized to exact strings at the top of
+        # this function; these are byte-for-byte the observer's keys.
+        configured = {spec.producer_public_key_filename} | {
+            anchor.filename for anchor in spec.anchors.values()
         }
         never_consumed = sorted(configured - set(anchor_observer))
         if never_consumed:
