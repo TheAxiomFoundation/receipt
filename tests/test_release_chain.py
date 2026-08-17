@@ -98,7 +98,7 @@ def test_by_default_no_digest_is_computed(repo: pathlib.Path) -> None:
     spec, _ = load_spec(repo / "verification/spec.py")
     verification = verify_release_chain(repo, spec=spec.chain)
     assert verification.anchor_set_sha256 is None
-    assert dict(verification.anchor_file_sha256s) == {}
+    assert verification.anchor_file_sha256s == ()
 
 
 def test_observing_adds_no_anchor_reads(built: pathlib.Path, tmp_path: pathlib.Path) -> None:
@@ -447,6 +447,115 @@ def test_a_stateful_pathlike_gets_exactly_one_pathname_call(
     assert "reported.pem" not in dict(verification.anchor_file_sha256s)
 
 
+def test_default_mode_fspath_counts_match_origin(
+    repo: pathlib.Path,
+) -> None:
+    """Origin's default-mode joins ask a PathLike for its pathname a fixed
+    number of times per release: twice for the producer key (the diagnostic
+    path and read_producer_public_key's own join) and once per TSA receipt.
+    Observing-mode normalization must not change any of these counts."""
+
+    import dataclasses
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    counts: dict[str, int] = {}
+
+    class Counting:
+        def __init__(self, label: str, name: str) -> None:
+            self._label, self._name = label, name
+
+        def __fspath__(self) -> str:
+            counts[self._label] = counts.get(self._label, 0) + 1
+            return self._name
+
+    chain = dataclasses.replace(
+        spec.chain,
+        producer_public_key_filename=Counting(  # type: ignore[arg-type]
+            "producer", spec.chain.producer_public_key_filename
+        ),
+        anchors={
+            tsa: dataclasses.replace(
+                anchor,
+                filename=Counting(tsa, anchor.filename),  # type: ignore[arg-type]
+            )
+            for tsa, anchor in spec.chain.anchors.items()
+        },
+    )
+    verify_release_chain(repo, spec=chain)
+    tsa_labels = sorted(spec.chain.anchors)
+    assert counts == {"producer": 2, tsa_labels[0]: 1, tsa_labels[1]: 1}
+
+
+def test_standalone_receipts_shared_filename_divergence_refuses(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two TSA roles sharing one stateful filename object, whose bytes
+    change between their consumptions: the standalone entry point's
+    memoized rewrite asks the object once, and the observer — not the
+    later OpenSSL failure — refuses the divergence."""
+
+    import dataclasses
+    import json as _json
+
+    import receipt.release_chain as module
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    first_role = sorted(spec.chain.anchors)[0]
+    shared_name = spec.chain.anchors[first_role].filename
+    calls = {"count": 0}
+
+    class Shared:
+        def __fspath__(self) -> str:
+            calls["count"] += 1
+            return shared_name
+
+    shared = Shared()
+    chain = dataclasses.replace(
+        spec.chain,
+        anchors={
+            tsa: dataclasses.replace(anchor, filename=shared)  # type: ignore[arg-type]
+            for tsa, anchor in spec.chain.anchors.items()
+        },
+    )
+    manifest_path = sorted((repo / "releases/manifests").glob("*.json"))[0]
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = _json.loads(manifest_bytes)
+    digest = hashlib.sha256(manifest_bytes).hexdigest()
+    receipt_paths = {
+        tsa: manifest_path.with_name(
+            manifest_path.name.replace(".json", f".{tsa}.tsr")
+        )
+        for tsa in chain.anchors
+    }
+
+    reads = {"count": 0}
+    original_read_bytes = pathlib.Path.read_bytes
+
+    def flipping_read_bytes(self: pathlib.Path) -> bytes:
+        data = original_read_bytes(self)
+        if self.name == shared_name and self.parent.name == "anchors":
+            reads["count"] += 1
+            if reads["count"] >= 2:
+                return data + b"# diverged between roles\n"
+        return data
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", flipping_read_bytes)
+    observer: dict[str, str] = {}
+    with pytest.raises(ReleaseChainError, match="changed during verification"):
+        module.verify_release_receipts(
+            manifest,
+            digest,
+            receipt_paths,
+            spec=chain,
+            anchor_dir=repo / ANCHOR_DIR,
+            enforce_production_pins=False,
+            clock_skew_seconds=300,
+            anchor_observer=observer,
+        )
+    assert calls["count"] == 1
+    assert reads["count"] == 2
+
+
 def test_default_mode_keeps_parts_based_purepath_joins(
     repo: pathlib.Path,
 ) -> None:
@@ -698,6 +807,23 @@ def test_the_combined_digest_is_injective_and_filename_agnostic() -> None:
     ).hexdigest()
 
 
+def test_tied_utf16_keys_digest_stably_through_the_sorted_pairs() -> None:
+    """An astral scalar and its explicit surrogate pair are distinct keys
+    whose UTF-16 sort keys tie; the chain path fixes their order by sorting
+    pairs with Python string order before digesting, so one key set has one
+    digest regardless of observer insertion order."""
+
+    astral, pair = "\U00010000", "\ud800\udc00"
+    assert astral != pair
+    a = {astral: "ab" * 32, pair: "cd" * 32}
+    b = {pair: "cd" * 32, astral: "ab" * 32}
+    stabilized_a = dict(tuple(sorted(a.items())))
+    stabilized_b = dict(tuple(sorted(b.items())))
+    assert _combined_anchor_digest(stabilized_a) == _combined_anchor_digest(
+        stabilized_b
+    )
+
+
 def test_a_pathlike_yielding_a_str_subclass_is_normalized_exact() -> None:
     from receipt.release_chain import _exact_filename
 
@@ -798,5 +924,5 @@ def test_an_absent_chain_names_no_anchor_set(
         monkeypatch.undo()
     assert verification.releases == ()
     assert verification.anchor_set_sha256 is None
-    assert dict(verification.anchor_file_sha256s) == {}
+    assert verification.anchor_file_sha256s == ()
     assert anchor_reads["count"] == 0

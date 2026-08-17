@@ -6,10 +6,11 @@ producer: each manifest is canonical and content-addressed, every state and
 append digest is recomputed from the current append-only JSONL, every manifest
 has a valid signature from the pinned producer key, and every RFC 3161 receipt
 in the consumer's configured anchor set is verified against its committed trust
-anchor. (Pin enforcement is the default for the spec-resolved anchor
-directory; a caller supplying its own anchor directory is making its own
-trust choice, and verification then establishes signatures against whatever
-material that directory holds.)
+anchor. (Byte-pin enforcement follows the effective pin mode: inferred on
+for the spec-resolved anchor directory and off for a caller-supplied one,
+and independently overrideable in either direction. With pins off,
+verification establishes signatures against whatever material the effective
+anchor directory holds — the caller's own trust choice.)
 
 Extracted nearly verbatim from PolicyEngine/ledger scripts/verify_release_chain.py
 at commit 07984278503b8e06c48c539327f6f1d01c035510 (branch
@@ -916,7 +917,8 @@ def verify_release_receipts(
     if anchor_observer is not None:
         # Shared stateful filename objects across roles must yield one
         # pathname; the memoized rewrite asks each object exactly once.
-        spec = _normalized_spec(spec)
+        # Producer excluded: this function consumes only TSA anchors.
+        spec = _normalized_spec(spec, include_producer=False)
     receipt_times = {
         tsa: verify_receipt(
             manifest_digest,
@@ -1081,21 +1083,33 @@ def _exact_filename(filename: Any) -> str:
 
     Applied only on observing paths: default-mode joins consume the raw
     configured values exactly as they always have (including parts-based
-    PurePath joining), so non-observing behavior never changes.
+    PurePath joining), so non-observing behavior never changes. Observing
+    mode's stated filename domain is ``str | os.PathLike`` — an exotic
+    object that default-mode joins would accept through ``__rtruediv__``
+    alone has no pathname to digest under, and refuses here rather than
+    escaping as a TypeError.
     """
 
-    decoded = os.fsdecode(filename)
+    try:
+        decoded = os.fsdecode(filename)
+    except TypeError as exc:
+        raise ReleaseChainError(
+            "anchor filenames must be str or os.PathLike when the anchor-set "
+            f"digest is computed; got {type(filename).__name__}"
+        ) from exc
     return decoded if type(decoded) is str else str.__str__(decoded)
 
 
-def _normalized_spec(spec: ChainSpec) -> ChainSpec:
+def _normalized_spec(spec: ChainSpec, *, include_producer: bool = True) -> ChainSpec:
     """Rewrite a spec's configured filenames to exact built-in strings.
 
     Memoized by object identity: a single stateful PathLike shared between
     the producer field and any number of TSA roles is asked for its pathname
     exactly once, so shared-filename collision detection cannot be defeated
     by per-role re-invocation. Idempotent — exact strings pass through
-    unchanged.
+    unchanged. A caller that consumes only TSA anchors (standalone receipt
+    verification) passes ``include_producer=False`` so an irrelevant
+    producer filename is neither touched nor able to refuse.
     """
 
     memo: dict[int, str] = {}
@@ -1106,14 +1120,21 @@ def _normalized_spec(spec: ChainSpec) -> ChainSpec:
             memo[key] = _exact_filename(filename)
         return memo[key]
 
-    return replace(
+    normalized = replace(
         spec,
-        producer_public_key_filename=normalize(spec.producer_public_key_filename),
         anchors={
             tsa: replace(anchor, filename=normalize(anchor.filename))
             for tsa, anchor in spec.anchors.items()
         },
     )
+    if include_producer:
+        normalized = replace(
+            normalized,
+            producer_public_key_filename=normalize(
+                spec.producer_public_key_filename
+            ),
+        )
+    return normalized
 
 
 def _observe_anchor_bytes(
@@ -1153,6 +1174,13 @@ def _combined_anchor_digest(per_file: Mapping[str, str]) -> str:
     same file differently (``key.pem`` against ``./key.pem``) produce
     different mappings by design, because the mapping commits to the
     configuration, not to resolved path identity.
+
+    One ordering edge, stated for completeness: canonical JSON sorts keys by
+    UTF-16 code units, where a key holding an astral scalar ties with a
+    distinct key holding its explicit surrogate pair, leaving their relative
+    order to the mapping's insertion order. The chain result is immune —
+    its pairs are sorted by Python string order before this digest is taken,
+    fixing one insertion order for any key set.
     """
 
     return canonical_sha256(dict(per_file))
