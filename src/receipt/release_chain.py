@@ -1103,13 +1103,18 @@ def _exact_filename(filename: Any) -> str:
             f"digest is computed; got {type(filename).__name__}"
         )
     try:
+        # Both steps inside the boundary: a hostile __fspath__ can raise
+        # anything, and a bytes subclass whose decode() returns a non-string
+        # makes the exact-string conversion itself raise. The refusal message
+        # is built from type names alone — an exception whose own __str__
+        # raises must not be able to leak a second exception from here.
         decoded = os.fsdecode(filename)
+        return decoded if type(decoded) is str else str.__str__(decoded)
     except Exception as exc:  # noqa: BLE001 - any failure here is a refusal
         raise ReleaseChainError(
             "anchor filename could not be decoded to a pathname: "
-            f"{type(filename).__name__}: {exc}"
+            f"{type(filename).__name__} ({type(exc).__name__})"
         ) from exc
-    return decoded if type(decoded) is str else str.__str__(decoded)
 
 
 def _normalized_spec(spec: ChainSpec, *, include_producer: bool = True) -> ChainSpec:
@@ -1186,9 +1191,10 @@ def _combined_anchor_digest(per_file: Mapping[str, str]) -> str:
 
     SHA-256 over the receipt-canonical JSON object mapping each configured
     anchor filename to the SHA-256 of the bytes verification consumed for it.
-    Canonical JSON is an injective encoding of that mapping for any filename
-    strings, so — up to SHA-256 collision resistance — two runs share this
-    value only if their filename-to-consumed-bytes mappings were identical.
+    Canonical JSON is an injective encoding of that mapping for any accepted
+    filename strings, so — up to SHA-256 collision resistance — two runs
+    share this value only if their filename-to-consumed-bytes mappings were
+    identical.
     The keys are the spec's configured filename strings: specs that name the
     same file differently (``key.pem`` against ``./key.pem``) produce
     different mappings by design, because the mapping commits to the

@@ -868,6 +868,28 @@ def test_out_of_domain_filenames_refuse_cleanly() -> None:
     with pytest.raises(ReleaseChainError, match="could not be decoded"):
         _exact_filename(Exploding())
 
+    class DecodesToNonsense(bytes):
+        def decode(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            return 42
+
+    class PathLikeToHostileBytes:
+        def __fspath__(self) -> str:
+            return DecodesToNonsense(b"x.pem")  # type: ignore[return-value]
+
+    with pytest.raises(ReleaseChainError, match="could not be decoded"):
+        _exact_filename(PathLikeToHostileBytes())
+
+    class Unprintable(Exception):
+        def __str__(self) -> str:
+            raise RuntimeError("even the message is hostile")
+
+    class RaisesUnprintable:
+        def __fspath__(self) -> str:
+            raise Unprintable()
+
+    with pytest.raises(ReleaseChainError, match="could not be decoded"):
+        _exact_filename(RaisesUnprintable())
+
 
 def test_a_lazy_spec_mapping_cannot_alias_through_id_reuse(
     repo: pathlib.Path,
@@ -1095,3 +1117,31 @@ def test_module_version_matches_project_metadata() -> None:
     )
     assert declared is not None
     assert receipt.__version__ == declared.group(1)
+
+
+def test_pin_inference_follows_resolution_not_spelling(
+    repo: pathlib.Path,
+) -> None:
+    """A caller-supplied anchor directory that merely spells the default
+    directory differently still resolves equal, so pin inference keeps
+    enforcement on — proven by the pin refusal firing through the alternate
+    spelling once an anchor byte is flipped."""
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    spelled = repo / ANCHOR_DIR / ".." / "anchors"
+    verification = verify_release_chain(
+        repo, spec=spec.chain, anchor_dir=spelled, compute_anchor_set_digest=True
+    )
+    assert verification.anchor_set_sha256 is not None
+
+    target = sorted(a.filename for a in spec.chain.anchors.values())[0]
+    data = bytearray((repo / ANCHOR_DIR / target).read_bytes())
+    data[len(data) // 2] ^= 0x01
+    (repo / ANCHOR_DIR / target).write_bytes(bytes(data))
+    with pytest.raises(ReleaseChainError, match="not code-pinned"):
+        verify_release_chain(
+            repo,
+            spec=spec.chain,
+            anchor_dir=spelled,
+            compute_anchor_set_digest=True,
+        )
