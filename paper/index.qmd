@@ -3,7 +3,7 @@ title: "receipt: verifiable custody of agent-produced records"
 author:
   - name: Max Ghenis
     affiliations:
-      - name: the Axiom Foundation
+      - name: Axiom Foundation
 date: 2026-08-14
 date-format: iso
 kicker: working paper
