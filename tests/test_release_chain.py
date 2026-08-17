@@ -86,7 +86,8 @@ def test_a_verified_chain_names_the_consumed_anchor_set(
     )
     combined, per_file = independent_digests(repo)
     assert verification.anchor_set_sha256 == combined
-    assert dict(verification.anchor_file_sha256s) == per_file
+    # The exact public shape: a sorted tuple of pairs, not any mapping-like.
+    assert verification.anchor_file_sha256s == tuple(sorted(per_file.items()))
     assert "unrelated.pem" not in dict(verification.anchor_file_sha256s)
 
 
@@ -181,6 +182,19 @@ def test_the_producer_openssl_fallback_uses_a_private_leaf(
     )
     assert captured == ["producer-key-snapshot.pem"]
     assert absolute_name in observer
+
+    # Non-observing mode must keep origin's behavior exactly: the configured
+    # name is forwarded as the temporary filename, absolute or not.
+    captured.clear()
+    module.verify_producer_signature_bytes(
+        manifest_bytes,
+        signature,
+        spec=chain,
+        anchor_dir=repo / ANCHOR_DIR,
+        enforce_production_pin=False,
+        label="0000.producer.sig",
+    )
+    assert captured == [absolute_name]
 
 
 def test_a_reserialized_producer_key_is_accepted_and_recorded(
@@ -284,8 +298,11 @@ def test_the_reported_pairs_cannot_be_mutated(repo: pathlib.Path) -> None:
 
 
 def test_chain_verification_stays_reflection_safe(repo: pathlib.Path) -> None:
-    """The 0.5.0 object was hashable, picklable, and asdict-safe; adding the
-    anchor-set fields must not regress that for any mode."""
+    """Adding the anchor-set fields must not tighten 0.5.0's reflection
+    contract: asdict, deepcopy, and pickle work in every mode, and the
+    empty result stays hashable. (A populated result was already unhashable
+    on 0.5.0 through ReleaseRecord's dictionaries — the new fields must not
+    be what makes anything unhashable.)"""
 
     import copy
     import dataclasses
@@ -302,6 +319,13 @@ def test_chain_verification_stays_reflection_safe(repo: pathlib.Path) -> None:
         assert copy.deepcopy(verification) == verification
         assert pickle.loads(pickle.dumps(verification)) == verification
     hash(ChainVerification(()))
+    hash(
+        ChainVerification(
+            (),
+            anchor_set_sha256="ab" * 32,
+            anchor_file_sha256s=(("a.pem", "cd" * 32),),
+        )
+    )
 
 
 def test_bytes_that_change_between_consumptions_refuse() -> None:
@@ -312,12 +336,39 @@ def test_bytes_that_change_between_consumptions_refuse() -> None:
         _observe_anchor_bytes(observer, "root.pem", b"second bytes")
 
 
+def test_pathlike_filenames_key_by_consumed_pathname() -> None:
+    """A custom PathLike names the file through __fspath__; str() could be a
+    repr. Two roles naming one file through distinct PathLike objects must
+    collapse to one observer key — the consumed pathname."""
+
+    from receipt.release_chain import _observe_anchor_bytes as observe
+
+    class Configured:
+        def __init__(self, pathname: str) -> None:
+            self._pathname = pathname
+
+        def __fspath__(self) -> str:
+            return self._pathname
+
+        def __repr__(self) -> str:  # deliberately address-like
+            return f"<Configured at {id(self):#x}>"
+
+    observer: dict[str, str] = {}
+    observe(observer, Configured("shared.pem"), b"bytes")  # type: ignore[arg-type]
+    observe(observer, Configured("shared.pem"), b"bytes")  # type: ignore[arg-type]
+    assert set(observer) == {"shared.pem"}
+    with pytest.raises(ReleaseChainError, match="changed during verification"):
+        observe(observer, Configured("shared.pem"), b"other")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("role", ["tsa-anchor", "producer-key"])
 def test_a_mid_run_anchor_change_refuses_end_to_end(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    role: str, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One observer spans releases and roles: over a two-release chain the
-    same anchor is consumed once per release, and bytes that differ between
-    those consumptions refuse — proving the wiring, not just the helper."""
+    """One observer spans releases and roles: over a two-release chain each
+    anchor file is consumed once per release, and bytes that differ between
+    those consumptions refuse — proving the wiring for both consumption
+    sites, not just the helper."""
 
     root = tmp_path / "repo"
     root.mkdir()
@@ -328,7 +379,10 @@ def test_a_mid_run_anchor_change_refuses_end_to_end(
     append_release(root, workspace, content=corrected)
 
     spec, _ = load_spec(root / "verification/spec.py")
-    target = sorted(a.filename for a in spec.chain.anchors.values())[0]
+    if role == "tsa-anchor":
+        target = sorted(a.filename for a in spec.chain.anchors.values())[0]
+    else:
+        target = spec.chain.producer_public_key_filename
     aside = tmp_path / "anchors-copy"
     shutil.copytree(root / ANCHOR_DIR, aside)
 
@@ -406,13 +460,29 @@ def test_an_absent_chain_names_no_anchor_set(
     spec, _ = load_spec(repo / "verification/spec.py")
     empty = tmp_path / "empty"
     empty.mkdir()
-    verification = verify_release_chain(
-        empty,
-        spec=spec.chain,
-        require_chain=False,
-        verify_state=False,
-        compute_anchor_set_digest=True,
-    )
+    anchor_reads = {"count": 0}
+    original_read_bytes = pathlib.Path.read_bytes
+
+    def counting_read_bytes(self: pathlib.Path) -> bytes:
+        if self.parent.name == "anchors":
+            anchor_reads["count"] += 1
+        return original_read_bytes(self)
+
+    import pytest as _pytest
+
+    monkeypatch = _pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(pathlib.Path, "read_bytes", counting_read_bytes)
+        verification = verify_release_chain(
+            empty,
+            spec=spec.chain,
+            require_chain=False,
+            verify_state=False,
+            compute_anchor_set_digest=True,
+        )
+    finally:
+        monkeypatch.undo()
     assert verification.releases == ()
     assert verification.anchor_set_sha256 is None
     assert dict(verification.anchor_file_sha256s) == {}
+    assert anchor_reads["count"] == 0

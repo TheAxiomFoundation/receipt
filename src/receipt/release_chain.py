@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -148,10 +149,12 @@ class ChainVerification:
     #: the mapping records consumed bytes and establishes no pin claim.
     anchor_set_sha256: str | None = None
     #: The per-file digests behind anchor_set_sha256 as a sorted tuple of
-    #: (filename, sha256) pairs — immutable and as hashable, picklable, and
-    #: asdict-safe as the rest of this object; ``dict(...)`` it for mapping
-    #: access. Keys are the spec's configured filenames coerced with str()
-    #: (not resolved path identities).
+    #: (filename, sha256) pairs — immutable, and adding no hashability or
+    #: reflection constraint beyond 0.5.0's (the empty result stays hashable;
+    #: a populated result was already unhashable through ReleaseRecord's
+    #: dictionaries). ``dict(...)`` it for mapping access. Keys are the
+    #: spec's configured filenames coerced with os.fsdecode — the pathname
+    #: the path joins consumed, not resolved path identities.
     anchor_file_sha256s: tuple[tuple[str, str], ...] = ()
 
     @property
@@ -1053,9 +1056,12 @@ def _observe_anchor_bytes(
 
     if observer is None:
         return
-    # Coerce so PathLike configurations the older checks tolerate at runtime
-    # (ChainSpec does not enforce its annotations) stay total here too.
-    filename = str(filename)
+    # Coerce to the pathname the path joins actually consumed: os.fsdecode
+    # goes through __fspath__ for PathLike values (ChainSpec does not enforce
+    # its annotations), where str() could yield an object repr — two roles
+    # naming one file through distinct PathLike objects must collapse to one
+    # key, and the key must be process-stable.
+    filename = os.fsdecode(filename)
     digest = sha256_bytes(payload)
     previous = observer.get(filename)
     if previous is not None and previous != digest:
@@ -1248,8 +1254,8 @@ def verify_release_chain(
     anchor_set_sha256: str | None = None
     anchor_file_sha256s: tuple[tuple[str, str], ...] = ()
     if anchor_observer is not None:
-        configured = {str(spec.producer_public_key_filename)} | {
-            str(anchor.filename) for anchor in spec.anchors.values()
+        configured = {os.fsdecode(spec.producer_public_key_filename)} | {
+            os.fsdecode(anchor.filename) for anchor in spec.anchors.values()
         }
         never_consumed = sorted(configured - set(anchor_observer))
         if never_consumed:
