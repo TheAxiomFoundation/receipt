@@ -1090,12 +1090,19 @@ def _exact_filename(filename: Any) -> str:
     escaping as a TypeError.
     """
 
-    try:
-        decoded = os.fsdecode(filename)
-    except TypeError as exc:
+    if not isinstance(filename, (str, os.PathLike)):
+        # Exactly the stated domain: bare bytes, which os.fsdecode would
+        # happily decode, are refused along with everything else.
         raise ReleaseChainError(
             "anchor filenames must be str or os.PathLike when the anchor-set "
             f"digest is computed; got {type(filename).__name__}"
+        )
+    try:
+        decoded = os.fsdecode(filename)
+    except (TypeError, ValueError) as exc:
+        raise ReleaseChainError(
+            "anchor filename could not be decoded to a pathname: "
+            f"{type(filename).__name__}: {exc}"
         ) from exc
     return decoded if type(decoded) is str else str.__str__(decoded)
 
@@ -1112,13 +1119,20 @@ def _normalized_spec(spec: ChainSpec, *, include_producer: bool = True) -> Chain
     producer filename is neither touched nor able to refuse.
     """
 
-    memo: dict[int, str] = {}
+    # The memo retains each filename object beside its pathname: an id is
+    # only reusable after its object is collected, and a retained object is
+    # never collected while the rewrite runs — so a lazy spec mapping that
+    # materializes fresh filename objects per access cannot alias an earlier
+    # entry through id reuse. The identity comparison is then exact.
+    memo: dict[int, tuple[Any, str]] = {}
 
     def normalize(filename: Any) -> str:
-        key = id(filename)
-        if key not in memo:
-            memo[key] = _exact_filename(filename)
-        return memo[key]
+        entry = memo.get(id(filename))
+        if entry is not None and entry[0] is filename:
+            return entry[1]
+        pathname = _exact_filename(filename)
+        memo[id(filename)] = (filename, pathname)
+        return pathname
 
     normalized = replace(
         spec,
@@ -1175,14 +1189,23 @@ def _combined_anchor_digest(per_file: Mapping[str, str]) -> str:
     different mappings by design, because the mapping commits to the
     configuration, not to resolved path identity.
 
-    One ordering edge, stated for completeness: canonical JSON sorts keys by
-    UTF-16 code units, where a key holding an astral scalar ties with a
-    distinct key holding its explicit surrogate pair, leaving their relative
-    order to the mapping's insertion order. The chain result is immune —
-    its pairs are sorted by Python string order before this digest is taken,
-    fixing one insertion order for any key set.
+    One edge is refused rather than encoded: a key holding an astral scalar
+    and a distinct key holding its explicit surrogate pair are different
+    Python strings but one and the same JSON string, so a verdict containing
+    both could never be faithfully reported or reconstructed from JSON
+    output. Their UTF-16 code units — the canonical key sort — are where
+    they collide, and that collision is the refusal condition.
     """
 
+    from receipt.canonical import utf16_sort_key
+
+    sort_keys = [utf16_sort_key(name) for name in per_file]
+    if len(set(sort_keys)) != len(sort_keys):
+        raise ReleaseChainError(
+            "two configured anchor filenames are distinct in Python but "
+            "identical as JSON strings; the verdict cannot report them "
+            "faithfully"
+        )
     return canonical_sha256(dict(per_file))
 
 

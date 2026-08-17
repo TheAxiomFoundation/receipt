@@ -807,21 +807,81 @@ def test_the_combined_digest_is_injective_and_filename_agnostic() -> None:
     ).hexdigest()
 
 
-def test_tied_utf16_keys_digest_stably_through_the_sorted_pairs() -> None:
-    """An astral scalar and its explicit surrogate pair are distinct keys
-    whose UTF-16 sort keys tie; the chain path fixes their order by sorting
-    pairs with Python string order before digesting, so one key set has one
-    digest regardless of observer insertion order."""
+def test_python_distinct_but_json_identical_keys_refuse() -> None:
+    """An astral scalar and its explicit surrogate pair are distinct Python
+    strings but one and the same JSON string — a verdict containing both
+    could never be faithfully reported or reconstructed from --json, so the
+    digest refuses rather than encoding an ambiguity."""
 
     astral, pair = "\U00010000", "\ud800\udc00"
     assert astral != pair
-    a = {astral: "ab" * 32, pair: "cd" * 32}
-    b = {pair: "cd" * 32, astral: "ab" * 32}
-    stabilized_a = dict(tuple(sorted(a.items())))
-    stabilized_b = dict(tuple(sorted(b.items())))
-    assert _combined_anchor_digest(stabilized_a) == _combined_anchor_digest(
-        stabilized_b
+    with pytest.raises(ReleaseChainError, match="identical as JSON strings"):
+        _combined_anchor_digest({astral: "ab" * 32, pair: "cd" * 32})
+
+
+def test_out_of_domain_filenames_refuse_cleanly() -> None:
+    """The observing-mode domain is exactly str | os.PathLike: bare bytes
+    (which os.fsdecode would happily decode) and malformed PathLike objects
+    refuse with the package's own error, never an escaping TypeError."""
+
+    from receipt.release_chain import _exact_filename
+
+    with pytest.raises(ReleaseChainError, match="must be str or os.PathLike"):
+        _exact_filename(b"anchor.pem")
+
+    class Malformed:
+        def __fspath__(self) -> str:
+            return 42  # type: ignore[return-value]
+
+    with pytest.raises(ReleaseChainError, match="could not be decoded"):
+        _exact_filename(Malformed())
+
+
+def test_a_lazy_spec_mapping_cannot_alias_through_id_reuse(
+    repo: pathlib.Path,
+) -> None:
+    """The memo retains each filename object: a mapping that materializes
+    fresh filename objects on every access cannot have an early object
+    collected mid-rewrite and its id reused for a different filename."""
+
+    import dataclasses
+    from collections.abc import Mapping as MappingABC
+
+    from receipt.release_chain import _normalized_spec
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    base_anchors = dict(spec.chain.anchors)
+    roles = {f"role{i:03d}": f"anchor-{i:03d}.pem" for i in range(200)}
+
+    class FreshName:
+        def __init__(self, name: str) -> None:
+            self._name = name
+
+        def __fspath__(self) -> str:
+            return self._name
+
+    template = next(iter(base_anchors.values()))
+
+    class LazyAnchors(MappingABC):
+        def __getitem__(self, tsa: str):  # fresh objects per access
+            return dataclasses.replace(
+                template, filename=FreshName(roles[tsa])  # type: ignore[arg-type]
+            )
+
+        def __iter__(self):
+            return iter(roles)
+
+        def __len__(self) -> int:
+            return len(roles)
+
+    chain = dataclasses.replace(
+        spec.chain, anchors=LazyAnchors()  # type: ignore[arg-type]
     )
+    normalized = _normalized_spec(chain, include_producer=False)
+    observed = {
+        tsa: anchor.filename for tsa, anchor in normalized.anchors.items()
+    }
+    assert observed == roles
 
 
 def test_a_pathlike_yielding_a_str_subclass_is_normalized_exact() -> None:
@@ -926,3 +986,80 @@ def test_an_absent_chain_names_no_anchor_set(
     assert verification.anchor_set_sha256 is None
     assert verification.anchor_file_sha256s == ()
     assert anchor_reads["count"] == 0
+
+
+def test_standalone_receipts_never_touch_the_producer_filename(
+    repo: pathlib.Path,
+) -> None:
+    """verify_release_receipts consumes only TSA anchors; a producer
+    filename that would refuse normalization must be neither asked nor able
+    to fail the call."""
+
+    import dataclasses
+    import json as _json
+
+    import receipt.release_chain as module
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    chain = dataclasses.replace(
+        spec.chain,
+        producer_public_key_filename=b"not-in-domain",  # type: ignore[arg-type]
+    )
+    manifest_path = sorted((repo / "releases/manifests").glob("*.json"))[0]
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = _json.loads(manifest_bytes)
+    digest = hashlib.sha256(manifest_bytes).hexdigest()
+    receipt_paths = {
+        tsa: manifest_path.with_name(
+            manifest_path.name.replace(".json", f".{tsa}.tsr")
+        )
+        for tsa in chain.anchors
+    }
+    observer: dict[str, str] = {}
+    times = module.verify_release_receipts(
+        manifest,
+        digest,
+        receipt_paths,
+        spec=chain,
+        anchor_dir=repo / ANCHOR_DIR,
+        enforce_production_pins=True,
+        clock_skew_seconds=300,
+        anchor_observer=observer,
+    )
+    assert set(times) == set(chain.anchors)
+    assert set(observer) == {
+        anchor.filename for anchor in spec.chain.anchors.values()
+    }
+
+
+def test_verify_result_accessors_before_custody() -> None:
+    from receipt.verify import VerifyResult
+
+    result = VerifyResult(
+        spec_name="x",
+        spec_path=pathlib.Path("spec.py"),
+        spec_sha256="ab" * 32,
+        root=pathlib.Path("."),
+        receipt_version="0.0.0",
+        producer_spki_sha256="cd" * 32,
+        passes=(),
+        chain=None,
+        corpus=None,
+    )
+    assert result.anchor_set_sha256 is None
+    assert result.anchor_file_sha256s == {}
+
+
+def test_module_version_matches_project_metadata() -> None:
+    import re
+
+    import receipt
+
+    pyproject = (
+        pathlib.Path(receipt.__file__).resolve().parents[2] / "pyproject.toml"
+    ).read_text()
+    declared = re.search(
+        r'^version = "([^"]+)"', pyproject, flags=re.MULTILINE
+    )
+    assert declared is not None
+    assert receipt.__version__ == declared.group(1)
