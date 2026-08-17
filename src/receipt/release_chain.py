@@ -33,7 +33,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from receipt import sign as _sign
-from receipt.canonical import canonical_bytes
+from receipt.canonical import canonical_bytes, canonical_sha256
 
 # One availability gate for the whole package: producer-signature verification
 # lives in receipt.sign, and this module's only remaining cryptography use is
@@ -134,12 +134,15 @@ class ReleaseRecord:
 @dataclass(frozen=True)
 class ChainVerification:
     releases: tuple[ReleaseRecord, ...]
-    #: SHA-256 over the resolved anchor set the run trusted, so a verdict can
-    #: name which anchors were in force — None only when no chain was verified
-    #: (an absent chain consults no anchors). Canonical form and the exact
-    #: claim are documented on _anchor_set_digests.
+    #: One SHA-256 naming the anchor bytes this run consumed — captured at the
+    #: read sites signature and receipt verification actually used, never
+    #: re-read afterward. None when the caller did not request it
+    #: (compute_anchor_set_digest=False, the default) or no chain was
+    #: verified. Canonical form and the exact claim are documented on
+    #: _combined_anchor_digest.
     anchor_set_sha256: str | None = None
-    #: Per-file digests behind anchor_set_sha256, keyed by anchor filename.
+    #: The per-file digests behind anchor_set_sha256, keyed by the spec's
+    #: configured filename strings (not resolved path identities).
     anchor_file_sha256s: Mapping[str, str] = field(default_factory=dict)
 
     @property
@@ -568,6 +571,7 @@ def verify_producer_signature_bytes(
     anchor_dir: pathlib.Path,
     enforce_production_pin: bool,
     label: str,
+    anchor_observer: dict[str, str] | None = None,
 ) -> None:
     """Verify one raw Ed25519 signature over exact manifest bytes."""
 
@@ -581,6 +585,11 @@ def verify_producer_signature_bytes(
         # refuse before a missing producer-key path is inspected.
         _sign._validate_signature_inputs(manifest, signature, label)
         public_key_pem = _sign.read_producer_public_key(anchor_dir, key_spec)
+        # These exact bytes feed both verification branches below, so the
+        # observed digest is the digest of the key material actually used.
+        _observe_anchor_bytes(
+            anchor_observer, key_spec.public_key_filename, public_key_pem
+        )
         if not CRYPTOGRAPHY_AVAILABLE:
             _sign._verify_producer_signature_with_openssl(
                 manifest,
@@ -613,6 +622,7 @@ def verify_producer_signature(
     spec: ChainSpec,
     anchor_dir: pathlib.Path,
     enforce_production_pin: bool,
+    anchor_observer: dict[str, str] | None = None,
 ) -> None:
     if signature_path.is_symlink() or not signature_path.is_file():
         raise ReleaseChainError(
@@ -625,6 +635,7 @@ def verify_producer_signature(
         anchor_dir=anchor_dir,
         enforce_production_pin=enforce_production_pin,
         label=signature_path.name,
+        anchor_observer=anchor_observer,
     )
 
 
@@ -717,6 +728,7 @@ def verify_receipt(
     anchor_dir: pathlib.Path,
     enforce_production_pins: bool,
     now: datetime | None = None,
+    anchor_observer: dict[str, str] | None = None,
 ) -> datetime:
     """Cryptographically verify one receipt and return its signed genTime."""
 
@@ -729,19 +741,36 @@ def verify_receipt(
     anchor = anchor_dir / anchor_spec.filename
     if anchor.is_symlink() or not anchor.is_file():
         raise ReleaseChainError(f"missing or non-regular TSA anchor: {anchor}")
+    anchor_bytes: bytes | None = None
+    if enforce_production_pins or anchor_observer is not None:
+        anchor_bytes = anchor.read_bytes()
     if enforce_production_pins:
-        anchor_digest = sha256_bytes(anchor.read_bytes())
+        assert anchor_bytes is not None
+        anchor_digest = sha256_bytes(anchor_bytes)
         if anchor_digest != anchor_spec.pem_sha256:
             raise ReleaseChainError(
                 f"production TSA anchor bytes are not code-pinned for {tsa}: "
                 f"{anchor_digest}"
             )
+    if anchor_observer is not None:
+        assert anchor_bytes is not None
+        _observe_anchor_bytes(anchor_observer, anchor_spec.filename, anchor_bytes)
 
     with tempfile.TemporaryDirectory(prefix="thesis-release-tsa-") as name:
         temporary = pathlib.Path(name)
         empty_ca_dir = temporary / "empty-ca"
         empty_ca_dir.mkdir()
         environment = _openssl_environment(empty_ca_dir)
+        # When observing, OpenSSL must consume exactly the bytes that were
+        # just digested — not whatever the anchor path holds by the time each
+        # subprocess independently reopens it — so the snapshot is written
+        # into this run's private directory and used as the trust anchor for
+        # every OpenSSL call below.
+        if anchor_observer is not None:
+            assert anchor_bytes is not None
+            snapshot = temporary / f"anchor-{tsa}.pem"
+            snapshot.write_bytes(anchor_bytes)
+            anchor = snapshot
         try:
             text_result = subprocess.run(
                 [
@@ -832,6 +861,7 @@ def verify_release_receipts(
     clock_skew_seconds: int,
     previous_times: dict[str, datetime] | None = None,
     now: datetime | None = None,
+    anchor_observer: dict[str, str] | None = None,
 ) -> dict[str, datetime]:
     """Verify both receipts and their chronology for one manifest."""
 
@@ -848,6 +878,7 @@ def verify_release_receipts(
             anchor_dir=anchor_dir,
             enforce_production_pins=enforce_production_pins,
             now=now,
+            anchor_observer=anchor_observer,
         )
         for tsa, receipt_path in receipt_paths.items()
     }
@@ -989,61 +1020,45 @@ def _verify_state_history(
             )
 
 
-def _anchor_set_digests(
-    anchor_dir: pathlib.Path,
-    spec: ChainSpec,
-    *,
-    enforce_production_pins: bool,
-) -> tuple[str, dict[str, str]]:
-    """Digest the resolved anchor set so the verdict can name it.
+def _observe_anchor_bytes(
+    observer: dict[str, str] | None, filename: str, payload: bytes
+) -> None:
+    """Record the digest of anchor bytes at the moment verification consumes
+    them.
 
-    The set is every file custody verification trusts from the resolved anchor
-    directory: the producer public key and each TSA anchor PEM. The canonical
-    form is one ``"{filename} {sha256}\\n"`` line per file, sorted by filename,
-    digested as ASCII — two verdicts carry the same value exactly when the
-    anchor sets they ran against were byte-identical.
-
-    This runs only after every extracted check has passed, so it never changes
-    which refusal a broken tree produces. The files are re-read here; when
-    production pins are enforced, each TSA anchor's digest is re-checked
-    against its code pin, so bytes that changed between use and this read are
-    a refusal rather than a misreport. The producer key has no byte pin — its
-    trust identity is the SPKI, pinned and verified at use time and reported
-    beside this digest — so its entry records the PEM bytes as found.
+    One filename must resolve to one byte sequence for the whole run —
+    including two TSA roles that share a filename. A later read that disagrees
+    is a mid-run change and refuses, rather than letting the verdict report
+    bytes the run did not uniformly use.
     """
 
-    filenames = {spec.producer_public_key_filename}
-    pinned: dict[str, tuple[str, str]] = {}
-    for tsa, anchor_spec in spec.anchors.items():
-        filenames.add(anchor_spec.filename)
-        pinned[anchor_spec.filename] = (tsa, anchor_spec.pem_sha256)
-    per_file: dict[str, str] = {}
-    for filename in sorted(filenames):
-        if "\n" in filename:
-            # The canonical form is newline-delimited; a filename embedding a
-            # newline could make two different sets share one canonical
-            # string, so it is refused rather than encoded.
-            raise ReleaseChainError(
-                f"anchor filename embeds a newline: {filename!r}"
-            )
-        path = anchor_dir / filename
-        if path.is_symlink() or not path.is_file():
-            raise ReleaseChainError(f"missing or non-regular anchor file: {path}")
-        digest = sha256_bytes(path.read_bytes())
-        if enforce_production_pins and filename in pinned:
-            tsa, expected = pinned[filename]
-            if digest != expected:
-                raise ReleaseChainError(
-                    f"TSA anchor bytes for {tsa} changed after verification: "
-                    f"{digest} is not the code-pinned {expected}"
-                )
-        per_file[filename] = digest
-    combined = hashlib.sha256(
-        "".join(
-            f"{filename} {digest}\n" for filename, digest in sorted(per_file.items())
-        ).encode("ascii")
-    ).hexdigest()
-    return combined, per_file
+    if observer is None:
+        return
+    digest = sha256_bytes(payload)
+    previous = observer.get(filename)
+    if previous is not None and previous != digest:
+        raise ReleaseChainError(
+            f"anchor file {filename!r} bytes changed during verification: "
+            f"{digest} after {previous}"
+        )
+    observer[filename] = digest
+
+
+def _combined_anchor_digest(per_file: Mapping[str, str]) -> str:
+    """One digest naming a whole consumed anchor set.
+
+    SHA-256 over the receipt-canonical JSON object mapping each configured
+    anchor filename to the SHA-256 of the bytes verification consumed for it.
+    Canonical JSON is an injective encoding of that mapping for any filename
+    strings, so — up to SHA-256 collision resistance — two runs share this
+    value only if their filename-to-consumed-bytes mappings were identical.
+    The keys are the spec's configured filename strings: specs that name the
+    same file differently (``key.pem`` against ``./key.pem``) produce
+    different mappings by design, because the mapping commits to the
+    configuration, not to resolved path identity.
+    """
+
+    return canonical_sha256(dict(per_file))
 
 
 def verify_release_chain(
@@ -1057,8 +1072,19 @@ def verify_release_chain(
     enforce_production_pins: bool | None = None,
     clock_skew_seconds: int = DEFAULT_CLOCK_SKEW_SECONDS,
     now: datetime | None = None,
+    compute_anchor_set_digest: bool = False,
 ) -> ChainVerification:
-    """Verify all manifests, signatures, receipts, links, and state bytes."""
+    """Verify all manifests, signatures, receipts, links, and state bytes.
+
+    With ``compute_anchor_set_digest=True`` the result additionally names the
+    anchor set the run consumed: every signature and receipt verification
+    digests the anchor bytes at its own read site (OpenSSL calls are then fed
+    a private snapshot of those exact bytes), a filename whose bytes differ
+    between two consumptions refuses, and the combined digest is documented
+    on _combined_anchor_digest. Off by default: existing callers keep
+    byte-for-byte identical behavior, including which refusal a broken tree
+    produces.
+    """
 
     root = root.resolve()
     default_anchor_dir = root / spec.anchor_relative
@@ -1083,6 +1109,11 @@ def verify_release_chain(
         enforce_production_pins = selected_anchors == default_anchor_dir.resolve()
     if type(clock_skew_seconds) is not int or clock_skew_seconds < 0:
         raise ReleaseChainError("clock_skew_seconds must be a non-negative integer")
+    if type(compute_anchor_set_digest) is not bool:
+        raise ReleaseChainError("compute_anchor_set_digest must be a boolean")
+    anchor_observer: dict[str, str] | None = (
+        {} if compute_anchor_set_digest else None
+    )
 
     enumerated = _enumerate_manifest_files(root, spec)
     if not enumerated:
@@ -1126,6 +1157,7 @@ def verify_release_chain(
             spec=spec,
             anchor_dir=selected_anchors,
             enforce_production_pin=enforce_production_pins,
+            anchor_observer=anchor_observer,
         )
         if records:
             previous_line_count = records[-1].manifest["state"]["lineCount"]
@@ -1159,6 +1191,7 @@ def verify_release_chain(
             clock_skew_seconds=clock_skew_seconds,
             previous_times=previous_times,
             now=verification_now,
+            anchor_observer=anchor_observer,
         )
 
         records.append(
@@ -1188,9 +1221,24 @@ def verify_release_chain(
             spec=spec,
             require_head_current=not allow_pending_append,
         )
-    anchor_set_sha256, anchor_file_sha256s = _anchor_set_digests(
-        selected_anchors, spec, enforce_production_pins=enforce_production_pins
-    )
+    anchor_set_sha256: str | None = None
+    anchor_file_sha256s: dict[str, str] = {}
+    if anchor_observer is not None:
+        configured = {spec.producer_public_key_filename} | {
+            anchor.filename for anchor in spec.anchors.values()
+        }
+        never_consumed = sorted(configured - set(anchor_observer))
+        if never_consumed:
+            # Unreachable with a non-empty chain — every release verifies the
+            # producer signature and every configured receipt — but a digest
+            # that silently omitted a configured anchor would misname the set,
+            # so the invariant is enforced rather than assumed.
+            raise ReleaseChainError(
+                "anchor files configured but never consumed by verification: "
+                + ", ".join(never_consumed)
+            )
+        anchor_file_sha256s = dict(anchor_observer)
+        anchor_set_sha256 = _combined_anchor_digest(anchor_file_sha256s)
     return ChainVerification(
         tuple(records),
         anchor_set_sha256=anchor_set_sha256,

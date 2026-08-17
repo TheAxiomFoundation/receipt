@@ -124,16 +124,24 @@ def test_json_output_marks_gates_as_not_re_run(
 
 
 def anchor_set_recomputed(repo: pathlib.Path) -> tuple[str, dict[str, str]]:
-    """The recomputation an auditor would script, sharing no package code."""
+    """The recomputation an auditor would script, sharing no package code:
+    hash the spec-configured anchor files, then SHA-256 the compact
+    sorted-key JSON of the mapping (receipt-canonical JSON for these
+    ASCII filenames)."""
 
+    spec, _ = load_spec(repo / "verification/spec.py")
+    names = {
+        spec.chain.producer_public_key_filename,
+        *(anchor.filename for anchor in spec.chain.anchors.values()),
+    }
     per_file = {
-        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in (repo / "releases/anchors").iterdir()
+        name: hashlib.sha256(
+            (repo / "releases/anchors" / name).read_bytes()
+        ).hexdigest()
+        for name in names
     }
     combined = hashlib.sha256(
-        "".join(
-            f"{name} {digest}\n" for name, digest in sorted(per_file.items())
-        ).encode("ascii")
+        json.dumps(per_file, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     return combined, per_file
 
@@ -141,8 +149,8 @@ def anchor_set_recomputed(repo: pathlib.Path) -> tuple[str, dict[str, str]]:
 def test_the_json_verdict_names_the_anchor_set_in_force(
     repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """receipt#24: an auditor confirms from the verdict alone which anchor set
-    custody ran against — production anchors, not a substituted set."""
+    """receipt#24: an auditor confirms from the verdict alone which anchor
+    bytes custody consumed — production anchors, not a substituted set."""
 
     assert run(repo, "--json") == EXIT_OK
     payload = json.loads(capsys.readouterr().out)
