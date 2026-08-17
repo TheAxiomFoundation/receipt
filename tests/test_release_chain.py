@@ -104,29 +104,117 @@ def test_openssl_is_fed_the_digested_bytes(
     repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The digest describes bytes OpenSSL actually consumed: every -CAfile
-    the run passes must be a private snapshot, never the repository path a
-    concurrent writer could swap between the hash and the subprocess."""
+    the run passes must be a private snapshot — never the repository path a
+    concurrent writer could swap between the hash and the subprocess — and
+    the snapshot's bytes at call time must hash to the digest the verdict
+    reports for that anchor."""
 
     import receipt.release_chain as module
 
     repo_anchor_dir = (repo / ANCHOR_DIR).resolve()
-    ca_files: list[pathlib.Path] = []
+    consumed: list[tuple[pathlib.Path, str]] = []
     real_run = subprocess.run
 
     def spying_run(arguments, *args, **kwargs):  # type: ignore[no-untyped-def]
         if isinstance(arguments, list) and "-CAfile" in arguments:
-            ca_files.append(
-                pathlib.Path(arguments[arguments.index("-CAfile") + 1])
+            path = pathlib.Path(arguments[arguments.index("-CAfile") + 1])
+            consumed.append(
+                (path, hashlib.sha256(path.read_bytes()).hexdigest())
             )
         return real_run(arguments, *args, **kwargs)
 
     monkeypatch.setattr(module.subprocess, "run", spying_run)
     spec, _ = load_spec(repo / "verification/spec.py")
-    verify_release_chain(repo, spec=spec.chain, compute_anchor_set_digest=True)
+    verification = verify_release_chain(
+        repo, spec=spec.chain, compute_anchor_set_digest=True
+    )
 
-    assert ca_files, "the run must have verified RFC 3161 receipts"
-    for path in ca_files:
+    assert consumed, "the run must have verified RFC 3161 receipts"
+    reported = set(verification.anchor_file_sha256s.values())
+    for path, digest in consumed:
         assert path.resolve().parent != repo_anchor_dir
+        assert digest in reported
+
+
+def test_the_producer_openssl_fallback_uses_a_private_leaf(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A configured producer filename that is absolute would survive the
+    temporary-directory join in the OpenSSL fallback and hand the original
+    path to the subprocess. When observing, the temporary name must be a
+    fixed private leaf regardless of configuration."""
+
+    import dataclasses
+
+    import receipt.release_chain as module
+    from receipt import sign as sign_module
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    absolute_name = str((repo / ANCHOR_DIR / "producer-ed25519.pub").resolve())
+    chain = dataclasses.replace(
+        spec.chain, producer_public_key_filename=absolute_name
+    )
+    manifests = sorted((repo / "releases/manifests").glob("*.json"))
+    manifest_bytes = manifests[0].read_bytes()
+    signature = manifests[0].with_name(
+        manifests[0].name.replace(".json", ".producer.sig")
+    ).read_bytes()
+
+    captured: list[str | None] = []
+
+    def spying_fallback(*args, **kwargs):  # type: ignore[no-untyped-def]
+        captured.append(kwargs.get("temporary_public_key_filename"))
+
+    monkeypatch.setattr(module, "CRYPTOGRAPHY_AVAILABLE", False)
+    monkeypatch.setattr(
+        sign_module, "_verify_producer_signature_with_openssl", spying_fallback
+    )
+    observer: dict[str, str] = {}
+    module.verify_producer_signature_bytes(
+        manifest_bytes,
+        signature,
+        spec=chain,
+        anchor_dir=repo / ANCHOR_DIR,
+        enforce_production_pin=False,
+        label="0000.producer.sig",
+        anchor_observer=observer,
+    )
+    assert captured == ["producer-key-snapshot.pem"]
+    assert absolute_name in observer
+
+
+def test_a_caller_supplied_anchor_directory_still_gets_a_digest(
+    repo: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """Pins off (the caller's own trust choice), digest still computed —
+    and byte-identical anchor material yields the production digest, since
+    the mapping commits to configured names and consumed bytes, not paths."""
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    production = verify_release_chain(
+        repo, spec=spec.chain, compute_anchor_set_digest=True
+    )
+    aside = tmp_path / "anchors-copy"
+    shutil.copytree(repo / ANCHOR_DIR, aside)
+    substituted = verify_release_chain(
+        repo,
+        spec=spec.chain,
+        anchor_dir=aside,
+        compute_anchor_set_digest=True,
+    )
+    assert substituted.anchor_set_sha256 == production.anchor_set_sha256
+
+
+def test_the_reported_mapping_cannot_be_mutated(repo: pathlib.Path) -> None:
+    """ChainVerification is frozen; a mutable mapping inside it could drift
+    from the combined digest it backs."""
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    verification = verify_release_chain(
+        repo, spec=spec.chain, compute_anchor_set_digest=True
+    )
+    with pytest.raises(TypeError):
+        verification.anchor_file_sha256s["x"] = "y"  # type: ignore[index]
 
 
 def test_bytes_that_change_between_consumptions_refuse() -> None:
@@ -151,6 +239,19 @@ def test_the_combined_digest_is_injective_and_filename_agnostic() -> None:
     # filename domain the older checks accepted.
     exotic = {"ключ\nанкер .pem": digest_a}
     assert _combined_anchor_digest(exotic) == canonical_sha256(exotic)
+    # And the canonical rule is pinned against an independently hand-built
+    # encoding for the case where key orders diverge: canonical JSON sorts
+    # keys by UTF-16 code units, so an astral-plane key (surrogates D800…)
+    # precedes U+FF61 even though its code point is higher. A drift to
+    # code-point ordering (plain sort_keys) would flip these keys.
+    astral, halfwidth = "\U00010000k", "｡k"
+    expected = (
+        b'{"' + astral.encode() + b'":"' + digest_a.encode()
+        + b'","' + halfwidth.encode() + b'":"' + digest_b.encode() + b'"}'
+    )
+    assert _combined_anchor_digest(
+        {halfwidth: digest_b, astral: digest_a}
+    ) == hashlib.sha256(expected).hexdigest()
 
 
 def test_verify_result_exposes_the_anchor_set(repo: pathlib.Path) -> None:

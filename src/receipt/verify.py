@@ -150,7 +150,11 @@ class VerifyResult:
 
         Captured at the read sites signature and receipt verification used
         (OpenSSL is fed a snapshot of those exact bytes), under this
-        command's unconditional production pins. None before custody ran.
+        command's unconditional production pins. Pin semantics differ by
+        role: TSA anchor bytes are code-pinned exactly, while producer
+        identity is pinned by SPKI — a byte-different serialization of the
+        same producer key verifies and is recorded at its own digest here.
+        None before custody ran.
         """
         if self.chain is None:
             return None
@@ -241,7 +245,11 @@ def _custody_detail(verification: ChainVerification, spec: VerificationSpec) -> 
     return (
         f"{len(verification.releases)} release(s), HEAD {head.path.name}; "
         f"producer SPKI {spec.chain.producer_spki_sha256[:16]}…; "
-        f"anchor set {anchor_set[:16]}…; "
+        # Full digest, deliberately: the anchor-set digest exists so an
+        # assessment can quote it from the verdict alone, and unlike the
+        # SPKI it is pinned nowhere else. A prefix would not be quotable
+        # evidence.
+        f"anchor set {anchor_set}; "
         f"witnesses {witnesses}"
     )
 

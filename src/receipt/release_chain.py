@@ -27,6 +27,7 @@ import pathlib
 import re
 import subprocess
 import tempfile
+import types
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -139,11 +140,17 @@ class ChainVerification:
     #: re-read afterward. None when the caller did not request it
     #: (compute_anchor_set_digest=False, the default) or no chain was
     #: verified. Canonical form and the exact claim are documented on
-    #: _combined_anchor_digest.
+    #: _combined_anchor_digest. Pin semantics differ by role and are recorded,
+    #: not collapsed: TSA anchor bytes are code-pinned exactly, while producer
+    #: identity is pinned by SPKI — a byte-different serialization of the same
+    #: producer key verifies and is recorded at its own digest.
     anchor_set_sha256: str | None = None
     #: The per-file digests behind anchor_set_sha256, keyed by the spec's
-    #: configured filename strings (not resolved path identities).
-    anchor_file_sha256s: Mapping[str, str] = field(default_factory=dict)
+    #: configured filename strings (not resolved path identities). Stored as
+    #: an immutable view so it cannot drift from the combined digest above.
+    anchor_file_sha256s: Mapping[str, str] = field(
+        default_factory=lambda: types.MappingProxyType({})
+    )
 
     @property
     def head(self) -> ReleaseRecord | None:
@@ -591,12 +598,22 @@ def verify_producer_signature_bytes(
             anchor_observer, key_spec.public_key_filename, public_key_pem
         )
         if not CRYPTOGRAPHY_AVAILABLE:
+            # When observing, the temporary key file must be a private leaf:
+            # a configured filename that is absolute would survive the
+            # temporary-directory join and hand OpenSSL (and the write
+            # before it) the original path, breaking the snapshot guarantee
+            # the observed digest depends on.
+            temporary_key_name = (
+                "producer-key-snapshot.pem"
+                if anchor_observer is not None
+                else key_spec.public_key_filename
+            )
             _sign._verify_producer_signature_with_openssl(
                 manifest,
                 signature,
                 public_key_pem,
                 public_key_filename=str(public_key_path),
-                temporary_public_key_filename=key_spec.public_key_filename,
+                temporary_public_key_filename=temporary_key_name,
                 spki_sha256=(
                     key_spec.spki_sha256 if enforce_production_pin else None
                 ),
@@ -1082,8 +1099,10 @@ def verify_release_chain(
     a private snapshot of those exact bytes), a filename whose bytes differ
     between two consumptions refuses, and the combined digest is documented
     on _combined_anchor_digest. Off by default: existing callers keep
-    byte-for-byte identical behavior, including which refusal a broken tree
-    produces.
+    identical verification behavior — the same reads, the same acceptances,
+    the same refusals in the same order with the same messages. The returned
+    object does carry the two new (unset) fields, which is visible to
+    reflection such as ``dataclasses.asdict``.
     """
 
     root = root.resolve()
@@ -1242,7 +1261,7 @@ def verify_release_chain(
     return ChainVerification(
         tuple(records),
         anchor_set_sha256=anchor_set_sha256,
-        anchor_file_sha256s=anchor_file_sha256s,
+        anchor_file_sha256s=types.MappingProxyType(anchor_file_sha256s),
     )
 
 

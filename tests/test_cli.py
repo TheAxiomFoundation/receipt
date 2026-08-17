@@ -150,7 +150,8 @@ def test_the_json_verdict_names_the_anchor_set_in_force(
     repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """receipt#24: an auditor confirms from the verdict alone which anchor
-    bytes custody consumed — production anchors, not a substituted set."""
+    bytes custody consumed. TSA anchors are byte-pinned; producer identity
+    is SPKI-pinned, so its entry records the serialization that verified."""
 
     assert run(repo, "--json") == EXIT_OK
     payload = json.loads(capsys.readouterr().out)
@@ -159,13 +160,16 @@ def test_the_json_verdict_names_the_anchor_set_in_force(
     assert payload["chain"]["anchorFiles"] == per_file
 
 
-def test_the_text_verdict_names_the_anchor_set_in_force(
+def test_the_text_verdict_carries_the_full_anchor_set_digest(
     repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """The digest exists to be quoted from the verdict alone, and it is
+    pinned nowhere else — a prefix would not be quotable evidence."""
+
     combined, _ = anchor_set_recomputed(repo)
     assert run(repo) == EXIT_OK
     out = capsys.readouterr().out
-    assert f"anchor set {combined[:16]}…" in out
+    assert f"anchor set {combined}" in out
 
 
 def test_a_gate_that_did_not_run_is_shouted_not_hidden(
