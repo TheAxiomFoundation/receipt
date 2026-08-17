@@ -144,6 +144,31 @@ class VerifyResult:
             return None
         return self.chain.head.path.name
 
+    @property
+    def anchor_set_sha256(self) -> str | None:
+        """One digest naming the anchor bytes custody consumed.
+
+        Captured at the read sites signature and receipt verification used
+        (OpenSSL is fed a snapshot of those exact bytes), under this
+        command's unconditional production pins. Pin semantics differ by
+        role: TSA anchor bytes are code-pinned exactly, while producer
+        identity is pinned by SPKI — a byte-different serialization of the
+        same producer key verifies and is recorded at its own digest here.
+        None unless custody completed successfully.
+        """
+        if self.chain is None:
+            return None
+        return self.chain.anchor_set_sha256
+
+    @property
+    def anchor_file_sha256s(self) -> dict[str, str]:
+        """The per-file digests behind anchor_set_sha256, keyed by the
+        spec's configured filename strings; empty unless custody completed
+        successfully."""
+        if self.chain is None:
+            return {}
+        return dict(self.chain.anchor_file_sha256s)
+
     def witness_times(self) -> dict[str, datetime]:
         if self.chain is None or self.chain.head is None:
             return {}
@@ -216,9 +241,16 @@ def _custody_detail(verification: ChainVerification, spec: VerificationSpec) -> 
         f"{anchor} {value.strftime('%Y-%m-%dT%H:%M:%SZ')}"
         for anchor, value in sorted(head.receipt_times.items())
     )
+    anchor_set = verification.anchor_set_sha256
+    assert anchor_set is not None
     return (
         f"{len(verification.releases)} release(s), HEAD {head.path.name}; "
         f"producer SPKI {spec.chain.producer_spki_sha256[:16]}…; "
+        # Full digest, deliberately: the anchor-set digest exists so an
+        # assessment can quote it from the verdict alone, and unlike the
+        # SPKI it is pinned nowhere else. A prefix would not be quotable
+        # evidence.
+        f"anchor set {anchor_set}; "
         f"witnesses {witnesses}"
     )
 
@@ -325,6 +357,10 @@ def run_verification(
             # auditors, and its pins are on unconditionally regardless of
             # how the anchor path resolves on this machine.
             enforce_production_pins=True,
+            # The verdict names the anchor bytes this run consumed, so an
+            # auditor can confirm from the verdict alone which trust
+            # material was in force (receipt#24).
+            compute_anchor_set_digest=True,
         )
         custody_detail = _custody_detail(chain, spec)
     except Exception as exc:  # noqa: BLE001 - any failure is a FAIL verdict
@@ -433,6 +469,11 @@ def result_to_dict(result: VerifyResult) -> dict[str, Any]:
             "head": result.chain.head.path.name,
             "headSha256": result.chain.head.sha256,
             "producerSpkiSha256": result.producer_spki_sha256,
+            # Which anchor bytes this run consumed, from the verdict alone:
+            # digests captured at the verification read sites themselves,
+            # with the per-file digests behind the combined one (receipt#24).
+            "anchorSetSha256": result.chain.anchor_set_sha256,
+            "anchorFiles": dict(result.chain.anchor_file_sha256s),
             "witnesses": {
                 anchor: value.strftime("%Y-%m-%dT%H:%M:%SZ")
                 for anchor, value in sorted(result.chain.head.receipt_times.items())

@@ -6,31 +6,40 @@ producer: each manifest is canonical and content-addressed, every state and
 append digest is recomputed from the current append-only JSONL, every manifest
 has a valid signature from the pinned producer key, and every RFC 3161 receipt
 in the consumer's configured anchor set is verified against its committed trust
-anchor.
+anchor. (Byte-pin enforcement follows the effective pin mode: when not set
+explicitly, it is inferred on exactly when the effective anchor directory
+resolves to the spec's own, and independently overrideable in either
+direction. With pins off, verification establishes signatures against
+whatever material the effective anchor directory holds — the caller's own
+trust choice.)
 
 Extracted nearly verbatim from PolicyEngine/ledger scripts/verify_release_chain.py
 at commit 07984278503b8e06c48c539327f6f1d01c035510 (branch
 codex/thesis-ledger-facts); see receipts/ledger-pin-source-hashes.txt. The only
 intended change is parameterization: every repo-specific constant moved into
 ChainSpec, supplied by the consumer's committed code. Behavior is gated by the
-differential harness in tests/test_ledger_equivalence.py.
+differential harness in tests/test_ledger_equivalence.py. Additions since the
+extraction (the base-ref history pass, the anchor-set digest in the result) run
+beside the extracted checks without altering any of their refusals, and carry
+their own tests.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
 import re
 import subprocess
 import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from receipt import sign as _sign
-from receipt.canonical import canonical_bytes
+from receipt.canonical import canonical_bytes, canonical_sha256
 
 # One availability gate for the whole package: producer-signature verification
 # lives in receipt.sign, and this module's only remaining cryptography use is
@@ -50,6 +59,10 @@ STRICT_UTC_RE = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:"
     r"[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z\Z"
 )
+# A well-formed surrogate pair spelled explicitly inside a Python string:
+# JSON parsing rewrites it into the astral character, so a filename carrying
+# one could never be reproduced from JSON output (see _combined_anchor_digest).
+_SURROGATE_PAIR_RE = re.compile("[\ud800-\udbff][\udc00-\udfff]")
 TIME_STAMP_RE = re.compile(
     r"(?P<month>[A-Z][a-z]{2})\s+"
     r"(?P<day>[0-9]{1,2})\s+"
@@ -131,6 +144,27 @@ class ReleaseRecord:
 @dataclass(frozen=True)
 class ChainVerification:
     releases: tuple[ReleaseRecord, ...]
+    #: One SHA-256 naming the anchor bytes this run consumed — captured at
+    #: the read sites signature and receipt verification actually used, not
+    #: re-read for that consumption (later releases and roles deliberately
+    #: re-read and re-observe). None when the caller did not request it
+    #: (compute_anchor_set_digest=False, the default) or no chain was
+    #: verified. Canonical form and the exact claim are documented on
+    #: _combined_anchor_digest. What the digests establish depends on the
+    #: run's pin mode: with production pins enforced (always true under
+    #: receipt.verify's spanning verifier), TSA anchor bytes are code-pinned
+    #: exactly while producer identity is pinned by SPKI with its
+    #: serialization recorded; with pins off — a caller's own trust choice —
+    #: the mapping records consumed bytes and establishes no pin claim.
+    anchor_set_sha256: str | None = None
+    #: The per-file digests behind anchor_set_sha256 as a sorted tuple of
+    #: (filename, sha256) pairs — immutable, and adding no hashability or
+    #: reflection constraint beyond 0.5.0's (the empty result stays hashable;
+    #: a populated result was already unhashable through ReleaseRecord's
+    #: dictionaries). ``dict(...)`` it for mapping access. Keys are the
+    #: spec's configured filenames coerced with os.fsdecode — the pathname
+    #: the path joins consumed, not resolved path identities.
+    anchor_file_sha256s: tuple[tuple[str, str], ...] = ()
 
     @property
     def head(self) -> ReleaseRecord | None:
@@ -558,11 +592,22 @@ def verify_producer_signature_bytes(
     anchor_dir: pathlib.Path,
     enforce_production_pin: bool,
     label: str,
+    anchor_observer: dict[str, str] | None = None,
 ) -> None:
     """Verify one raw Ed25519 signature over exact manifest bytes."""
 
     key_spec = _sign.ProducerKeySpec(
-        public_key_filename=spec.producer_public_key_filename,
+        # When observing, normalized once here: the join below,
+        # read_producer_public_key's own join, the observer key, and the
+        # fallback's temporary filename all flow from this one value, so no
+        # later __fspath__ call exists for a stateful PathLike to answer
+        # differently. When not observing, the raw configured value flows
+        # exactly as it always has.
+        public_key_filename=(
+            _exact_filename(spec.producer_public_key_filename)
+            if anchor_observer is not None
+            else spec.producer_public_key_filename
+        ),
         spki_sha256=spec.producer_spki_sha256,
     )
     public_key_path = anchor_dir / key_spec.public_key_filename
@@ -571,13 +616,28 @@ def verify_producer_signature_bytes(
         # refuse before a missing producer-key path is inspected.
         _sign._validate_signature_inputs(manifest, signature, label)
         public_key_pem = _sign.read_producer_public_key(anchor_dir, key_spec)
+        # These exact bytes feed both verification branches below, so the
+        # observed digest is the digest of the key material actually used.
+        _observe_anchor_bytes(
+            anchor_observer, key_spec.public_key_filename, public_key_pem
+        )
         if not CRYPTOGRAPHY_AVAILABLE:
+            # When observing, the temporary key file must be a private leaf:
+            # a configured filename that is absolute would survive the
+            # temporary-directory join and hand OpenSSL (and the write
+            # before it) the original path, breaking the snapshot guarantee
+            # the observed digest depends on.
+            temporary_key_name = (
+                "producer-key-snapshot.pem"
+                if anchor_observer is not None
+                else key_spec.public_key_filename
+            )
             _sign._verify_producer_signature_with_openssl(
                 manifest,
                 signature,
                 public_key_pem,
                 public_key_filename=str(public_key_path),
-                temporary_public_key_filename=key_spec.public_key_filename,
+                temporary_public_key_filename=temporary_key_name,
                 spki_sha256=(
                     key_spec.spki_sha256 if enforce_production_pin else None
                 ),
@@ -603,6 +663,7 @@ def verify_producer_signature(
     spec: ChainSpec,
     anchor_dir: pathlib.Path,
     enforce_production_pin: bool,
+    anchor_observer: dict[str, str] | None = None,
 ) -> None:
     if signature_path.is_symlink() or not signature_path.is_file():
         raise ReleaseChainError(
@@ -615,6 +676,7 @@ def verify_producer_signature(
         anchor_dir=anchor_dir,
         enforce_production_pin=enforce_production_pin,
         label=signature_path.name,
+        anchor_observer=anchor_observer,
     )
 
 
@@ -707,6 +769,7 @@ def verify_receipt(
     anchor_dir: pathlib.Path,
     enforce_production_pins: bool,
     now: datetime | None = None,
+    anchor_observer: dict[str, str] | None = None,
 ) -> datetime:
     """Cryptographically verify one receipt and return its signed genTime."""
 
@@ -716,22 +779,48 @@ def verify_receipt(
     if receipt.is_symlink() or not receipt.is_file():
         raise ReleaseChainError(f"missing or non-regular RFC 3161 receipt: {receipt}")
     anchor_spec = spec.anchors[tsa]
-    anchor = anchor_dir / anchor_spec.filename
+    # When observing: one normalization for the join and the observer key
+    # alike — a stateful PathLike gets exactly one __fspath__ call per
+    # consumption. When not observing: the raw configured value joins
+    # exactly as it always has.
+    anchor_filename = (
+        _exact_filename(anchor_spec.filename)
+        if anchor_observer is not None
+        else anchor_spec.filename
+    )
+    anchor = anchor_dir / anchor_filename
     if anchor.is_symlink() or not anchor.is_file():
         raise ReleaseChainError(f"missing or non-regular TSA anchor: {anchor}")
+    anchor_bytes: bytes | None = None
+    if enforce_production_pins or anchor_observer is not None:
+        anchor_bytes = anchor.read_bytes()
     if enforce_production_pins:
-        anchor_digest = sha256_bytes(anchor.read_bytes())
+        assert anchor_bytes is not None
+        anchor_digest = sha256_bytes(anchor_bytes)
         if anchor_digest != anchor_spec.pem_sha256:
             raise ReleaseChainError(
                 f"production TSA anchor bytes are not code-pinned for {tsa}: "
                 f"{anchor_digest}"
             )
+    if anchor_observer is not None:
+        assert anchor_bytes is not None
+        _observe_anchor_bytes(anchor_observer, anchor_filename, anchor_bytes)
 
     with tempfile.TemporaryDirectory(prefix="thesis-release-tsa-") as name:
         temporary = pathlib.Path(name)
         empty_ca_dir = temporary / "empty-ca"
         empty_ca_dir.mkdir()
         environment = _openssl_environment(empty_ca_dir)
+        # When observing, OpenSSL must consume exactly the bytes that were
+        # just digested — not whatever the anchor path holds by the time each
+        # subprocess independently reopens it — so the snapshot is written
+        # into this run's private directory and used as the trust anchor for
+        # every OpenSSL call below.
+        if anchor_observer is not None:
+            assert anchor_bytes is not None
+            snapshot = temporary / f"anchor-{tsa}.pem"
+            snapshot.write_bytes(anchor_bytes)
+            anchor = snapshot
         try:
             text_result = subprocess.run(
                 [
@@ -822,6 +911,7 @@ def verify_release_receipts(
     clock_skew_seconds: int,
     previous_times: dict[str, datetime] | None = None,
     now: datetime | None = None,
+    anchor_observer: dict[str, str] | None = None,
 ) -> dict[str, datetime]:
     """Verify both receipts and their chronology for one manifest."""
 
@@ -829,6 +919,11 @@ def verify_release_receipts(
         raise ReleaseChainError(
             f"release must have exactly {' and '.join(spec.anchors)} receipt paths"
         )
+    if anchor_observer is not None:
+        # Shared stateful filename objects across roles must yield one
+        # pathname; the memoized rewrite asks each object exactly once.
+        # Producer excluded: this function consumes only TSA anchors.
+        spec = _normalized_spec(spec, include_producer=False)
     receipt_times = {
         tsa: verify_receipt(
             manifest_digest,
@@ -838,6 +933,7 @@ def verify_release_receipts(
             anchor_dir=anchor_dir,
             enforce_production_pins=enforce_production_pins,
             now=now,
+            anchor_observer=anchor_observer,
         )
         for tsa, receipt_path in receipt_paths.items()
     }
@@ -979,6 +1075,162 @@ def _verify_state_history(
             )
 
 
+def _exact_filename(filename: Any) -> str:
+    """Normalize a configured anchor filename to one exact built-in str.
+
+    ChainSpec does not enforce its annotations, so runtime-accepted values
+    include PathLike objects and str subclasses. os.fsdecode consumes a
+    PathLike through ``__fspath__`` exactly once — a stateful object cannot
+    show one pathname to a path join and another to the observer if every
+    consumer shares this single normalization — and the forced built-in str
+    strips subclasses whose overridden methods could diverge between
+    hashing, sorting, and encoding.
+
+    Applied only on observing paths: default-mode joins consume the raw
+    configured values exactly as they always have (including parts-based
+    PurePath joining), so non-observing behavior never changes. Observing
+    mode's stated filename domain is ``str | os.PathLike`` — an exotic
+    object that default-mode joins would accept through ``__rtruediv__``
+    alone has no pathname to digest under, and refuses here rather than
+    escaping as a TypeError.
+    """
+
+    if not isinstance(filename, (str, os.PathLike)):
+        # Exactly the stated domain: bare bytes, which os.fsdecode would
+        # happily decode, are refused along with everything else.
+        raise ReleaseChainError(
+            "anchor filenames must be str or os.PathLike when the anchor-set "
+            f"digest is computed; got {type(filename).__name__}"
+        )
+    try:
+        # Both steps inside the boundary: a hostile __fspath__ can raise
+        # anything, and a bytes subclass whose decode() returns a non-string
+        # makes the exact-string conversion itself raise. The refusal message
+        # is built from type names alone — an exception whose own __str__
+        # raises must not be able to leak a second exception from here.
+        decoded = os.fsdecode(filename)
+        return decoded if type(decoded) is str else str.__str__(decoded)
+    except Exception as exc:  # noqa: BLE001 - any failure here is a refusal
+        raise ReleaseChainError(
+            "anchor filename could not be decoded to a pathname: "
+            f"{type(filename).__name__} ({type(exc).__name__})"
+        ) from exc
+
+
+def _normalized_spec(spec: ChainSpec, *, include_producer: bool = True) -> ChainSpec:
+    """Rewrite a spec's configured filenames to exact built-in strings.
+
+    Memoized by object identity: a single stateful PathLike shared between
+    the producer field and any number of TSA roles is asked for its pathname
+    exactly once, so shared-filename collision detection cannot be defeated
+    by per-role re-invocation. Idempotent — exact strings pass through
+    unchanged. A caller that consumes only TSA anchors (standalone receipt
+    verification) passes ``include_producer=False`` so an irrelevant
+    producer filename is neither touched nor able to refuse.
+    """
+
+    # The memo retains each filename object beside its pathname: an id is
+    # only reusable after its object is collected, and a retained object is
+    # never collected while the rewrite runs — so a lazy spec mapping that
+    # materializes fresh filename objects per access cannot alias an earlier
+    # entry through id reuse. The identity comparison is then exact.
+    memo: dict[int, tuple[Any, str]] = {}
+
+    def normalize(filename: Any) -> str:
+        entry = memo.get(id(filename))
+        if entry is not None and entry[0] is filename:
+            return entry[1]
+        pathname = _exact_filename(filename)
+        memo[id(filename)] = (filename, pathname)
+        return pathname
+
+    normalized = replace(
+        spec,
+        anchors={
+            tsa: replace(anchor, filename=normalize(anchor.filename))
+            for tsa, anchor in spec.anchors.items()
+        },
+    )
+    if include_producer:
+        normalized = replace(
+            normalized,
+            producer_public_key_filename=normalize(
+                spec.producer_public_key_filename
+            ),
+        )
+    return normalized
+
+
+def _observe_anchor_bytes(
+    observer: dict[str, str] | None, filename: str, payload: bytes
+) -> None:
+    """Record the digest of anchor bytes at the moment verification consumes
+    them.
+
+    One filename must resolve to one byte sequence for the whole run —
+    including two TSA roles that share a filename. A later read that disagrees
+    is a mid-run change and refuses, rather than letting the verdict report
+    bytes the run did not uniformly use.
+    """
+
+    if observer is None:
+        return
+    filename = _exact_filename(filename)
+    digest = sha256_bytes(payload)
+    previous = observer.get(filename)
+    if previous is not None and previous != digest:
+        raise ReleaseChainError(
+            f"anchor file {filename!r} bytes changed during verification: "
+            f"{digest} after {previous}"
+        )
+    observer[filename] = digest
+
+
+def _combined_anchor_digest(per_file: Mapping[str, str]) -> str:
+    """One digest naming a whole consumed anchor set.
+
+    SHA-256 over the receipt-canonical JSON object mapping each configured
+    anchor filename to the SHA-256 of the bytes verification consumed for it.
+    Canonical JSON is an injective encoding of that mapping for any accepted
+    filename strings, so — up to SHA-256 collision resistance — two runs
+    share this value only if their filename-to-consumed-bytes mappings were
+    identical.
+    The keys are the spec's configured filename strings: specs that name the
+    same file differently (``key.pem`` against ``./key.pem``) produce
+    different mappings by design, because the mapping commits to the
+    configuration, not to resolved path identity.
+
+    One edge is refused rather than encoded: a filename containing an
+    explicit well-formed surrogate pair is a different Python string from
+    the astral character it spells, but one and the same string after any
+    JSON round trip — a verdict carrying it could never be reproduced from
+    ``--json`` output. Such a pair cannot come from ``os.fsdecode`` (its
+    escapes are unpaired low surrogates, which round-trip faithfully); only
+    a spec literally configuring one is refused, and the fix is to
+    configure the astral character directly.
+    """
+
+    from receipt.canonical import utf16_sort_key
+
+    for name in per_file:
+        if _SURROGATE_PAIR_RE.search(name):
+            raise ReleaseChainError(
+                "anchor filename spells an astral character as an explicit "
+                "surrogate pair, which JSON parsing would rewrite; configure "
+                f"the character directly: {name!r}"
+            )
+    # With well-formed pairs refused, UTF-16 code units are injective over
+    # the remaining strings; a tie would mean the refusal above regressed.
+    sort_keys = [utf16_sort_key(name) for name in per_file]
+    if len(set(sort_keys)) != len(sort_keys):
+        raise ReleaseChainError(
+            "two configured anchor filenames are distinct in Python but "
+            "identical as JSON strings; the verdict cannot report them "
+            "faithfully"
+        )
+    return canonical_sha256(dict(per_file))
+
+
 def verify_release_chain(
     root: pathlib.Path,
     *,
@@ -990,8 +1242,26 @@ def verify_release_chain(
     enforce_production_pins: bool | None = None,
     clock_skew_seconds: int = DEFAULT_CLOCK_SKEW_SECONDS,
     now: datetime | None = None,
+    compute_anchor_set_digest: bool = False,
 ) -> ChainVerification:
-    """Verify all manifests, signatures, receipts, links, and state bytes."""
+    """Verify all manifests, signatures, receipts, links, and state bytes.
+
+    With ``compute_anchor_set_digest=True`` the result additionally names the
+    anchor set the run consumed: every signature and receipt verification
+    digests the anchor bytes at its own read site (OpenSSL calls are then fed
+    a private snapshot of those exact bytes), a filename whose bytes differ
+    between two consumptions refuses, and the combined digest is documented
+    on _combined_anchor_digest. Observing mode consumes each configured
+    filename as the single pathname ``os.fsdecode`` yields for it, asked of
+    the object exactly once per run — a cross-flavour PurePath whose
+    parts-based join would address a different file is consumed by pathname
+    here, by parts in default mode. Off by default: existing callers keep
+    identical verification behavior — the same reads through the same raw
+    configured values, the same acceptances, the same refusals in the same
+    order with the same messages. The returned object does carry the two new
+    (unset) fields, which is visible to reflection such as
+    ``dataclasses.asdict``.
+    """
 
     root = root.resolve()
     default_anchor_dir = root / spec.anchor_relative
@@ -1016,12 +1286,27 @@ def verify_release_chain(
         enforce_production_pins = selected_anchors == default_anchor_dir.resolve()
     if type(clock_skew_seconds) is not int or clock_skew_seconds < 0:
         raise ReleaseChainError("clock_skew_seconds must be a non-negative integer")
+    if type(compute_anchor_set_digest) is not bool:
+        raise ReleaseChainError("compute_anchor_set_digest must be a boolean")
+    anchor_observer: dict[str, str] | None = (
+        {} if compute_anchor_set_digest else None
+    )
 
     enumerated = _enumerate_manifest_files(root, spec)
     if not enumerated:
         if require_chain:
             raise ReleaseChainError("release chain is absent; genesis is required")
         return ChainVerification(())
+
+    if anchor_observer is not None:
+        # Observing only, and only once a chain exists: every configured
+        # filename is normalized exactly once for the whole run — each
+        # PathLike gets one __fspath__ call (memoized by object identity, so
+        # an object shared across roles is asked once), and every downstream
+        # join, observer key, and the completeness check below reuse the
+        # same plain strings. Default mode touches none of this: raw values
+        # flow to the joins exactly as on every earlier release.
+        spec = _normalized_spec(spec)
 
     records: list[ReleaseRecord] = []
     previous_hash: str | None = None
@@ -1059,6 +1344,7 @@ def verify_release_chain(
             spec=spec,
             anchor_dir=selected_anchors,
             enforce_production_pin=enforce_production_pins,
+            anchor_observer=anchor_observer,
         )
         if records:
             previous_line_count = records[-1].manifest["state"]["lineCount"]
@@ -1092,6 +1378,7 @@ def verify_release_chain(
             clock_skew_seconds=clock_skew_seconds,
             previous_times=previous_times,
             now=verification_now,
+            anchor_observer=anchor_observer,
         )
 
         records.append(
@@ -1121,7 +1408,31 @@ def verify_release_chain(
             spec=spec,
             require_head_current=not allow_pending_append,
         )
-    return ChainVerification(tuple(records))
+    anchor_set_sha256: str | None = None
+    anchor_file_sha256s: tuple[tuple[str, str], ...] = ()
+    if anchor_observer is not None:
+        # The spec's filenames were normalized to exact strings at the top of
+        # this function; these are byte-for-byte the observer's keys.
+        configured = {spec.producer_public_key_filename} | {
+            anchor.filename for anchor in spec.anchors.values()
+        }
+        never_consumed = sorted(configured - set(anchor_observer))
+        if never_consumed:
+            # Unreachable with a non-empty chain — every release verifies the
+            # producer signature and every configured receipt — but a digest
+            # that silently omitted a configured anchor would misname the set,
+            # so the invariant is enforced rather than assumed.
+            raise ReleaseChainError(
+                "anchor files configured but never consumed by verification: "
+                + ", ".join(never_consumed)
+            )
+        anchor_file_sha256s = tuple(sorted(anchor_observer.items()))
+        anchor_set_sha256 = _combined_anchor_digest(dict(anchor_file_sha256s))
+    return ChainVerification(
+        tuple(records),
+        anchor_set_sha256=anchor_set_sha256,
+        anchor_file_sha256s=anchor_file_sha256s,
+    )
 
 
 def _git_run(
