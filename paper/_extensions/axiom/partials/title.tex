@@ -1,0 +1,35 @@
+\makeatletter
+\renewcommand{\maketitle}{%
+  \begingroup
+  \setlength{\parindent}{0pt}%
+  \begin{flushleft}
+    {\axiommono\fontsize{7}{9}\selectfont
+      {\color{axiomaccent}\S}\hspace{0.7em}%
+      \MakeUppercase{$if(kicker)$$kicker$$else$WORKING PAPER$endif$}\par}
+    \vspace{0.8em}
+    $if(title)$
+    {\axiomserif\bfseries\fontsize{23}{25}\selectfont $title$\par}
+    $endif$
+    \vspace{0.85em}
+    $if(by-author)$
+    {\sffamily\bfseries\normalsize
+      $for(by-author)$$it.name.literal$$sep$\enspace\textperiodcentered\enspace$endfor$\par}
+    $endif$
+    $if(by-affiliation)$
+    {\sffamily\small
+      $for(by-affiliation)$$it.name$$sep$\enspace\textperiodcentered\enspace$endfor$\par}
+    $elseif(axiom-theme.affiliation)$
+    {\sffamily\small $axiom-theme.affiliation$\par}
+    $endif$
+    $if(revision)$
+    {\axiommono\fontsize{8}{10}\selectfont Revision $revision$$if(date-meta)$\enspace\textperiodcentered\enspace$date-meta$$elseif(date)$\enspace\textperiodcentered\enspace$date$$endif$\par}
+    $elseif(date-meta)$
+    {\axiommono\fontsize{8}{10}\selectfont $date-meta$\par}
+    $elseif(date)$
+    {\axiommono\fontsize{8}{10}\selectfont $date$\par}
+    $endif$
+  \end{flushleft}
+  \vspace{0.65em}
+  \endgroup
+}
+\makeatother

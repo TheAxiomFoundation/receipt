@@ -1,0 +1,167 @@
+/*-- scss:defaults --*/
+
+$font-family-sans-serif: "Geist Sans", system-ui, -apple-system, sans-serif;
+$font-family-monospace: "JetBrains Mono", ui-monospace, monospace;
+$headings-font-family: "Geist Sans", system-ui, sans-serif;
+$body-color: #171717;
+$link-color: #d97706;
+$code-color: #171717;
+$code-bg: transparent;
+$code-block-bg: transparent;
+$code-block-border-left: #e5e7eb;
+$border-radius: 0;
+$border-radius-sm: 0;
+$border-radius-lg: 0;
+
+/*-- scss:rules --*/
+
+:root {
+  --color-accent: #d97706;
+  --color-accent-hover: #b45309;
+  --f-serif: "Newsreader", Georgia, serif;
+  --f-sans: "Geist Sans", system-ui, -apple-system, sans-serif;
+  --f-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+html,
+body {
+  background: #fff;
+  color: #171717;
+  font-family: var(--f-sans);
+  font-kerning: normal;
+  text-rendering: optimizeLegibility;
+}
+
+a {
+  color: var(--color-accent);
+  text-decoration-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
+  text-underline-offset: 0.14em;
+}
+
+a:hover,
+a:focus {
+  color: var(--color-accent-hover);
+  text-decoration-color: currentColor;
+}
+
+.axiom-title-block {
+  margin-block: 0 2.2rem;
+}
+
+.axiom-kicker,
+.axiom-revision,
+.axiom-status-label {
+  font-family: var(--f-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.14em;
+  line-height: 1.35;
+  text-transform: uppercase;
+}
+
+.axiom-kicker {
+  display: flex;
+  gap: 0.7em;
+  margin-bottom: 0.85rem;
+}
+
+.axiom-kicker-mark {
+  color: var(--color-accent);
+}
+
+.axiom-title-block .title {
+  max-width: 22ch;
+  margin: 0 0 0.9rem;
+  color: #171717;
+  font-family: var(--f-serif);
+  font-size: clamp(2.35rem, 7vw, 4.15rem);
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  line-height: 0.98;
+}
+
+.axiom-authors {
+  font-weight: 700;
+}
+
+.axiom-affiliations {
+  margin-top: 0.08rem;
+  font-size: 0.94rem;
+}
+
+.axiom-revision {
+  margin-top: 0.45rem;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.axiom-title-block .abstract {
+  max-width: 70ch;
+  margin-top: 1.5rem;
+}
+
+.axiom-title-block .block-title {
+  margin-bottom: 0.35rem;
+  font-family: var(--f-mono);
+  font-size: 0.7rem;
+  font-weight: 400;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.axiom-status {
+  max-width: 70ch;
+  margin-top: 1.3rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid var(--color-accent);
+}
+
+.axiom-status-label {
+  margin-bottom: 0.3rem;
+}
+
+.axiom-status-body > :last-child {
+  margin-bottom: 0;
+}
+
+#quarto-document-content > section > h1,
+h1:not(.title) {
+  font-family: var(--f-serif);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: var(--f-sans);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+code,
+kbd,
+samp,
+pre {
+  font-family: var(--f-mono);
+}
+
+pre {
+  padding-left: 1rem;
+  border-left-width: 1px;
+  border-left-style: solid;
+  border-left-color: #e5e7eb;
+  background: transparent;
+}
+
+.footnotes,
+.footnote-ref {
+  font-family: var(--f-sans);
+  font-size: 90%;
+}
+
+#TOC,
+#TOC a {
+  font-family: var(--f-sans);
+}

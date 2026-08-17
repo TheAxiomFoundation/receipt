@@ -1,0 +1,54 @@
+<style>
+  :root {
+    --color-accent: $axiom-theme.accent-css$;
+    --color-accent-hover: $axiom-theme.accent-hover-css$;
+  }
+</style>
+
+<header id="title-block-header" class="quarto-title-block axiom-title-block">
+  <div class="axiom-kicker">
+    <span class="axiom-kicker-mark" aria-hidden="true">§</span>
+    <span>$if(kicker)$$kicker$$else$WORKING PAPER$endif$</span>
+  </div>
+
+  $if(title)$
+  <h1 class="title">$title$</h1>
+  $endif$
+
+  $if(by-author)$
+  <div class="axiom-authors">
+    $for(by-author)$
+    <span class="author">$it.name.literal$</span>$sep$<span aria-hidden="true"> · </span>$endfor$
+  </div>
+  $endif$
+
+  <div class="axiom-affiliations">
+  $if(by-affiliation)$
+    $for(by-affiliation)$<span class="affiliation">$it.name$</span>$sep$<span aria-hidden="true"> · </span>$endfor$
+  $elseif(axiom-theme.affiliation)$
+    <span class="affiliation">$axiom-theme.affiliation$</span>
+  $endif$
+  </div>
+
+  $if(revision)$
+  <div class="axiom-revision">Revision $revision$$if(date-meta)$ <span aria-hidden="true">·</span> $date-meta$$endif$</div>
+  $elseif(date-meta)$
+  <div class="axiom-revision">$date-meta$</div>
+  $elseif(date)$
+  <div class="axiom-revision">$date$</div>
+  $endif$
+
+  $if(abstract)$
+  <div class="abstract">
+    <div class="block-title">$labels.abstract$</div>
+    $abstract$
+  </div>
+  $endif$
+
+  $if(status)$
+  <div class="axiom-status" role="note" aria-label="Status">
+    <div class="axiom-status-label">Status</div>
+    <div class="axiom-status-body">$status$</div>
+  </div>
+  $endif$
+</header>

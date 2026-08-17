@@ -17,3 +17,7 @@ paper/index.tex
 paper/.quarto/
 paper/index.typ
 paper/.gitignore
+# xelatex font staging the axiom format copies beside the source at render
+paper/fonts/
+paper/index.aux
+paper/index.log

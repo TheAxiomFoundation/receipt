@@ -5,7 +5,14 @@ author:
     affiliations:
       - name: the Axiom Foundation
 date: 2026-08-14
-date-format: "MMMM D, YYYY"
+date-format: iso
+kicker: working paper
+revision: "8"
+status: |
+  Working paper. It describes `receipt` 0.5.0 on PyPI; statements
+  about still-open pull requests are marked as such. Code:
+  [github.com/TheAxiomFoundation/receipt](https://github.com/TheAxiomFoundation/receipt).
+  API reference: [axiom.org/receipt/api](https://axiom.org/receipt/api/).
 abstract: |
   The Axiom Foundation's software agents encode statutes into
   executable rules, and the records that carry the work — signed rule
@@ -24,22 +31,10 @@ abstract: |
   package today, and the 0.5.0 corpus-verification release extends the
   same discipline to published rule corpora.
 format:
-  html:
-    toc: true
-    number-sections: true
-    embed-resources: false
-  pdf:
-    number-sections: true
-    geometry: margin=1.1in
+  axiom-paper-pdf: default
+  axiom-paper-html: default
 bibliography: references.bib
 ---
-
-::: {.callout-note appearance="simple"}
-Working paper. It describes `receipt` 0.5.0 on PyPI; statements
-about still-open pull requests are marked as such. Code:
-[github.com/TheAxiomFoundation/receipt](https://github.com/TheAxiomFoundation/receipt).
-API reference: [axiom.org/receipt/api](https://axiom.org/receipt/api/).
-:::
 
 # Records that outrun their witnesses
 

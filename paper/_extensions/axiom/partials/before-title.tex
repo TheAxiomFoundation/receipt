@@ -1,0 +1,83 @@
+% Axiom's vendored fonts are addressed by filename so no system font or
+% network lookup can affect the result.
+\usepackage{fontspec}
+\usepackage{titlesec}
+\usepackage{etoolbox}
+\usepackage{xurl}
+
+\setmainfont[
+  Path={$axiom-font-dir$/geist/},
+  UprightFont={Geist-Regular.ttf},
+  ItalicFont={Geist-Italic.ttf},
+  BoldFont={Geist-Bold.ttf},
+  BoldItalicFont={Geist-BoldItalic.ttf}
+]{Geist}
+
+\setsansfont[
+  Path={$axiom-font-dir$/geist/},
+  UprightFont={Geist-Regular.ttf},
+  ItalicFont={Geist-Italic.ttf},
+  BoldFont={Geist-Bold.ttf},
+  BoldItalicFont={Geist-BoldItalic.ttf}
+]{Geist}
+
+\setmonofont[
+  Path={$axiom-font-dir$/jetbrains-mono/},
+  UprightFont={JetBrainsMono-Regular.ttf},
+  ItalicFont={JetBrainsMono-Italic.ttf},
+  BoldFont={JetBrainsMono-Bold.ttf},
+  BoldItalicFont={JetBrainsMono-BoldItalic.ttf},
+  RawFeature={-calt},
+  Scale=MatchLowercase
+]{JetBrains Mono}
+
+\newfontfamily\axiomserif[
+  Path={$axiom-font-dir$/newsreader/},
+  UprightFont={Newsreader16pt-Regular.ttf},
+  ItalicFont={Newsreader16pt-Italic.ttf},
+  BoldFont={Newsreader16pt-SemiBold.ttf},
+  BoldItalicFont={Newsreader16pt-SemiBoldItalic.ttf}
+]{Newsreader 16pt}
+
+\newfontfamily\axiommono[
+  Path={$axiom-font-dir$/jetbrains-mono/},
+  UprightFont={JetBrainsMono-Regular.ttf},
+  ItalicFont={JetBrainsMono-Italic.ttf},
+  BoldFont={JetBrainsMono-Bold.ttf},
+  BoldItalicFont={JetBrainsMono-BoldItalic.ttf},
+  RawFeature={-calt},
+  LetterSpace=14,
+  Scale=MatchLowercase
+]{JetBrains Mono}
+
+\definecolor{axiomaccent}{HTML}{$axiom-theme.accent-tex$}
+\definecolor{axiomaccenthover}{HTML}{$axiom-theme.accent-hover-tex$}
+\definecolor{axiomrule}{HTML}{E5E7EB}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=axiomaccent,
+  citecolor=axiomaccent,
+  urlcolor=axiomaccent,
+  pdfborder={0 0 0}
+}
+
+\titleformat{\section}
+  {\axiomserif\bfseries\fontsize{15}{18}\selectfont}
+  {\thesection}{0.7em}{}
+\titleformat{\subsection}
+  {\sffamily\bfseries\fontsize{12}{15}\selectfont}
+  {\thesubsection}{0.7em}{}
+\titleformat{\subsubsection}
+  {\sffamily\bfseries\normalsize}
+  {\thesubsubsection}{0.7em}{}
+
+\renewcommand{\footnotesize}{\fontsize{9}{11}\selectfont\sffamily}
+\newcommand{\axiombibliographyhref}[2]{%
+  \unskip\newline\axiomoriginalhref{#1}{\nolinkurl{#2}}%
+}
+\AtBeginEnvironment{CSLReferences}{%
+  \urlstyle{same}%
+  \let\axiomoriginalhref\href
+  \let\href\axiombibliographyhref
+}
+\AtEndEnvironment{CSLReferences}{\let\href\axiomoriginalhref}

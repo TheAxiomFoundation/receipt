@@ -1,0 +1,22 @@
+$if(has-frontmatter)$
+\frontmatter
+$endif$
+$if(title)$
+\maketitle
+$if(abstract)$
+\begin{abstract}
+$abstract$
+\end{abstract}
+$endif$
+$endif$
+$if(status)$
+\par\vspace{0.7em}
+\noindent{\color{axiomaccent}\rule{\linewidth}{0.5pt}}\par
+\vspace{0.4em}
+{\axiommono\fontsize{7}{9}\selectfont STATUS\par}
+\vspace{0.25em}
+\begingroup\small\sffamily
+$status$
+\par\endgroup
+\vspace{0.9em}
+$endif$
