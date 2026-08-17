@@ -144,6 +144,13 @@ class VerifyResult:
             return None
         return self.chain.head.path.name
 
+    @property
+    def anchor_set_sha256(self) -> str | None:
+        """Digest of the anchor set custody ran against; None before custody."""
+        if self.chain is None:
+            return None
+        return self.chain.anchor_set_sha256
+
     def witness_times(self) -> dict[str, datetime]:
         if self.chain is None or self.chain.head is None:
             return {}
@@ -216,9 +223,12 @@ def _custody_detail(verification: ChainVerification, spec: VerificationSpec) -> 
         f"{anchor} {value.strftime('%Y-%m-%dT%H:%M:%SZ')}"
         for anchor, value in sorted(head.receipt_times.items())
     )
+    anchor_set = verification.anchor_set_sha256
+    assert anchor_set is not None
     return (
         f"{len(verification.releases)} release(s), HEAD {head.path.name}; "
         f"producer SPKI {spec.chain.producer_spki_sha256[:16]}…; "
+        f"anchor set {anchor_set[:16]}…; "
         f"witnesses {witnesses}"
     )
 
@@ -433,6 +443,11 @@ def result_to_dict(result: VerifyResult) -> dict[str, Any]:
             "head": result.chain.head.path.name,
             "headSha256": result.chain.head.sha256,
             "producerSpkiSha256": result.producer_spki_sha256,
+            # Which anchor set was in force, from the verdict alone: the
+            # digest of the resolved anchor files custody ran against, with
+            # the per-file digests behind it (receipt#24).
+            "anchorSetSha256": result.chain.anchor_set_sha256,
+            "anchorFiles": dict(result.chain.anchor_file_sha256s),
             "witnesses": {
                 anchor: value.strftime("%Y-%m-%dT%H:%M:%SZ")
                 for anchor, value in sorted(result.chain.head.receipt_times.items())

@@ -14,6 +14,7 @@ whose whole purpose is to be handed to a skeptic, is the more important half.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
 import shutil
@@ -120,6 +121,43 @@ def test_json_output_marks_gates_as_not_re_run(
     assert payload["chain"]["releases"] == 1
     assert len(payload["chain"]["witnesses"]) == 2
     assert payload["binding"]["contentFiles"] == 3
+
+
+def anchor_set_recomputed(repo: pathlib.Path) -> tuple[str, dict[str, str]]:
+    """The recomputation an auditor would script, sharing no package code."""
+
+    per_file = {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in (repo / "releases/anchors").iterdir()
+    }
+    combined = hashlib.sha256(
+        "".join(
+            f"{name} {digest}\n" for name, digest in sorted(per_file.items())
+        ).encode("ascii")
+    ).hexdigest()
+    return combined, per_file
+
+
+def test_the_json_verdict_names_the_anchor_set_in_force(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """receipt#24: an auditor confirms from the verdict alone which anchor set
+    custody ran against — production anchors, not a substituted set."""
+
+    assert run(repo, "--json") == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    combined, per_file = anchor_set_recomputed(repo)
+    assert payload["chain"]["anchorSetSha256"] == combined
+    assert payload["chain"]["anchorFiles"] == per_file
+
+
+def test_the_text_verdict_names_the_anchor_set_in_force(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    combined, _ = anchor_set_recomputed(repo)
+    assert run(repo) == EXIT_OK
+    out = capsys.readouterr().out
+    assert f"anchor set {combined[:16]}…" in out
 
 
 def test_a_gate_that_did_not_run_is_shouted_not_hidden(

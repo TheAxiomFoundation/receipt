@@ -13,7 +13,10 @@ at commit 07984278503b8e06c48c539327f6f1d01c035510 (branch
 codex/thesis-ledger-facts); see receipts/ledger-pin-source-hashes.txt. The only
 intended change is parameterization: every repo-specific constant moved into
 ChainSpec, supplied by the consumer's committed code. Behavior is gated by the
-differential harness in tests/test_ledger_equivalence.py.
+differential harness in tests/test_ledger_equivalence.py. Additions since the
+extraction (the base-ref history pass, the anchor-set digest in the result) run
+beside the extracted checks without altering any of their refusals, and carry
+their own tests.
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ import re
 import subprocess
 import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -131,6 +134,13 @@ class ReleaseRecord:
 @dataclass(frozen=True)
 class ChainVerification:
     releases: tuple[ReleaseRecord, ...]
+    #: SHA-256 over the resolved anchor set the run trusted, so a verdict can
+    #: name which anchors were in force — None only when no chain was verified
+    #: (an absent chain consults no anchors). Canonical form and the exact
+    #: claim are documented on _anchor_set_digests.
+    anchor_set_sha256: str | None = None
+    #: Per-file digests behind anchor_set_sha256, keyed by anchor filename.
+    anchor_file_sha256s: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def head(self) -> ReleaseRecord | None:
@@ -979,6 +989,56 @@ def _verify_state_history(
             )
 
 
+def _anchor_set_digests(
+    anchor_dir: pathlib.Path,
+    spec: ChainSpec,
+    *,
+    enforce_production_pins: bool,
+) -> tuple[str, dict[str, str]]:
+    """Digest the resolved anchor set so the verdict can name it.
+
+    The set is every file custody verification trusts from the resolved anchor
+    directory: the producer public key and each TSA anchor PEM. The canonical
+    form is one ``"{filename} {sha256}\\n"`` line per file, sorted by filename,
+    digested as ASCII — two verdicts carry the same value exactly when the
+    anchor sets they ran against were byte-identical.
+
+    This runs only after every extracted check has passed, so it never changes
+    which refusal a broken tree produces. The files are re-read here; when
+    production pins are enforced, each TSA anchor's digest is re-checked
+    against its code pin, so bytes that changed between use and this read are
+    a refusal rather than a misreport. The producer key has no byte pin — its
+    trust identity is the SPKI, pinned and verified at use time and reported
+    beside this digest — so its entry records the PEM bytes as found.
+    """
+
+    filenames = {spec.producer_public_key_filename}
+    pinned: dict[str, tuple[str, str]] = {}
+    for tsa, anchor_spec in spec.anchors.items():
+        filenames.add(anchor_spec.filename)
+        pinned[anchor_spec.filename] = (tsa, anchor_spec.pem_sha256)
+    per_file: dict[str, str] = {}
+    for filename in sorted(filenames):
+        path = anchor_dir / filename
+        if path.is_symlink() or not path.is_file():
+            raise ReleaseChainError(f"missing or non-regular anchor file: {path}")
+        digest = sha256_bytes(path.read_bytes())
+        if enforce_production_pins and filename in pinned:
+            tsa, expected = pinned[filename]
+            if digest != expected:
+                raise ReleaseChainError(
+                    f"TSA anchor bytes for {tsa} changed after verification: "
+                    f"{digest} is not the code-pinned {expected}"
+                )
+        per_file[filename] = digest
+    combined = hashlib.sha256(
+        "".join(
+            f"{filename} {digest}\n" for filename, digest in sorted(per_file.items())
+        ).encode("ascii")
+    ).hexdigest()
+    return combined, per_file
+
+
 def verify_release_chain(
     root: pathlib.Path,
     *,
@@ -1121,7 +1181,14 @@ def verify_release_chain(
             spec=spec,
             require_head_current=not allow_pending_append,
         )
-    return ChainVerification(tuple(records))
+    anchor_set_sha256, anchor_file_sha256s = _anchor_set_digests(
+        selected_anchors, spec, enforce_production_pins=enforce_production_pins
+    )
+    return ChainVerification(
+        tuple(records),
+        anchor_set_sha256=anchor_set_sha256,
+        anchor_file_sha256s=anchor_file_sha256s,
+    )
 
 
 def _git_run(
