@@ -68,6 +68,12 @@ that match no witnessed journal row, a release history that never
 mentions the change. `receipt verify` is the command that tells the
 two apart from a clone, after the fact.
 
+![One correction, two paths. The producer's pull-request gate can
+refuse the hand edit, but that check runs in the producer's own trust
+domain; the binding refusal is anyone's, offline, from a clone. The
+re-encoded fix arrives as release 0003 with its journal row, and the
+same command passes it.](figures/two-paths.png){#fig-two-paths}
+
 The extraction sources ran on the same discipline before the package
 existed. A forecast is pre-registered only if it entered through the
 registration pipeline before the outcome — the witnessed chain gives
