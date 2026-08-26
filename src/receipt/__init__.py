@@ -20,6 +20,14 @@ verdicts they report are produced entirely by the differentially gated modules
 above. Their own gate is the refusal battery in tests/test_corpus.py and
 tests/test_cli.py.
 
+Also shipped, and deliberately outside every verdict: non-authorizing
+emission-time evidence records (receipt.evidence). A record is
+manifest-shaped but signed under its own domain and stored outside the
+closed release directory, so the authorizing verifier refuses it twice over
+— once at the closed-world schema check, once at the no-domain signature
+check. Its verifier is not wired into receipt.verify and no VerifyResult
+depends on it. Its gate is the refusal battery in tests/test_evidence.py.
+
 Pending extraction: waiver ratchet and chronology tiers.
 """
 
