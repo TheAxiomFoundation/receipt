@@ -17,6 +17,7 @@ import pytest
 from receipt.canonical import canonical_bytes
 from receipt.evidence import (
     DOMAIN,
+    RECORD_RE,
     STANDING,
     EvidenceRecordError,
     EvidenceSpec,
@@ -29,9 +30,11 @@ from receipt.evidence import (
     verify_evidence_records,
 )
 from receipt.release_chain import (
+    MANIFEST_RE,
     AnchorSpec,
     ChainSpec,
     ReleaseChainError,
+    _enumerate_manifest_files,
     validate_manifest_schema,
 )
 from receipt.sign import (
@@ -163,6 +166,89 @@ def test_an_evidence_record_is_refused_by_the_authorizing_verifier(
     assert verify_evidence_records(
         tmp_path, spec=spec, anchor_dir=anchor_dir
     ).records[0].sha256 == sha256_bytes(raw)
+
+
+def _chain_spec(public_pem: bytes) -> ChainSpec:
+    return ChainSpec(
+        manifest_relative=pathlib.PurePosixPath("releases/manifests"),
+        state_relative=pathlib.PurePosixPath("releases/state.jsonl"),
+        prefix_relative=pathlib.PurePosixPath("releases/prefix"),
+        anchor_relative=pathlib.PurePosixPath("releases/anchors"),
+        release_root_relative=pathlib.PurePosixPath("releases"),
+        schema_version="example.org/release-manifest/v1",
+        producer_public_key_filename="producer.pem",
+        producer_spki_sha256=spki_sha256(public_pem),
+        anchors={},
+    )
+
+
+def _plant_in_release_directory(
+    tmp_path: pathlib.Path, emitted: pathlib.Path, suffixes: list[str]
+) -> pathlib.Path:
+    directory = tmp_path / "releases" / "manifests"
+    directory.mkdir(parents=True, exist_ok=True)
+    for suffix in suffixes:
+        name = f"{emitted.stem}{suffix}"
+        (directory / name).write_bytes((emitted.parent / name).read_bytes())
+    return directory
+
+
+def test_record_filename_grammar_is_deliberately_a_manifest_grammar(
+    emitted: pathlib.Path,
+) -> None:
+    """The filename does NOT keep the two apart, and the docstring says so.
+
+    A record mirrors a manifest's filename layout on purpose, so
+    release_chain's own pattern matches it. Anything claiming the separation
+    is carried by the filename grammar is wrong; this test pins that.
+    """
+
+    assert RECORD_RE.pattern == MANIFEST_RE.pattern
+    assert MANIFEST_RE.fullmatch(emitted.name) is not None
+    assert MANIFEST_RE.fullmatch(f"{emitted.stem}.body.json") is None
+
+
+def test_planted_record_with_body_is_refused_at_enumeration(
+    tmp_path: pathlib.Path, emitted: pathlib.Path, keys: tuple[bytes, bytes]
+) -> None:
+    _, public_pem = keys
+    _plant_in_release_directory(
+        tmp_path, emitted, [".json", ".body.json", ".producer.sig"]
+    )
+    with pytest.raises(ReleaseChainError, match="unknown file in closed"):
+        _enumerate_manifest_files(tmp_path, _chain_spec(public_pem))
+
+
+def test_planted_record_alone_is_refused_for_a_missing_signature(
+    tmp_path: pathlib.Path, emitted: pathlib.Path, keys: tuple[bytes, bytes]
+) -> None:
+    _, public_pem = keys
+    _plant_in_release_directory(tmp_path, emitted, [".json"])
+    with pytest.raises(ReleaseChainError, match="producer signature"):
+        _enumerate_manifest_files(tmp_path, _chain_spec(public_pem))
+
+
+def test_planted_record_and_signature_pass_enumeration_and_die_at_the_schema(
+    tmp_path: pathlib.Path, emitted: pathlib.Path, keys: tuple[bytes, bytes]
+) -> None:
+    """The arrangement that gets furthest — and where invariant 1 earns its keep.
+
+    Record plus signature carry manifest-shaped filenames, so enumeration
+    accepts the pair. Nothing about the filename grammar stops it; the
+    closed-world schema check does.
+    """
+
+    _, public_pem = keys
+    chain_spec = _chain_spec(public_pem)
+    directory = _plant_in_release_directory(
+        tmp_path, emitted, [".json", ".producer.sig"]
+    )
+    enumerated = _enumerate_manifest_files(tmp_path, chain_spec)
+    assert len(enumerated) == 1
+
+    payload = json.loads((directory / emitted.name).read_text())
+    with pytest.raises(ReleaseChainError, match="closed-world"):
+        validate_manifest_schema(payload, chain_spec)
 
 
 def test_standing_is_inside_the_signed_bytes(

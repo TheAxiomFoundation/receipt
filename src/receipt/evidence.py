@@ -25,12 +25,25 @@ than of any caller's discipline (tests/test_evidence.py):
 Either failure alone is sufficient. Both hold, and neither depends on a
 consumer remembering to keep the two apart.
 
-Records also live outside the release directory, and must: the record files
-`{index:04d}-{sha16}.body.json` and the record itself do not match
-`release_chain.MANIFEST_RE`, so `_enumerate_manifest_files` would raise
-"unknown file in closed release manifest directory" on sight of them. The
-release directory is closed; this module's directory is closed too, over its
-own three filename shapes.
+Records also live outside the release directory. Note what does *not* keep them
+apart: this module's `RECORD_RE` and `PRODUCER_SIGNATURE_RE` are deliberately the
+same patterns as `release_chain`'s, because a record mirrors a manifest's
+filename layout on purpose. A record dropped into a release directory is
+therefore refused, but by three different mechanisms depending on what travels
+with it (tests/test_evidence.py):
+
+- record, body and signature together — `_enumerate_manifest_files` raises
+  "unknown file in closed release manifest directory", because `{stem}.body.json`
+  matches no pattern it knows.
+- record and signature alone — enumeration *accepts* them as a manifest/signature
+  pair, and the refusal lands one step later at `validate_manifest_schema`. This
+  is invariant 1 doing exactly the job it exists for.
+- record alone — enumeration raises for a missing producer signature.
+
+The safety property holds in every arrangement; it is the closed-world schema
+check, not the filename grammar, that carries it. The release directory is
+closed; this module's directory is closed too, over its own three filename
+shapes.
 
 Shape
 -----
@@ -73,8 +86,10 @@ claim by the producer and nothing else, this module parses it and refuses a
 malformed one, but never uses it in a refusal — mirroring the release chain,
 where a claimed `createdAtUtc` is only ever checked *against* a witness's
 gen_time and is never trusted on its own. Adding `{stem}.{tsa}.tsr` sidecars
-later is additive: the filename and digest layout already matches the one
-`receipt.tsa` verifies for manifests, and no schema change is needed.
+later is expected to be additive — the filename and digest layout already
+matches the one `receipt.tsa` verifies for manifests — though no witness path
+is implemented or tested here, so that is a design expectation rather than a
+demonstrated one.
 
 `verify_evidence_records` is not wired into `receipt.verify.run_verification`,
 and must not be. `VerifyResult.verdict` cannot depend on it; that is the whole
