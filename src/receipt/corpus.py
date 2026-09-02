@@ -109,6 +109,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import json.encoder
 import os
 import pathlib
 import re
@@ -161,7 +162,8 @@ INDEPENDENTLY_REPRODUCIBLE_TIERS = frozenset({PUBLIC_TIER})
 #: many of them a producer may supply. A gate whose evidence carries two
 #: hundred thousand blameless characters scrolls every line an auditor needed
 #: to read out of the terminal, which defeats the verdict as surely as an
-#: escape sequence would.
+#: escape sequence would. A count of characters for the same reason
+#: ``MAX_PATH_TEXT`` is one: this bounds what a refusal quotes.
 MAX_EVIDENCE_TEXT = 1024
 #: The most characters of verdict text the effective view's gates may cost
 #: in total. The per-string bound above caps one flood; a journal of a
@@ -177,6 +179,13 @@ MAX_EVIDENCE_TEXT = 1024
 #: exists to stop, assembled out of strings none of which is long (peer
 #: review, round five). So the fixed cost of the lines a gate produces is
 #: charged alongside the characters it declares.
+#:
+#: And the characters it declares are counted as the verdict renders them,
+#: not as Python holds them. ``json.dumps`` escapes with ``ensure_ascii``
+#: on, so one character outside the BMP leaves as twelve; 249 four-character
+#: evidence keys with 1024 of them per value is one legal gate charging
+#: 262,013 and rendering 3,065,876 (peer review, round six). See
+#: :func:`_rendered_length`.
 MAX_GATE_TEXT = 262144
 #: What one gate declaration is charged beyond the characters of its id: the
 #: outcome, the labels, and the punctuation and indentation of the verdict's
@@ -198,11 +207,17 @@ EVIDENCE_RENDER_OVERHEAD = 24
 MAX_GATE_DECLARATIONS = 2048
 #: The most characters one journal path may carry. Paths are quoted in
 #: refusals and, for removed paths, rendered in the verdict; the bound is
-#: checked before any other path rule so no refusal quotes a flood.
+#: checked before any other path rule so no refusal quotes a flood. A count
+#: of characters, deliberately: what it bounds is the Python text a refusal
+#: quotes back, not the JSON a verdict renders, and the total the verdict
+#: renders is bounded by ``MAX_REMOVED_TEXT`` instead.
 MAX_PATH_TEXT = 1024
 #: The most characters the verdict's removedPaths may carry in total; the
 #: gate budget's counterpart for the other producer-controlled list the
-#: verdict renders verbatim (peer review, round two).
+#: verdict renders verbatim (peer review, round two). Counted the same way
+#: as the gate budget and for the same reason: a path of non-BMP characters
+#: renders twelve times its length, so a set of them charged an eighth of
+#: what the verdict would carry (peer review, round six).
 MAX_REMOVED_TEXT = 262144
 #: The most directory entries the whole tombstone pass may touch before it is
 #: refused as unverifiable rather than allowed to run on. Counted in entries
@@ -501,6 +516,37 @@ def _reject_control_characters(value: str, label: str) -> str:
                 f"({code:#04x}): {_quoted(value)}"
             )
     return value
+
+
+def _rendered_length(text: str) -> int:
+    """What one producer string costs the verdict once JSON has escaped it.
+
+    The budgets below bound what a verdict renders, and the verdict is
+    rendered by ``json.dumps(..., indent=2, sort_keys=True)`` in
+    ``receipt.cli`` — with ``ensure_ascii`` left at its default of True. So
+    every non-ASCII character a producer writes leaves this module as an
+    escape: three ASCII characters become six for a BMP character, and a
+    character outside the BMP becomes a surrogate pair spelled as twelve
+    (peer review, round six). Charging Python characters let one legal gate
+    with 249 four-character keys and 1024 U+1F600 characters per value charge
+    262,013 against a budget of 262,144 and render 3,065,876 characters of
+    JSON — the flood the budget exists to stop, a factor of twelve under the
+    cap.
+
+    So the charge is what ``json.dumps`` makes of the string, quotes
+    included — taken from the escaper ``json.dumps`` applies to a string
+    rather than by calling it. ``JSONEncoder.encode`` short-circuits a
+    top-level string to exactly this function when ``ensure_ascii`` is on, so
+    the two are equal by construction and a test pins the equality; naming
+    the escaper keeps a caller who has substituted something for
+    ``json.dumps`` from silently changing what a budget charges.
+
+    The per-string bounds (``MAX_EVIDENCE_TEXT``, ``MAX_PATH_TEXT``) stay
+    counts of characters, because what they bound is what a *refusal* quotes
+    back, which is Python text and not JSON.
+    """
+
+    return len(json.encoder.encode_basestring_ascii(text))
 
 
 def _reject_oversized_text(value: str, label: str) -> str:
@@ -928,9 +974,9 @@ def parse_journal(
         )
     rendered = sum(
         GATE_RENDER_OVERHEAD
-        + len(gate.gate_id)
+        + _rendered_length(gate.gate_id)
         + sum(
-            EVIDENCE_RENDER_OVERHEAD + len(key) + len(value)
+            EVIDENCE_RENDER_OVERHEAD + _rendered_length(key) + _rendered_length(value)
             for key, value in gate.evidence.items()
         )
         for gate in gates
@@ -940,7 +986,7 @@ def parse_journal(
             f"journal gate declarations cost {rendered} characters of verdict "
             f"text, over the verdict budget of {MAX_GATE_TEXT}"
         )
-    removed_text = sum(len(path) for path in removed)
+    removed_text = sum(_rendered_length(path) for path in removed)
     if removed_text > MAX_REMOVED_TEXT:
         raise CorpusError(
             f"journal removed paths total {removed_text} characters, over the "

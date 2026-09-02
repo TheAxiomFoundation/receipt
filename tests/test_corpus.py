@@ -7,6 +7,7 @@ happy-path test is one line; the value is entirely in the refusals.
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 
@@ -18,6 +19,7 @@ from receipt.corpus import (
     MAX_EVIDENCE_TEXT,
     MAX_GATE_DECLARATIONS,
     MAX_GATE_TEXT,
+    MAX_REMOVED_TEXT,
     CorpusError,
     verify_corpus_binding,
     verify_declarations,
@@ -1541,12 +1543,16 @@ def test_refuses_gates_whose_rendering_cost_alone_floods_the_verdict(
     assert len(gates) <= MAX_GATE_DECLARATIONS
     # What the old charge came to, which is why this journal used to pass.
     assert sum(len(gate["gateId"]) + 2 for gate in gates) < MAX_GATE_TEXT
+    # Every producer string is charged as the verdict renders it (R6-F3), so
+    # the arithmetic here goes through json.dumps rather than len — and
+    # through the stdlib call the CLI makes, not through the module's own
+    # helper, so this stays a measurement of the renderer.
     charged = sum(
         GATE_RENDER_OVERHEAD
-        + len(gate["gateId"])
+        + len(json.dumps(gate["gateId"]))
         + EVIDENCE_RENDER_OVERHEAD
-        + len("c")
-        + len("1")
+        + len(json.dumps("c"))
+        + len(json.dumps("1"))
         for gate in gates
     )
     assert charged > MAX_GATE_TEXT
@@ -3095,3 +3101,239 @@ def test_a_bound_file_rewritten_during_the_second_tombstone_pass_refuses(
     assert str(caught.value) == (
         "the tree changed during verification; the closed-world verdict is refused"
     )
+
+
+def test_refuses_a_gate_whose_escaped_evidence_floods_the_verdict(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds R6-F3: the budget counted Python characters, the verdict renders JSON.
+
+    ``receipt.cli`` renders the verdict with ``json.dumps(..., indent=2,
+    sort_keys=True)`` and leaves ``ensure_ascii`` at its default, so every
+    non-ASCII character a producer writes leaves as an escape — twelve ASCII
+    characters for one outside the BMP, which JSON spells as a surrogate
+    pair. Charging what Python holds rather than what the renderer emits left
+    a factor of twelve unbudgeted, and it takes exactly one legal gate to
+    spend it: 249 four-character evidence keys with 1024 U+1F600 characters
+    per value, each value inside ``MAX_EVIDENCE_TEXT`` and each key
+    unremarkable.
+
+    That gate charged 262,013 against a budget of 262,144 and passed, while
+    the JSON it renders is over three million characters — the flood the
+    budget exists to stop, assembled out of strings none of which is over the
+    per-string bound. Every producer string is charged its rendered length
+    now. Without the fix this journal verifies.
+    """
+
+    write_tree(tmp_path)
+    evidence = {f"{index:04d}": "\U0001F600" * 1024 for index in range(249)}
+    gates = [
+        {"gateId": "g", "tier": "public", "outcome": "pass", "evidence": evidence}
+    ]
+    # What the old charge came to, which is why this journal used to pass.
+    old_charge = (
+        GATE_RENDER_OVERHEAD
+        + len("g")
+        + sum(
+            EVIDENCE_RENDER_OVERHEAD + len(key) + len(value)
+            for key, value in evidence.items()
+        )
+    )
+    assert old_charge == 262013
+    assert old_charge <= MAX_GATE_TEXT
+    charged = (
+        GATE_RENDER_OVERHEAD
+        + len(json.dumps("g"))
+        + sum(
+            EVIDENCE_RENDER_OVERHEAD + len(json.dumps(key)) + len(json.dumps(value))
+            for key, value in evidence.items()
+        )
+    )
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows(gates=gates)), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        f"journal gate declarations cost {charged} characters of verdict "
+        f"text, over the verdict budget of {MAX_GATE_TEXT}"
+    )
+
+
+def test_refuses_removed_paths_whose_escaped_spelling_floods_the_verdict(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds R6-F3: ``MAX_REMOVED_TEXT`` had the same gap as the gate budget.
+
+    removedPaths is the other producer-controlled list the verdict renders
+    verbatim, and it was charged the same way — by Python characters. A path
+    spelled in characters outside the BMP renders twelve times its length, so
+    four hundred of them charged 30,800 against a budget of 262,144 while
+    putting 295,600 characters of escaped JSON into the verdict.
+
+    Nothing else in the schema stops it: each path is inside
+    ``MAX_PATH_TEXT``, each code point is assigned and is neither a control
+    nor a format character, and a producer may retire as many paths as it
+    likes. Charged as rendered, the set refuses. Without the fix it verifies
+    — really verifies, not merely refuses differently, which is why each
+    name here stays inside the 255-byte limit a filesystem puts on one
+    component: a path too long to look for would refuse on the old module as
+    an unverifiable tombstone and the test would bind nothing.
+    """
+
+    body = '{"applied": true}\n'
+    retired = [
+        ".axiom/" + "\U0001F600" * 60 + f"-{index:04d}.json" for index in range(400)
+    ]
+    attested = dict(ATTESTED)
+    for path in retired:
+        attested[path] = body
+    rows = journal_rows(attested=attested)
+    for path in retired:
+        rows.append(
+            {
+                "schemaVersion": JOURNAL_SCHEMA,
+                "kind": "attested",
+                "path": path,
+                "sha256": sha256_text(body),
+                "state": "removed",
+            }
+        )
+    reindex(rows)
+    write_tree(tmp_path)
+    # What the old charge came to, which is why this journal used to pass.
+    assert sum(len(path) for path in retired) <= MAX_REMOVED_TEXT
+    charged = sum(len(json.dumps(path)) for path in retired)
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+    assert str(caught.value) == (
+        f"journal removed paths total {charged} characters, over the verdict "
+        f"budget of {MAX_REMOVED_TEXT}"
+    )
+
+
+def test_a_journal_just_under_both_budgets_renders_within_them(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds R6-F3: the budgets are measured against the renderer, not modelled.
+
+    The two budgets above are refusals; this is the other half of the claim
+    they make — that a journal they *admit* renders a verdict of about the
+    size they charged. Both are filled to just under their caps here, the
+    verdict is rendered exactly as ``receipt.cli`` renders it (the same
+    ``result_to_dict`` and the same ``json.dumps(..., indent=2,
+    sort_keys=True)``), and its size is held against what the budgets
+    charged.
+
+    Measured rather than asserted: this journal charges 519,096 and renders
+    599,972 characters, a ratio of 1.16, and the shape that renders most per
+    unit charged — the maximum number of gates, each with the shortest id and
+    smallest evidence, where the structural overhead the budget under-charges
+    dominates — measures 1.37. A factor of four is the bound pinned here, far
+    enough above both that rewording a verdict line does not fail the test
+    and close enough that a renderer growing multiples per gate would.
+
+    Without the R6-F3 fix this test still passes: it is not a refusal test.
+    It exists so that the two refusal tests above cannot be satisfied by a
+    budget that has drifted away from what the verdict actually costs.
+
+    The chain half of the verdict is left out — the result is built with
+    ``chain=None`` — because it is a fixed handful of digests and timestamps
+    with no producer-controlled string in it, so it cannot scale with either
+    budget. What is measured is exactly what the budgets bound.
+    """
+
+    from receipt.verify import VerifyResult, result_to_dict
+
+    body = '{"applied": true}\n'
+    write_tree(tmp_path)
+    gates = [
+        {
+            "gateId": f"g/{index:04d}".ljust(31, "x"),
+            "tier": "public",
+            "outcome": "pass",
+            "evidence": {"c": "1"},
+        }
+        for index in range(MAX_GATE_DECLARATIONS)
+    ]
+    # Each component stays inside the 255-byte name limit every filesystem
+    # this runs on enforces, since these paths are looked for on disk.
+    retired = [".axiom/" + "r" * 240 + f"-{index:04d}.json" for index in range(1000)]
+    attested = dict(ATTESTED)
+    for path in retired:
+        attested[path] = body
+    rows = journal_rows(attested=attested, gates=gates)
+    for path in retired:
+        rows.append(
+            {
+                "schemaVersion": JOURNAL_SCHEMA,
+                "kind": "attested",
+                "path": path,
+                "sha256": sha256_text(body),
+                "state": "removed",
+            }
+        )
+    reindex(rows)
+
+    charged_gates = sum(
+        GATE_RENDER_OVERHEAD
+        + len(json.dumps(gate["gateId"]))
+        + EVIDENCE_RENDER_OVERHEAD
+        + len(json.dumps("c"))
+        + len(json.dumps("1"))
+        for gate in gates
+    )
+    charged_removed = sum(len(json.dumps(path)) for path in retired)
+    assert charged_gates <= MAX_GATE_TEXT
+    assert charged_removed <= MAX_REMOVED_TEXT
+
+    verification = verify_corpus_binding(
+        tmp_path, render_journal(rows), spec=corpus_spec()
+    )
+    result = VerifyResult(
+        spec_name="receipt test corpus",
+        spec_path=tmp_path / "verification" / "spec.py",
+        spec_sha256="0" * 64,
+        root=tmp_path,
+        receipt_version="test",
+        producer_spki_sha256="0" * 64,
+        passes=(),
+        chain=None,
+        corpus=verification,
+    )
+    rendered = json.dumps(result_to_dict(result), indent=2, sort_keys=True)
+    assert len(rendered) < 4 * (charged_gates + charged_removed)
+
+
+def test_the_rendered_charge_equals_what_json_dumps_would_cost() -> None:
+    """Binds R6-F3: the charge must be the renderer's escaping, not a model of it.
+
+    The budgets charge what ``json.dumps`` makes of a producer string, and
+    the module takes that from the escaper ``json.dumps`` applies to a
+    top-level string rather than by calling ``json.dumps`` itself —
+    ``JSONEncoder.encode`` short-circuits to exactly that function when
+    ``ensure_ascii`` is on, and naming it keeps a caller who has replaced
+    ``json.dumps`` from silently changing what a budget charges. Equal by
+    construction, and pinned here rather than assumed, across the shapes the
+    two differ over if they ever were to: plain ASCII, a character that
+    escapes to six, one outside the BMP that escapes to twelve as a
+    surrogate pair, and the characters JSON escapes for its own syntax.
+
+    Without the fix — with the charge counting Python characters — every case
+    below but the first is short by the factor this finding is about.
+    """
+
+    from receipt.corpus import _rendered_length
+
+    for text in (
+        "",
+        "make validate",
+        "rules/tax/rate.yaml",
+        "café",
+        "中文",
+        "\U0001F600",
+        "\U0001F600" * 64,
+        'quote " backslash \\ tab-free',
+    ):
+        assert _rendered_length(text) == len(json.dumps(text, ensure_ascii=True))
+    assert _rendered_length("\U0001F600") == 14
+    assert _rendered_length("abc") == 5
