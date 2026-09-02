@@ -1148,7 +1148,9 @@ def test_pin_inference_follows_resolution_not_spelling(
         )
 
 
-def state_paths(repo: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, dict[str, bytes]]:
+def state_paths(
+    repo: pathlib.Path,
+) -> tuple[pathlib.Path, pathlib.Path, dict[str, bytes]]:
     """The two state files of a built chain, and their bytes keyed as supplied."""
 
     spec, _ = load_spec(repo / "verification/spec.py")

@@ -1091,9 +1091,10 @@ def confined_state_descriptor(
     descriptor rather than the name.
 
     A component that fails the no-follow open because it is now a link is
-    refused in the walk's own words, since it is the walk's own fact. Any
-    other failure is the caller's to see: a regular file at ``ledger`` has
-    always raised ``NotADirectoryError`` out of this reader and still does.
+    refused in the walk's own words, since it is the walk's own fact. Every
+    other failure is raised as it stands, with the errno the pathname open
+    would have given: ``ENOTDIR`` for a component that is a file rather than
+    a directory, ``ENOENT`` for one that is gone.
 
     Where ``dir_fd`` is unsupported — Windows, where ``os.open`` is not in
     ``os.supports_dir_fd`` — the pathname open is kept, so the walk remains
@@ -1907,7 +1908,7 @@ def _exact_relative(relative: pathlib.PurePosixPath | str) -> str:
 def assert_state_path_tracked(
     root: pathlib.Path, relative: pathlib.PurePosixPath | str
 ) -> None:
-    """Require a state path to be a tracked regular file, with no gitlink over it.
+    """Require a state path to be tracked, with no gitlink standing over it.
 
     ``assert_index_agrees_with_tree`` compares a path the index holds against
     the working tree and returns when the index holds nothing for it, because
