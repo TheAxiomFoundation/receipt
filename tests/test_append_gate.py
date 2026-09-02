@@ -26,7 +26,8 @@ Docstrings labelled R6-F1 onward name the third gate's first round, whose
 numbering starts over again: R6-F1 the release-root index entries never
 reconciled with the filesystem, R6-F2 the closing state checks a writer could
 step between, R6-F3 the state file's mode and parents resolved again after
-the read that established them.
+the read that established them, R6-F4 the descent that fell back to a
+pathname open and the root nothing vouched for.
 
 The fixture is a local git repository built from scratch — no network, no
 witnesses, no signatures. Its release tree holds a README and no manifests, so
@@ -45,7 +46,7 @@ import shutil
 import signal
 import subprocess
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import pytest
@@ -2412,3 +2413,102 @@ def test_check_state_modes_takes_the_mode_from_the_snapshot(
         "state file mode changed relative to base: "
         "ledger/official_observations.jsonl"
     )
+
+
+def test_state_reads_refuse_a_platform_without_secure_descent(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds R6-F4: the descriptor walk fell back to the pathname open where
+    ``os.open`` takes no ``dir_fd``, which is the behaviour every check in
+    that walk exists to replace — the whole path resolved a second time, with
+    the walk's findings about the parents already stale, and no refusal
+    anywhere saying the confinement had lapsed. A verifier that quietly
+    weakens itself on some platforms states an invariant it does not hold
+    there. It now says it cannot read the state files instead. Both readers
+    go through the same helper, so both say it."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    without_open = frozenset(os.supports_dir_fd) - {os.open}
+    monkeypatch.setattr(os, "supports_dir_fd", without_open)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "state files cannot be read with secure descent on this platform "
+        "(os.open lacks dir_fd support)"
+    )
+    with pytest.raises(ReleaseChainError) as read:
+        _regular_file_bytes(candidate.root, CHAIN_SPEC.state_relative)
+    assert str(read.value) == (
+        "state files cannot be read with secure descent on this platform "
+        "(os.open lacks dir_fd support)"
+    )
+
+
+def test_a_root_that_is_not_the_recorded_one_is_refused(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R6-F4's other half: the candidate root was the one component of every
+    state path that nothing vouched for. The walk below it starts at the root
+    and checks what it finds *inside* it, and the descriptor open took the
+    root by name with neither ``O_NOFOLLOW`` nor an identity check — so a
+    root exchanged for another directory, or for a link to one, was simply
+    the tree every subsequent read descended from. ``_set_root`` records the
+    resolved root's identity once, and every descent compares against it.
+    Here the recorded identity is made to differ from the root on disk; the
+    same tree with the identity it really has gets the ordinary verdict, so
+    the comparison is what refused."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    real_set_root = append_gate._set_root
+
+    def misrecord(root: pathlib.Path, spec: AppendGateSpec) -> Any:
+        tree = real_set_root(root, spec)
+        device, inode = tree.root_identity
+        return replace(tree, root_identity=(device, inode + 1))
+
+    monkeypatch.setattr(append_gate, "_set_root", misrecord)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == "candidate root changed during verification"
+
+    monkeypatch.undo()
+    assert run_gate(candidate) == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 1, "
+        "+1 appended vs base"
+    )
+
+
+def test_a_root_relinked_between_the_two_state_reads_is_refused(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R6-F4 driven by an actual swap rather than a recorded one: the root is
+    moved aside and a symlink left in its place after the ledger has been
+    read and before the frozen prefix is. Every git command still resolves,
+    the component walk still finds real directories inside the root — it
+    never looks at the root itself — and before this round the prefix was
+    read through the link without complaint. The root open now refuses to
+    follow it, and for a caller that recorded the root that is the same
+    answer as an identity that does not match."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    checked = append_gate.reject_non_append_bytes
+
+    def relink_root(text: str) -> None:
+        checked(text)
+        moved = tmp_path / "real-candidate"
+        shutil.move(str(candidate.root), str(moved))
+        candidate.root.symlink_to(moved, target_is_directory=True)
+
+    monkeypatch.setattr(append_gate, "reject_non_append_bytes", relink_root)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == "candidate root changed during verification"
+    # The link really is there, and really does still resolve to the tree.
+    assert candidate.root.is_symlink()
+    assert (candidate.root / CHAIN_SPEC.prefix_relative).is_file()

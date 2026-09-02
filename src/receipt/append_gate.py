@@ -136,12 +136,20 @@ class AppendGateSpec:
 
 @dataclass(frozen=True)
 class _CandidateTree:
-    """Candidate-controlled paths, kept separate from the trusted code root."""
+    """Candidate-controlled paths, kept separate from the trusted code root.
+
+    ``root_identity`` is the ``(st_dev, st_ino)`` of the resolved root when
+    this verdict began. Every state read descends from that directory, and
+    the descent opened it by name each time, so a root swapped mid-run — the
+    one component no walk below it can speak for — was simply followed. The
+    descriptor walk compares against this.
+    """
 
     root: pathlib.Path
     ledger_path: pathlib.Path
     prefix_path: pathlib.Path
     spec: AppendGateSpec
+    root_identity: tuple[int, int]
 
 
 @dataclass(frozen=True)
@@ -175,11 +183,17 @@ def _set_root(root: pathlib.Path, spec: AppendGateSpec) -> _CandidateTree:
     """
 
     candidate_root = root.resolve()
+    # Recorded once, here, because this is the only moment in the run at
+    # which the root has not yet been used for anything: every later read
+    # descends from it, and a root exchanged after this is a different tree
+    # answering questions asked about this one.
+    recorded = os.lstat(candidate_root)
     return _CandidateTree(
         root=candidate_root,
         ledger_path=candidate_root / spec.chain.state_relative,
         prefix_path=candidate_root / spec.chain.prefix_relative,
         spec=spec,
+        root_identity=(recorded.st_dev, recorded.st_ino),
     )
 
 
@@ -403,6 +417,11 @@ def _read_state_snapshot(
     resolving the pathname a second time: ``O_NOFOLLOW`` on the leaf says
     nothing about ``ledger/``, so a parent this walk found to be a real
     directory could still be replaced by a link before the open followed it.
+    It is given the root identity ``_set_root`` recorded, so the one
+    component below which nothing can vouch for it — the candidate root
+    itself — is checked too, and it refuses outright on a platform whose
+    ``os.open`` cannot take a ``dir_fd`` rather than reading the state files
+    with confinement it cannot provide there.
     """
 
     _confine_state_path(relative, candidate)
@@ -412,7 +431,9 @@ def _read_state_snapshot(
     if not stat.S_ISREG(before.st_mode):
         raise AppendError(f"state file is not a regular file: {display}")
     try:
-        confined = confined_state_descriptor(candidate.root, relative)
+        confined = confined_state_descriptor(
+            candidate.root, relative, root_identity=candidate.root_identity
+        )
     except ReleaseChainError as exc:
         raise AppendError(str(exc)) from exc
     descriptor = confined.descriptor
