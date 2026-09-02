@@ -1053,8 +1053,21 @@ def _v1_witness_evidence(
     if status not in {"available", "unavailable"}:
         raise TsaError(f"invalid witness status for {path}: {status!r}")
     if status == "unavailable":
-        if not witness.get("reason"):
+        # The v2 per-anchor outcome has held these two rules since it shipped;
+        # the legacy path enforced neither.  A truthy non-string reason -- a
+        # number, a list -- records nothing an auditor can read, and token
+        # evidence beside a claim of no token means the witness is describing
+        # a token it is simultaneously not standing behind.  Both are stricter
+        # than the ported verifier, which accepts either.
+        reason = witness.get("reason")
+        if not isinstance(reason, str) or not reason:
             raise TsaError(f"unavailable witness lacks a reason for {path}")
+        forbidden = sorted(_TOKEN_EVIDENCE_FIELDS.intersection(witness))
+        if forbidden:
+            raise TsaError(
+                f"unavailable witness contains token evidence for {path}: "
+                f"{forbidden}"
+            )
         return WitnessEvidence(status=status, digest_sha256=digest_sha256)
     bundle_reference, _trust = _bundle_for_claim(
         records,

@@ -753,6 +753,66 @@ def test_refuses_a_token_that_precedes_the_record_it_witnesses(
         verify_tree(tree)
 
 
+def test_refuses_a_legacy_unavailable_witness_whose_reason_is_not_a_string(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """An unreadable reason is not a reason.
+
+    The ported verifier tested the reason for truth, not for type, so a number
+    or a list passed -- and the one thing an auditor gets when no token exists
+    is the producer's account of why. The v2 per-anchor outcome has required a
+    non-empty string since it shipped.
+    """
+
+    tree = build_witness_tree(
+        tmp_path,
+        local_anchors[:1],
+        schema="thesis_rfc3161_witness_v1",
+        available=False,
+    )
+    assert verify_tree(tree).status == "unavailable"
+
+    rewrite_witness(tree, lambda payload: payload.__setitem__("reason", 503))
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == f"unavailable witness lacks a reason for {tree.record}"
+
+
+def test_refuses_a_legacy_unavailable_witness_that_carries_token_evidence(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """A witness must not describe a token it declines to stand behind.
+
+    Token fields beside ``status: unavailable`` are never verified -- the
+    legacy path returns before any of them is read -- so they would travel
+    with the record as unchecked provenance that reads exactly like the
+    checked kind. The v2 per-anchor outcome refuses them; the legacy path
+    ignored them.
+    """
+
+    tree = build_witness_tree(
+        tmp_path,
+        local_anchors[:1],
+        schema="thesis_rfc3161_witness_v1",
+        available=False,
+    )
+    rewrite_witness(
+        tree,
+        lambda payload: payload.update(
+            {
+                "tokenPath": f"records/{RECORD_DAY}/never-fetched.tsr",
+                "tokenSha256": "0" * 64,
+            }
+        ),
+    )
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == (
+        f"unavailable witness contains token evidence for {tree.record}: "
+        "['tokenPath', 'tokenSha256']"
+    )
+
+
 def test_a_witness_with_every_authority_unavailable_carries_no_tokens(
     tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
 ) -> None:
