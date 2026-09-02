@@ -577,10 +577,12 @@ verifier enforces the configured anchor set and cannot prove that
 authorities fail independently, validates certificates as of the
 token's signed time via OpenSSL, to the second and without revocation
 checking, and has no long-term renewal protocol for aging evidence
-[@RFC4998] — nor generation or retirement semantics for
-timestamp-authority signers: an identity may allow several signer keys
-at once, and a rotation the consumer wants to bound is a new pinned
-identity in the spec. The release-chain lane requires the exact
+[@RFC4998] — nor validity intervals for timestamp-authority
+signers: an authority's own key rotation is a new immutable bundle
+version with its own pinned identity, so verification splits into eras
+by bundle version that the consumer spec carries explicitly, and the
+superseded signer stops vouching for new records once the newer bundle
+is active. The release-chain lane requires the exact
 configured receipt set, so a release missing one configured authority's
 token cannot pass until the consumer revises policy — the witness
 lane's declared-unavailable escape (@sec-guarantees) does not exist
