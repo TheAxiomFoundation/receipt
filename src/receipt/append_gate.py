@@ -42,9 +42,14 @@ it is read, the base is resolved to a commit once and carried to every
 consumer, every git read runs with ``refs/replace`` disabled so a replacement
 object cannot change what the printed OID reads as, the two state files keep
 the base's file mode, and the post-cutover binding values are validated for
-shape rather than presence alone. They run beside the extracted checks without
-altering any of their refusals or the order in which those refusals fire, and
-carry their own tests in tests/test_append_gate.py.
+shape rather than presence alone. They run beside the extracted checks without altering any of their
+refusals, and every new refusal runs after every pre-existing file-level
+refusal — with one stated exception: the checkout-level guard
+(``release_chain.assert_file_modes_authoritative``) runs before the
+release-history file checks, and after the base ref is resolved, because a
+checkout whose modes and types are not authoritative cannot be verified at
+all and says so before any verdict about its files. All of it carries its own
+tests in tests/test_append_gate.py.
 """
 
 from __future__ import annotations
@@ -719,6 +724,10 @@ def check_state_modes(base: _BaseCommit, candidate: _CandidateTree) -> None:
     gitlink entry is a category change too, and refuses here.
     """
 
+    # verify_append_gate already refused a non-authoritative checkout at
+    # entry, for the push path as well as this one; the call is kept so this
+    # function is safe to call on its own, exactly as the release-history
+    # pass keeps its own.
     try:
         assert_file_modes_authoritative(candidate.root)
     except ReleaseChainError as exc:
@@ -990,6 +999,19 @@ def verify_append_gate(
         if base_ref
         else None
     )
+    # Every mode and type this run compares is read from the working tree, so
+    # a checkout that does not carry them cannot be verified at all — on the
+    # push path as much as against a base. The guard used to be reachable only
+    # through the base-ref path (the release history, then check_state_modes),
+    # which left a git 120000 state entry materialised as a plain file holding
+    # its target text to pass the component walk and both state reads on a
+    # push. It runs here, once, for both paths: after the base ref is
+    # resolved, so a false setting cannot mask an invalid ref, and before any
+    # state file is read.
+    try:
+        assert_file_modes_authoritative(candidate.root)
+    except ReleaseChainError as exc:
+        raise AppendError(str(exc)) from exc
     if base is not None:
         _data_changes, gate_changes, unclassified = check_surface_separation(
             base,

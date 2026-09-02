@@ -259,6 +259,17 @@ def run_gate(candidate: Candidate, base_ref: str | None = None) -> str:
     )
 
 
+def run_push_gate(candidate: Candidate) -> str:
+    """The push path: no base ref, so only the full-file invariants run.
+
+    ``run_gate`` always names a base, so nothing above exercised the branch
+    that skips surface classification, the append-only diff, the base prefix
+    anchor, and the release history.
+    """
+
+    return verify_append_gate(candidate.root, spec=GATE_SPEC)
+
+
 def test_an_ordinary_append_is_accepted(tmp_path: pathlib.Path) -> None:
     """The fixture's baseline verdict, so every refusal below is the change."""
 
@@ -1108,3 +1119,92 @@ def test_the_replacement_control_shows_the_environment_is_what_stops_it(
     with pytest.raises(AppendError) as refusal:
         run_gate(moving)
     assert "changed vs base moving" in str(refusal.value)
+
+
+def test_the_push_path_accepts_an_ordinary_tree(tmp_path: pathlib.Path) -> None:
+    """The push-path baseline, so the refusals below are the change: with no
+    base ref the verdict carries neither an append count nor a release."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+
+    assert run_push_gate(candidate) == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 1"
+    )
+
+
+@pytest.mark.parametrize(
+    ("key", "message"),
+    [
+        (
+            "core.fileMode",
+            "file modes cannot be verified: core.fileMode is false in this "
+            "checkout, so the working tree does not carry the executable bit "
+            "git records",
+        ),
+        (
+            "core.symlinks",
+            "file types cannot be verified: core.symlinks is false in this "
+            "checkout, so a symlink entry is materialised as a plain file",
+        ),
+    ],
+    ids=["fileMode", "symlinks"],
+)
+def test_the_push_path_refuses_a_non_authoritative_checkout(
+    tmp_path: pathlib.Path, key: str, message: str
+) -> None:
+    """Binds F1: the checkout guard was reachable only through the base-ref
+    path — the release-history pass and check_state_modes. On a push both are
+    skipped, so with core.symlinks false a git 120000 state entry materialised
+    as a plain file holding its target text passed the component walk (there
+    is no link to see) and both state reads, and the run returned OK. The
+    guard now runs at entry for both paths."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    git(candidate.root, "config", key, "false")
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate)
+    assert str(refusal.value) == message
+
+
+def test_an_invalid_base_ref_is_refused_before_the_checkout_guard(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds F5: the guard used to run before the base ref was resolved, so a
+    false core.fileMode masked an unresolvable base — the run blamed the
+    checkout for a proposal that never named a real commit. The base is
+    resolved first now, and this refusal is the one that predates the guard."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    git(candidate.root, "config", "core.fileMode", "false")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate, base_ref="refs/heads/does-not-exist")
+    assert str(refusal.value).startswith(
+        "git rev-parse --verify --end-of-options "
+        "refs/heads/does-not-exist^{commit} failed:"
+    )
+
+
+def test_the_release_history_pass_resolves_the_base_before_its_checkout_guard(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds F5 at the release-chain level: the guard ran before
+    resolve_base_commit, so a false core.fileMode answered a base ref that
+    names nothing with a complaint about the checkout. Called directly — the
+    gate resolves the base itself and passes an OID — the refusal must be the
+    unresolvable ref."""
+
+    candidate = base_repository(tmp_path)
+    git(candidate.root, "config", "core.fileMode", "false")
+
+    with pytest.raises(ReleaseChainError) as refusal:
+        release_chain.verify_release_history_immutable(
+            candidate.root, "refs/heads/does-not-exist", spec=CHAIN_SPEC
+        )
+    assert str(refusal.value).startswith(
+        "cannot resolve base ref 'refs/heads/does-not-exist' to a commit:"
+    )
