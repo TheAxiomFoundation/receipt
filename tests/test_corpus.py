@@ -2809,3 +2809,124 @@ def test_the_aliasing_root_component_refusal_names_the_entry(
         "tree entry 'RULES' aliases the pinned content root component 'rules' "
         "on a case- or normalization-insensitive filesystem"
     )
+
+
+def test_refuses_a_tree_file_whose_short_name_alias_would_be_content(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds R6-F1: the alias screen covered declared paths, not tree names.
+
+    ``_aliases_natively`` refuses a *declared* path Win32 would resolve under
+    a spelling nothing emits. Closed-world membership is not decided by
+    declared paths, though — it is decided by what the sweep finds on disk,
+    and there the same asymmetry was wide open. With ``.yml`` pinned, an
+    emitted entry ``rules/smuggled.ymlx`` is not content under
+    ``_has_pinned_suffix``, so the sweep skipped it; the ``SMUGGL~1.YML``
+    that 8.3 generation hands out for it opens the same bytes and *is*
+    content, sitting outside the closed world the verdict just called closed.
+
+    The file is real here — POSIX allows the name, and it is the emitted long
+    name that the sweep has to judge. Without the fix this verification
+    returns a CorpusVerification with the file in the tree.
+    """
+
+    write_tree(tmp_path)
+    (tmp_path / "rules/smuggled.ymlx").write_text("name: smuggled\n")
+    spec = corpus_spec(content_suffixes=(".yaml", ".yml"))
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, render_journal(journal_rows()), spec=spec)
+    assert str(caught.value) == (
+        "content root contains a file whose short-name alias would carry a "
+        "pinned suffix: 'rules/smuggled.ymlx'"
+    )
+
+
+def test_refuses_a_tree_entry_whose_name_windows_would_strip(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds R6-F1: a trailing dot on a tree entry aliases the name beside it.
+
+    Win32 strips trailing dots and spaces before the lookup, so
+    ``rules/tax/notes.yaml.`` opens ``rules/tax/notes.yaml`` there. The two
+    spellings are not fold-equal, so no fold key pairs them, and a declared
+    path spelled either way has been refused since round three — but the
+    entry the *tree* carries was never asked. A file emitted under the dotted
+    spelling is not content by suffix, is skipped by the sweep, and answers
+    to a content name on the filesystem this module's whole portability model
+    is about.
+
+    The name is injected through the sweep's listing rather than written:
+    what the verifier has to hold against is a filesystem that emits the
+    name, and injecting it makes the test say the same thing on every host.
+    Without the fix the entry falls through to the ``lstat``, which fails,
+    and the refusal is the non-regular-file one instead.
+    """
+
+    write_tree(tmp_path)
+    monkeypatch.setattr(pathlib.Path, "iterdir", _listing_with("tax", "notes.yaml."))
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        "content root contains an entry Windows would alias: "
+        "'rules/tax/notes.yaml.'"
+    )
+
+
+def test_refuses_an_entry_beside_a_root_component_windows_would_strip(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds R6-F1: the same strip decides which directory *is* the root.
+
+    ``rules `` beside the pinned ``rules`` is the content root on Windows —
+    the lookup strips the space — so a producer can fill it with rule files
+    that a POSIX verifier never sweeps, because the walk descends the
+    spelling the spec pinned and the fold check beside it cannot pair two
+    names that are not fold-equal. The aliasing-root-component guard now asks
+    the strip question as well as the fold question.
+
+    Injected into the tree root's listing so the branch is covered on every
+    host. Without the fix nothing here refuses: the entry is not fold-equal
+    to ``rules``, the sweep never descends it, and the verification passes.
+    """
+
+    real = pathlib.Path.iterdir
+
+    def iterdir(self: pathlib.Path):
+        entries = list(real(self))
+        if self == tmp_path:
+            entries.append(self / "rules ")
+        return iter(entries)
+
+    write_tree(tmp_path)
+    monkeypatch.setattr(pathlib.Path, "iterdir", iterdir)
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        "content root contains an entry Windows would alias: 'rules '"
+    )
+
+
+def test_an_ordinary_non_content_file_under_a_content_root_still_verifies(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds R6-F1, the other side: the screen must not close the closed world.
+
+    The sweep binds files with a pinned suffix and ignores everything else
+    under a content root, which is what lets a corpus keep a README beside
+    its rules. The short-name screen refuses only a name whose 8.3 extension
+    would fold onto a pinned one, so an ordinary neighbour is untouched.
+    Pinned because a conservative screen that also refused these would break
+    every real corpus while every refusal test above still passed.
+    """
+
+    write_tree(tmp_path)
+    (tmp_path / "rules/README.md").write_text("# rules\n")
+    (tmp_path / "rules/tax/notes.txt").write_text("scratch\n")
+    verification = verify_corpus_binding(
+        tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+    )
+    assert len(verification.content) == len(CONTENT)
