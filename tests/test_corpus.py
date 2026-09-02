@@ -936,13 +936,13 @@ def test_refuses_an_attested_file_removed_after_hashing(
         )
 
 
-# --- third cross-family round: the sweep's own blind spots -------------------
+# --- later review round: what the sweep and the sanitiser still let past ----
 
 
 def test_refuses_an_unlisted_content_file_whose_suffix_differs_only_by_case(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Regression for a demonstrated false PASS (cross-family review).
+    """Regression for a demonstrated false PASS.
 
     The sweep matched pinned suffixes byte-for-byte, so ``smuggled.YAML`` was
     not content and never entered the closed-world set. On the
