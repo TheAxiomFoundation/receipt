@@ -198,7 +198,7 @@ def write_prefix_manifest(root: pathlib.Path, rows: list[dict[str, Any]]) -> Non
     path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
 
-def git(root: pathlib.Path, *arguments: str) -> str:
+def git(root: pathlib.Path, *arguments: str, stdin: str | None = None) -> str:
     """Run fixture git commands with ambient user configuration isolated."""
 
     environment = os.environ.copy()
@@ -215,6 +215,7 @@ def git(root: pathlib.Path, *arguments: str) -> str:
         capture_output=True,
         text=True,
         env=environment,
+        input=stdin,
     )
     return completed.stdout.strip()
 
@@ -1363,9 +1364,8 @@ def test_a_fifo_at_the_ledger_path_is_refused_rather_than_waited_on(
     ledger.unlink()
     os.mkfifo(ledger)
 
-    with time_limit(20):
-        with pytest.raises(AppendError) as refusal:
-            run_gate(candidate)
+    with time_limit(20), pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
     assert str(refusal.value) == (
         "state file is not a regular file: ledger/official_observations.jsonl"
     )
@@ -1386,9 +1386,8 @@ def test_a_fifo_at_the_prefix_path_is_refused_rather_than_waited_on(
     prefix.unlink()
     os.mkfifo(prefix)
 
-    with time_limit(20):
-        with pytest.raises(AppendError) as refusal:
-            run_gate(candidate)
+    with time_limit(20), pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
     assert str(refusal.value) == (
         "state file is not a regular file: ledger/immutable_prefix.json"
     )
@@ -1577,4 +1576,30 @@ def test_an_unchanged_tree_passes_the_re_read(tmp_path: pathlib.Path) -> None:
     assert run_gate(candidate) == (
         "thesis-facts append check OK: 3 rows, immutable prefix 1, "
         "+1 appended vs base"
+    )
+
+
+def test_a_conflicted_index_entry_is_refused(tmp_path: pathlib.Path) -> None:
+    """The remaining index state F2 has to answer for: a conflicted merge
+    records stages 1-3 and no single mode for the path, so there is nothing
+    for the working tree to agree with and no basis for comparing modes.
+    Refuse rather than pick one of the stages."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    relative = CHAIN_SPEC.state_relative.as_posix()
+    blob = git(candidate.root, "rev-parse", f"HEAD:{relative}")
+    git(candidate.root, "rm", "--cached", "--quiet", "--", relative)
+    git(
+        candidate.root,
+        "update-index",
+        "--index-info",
+        stdin=f"100644 {blob} 1\t{relative}\n100644 {blob} 2\t{relative}\n",
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "candidate index holds an unmerged entry at "
+        "ledger/official_observations.jsonl"
     )

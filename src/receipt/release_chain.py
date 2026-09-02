@@ -1701,16 +1701,29 @@ def assert_index_agrees_with_tree(
     if completed.returncode != 0:
         diagnostic = completed.stderr.decode("utf-8", errors="replace").strip()
         raise ReleaseChainError(f"cannot read the index entry for {path}: {diagnostic}")
-    records = [record for record in completed.stdout.split(b"\0") if record]
-    if not records:
+    # A pathspec can match more than the path asked about (a directory, or a
+    # name carrying glob magic), so only entries for this exact path count.
+    entries: list[tuple[str, str]] = []
+    for record in completed.stdout.split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, raw_path = record.split(b"\t", 1)
+            mode, _object_id, stage = metadata.decode("ascii").split(" ")
+            listed = raw_path.decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ReleaseChainError(
+                f"cannot parse the index entry for {path}"
+            ) from exc
+        if listed == path:
+            entries.append((mode, stage))
+    if not entries:
         return
-    if len(records) > 1:
+    # Stages 1-3 are a conflicted merge: the index records no single mode for
+    # this path, so there is nothing for the working tree to agree with.
+    if len(entries) > 1 or entries[0][1] != "0":
         raise ReleaseChainError(f"candidate index holds an unmerged entry at {path}")
-    try:
-        metadata, _raw_path = records[0].split(b"\t", 1)
-        index_mode, _object_id, _stage = metadata.decode("ascii").split(" ")
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise ReleaseChainError(f"cannot parse the index entry for {path}") from exc
+    index_mode = entries[0][0]
 
     observed = _observed_git_category(root / pathlib.PurePosixPath(path))
     if index_mode == "120000":
