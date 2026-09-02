@@ -1347,6 +1347,59 @@ def verify_corpus_binding(
             f"from the tree, starting with {_quoted(absent[0])}"
         )
 
+    # A tombstone is a claim about the tree, not only about the journal, and
+    # the verdict repeats it as removedPaths. For a content path the sweep
+    # above already catches a file that outlived its removal row — it is
+    # unlisted. For an attested path nothing else looks: attested paths sit
+    # outside the content roots, so a retired toolchain pin or apply manifest
+    # could sit on disk bound by no row, reported as removed, and be read as
+    # current by every consumer. Look for both kinds, by fold key so an
+    # aliasing spelling counts, and refuse what is still there. One index
+    # serves the whole pass: the searches overlap, and re-reading a directory
+    # per removed path was what made the pass quadratic.
+    #
+    # Placed here, before the hashing, rather than at the end of the pass.
+    # This is the longest walk of the tree the verifier does, and it used to
+    # run after the only checks that look at the tree a second time, so
+    # anything that changed the tree while it ran was never rechecked: a
+    # content file inserted during the tombstone walk was unlisted and
+    # unnoticed, and a bound file rewritten during it kept the verdict of the
+    # bytes that were there before (peer review, round four). Everything that
+    # follows this point re-reads the tree, so the membership re-sweep and the
+    # identity re-check are the last things this function does and they cover
+    # the tombstone walk too.
+    tombstones = _TombstoneIndex(root)
+    for path in removed:
+        # Ask the filesystem about the tombstoned spelling itself before
+        # asking the fold model about it. _fold_survivor decides absence from
+        # the names iterdir emits, and Win32 lookup resolves names enumeration
+        # never emits: a trailing dot or space is stripped before the lookup,
+        # and an NTFS 8.3 short name answers for a long one. Both would be
+        # reported absent by a search over the listing while the file opens
+        # under the tombstoned name (peer review, round three). The host that
+        # runs knows its own aliases; ask it first.
+        try:
+            os.lstat(root / path)
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+        except OSError as exc:
+            raise CorpusError(
+                "cannot check whether a removed path is still in the tree, so "
+                f"the tombstone is unverifiable: {path} ({exc.strerror})"
+            ) from exc
+        else:
+            raise CorpusError(f"removed path is still present in the tree: {path}")
+        survivor = _fold_survivor(tombstones, path)
+        if survivor is None:
+            continue
+        if survivor == path:
+            raise CorpusError(f"removed path is still present in the tree: {path}")
+        raise CorpusError(
+            "removed path is still present in the tree under a spelling that "
+            "aliases it on a case- or normalization-insensitive filesystem: "
+            f"{path} ({_quoted(survivor)})"
+        )
+
     hashed: dict[str, _FileIdentity] = {}
 
     for path in sorted(journal_paths):
@@ -1384,6 +1437,9 @@ def verify_corpus_binding(
     # descriptor saw. A same-inode rewrite that also restores size and
     # mtime_ns is beneath this sweep's resolution; re-reading every byte
     # would double the verifier's IO to move that boundary, not remove it.
+    # They are the last two things this function does, deliberately: every
+    # earlier pass, the tombstone walk included, is inside the window they
+    # close.
     if set(_tree_content_paths(root, spec)) != tree_paths:
         raise CorpusError(
             "the content tree changed during verification; the closed-world "
@@ -1408,48 +1464,6 @@ def verify_corpus_binding(
                 f"bound file {_quoted(path)} changed during verification; the "
                 "verdict is refused"
             )
-
-    # A tombstone is a claim about the tree, not only about the journal, and
-    # the verdict repeats it as removedPaths. For a content path the sweep
-    # above already catches a file that outlived its removal row — it is
-    # unlisted. For an attested path nothing else looks: attested paths sit
-    # outside the content roots, so a retired toolchain pin or apply manifest
-    # could sit on disk bound by no row, reported as removed, and be read as
-    # current by every consumer. Look for both kinds, by fold key so an
-    # aliasing spelling counts, and refuse what is still there. One index
-    # serves the whole pass: the searches overlap, and re-reading a directory
-    # per removed path was what made the pass quadratic.
-    tombstones = _TombstoneIndex(root)
-    for path in removed:
-        # Ask the filesystem about the tombstoned spelling itself before
-        # asking the fold model about it. _fold_survivor decides absence from
-        # the names iterdir emits, and Win32 lookup resolves names enumeration
-        # never emits: a trailing dot or space is stripped before the lookup,
-        # and an NTFS 8.3 short name answers for a long one. Both would be
-        # reported absent by a search over the listing while the file opens
-        # under the tombstoned name (peer review, round three). The host that
-        # runs knows its own aliases; ask it first.
-        try:
-            os.lstat(root / path)
-        except (FileNotFoundError, NotADirectoryError):
-            pass
-        except OSError as exc:
-            raise CorpusError(
-                "cannot check whether a removed path is still in the tree, so "
-                f"the tombstone is unverifiable: {path} ({exc.strerror})"
-            ) from exc
-        else:
-            raise CorpusError(f"removed path is still present in the tree: {path}")
-        survivor = _fold_survivor(tombstones, path)
-        if survivor is None:
-            continue
-        if survivor == path:
-            raise CorpusError(f"removed path is still present in the tree: {path}")
-        raise CorpusError(
-            "removed path is still present in the tree under a spelling that "
-            "aliases it on a case- or normalization-insensitive filesystem: "
-            f"{path} ({_quoted(survivor)})"
-        )
 
     return CorpusVerification(
         content=tuple(content[path] for path in sorted(content)),

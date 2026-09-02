@@ -1815,6 +1815,86 @@ def test_many_tombstones_over_one_cached_bucket_exceed_the_budget(
     assert "tombstone is unverifiable: .axiom/retired/gone-" in str(caught.value)
 
 
+def _planting_fold_survivor(plant):
+    """A ``_fold_survivor`` that changes the tree once, then searches for real.
+
+    The tombstone pass is the longest walk of the tree the verifier does, so
+    it is the widest window an adversary with write access to the clone has.
+    Firing the change from inside the search is only how that window is made
+    to open on every run.
+    """
+
+    import receipt.corpus
+
+    real = receipt.corpus._fold_survivor
+    fired = []
+
+    def fold_survivor(index, relative):
+        if not fired:
+            fired.append(relative)
+            plant()
+        return real(index, relative)
+
+    return fold_survivor
+
+
+def test_a_content_file_inserted_during_the_tombstone_pass_refuses(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds F4: the tombstone pass ran after the last look at the tree.
+
+    Membership was swept once before hashing and re-swept once after, and the
+    tombstone walk ran after both. A content file inserted while that walk was
+    reading directories was therefore never enumerated: the closed-world claim
+    was made over a set that had already changed, and the verdict passed.
+
+    The pass now runs before the hashing, so the re-sweep covers it. Without
+    the fix this verification returns a CorpusVerification and the smuggled
+    rule file is in the tree it just called closed.
+    """
+
+    body = '{"applied": true}\n'
+    write_tree(tmp_path)
+    rows = _tombstone_rows(".axiom/apply-manifest.json", body)
+    monkeypatch.setattr(
+        "receipt.corpus._fold_survivor",
+        _planting_fold_survivor(
+            lambda: (tmp_path / "rules/tax/smuggled.yaml").write_text("name: evil\n")
+        ),
+    )
+    with pytest.raises(CorpusError, match="content tree changed during verification"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_a_bound_file_rewritten_during_the_tombstone_pass_refuses(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds F4: the identity re-check ran before the tombstone walk too.
+
+    The per-file identity re-check is what catches a bound file rewritten
+    after it was hashed, and it ran before the tombstone pass, so a rewrite
+    during that pass kept the verdict of the bytes that were there earlier.
+    The verdict then described a tree that no longer existed, which is the one
+    thing this module is for.
+
+    With the pass moved ahead of the hashing, the rewrite lands before the
+    file is read and the digest itself refuses. Without the fix this
+    verification passes.
+    """
+
+    body = '{"applied": true}\n'
+    write_tree(tmp_path)
+    rows = _tombstone_rows(".axiom/apply-manifest.json", body)
+    monkeypatch.setattr(
+        "receipt.corpus._fold_survivor",
+        _planting_fold_survivor(
+            lambda: (tmp_path / "rules/tax/rate.yaml").write_text("value: 0.99\n")
+        ),
+    )
+    with pytest.raises(CorpusError, match="does not match its witnessed digest"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
 class _CaseFoldingPath:
     """A path object that compares and hashes case-insensitively, as Windows does.
 
