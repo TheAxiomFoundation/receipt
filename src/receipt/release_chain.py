@@ -1857,6 +1857,103 @@ def _observed_git_category(path: pathlib.Path) -> str:
     return "100755" if entry.st_mode & 0o100 else "100644"
 
 
+def _index_entries(
+    root: pathlib.Path, pathspec: str
+) -> list[tuple[str, str, str]]:
+    """Every ``git ls-files -s`` record under one pathspec: mode, stage, path.
+
+    The one place this package parses the index, shared by the checks below
+    so they read it the same way and report an unreadable or unparseable
+    index in the same words.
+    """
+
+    completed = _git_run(root, ["ls-files", "-s", "-z", "--", pathspec])
+    if completed.returncode != 0:
+        diagnostic = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise ReleaseChainError(
+            f"cannot read the index entry for {pathspec}: {diagnostic}"
+        )
+    entries: list[tuple[str, str, str]] = []
+    for record in completed.stdout.split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, raw_path = record.split(b"\t", 1)
+            mode, _object_id, stage = metadata.decode("ascii").split(" ")
+            listed = raw_path.decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ReleaseChainError(
+                f"cannot parse the index entry for {pathspec}"
+            ) from exc
+        entries.append((mode, stage, listed))
+    return entries
+
+
+def _exact_relative(relative: pathlib.PurePosixPath | str) -> str:
+    return (
+        relative.as_posix()
+        if isinstance(relative, pathlib.PurePosixPath)
+        else str(relative)
+    )
+
+
+def assert_state_path_tracked(
+    root: pathlib.Path, relative: pathlib.PurePosixPath | str
+) -> None:
+    """Require a state path to be a tracked regular file, with no gitlink over it.
+
+    ``assert_index_agrees_with_tree`` compares a path the index holds against
+    the working tree and returns when the index holds nothing for it, because
+    a proposal that adds files must be able to add them. The two state files
+    are not in that class: they are the files the whole verdict is about, and
+    an untracked one is not part of the commit under review at all — its
+    bytes are not what a merge would take, and no diff against the base can
+    reach it. Worse, nothing looked at the path's ancestors. A directory only
+    appears in the index as a gitlink, and a gitlink at ``ledger`` is a
+    submodule boundary: the files beneath it belong to another repository,
+    are not this commit's content, and yet arrive in the working tree as
+    perfectly regular files that hash, parse, and satisfy every byte
+    comparison here.
+
+    So: every ancestor of the path must be absent from the index, whatever
+    mode it carries, and the leaf must have exactly one stage-0 entry whose
+    mode is 100644 or 100755. Ancestors are checked first, because a gitlink
+    at ``ledger`` is why the leaf beneath it has no entry of its own.
+
+    This says a comparison cannot be made rather than making one, so
+    ``append_gate.verify_append_gate`` calls it at entry, ahead of the checks
+    that would otherwise compare bytes git never recorded. That precedence is
+    stated in that module's docstring and pinned by a test.
+    """
+
+    path = _exact_relative(relative)
+    parts = pathlib.PurePosixPath(path).parts
+    for depth in range(1, len(parts)):
+        ancestor = "/".join(parts[:depth])
+        for mode, _stage, listed in _index_entries(root, ancestor):
+            if listed == ancestor:
+                raise ReleaseChainError(
+                    f"state path {path} has an indexed ancestor {ancestor} ({mode})"
+                )
+    entries = [
+        (mode, stage)
+        for mode, stage, listed in _index_entries(root, path)
+        if listed == path
+    ]
+    if not entries:
+        raise ReleaseChainError(
+            f"state path {path} is absent from the candidate index"
+        )
+    # The same fact assert_index_agrees_with_tree refuses, in its words: a
+    # conflicted merge records stages 1-3 and no single mode for the path.
+    if len(entries) > 1 or entries[0][1] != "0":
+        raise ReleaseChainError(f"candidate index holds an unmerged entry at {path}")
+    if entries[0][0] not in {"100644", "100755"}:
+        raise ReleaseChainError(
+            f"state path {path} has a non-regular index entry: {entries[0][0]}"
+        )
+
+
 def assert_index_agrees_with_tree(
     root: pathlib.Path, relative: pathlib.PurePosixPath | str
 ) -> None:
@@ -1884,31 +1981,14 @@ def assert_index_agrees_with_tree(
     pre-existing is pre-empted.
     """
 
-    path = (
-        relative.as_posix()
-        if isinstance(relative, pathlib.PurePosixPath)
-        else str(relative)
-    )
-    completed = _git_run(root, ["ls-files", "-s", "-z", "--", path])
-    if completed.returncode != 0:
-        diagnostic = completed.stderr.decode("utf-8", errors="replace").strip()
-        raise ReleaseChainError(f"cannot read the index entry for {path}: {diagnostic}")
+    path = _exact_relative(relative)
     # A pathspec can match more than the path asked about (a directory, or a
     # name carrying glob magic), so only entries for this exact path count.
-    entries: list[tuple[str, str]] = []
-    for record in completed.stdout.split(b"\0"):
-        if not record:
-            continue
-        try:
-            metadata, raw_path = record.split(b"\t", 1)
-            mode, _object_id, stage = metadata.decode("ascii").split(" ")
-            listed = raw_path.decode("utf-8")
-        except (ValueError, UnicodeDecodeError) as exc:
-            raise ReleaseChainError(
-                f"cannot parse the index entry for {path}"
-            ) from exc
-        if listed == path:
-            entries.append((mode, stage))
+    entries = [
+        (mode, stage)
+        for mode, stage, listed in _index_entries(root, path)
+        if listed == path
+    ]
     if not entries:
         return
     # Stages 1-3 are a conflicted merge: the index records no single mode for

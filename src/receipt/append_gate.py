@@ -82,6 +82,7 @@ from receipt.release_chain import (
     MANIFEST_RE,
     ReleaseChainError,
     assert_no_symlinked_state_component,
+    assert_state_path_tracked,
     confined_state_descriptor,
     git_blob_bytes,
     read_state_descriptor,
@@ -1202,6 +1203,21 @@ def verify_append_gate(
         assert_file_modes_authoritative(candidate.root)
     except ReleaseChainError as exc:
         raise AppendError(str(exc)) from exc
+    # And the two state files must be files git is tracking here, with no
+    # gitlink standing over them. Nothing checked either. A 160000 entry at
+    # ``ledger`` is a submodule boundary whose contents belong to another
+    # repository, and it delivers perfectly regular files that hash, parse,
+    # and satisfy every byte comparison below while being no part of this
+    # commit; an untracked state file is the same fact without the gitlink.
+    # Like the checkout guard, this says a comparison cannot be made rather
+    # than making one, so it runs before the checks that would make it — the
+    # second and last place a refusal added after the extraction precedes a
+    # pre-existing one, stated in the module docstring and pinned by a test.
+    for relative in (spec.chain.state_relative, spec.chain.prefix_relative):
+        try:
+            assert_state_path_tracked(candidate.root, relative)
+        except ReleaseChainError as exc:
+            raise AppendError(str(exc)) from exc
     if base is not None:
         _data_changes, gate_changes, unclassified = check_surface_separation(
             base,
@@ -1287,6 +1303,20 @@ def verify_append_gate(
     check_binding_shapes(lines, binding_boundary)
     if base is not None:
         check_state_modes(base, candidate)
+    else:
+        # The push path has no base to compare a mode against, so
+        # check_state_modes does not run and nothing on this path asked
+        # whether the working tree carries what git recorded for the two
+        # state files — a 120000 entry materialised as a plain file, or an
+        # executable bit the filesystem dropped, went unnoticed. The index
+        # answers that without a base. It runs here, in the position
+        # check_state_modes occupies on the other path and for the same
+        # reason: after every check that existed before it.
+        for relative in (spec.chain.state_relative, spec.chain.prefix_relative):
+            try:
+                assert_index_agrees_with_tree(candidate.root, relative)
+            except ReleaseChainError as exc:
+                raise AppendError(str(exc)) from exc
     # Last of all, and after the release verification's own re-reads: the two
     # state files must still be the files this verdict read.
     _assert_state_unchanged(ledger_state, candidate)

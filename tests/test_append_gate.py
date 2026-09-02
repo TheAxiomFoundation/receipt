@@ -1255,7 +1255,12 @@ def test_a_symlink_staged_over_a_regular_state_file_is_refused(
     not what git recorded — the exact shape core.symlinks false produces, and
     the shape a filesystem without symlinks leaves behind whatever the config
     says. Nothing compared the two, so the byte and mode checks ran on a
-    regular file while git held a link."""
+    regular file while git held a link.
+
+    R5-F3 moved which refusal the gate gives for this tree: a 120000 entry
+    for a state path is not a tracked regular file, and the entry check says
+    so before anything reads the file at all. The comparison this case was
+    written for is asserted directly below, so both remain bound."""
 
     candidate = base_repository(tmp_path)
     append_one_row(candidate)
@@ -1274,6 +1279,14 @@ def test_a_symlink_staged_over_a_regular_state_file_is_refused(
     with pytest.raises(AppendError) as refusal:
         run_gate(candidate)
     assert str(refusal.value) == (
+        "state path ledger/official_observations.jsonl has a non-regular "
+        "index entry: 120000"
+    )
+    with pytest.raises(ReleaseChainError) as compared:
+        release_chain.assert_index_agrees_with_tree(
+            candidate.root, CHAIN_SPEC.state_relative
+        )
+    assert str(compared.value) == (
         "candidate index records a symlink at ledger/official_observations.jsonl "
         "but the working tree holds a regular file"
     )
@@ -1845,4 +1858,158 @@ def test_the_state_reader_cannot_follow_a_parent_swapped_after_its_walk(
     assert str(refusal.value) == (
         "state path traverses a symlink at 'ledger': "
         "ledger/official_observations.jsonl"
+    )
+
+
+def test_a_gitlink_over_the_ledger_directory_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds R5-F3: nothing looked at a state path's ancestors.
+
+    A directory reaches the index only as a gitlink, and a 160000 entry at
+    ``ledger`` is a submodule boundary: what lies beneath it belongs to
+    another repository and is no part of this commit's content, while
+    arriving in the working tree as ordinary regular files that hash, parse,
+    and satisfy every byte comparison the gate makes. The index check that
+    existed returned on a path the index does not hold — which is exactly
+    what a gitlink over it produces — so the whole append ran on files git
+    never recorded here.
+    """
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    for relative in (CHAIN_SPEC.state_relative, CHAIN_SPEC.prefix_relative):
+        git(candidate.root, "rm", "--cached", "--quiet", "--", relative.as_posix())
+    git(
+        candidate.root,
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        f"160000,{candidate.base},ledger",
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "state path ledger/official_observations.jsonl has an indexed "
+        "ancestor ledger (160000)"
+    )
+
+
+def test_an_untracked_ledger_is_refused_as_absent_from_the_index(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The other half of R5-F3's leaf rule: an untracked state file is not
+    part of the commit under review. Its bytes are not what a merge would
+    take and no diff against the base can reach them, so there is nothing for
+    this verdict to be about. The index check that existed treated a path it
+    did not hold as nothing to compare, and returned."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    git(
+        candidate.root,
+        "rm",
+        "--cached",
+        "--quiet",
+        "--",
+        CHAIN_SPEC.state_relative.as_posix(),
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "state path ledger/official_observations.jsonl is absent from the "
+        "candidate index"
+    )
+
+
+def test_the_push_path_refuses_a_symlink_index_entry_for_the_ledger(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds R5-F3 on the push path, which had no state check of any kind.
+
+    With no base ref there is no release-history pass and no
+    ``check_state_modes``, so a 120000 index entry standing over a regular
+    file — what ``core.symlinks`` false materialises, and what a filesystem
+    without symlinks leaves whatever the config claims — reached every byte
+    check on this path unexamined. The entry check refuses it on both paths
+    now, before anything is read.
+    """
+
+    candidate = base_repository(tmp_path)
+    target = candidate.root / "link-target"
+    target.write_text("outside.jsonl", encoding="utf-8")
+    blob = git(candidate.root, "hash-object", "-w", "link-target")
+    target.unlink()
+    git(
+        candidate.root,
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        f"120000,{blob},{CHAIN_SPEC.state_relative.as_posix()}",
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate)
+    assert str(refusal.value) == (
+        "state path ledger/official_observations.jsonl has a non-regular "
+        "index entry: 120000"
+    )
+
+
+def test_the_push_path_compares_the_state_files_against_the_index(
+    tmp_path: pathlib.Path,
+) -> None:
+    """R5-F3's second push-path gap: the working tree was never compared with
+    the index there at all. ``check_state_modes`` carries that comparison on
+    the base-ref path and does not run without a base, so a state file whose
+    recorded executable bit the checkout did not materialise was accepted.
+    The comparison runs on the push path in the position check_state_modes
+    occupies on the other one — after every check that existed before it."""
+
+    candidate = base_repository(tmp_path)
+    git(
+        candidate.root,
+        "update-index",
+        "--chmod=+x",
+        "--",
+        CHAIN_SPEC.prefix_relative.as_posix(),
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate)
+    assert str(refusal.value) == (
+        "candidate working tree mode for ledger/immutable_prefix.json "
+        "disagrees with its index entry (100755 vs 100644)"
+    )
+
+
+def test_the_tracked_state_refusal_precedes_pre_existing_row_refusals(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The precedence R5-F3 introduces, stated in the module docstring and
+    pinned here: like the checkout guard, the entry check says a comparison
+    cannot be made and so runs ahead of the checks that would make it — the
+    only other place a refusal added after the extraction pre-empts one the
+    upstream gate gives. The same tree carries a row the upstream verifier
+    refuses in its own words, and that refusal is what fires once the ledger
+    is tracked again."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate, responseArchive={"sha256": "not-a-digest"})
+    relative = CHAIN_SPEC.state_relative.as_posix()
+    git(candidate.root, "rm", "--cached", "--quiet", "--", relative)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        f"state path {relative} is absent from the candidate index"
+    )
+
+    git(candidate.root, "add", "--", relative)
+    with pytest.raises(AppendError) as pre_existing:
+        run_gate(candidate)
+    assert "responseArchive.sha256 is not a SHA-256 hex digest" in str(
+        pre_existing.value
     )
