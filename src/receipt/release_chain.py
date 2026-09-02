@@ -1474,6 +1474,21 @@ def verify_release_chain(
     )
 
 
+def _git_environment() -> dict[str, str]:
+    """The environment every git read in this package runs under.
+
+    ``refs/replace`` rewrites what git returns for an object while every
+    command still prints the original OID, so a replacement placed in the
+    candidate repository changes the base commit, tree, or blob these checks
+    read behind the name the verdict names — a base resolved to one OID and
+    read as another. ``GIT_NO_REPLACE_OBJECTS`` turns the mechanism off for
+    the read; the ambient environment is otherwise carried through, so
+    ``GIT_DIR``, credentials, and the caller's own isolation still apply.
+    """
+
+    return {**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"}
+
+
 def _git_run(
     root: pathlib.Path,
     arguments: list[str],
@@ -1487,6 +1502,7 @@ def _git_run(
             check=False,
             capture_output=True,
             text=text,
+            env=_git_environment(),
         )
     except FileNotFoundError as exc:
         raise ReleaseChainError("git is required for --base-ref verification") from exc
@@ -1589,6 +1605,7 @@ def _git_bool(root: pathlib.Path, key: str) -> bool | None:
         capture_output=True,
         text=True,
         check=False,
+        env=_git_environment(),
     )
     if result.returncode == 1 and not result.stdout.strip():
         return None

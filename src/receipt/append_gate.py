@@ -39,11 +39,12 @@ Additions since the extraction close confinement gaps the upstream battery
 never presented: a gate-only proposal is confined to the surfaces its verdict
 speaks for, a state path that traverses a symlinked component is refused before
 it is read, the base is resolved to a commit once and carried to every
-consumer, the two state files keep the base's file mode, and the post-cutover
-binding values are validated for shape rather than presence alone. They run
-beside the extracted checks without altering any of their refusals or the
-order in which those refusals fire, and carry their own tests in
-tests/test_append_gate.py.
+consumer, every git read runs with ``refs/replace`` disabled so a replacement
+object cannot change what the printed OID reads as, the two state files keep
+the base's file mode, and the post-cutover binding values are validated for
+shape rather than presence alone. They run beside the extracted checks without
+altering any of their refusals or the order in which those refusals fire, and
+carry their own tests in tests/test_append_gate.py.
 """
 
 from __future__ import annotations
@@ -60,6 +61,7 @@ from typing import Any
 
 from receipt.canonical import canonical_sha256
 from receipt.release_chain import (
+    _git_environment,
     assert_file_modes_authoritative,
     ChainSpec,
     MANIFEST_RE,
@@ -139,12 +141,16 @@ def _set_root(root: pathlib.Path, spec: AppendGateSpec) -> _CandidateTree:
 
 
 def _git_output(arguments: list[str], candidate: _CandidateTree) -> bytes:
+    # Every git read here runs under the shared _git_environment, which turns
+    # off refs/replace: a replacement object changes what a commit, tree, or
+    # blob reads as while the OID this verdict prints stays the same.
     try:
         completed = subprocess.run(
             ["git", *arguments],
             cwd=candidate.root,
             check=False,
             capture_output=True,
+            env=_git_environment(),
         )
     except FileNotFoundError as exc:
         raise AppendError("git is required for --base-ref verification") from exc
@@ -591,6 +597,7 @@ def check_append_only(
             ["git", "show", f"{base.commit}:{relative}"],
             cwd=candidate.root,
             text=True,
+            env=_git_environment(),
         )
     except subprocess.CalledProcessError as exc:
         raise AppendError(f"cannot read {relative} at base {base.ref}") from exc
@@ -618,6 +625,7 @@ def _manifest_at_ref(
             ["git", "show", f"{base.commit}:{relative}"],
             cwd=candidate.root,
             text=True,
+            env=_git_environment(),
         )
     except subprocess.CalledProcessError as exc:
         raise AppendError(f"cannot read {relative} at base {base.ref}") from exc

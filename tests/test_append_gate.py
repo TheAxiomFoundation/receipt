@@ -28,7 +28,7 @@ from typing import Any
 
 import pytest
 
-from receipt import append_gate
+from receipt import append_gate, release_chain
 from receipt.append_gate import (
     AppendError,
     AppendGateSpec,
@@ -1060,3 +1060,51 @@ def test_the_checkout_refusal_precedes_file_level_release_refusals(
     with pytest.raises(AppendError) as refusal:
         run_gate(candidate)
     assert str(refusal.value).startswith("file modes cannot be verified")
+
+
+def test_a_replacement_object_cannot_change_what_the_base_commit_reads_as(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds F4: every git read in the gate disables ``refs/replace``.
+
+    A replacement rewrites what git returns for an object while every command
+    still prints the original OID, so a base commit replaced by a later one is
+    shown, diffed, and enumerated as that later commit behind the name the
+    verdict prints. Without ``GIT_NO_REPLACE_OBJECTS`` this run reads the
+    later commit — which differs in the ledger, the frozen prefix manifest,
+    and the release tree — and refuses; the control below shows exactly that.
+    """
+
+    moving, first, later = moving_base_repository(tmp_path)
+    git(moving.root, "replace", first, later)
+    # The replacement is live for an ordinary read: the base OID now shows the
+    # later commit's three-row ledger.
+    replaced = git(
+        moving.root,
+        "show",
+        f"{first}:{CHAIN_SPEC.state_relative.as_posix()}",
+    )
+    assert len(replaced.splitlines()) == BASE_ROW_COUNT + 1
+
+    assert run_gate(moving) == (
+        "thesis-facts append check OK: 4 rows, immutable prefix 1, "
+        f"+2 appended vs base moving ({first})"
+    )
+
+
+def test_the_replacement_control_shows_the_environment_is_what_stops_it(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control for F4: strip ``GIT_NO_REPLACE_OBJECTS`` from the shared
+    environment helper — in both modules, since append_gate binds the name at
+    import — and the same tree is read at the replacement and refused. That is
+    the verdict this branch would still be giving without the fix."""
+
+    moving, first, later = moving_base_repository(tmp_path)
+    git(moving.root, "replace", first, later)
+    monkeypatch.setattr(append_gate, "_git_environment", lambda: dict(os.environ))
+    monkeypatch.setattr(release_chain, "_git_environment", lambda: dict(os.environ))
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(moving)
+    assert "changed vs base moving" in str(refusal.value)
