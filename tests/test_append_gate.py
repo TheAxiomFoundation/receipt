@@ -30,8 +30,15 @@ the read that established them, R6-F4 the descent that fell back to a
 pathname open and the root nothing vouched for.
 
 Docstrings labelled R7-F1 onward name that gate's second round, numbering
-from one again: R7-F6 the index reads that passed a path to git as a
-pattern.
+from one again: R7-F1 the base release file removed from the candidate index
+alone, R7-F3 the gate-only classification that could not see what the index
+records, R7-F4 the indexed release path answered for through a symlinked
+component, R7-F5 the state mode read that followed a link where there was no
+snapshot to take, R7-F6 the index reads that passed a path to git as a
+pattern. That round's R7-F2 — the writer that can rewrite a state file after
+its last re-read — is the stated residual: it wants an immutable snapshot of
+the tree under audit, which this gate does not have, and it is tracked as
+follow-up rather than bound by a test here.
 
 The fixture is a local git repository built from scratch — no network, no
 witnesses, no signatures. Its release tree holds a README and no manifests, so

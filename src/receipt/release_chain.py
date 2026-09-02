@@ -19,11 +19,18 @@ codex/thesis-ledger-facts); see receipts/ledger-pin-source-hashes.txt. The only
 intended change is parameterization: every repo-specific constant moved into
 ChainSpec, supplied by the consumer's committed code. Behavior is gated by the
 differential harness in tests/test_ledger_equivalence.py. Additions since the
-extraction (the base-ref history pass with its checkout and index guards;
-the release-root guard, which reconciles that root's index entries with the
-working tree in both directions; the state-path guards ``append_gate``
-calls; the anchor-set digest in the result) run beside the extracted checks
-without altering any of their refusals, and carry their own tests. The state
+extraction (the base-ref history pass with its checkout and index guards,
+which include requiring every base release file to still be an entry in the
+candidate index, since both of that pass's comparisons read the working tree
+and ``git rm --cached`` leaves it untouched; the release-root guard, which
+reconciles that root's index entries with the working tree in both
+directions and walks an indexed path's parents before asking what it is,
+because a filesystem traversal does not descend a symlinked directory while
+resolving the whole name does; the state-path guards ``append_gate`` calls;
+the anchor-set digest in the result) run beside the extracted checks without
+altering any of their refusals, and carry their own tests. Every one of those
+index reads names its path as a literal pathspec, so git is asked about the
+exact path rather than handed a name to interpret as a pattern. The state
 reads themselves changed shape but not their refusals: ``_regular_file_bytes``
 keeps both of its messages and their order, and opens the file it accepts
 through directory descriptors so no component of the path is resolved twice.
