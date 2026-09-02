@@ -2127,6 +2127,48 @@ def assert_index_agrees_with_tree(
         )
 
 
+def assert_release_file_still_indexed(
+    root: pathlib.Path, relative: pathlib.PurePosixPath | str
+) -> None:
+    """Require a base release file to still be an entry in the candidate index.
+
+    ``assert_index_agrees_with_tree`` returns when the index holds nothing
+    for a path, because a proposal that adds files must be able to add them.
+    A file the base already carries is not in that class. Every comparison
+    the release-history pass makes about it — its mode, its bytes — is a
+    comparison against the working tree, and ``git rm --cached`` touches
+    neither: the file stays on disk, byte-identical and at the mode the base
+    recorded, while the entry that makes it part of this commit is gone. So
+    the mode matched, the bytes matched, the agreement check found no entry
+    to disagree with, the whole pass passed — and the commit under review
+    deletes a release file this package calls immutable.
+
+    The index must therefore hold exactly one stage-0 entry for the path, at
+    100644 or 100755. Like the agreement check beside it this runs after the
+    comparisons for that path, so nothing pre-existing is pre-empted; the two
+    failures the two checks share are refused there first and in its words,
+    including the more specific message a 120000 entry gets, so what is left
+    to say here is that the entry is gone.
+    """
+
+    path = _exact_relative(relative)
+    entries = [
+        (mode, stage)
+        for mode, stage, listed in _index_entries(root, path)
+        if listed == path
+    ]
+    if not entries:
+        raise ReleaseChainError(
+            f"existing release file was removed from the candidate index: {path}"
+        )
+    if len(entries) > 1 or entries[0][1] != "0":
+        raise ReleaseChainError(f"candidate index holds an unmerged entry at {path}")
+    if entries[0][0] not in {"100644", "100755"}:
+        raise ReleaseChainError(
+            f"candidate index records a non-regular entry at {path}: {entries[0][0]}"
+        )
+
+
 def assert_release_root_index_regular(root: pathlib.Path, spec: ChainSpec) -> None:
     """Refuse an index entry under the release root that is not a regular file.
 
@@ -2266,6 +2308,11 @@ def verify_release_history_immutable(
         # pins (an unstaged chmod is both a mode change and an index
         # disagreement). A comparison that passed fail-open is caught here.
         assert_index_agrees_with_tree(root, relative)
+        # And the entry has to still be there. Both comparisons above read the
+        # working tree, which `git rm --cached` leaves exactly as it found it,
+        # so a proposal that drops an existing release file from the index
+        # alone passed every one of them while deleting release history.
+        assert_release_file_still_indexed(root, relative)
     # After every per-file comparison, and for the same reason: the release
     # root's own index entries, which the working-tree enumeration above
     # cannot see when they are directories it skips or gitlinks nothing
