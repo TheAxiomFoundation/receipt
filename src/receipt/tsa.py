@@ -1107,7 +1107,9 @@ def _v1_witness_evidence(
     # happened to answer -- and say nothing about the rest.  Dual witness is
     # only dual under v2.  Counted on the bundle the witness actually selected
     # (peer review): every active bundle stays selectable here, so counting
-    # the newest one let a witness name an older, wider bundle and pass.
+    # only the newest one let a witness name an older, wider bundle and pass.
+    # verify_witness counts the newest one as well, before dispatch, for the
+    # unavailable witness that names no bundle at all.
     anchor_count = len(trust["anchors"])
     if anchor_count > 1:
         raise TsaError(
@@ -1366,6 +1368,24 @@ def verify_witness(
                 "legacy witness schema cannot cover a TSA trust transition "
                 "or a chain with v2 active"
             )
+        # The legacy bundle -- the newest active one, just checked to be the
+        # spec's legacy_witness_bundle_id -- must configure a single anchor.
+        # Counted here, before dispatch, because an unavailable legacy
+        # witness names no bundle and returns before any is resolved, so
+        # this is the only bundle it can be measured against (peer review,
+        # round two). _v1_witness_evidence counts again on the bundle an
+        # available witness actually selects, which may be an older one
+        # still active (round one).
+        if preferred is not None:
+            _legacy_path, legacy_trust = _load_trust_bundle(
+                records, preferred, spec=spec
+            )
+            legacy_count = len(legacy_trust["anchors"])
+            if legacy_count > 1:
+                raise TsaError(
+                    "legacy witness schema requires a single-anchor bundle; "
+                    f"{legacy_trust['bundleId']} has {legacy_count}"
+                )
         return _v1_witness_evidence(
             path,
             witness,

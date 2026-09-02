@@ -1153,3 +1153,28 @@ def test_a_rotated_signer_verifies_under_the_bundle_version_that_names_it(
     )
     assert evidence.trust_bundle_id == "tsa-anchors-v2"
     assert evidence.tokens[0].tsa_spki_sha256 == rotated["spkiSha256"]
+
+
+def test_refuses_an_unavailable_legacy_witness_over_a_multi_anchor_bundle(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """The unavailable path returned before any bundle was resolved.
+
+    An unavailable v1 marker names no bundle, so counting only the bundle an
+    available witness selects left it unmeasured: it verified over a
+    two-anchor legacy bundle while the PR said such witnesses refuse (peer
+    review, round two). The newest active bundle, which the legacy schema is
+    already required to match, is counted before dispatch.
+    """
+
+    tree = build_witness_tree(
+        tmp_path,
+        local_anchors,
+        schema="thesis_rfc3161_witness_v1",
+        available=False,
+    )
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == (
+        "legacy witness schema requires a single-anchor bundle; tsa-anchors-v1 has 2"
+    )
