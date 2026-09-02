@@ -28,6 +28,7 @@ from typing import Any
 
 import pytest
 
+from receipt import append_gate
 from receipt.append_gate import (
     AppendError,
     AppendGateSpec,
@@ -466,3 +467,93 @@ def test_the_state_reader_accepts_an_ordinary_regular_file(
     (root / CHAIN_SPEC.state_relative).write_text("{}\n", encoding="utf-8")
 
     assert _regular_file_bytes(root, CHAIN_SPEC.state_relative) == b"{}\n"
+
+
+def moving_base_repository(
+    tmp_path: pathlib.Path,
+) -> tuple[Candidate, str, str]:
+    """A branch on an early commit, a later commit, and a four-row worktree.
+
+    The two commits give different verdicts for the same working tree — two
+    appended rows against the first, one against the second — so the verdict
+    text alone says which commit the whole run measured against.
+    """
+
+    first = base_repository(tmp_path)
+    rows = [observation_row(number) for number in range(1, BASE_ROW_COUNT + 2)]
+    write_ledger(first.root, rows)
+    git(first.root, "add", "-A")
+    git(first.root, "commit", "--quiet", "-m", "third row")
+    later = git(first.root, "rev-parse", "HEAD")
+    git(first.root, "branch", "moving", first.base)
+    rows.append(observation_row(BASE_ROW_COUNT + 2))
+    write_ledger(first.root, rows)
+    return Candidate(root=first.root, base="moving"), first.base, later
+
+
+def test_the_success_text_names_the_commit_a_symbolic_base_resolved_to(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A verdict against a movable name must say which commit that name was."""
+
+    moving, first, _later = moving_base_repository(tmp_path)
+
+    assert run_gate(moving) == (
+        "thesis-facts append check OK: 4 rows, immutable prefix 1, "
+        f"+2 appended vs base moving ({first})"
+    )
+
+
+def test_a_base_named_by_its_own_commit_keeps_the_baseline_text(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A caller who named the OID already named the commit, so that verdict
+    text is exactly what it always was."""
+
+    moving, first, _later = moving_base_repository(tmp_path)
+
+    assert run_gate(moving, base_ref=first) == (
+        "thesis-facts append check OK: 4 rows, immutable prefix 1, "
+        "+2 appended vs base"
+    )
+
+
+def test_the_moved_branch_alone_would_change_the_verdict(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The control: the two commits really do disagree about this worktree."""
+
+    moving, _first, later = moving_base_repository(tmp_path)
+    git(moving.root, "branch", "-f", "moving", later)
+
+    assert run_gate(moving) == (
+        "thesis-facts append check OK: 4 rows, immutable prefix 1, "
+        f"+1 appended vs base moving ({later})"
+    )
+
+
+def test_a_branch_that_moves_mid_verdict_is_still_read_at_one_commit(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gap: the base was resolved by name at the surface check, again at
+    the append-only diff and the frozen prefix, and again at the release
+    history. Move the branch after the surface check and the run must still
+    answer about the commit it started with."""
+
+    moving, first, later = moving_base_repository(tmp_path)
+    separate = append_gate.check_surface_separation
+
+    def move_the_branch(
+        base: Any, candidate: Any
+    ) -> tuple[set[str], set[str], set[str]]:
+        classified = separate(base, candidate)
+        git(candidate.root, "branch", "-f", "moving", later)
+        return classified
+
+    monkeypatch.setattr(append_gate, "check_surface_separation", move_the_branch)
+
+    assert run_gate(moving) == (
+        "thesis-facts append check OK: 4 rows, immutable prefix 1, "
+        f"+2 appended vs base moving ({first})"
+    )
+    assert git(moving.root, "rev-parse", "moving") == later
