@@ -60,11 +60,18 @@ Deliberately outside the mutation contract:
 - the baseline pins a root PEM by its hash, its certificate hash and its
   SPKI -- the last two describing the file's first certificate only -- and
   then hands the whole file to ``openssl ts -verify -CAfile``, which trusts
-  every certificate in it; the port refuses a pinned root PEM that holds more
-  than one certificate.  Both pinned roots
-  (``records/trust/freetsa-root-2016.pem`` and
-  ``records/trust/digicert-trusted-root-g4.pem``) hold exactly one, so this
-  refusal, which precedes the ported PEM-hash refusal, fires on no case here;
+  every certificate in it; the port refuses a pinned root PEM unless
+  ``openssl storeutl -noout -certs`` counts exactly one certificate in it,
+  and gives the two ``-CAfile`` verifications that one certificate as
+  ``openssl x509`` re-encodes it rather than the pinned file.  ``storeutl``
+  counts one in each pinned root (``records/trust/freetsa-root-2016.pem``
+  and ``records/trust/digicert-trusted-root-g4.pem``), so the refusal --
+  which precedes the ported PEM-hash refusal, and the further refusal for a
+  root whose certificates ``storeutl`` cannot count at all -- fires on no
+  case here; and each root re-encodes to the certificate its own
+  ``certificateSha256`` already pins (``a6379e7c...`` and ``552f7bdc...``),
+  so the substituted ``-CAfile`` carries the same trust anchor the baseline
+  passed and no case's outcome moves;
 - the baseline compares a bundle's anchors with the code identities in one
   direction only, so an identity scoped to a bundle whose anchors do not
   include it is ignored; the port requires the two sets to be equal at load.

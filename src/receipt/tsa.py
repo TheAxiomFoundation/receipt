@@ -10,34 +10,37 @@ ships no repository-specific trust defaults and performs no chain walk or
 producer signature verification.
 
 The port is stricter than the baseline in ten places, each refusing an input
-the pinned tree never presents and so each outside the differential
-contract: a
-legacy witness over a bundle configuring more than one anchor; a bundle
-configuring an anchor the spec carries no identity for, or one whose
-declared root SPKI or allowed signers differ from that identity, or whose
-referenced root material fails the ported material checks or carries an
-SPKI other than the identity's (all compared at load for every anchor, not
-only the one a witness selects); a pinned root PEM holding more than one
-certificate, which the declared certificate hash and SPKI describe only the
-first of while the ``-CAfile`` verifications trust every certificate in the
-file; a bundle whose configured anchors are not exactly the anchors the
-spec's identities for that bundle name, so an identity the consumer scoped
-to it cannot be quietly absent from it; a pending bundle anchor reusing an
-active anchor ID under a different code-pinned root, which is a new
-authority and so must carry a supplemental outcome before the transition can
-activate it -- the ported supplemental-outcome refusal, reaching a case the
-baseline let through because it took the ID alone for the identity; an
-unavailable witness of either schema whose reason is not a string, or that
-carries token evidence at the witness level (the v2 per-anchor outcome has
-always refused both); and an unavailable legacy witness that names a bundle
-by any of its three claim fields, whose claim is then resolved and counted
-where the baseline ignored those fields.  The port also corrects one
-baseline defect: ``_decode_oid`` read only the first octet of a policy OID
-as its combined first two arcs, so a first subidentifier spanning several
-octets (2.999.3) decoded wrongly.  ``tests/test_tsa.py`` binds all of
-these.  Because every bundle anchor is now identity-checked at load,
-``_select_anchor``'s own identity refusal can no longer fire from within
-this module; its text is kept verbatim, as ported, and as defence in depth.
+the pinned tree never presents and so each outside the differential contract:
+a legacy witness over a bundle configuring more than one anchor; a bundle
+configuring an anchor the spec carries no identity for, or one whose declared
+root SPKI or allowed signers differ from that identity, or whose referenced
+root material fails the ported material checks or carries an SPKI other than
+the identity's (all compared at load for every anchor, not only the one a
+witness selects); a pinned root PEM that OpenSSL's own parser (``openssl
+storeutl -noout -certs``) does not count exactly one certificate in, or whose
+certificates it cannot count at all -- the declared certificate hash and SPKI
+describe only the first certificate, while a ``-CAfile`` trusts every
+certificate it is given, so the two verifications are now handed that first
+certificate alone, as ``openssl x509`` re-encodes it, and what the identity
+pins is the whole of what they trust; a bundle whose configured anchors are
+not exactly the anchors the spec's identities for that bundle name, so an
+identity the consumer scoped to it cannot be quietly absent from it; a
+pending bundle anchor reusing an active anchor ID under a different
+code-pinned root, which is a new authority and so must carry a supplemental
+outcome before the transition can activate it -- the ported
+supplemental-outcome refusal, reaching a case the baseline let through
+because it took the ID alone for the identity; an unavailable witness of
+either schema whose reason is not a string, or that carries token evidence at
+the witness level (the v2 per-anchor outcome has always refused both); and an
+unavailable legacy witness that names a bundle by any of its three claim
+fields, whose claim is then resolved and counted where the baseline ignored
+those fields.  The port also corrects one baseline defect: ``_decode_oid``
+read only the first octet of a policy OID as its combined first two arcs, so
+a first subidentifier spanning several octets (2.999.3) decoded wrongly.
+``tests/test_tsa.py`` binds all of these.  Because every bundle anchor is now
+identity-checked at load, ``_select_anchor``'s own identity refusal can no
+longer fire from within this module; its text is kept verbatim, as ported,
+and as defence in depth.
 """
 
 from __future__ import annotations
@@ -831,12 +834,43 @@ def preferred_active_trust_bundle(
     return dict(max(candidates, key=lambda item: item[0])[1])
 
 
-#: Every PEM object boundary OpenSSL recognises, whatever its label: a BEGIN
-#: line on its own, anchored to line boundaries, because OpenSSL's PEM reader
-#: only honours a marker that starts a line and a preamble mentioning one
-#: mid-line ("# Example: -----BEGIN PRIVATE KEY-----") is text it ignores
-#: (peer review, third gate).
-_PEM_LABEL_RE = re.compile(rb"^-----BEGIN ([A-Z0-9 ]+)-----[ \t]*\r?$", re.M)
+#: The line ``openssl storeutl`` ends a listing with.
+_STOREUTL_TOTAL_RE = re.compile(r"Total found: ([0-9]+)\Z")
+
+
+def _certificate_count(path: Path) -> int:
+    """Return how many certificates OpenSSL itself reads out of ``path``.
+
+    The question a pinned root has to answer is how many certificates
+    ``-CAfile`` will trust, and only OpenSSL's own parser answers it.  Two
+    review rounds each found a construction a pattern of ours miscounted --
+    labels ``-CAfile`` loads besides ``CERTIFICATE``, then a BEGIN marker
+    followed by a vertical tab or a form feed, which OpenSSL strips and an
+    end-of-line anchor does not, and a UTF-8 byte-order mark before the first
+    marker, which OpenSSL skips -- so this asks ``openssl storeutl -noout
+    -certs``, whose ``-certs`` filter is the same population ``-CAfile``
+    loads, and reads the total off the end of its listing.
+
+    Refuses rather than guesses when there is no total to read: ``storeutl``
+    is silent on a file holding no PEM object at all and fails outright on
+    one holding an object its store loader cannot decode, and neither is a
+    file a pinned root may be.
+    """
+
+    try:
+        listing = _run_openssl(["storeutl", "-noout", "-certs", str(path)])
+    except TsaError as exc:
+        raise TsaError(
+            f"pinned TSA root PEM certificates could not be counted: {path}: {exc}"
+        ) from exc
+    assert isinstance(listing, str)
+    match = _STOREUTL_TOTAL_RE.search(listing.strip())
+    if match is None:
+        raise TsaError(
+            f"pinned TSA root PEM certificates could not be counted: {path}: "
+            f"openssl storeutl reported no total"
+        )
+    return int(match.group(1))
 
 
 def _root_material(records: Path, anchor: dict[str, Any]) -> dict[str, str]:
@@ -861,24 +895,26 @@ def _root_material(records: Path, anchor: dict[str, Any]) -> dict[str, str]:
         raise TsaError(f"pinned TSA root is missing or not a regular file: {root_path}")
     # The certificate hash and SPKI below describe the file's *first*
     # certificate, which is all _certificate_identity reads, while
-    # verify_timestamp_token passes the whole file to `openssl ts -verify
-    # -CAfile` and `openssl cms -verify -CAfile`, which trust every
-    # certificate in it.  So a PEM holding the pinned root followed by a
-    # second authority satisfies all three pins while a token chaining
-    # through that second authority verifies (peer review).  One certificate
-    # per pinned root makes what the SPKI pin names the whole of what the
-    # file authorizes.  A new refusal, placed before the ported PEM-hash
-    # refusal because the file it describes is not one the pinned tree
-    # presents: both its roots hold exactly one certificate.
+    # verify_timestamp_token gives `openssl ts -verify` and `openssl cms
+    # -verify` a -CAfile, and they trust every certificate in whatever they
+    # are given.  So a PEM holding the pinned root followed by a second
+    # authority satisfies all three pins while a token chaining through that
+    # second authority verifies (peer review).  One certificate per pinned
+    # root makes what the SPKI pin names the whole of what the file
+    # authorizes.  A new refusal, placed before the ported PEM-hash refusal
+    # because the file it describes is not one the pinned tree presents: both
+    # its roots hold exactly one certificate.
     #
-    # Counted as PEM objects of any label, not as CERTIFICATE blocks: OpenSSL's
-    # -CAfile also loads "TRUSTED CERTIFICATE" and the legacy "X509
-    # CERTIFICATE" objects, so a file holding the pinned certificate followed
-    # by a second authority under either label counted as one (peer review,
-    # fresh gate round four). Exactly one object, and it must be a plain
-    # CERTIFICATE, which is the only form the identity pins describe.
-    labels = _PEM_LABEL_RE.findall(root_path.read_bytes())
-    if len(labels) != 1 or labels[0] != b"CERTIFICATE":
+    # Counted by OpenSSL, not by a pattern of ours.  Two rounds of review each
+    # broke the pattern -- first on PEM labels besides CERTIFICATE, then on a
+    # BEGIN marker trailed by a vertical tab or a form feed, and on a
+    # byte-order mark before the first one -- and matching a parser by
+    # imitation has no end, so _certificate_count asks the parser (peer
+    # review, third gate round two).  The label no longer matters: whatever
+    # label the one object wears, `openssl x509` re-encodes it to the plain
+    # certificate that _certificate_identity hashes below and that
+    # verify_timestamp_token trusts, alone, as its -CAfile.
+    if _certificate_count(root_path) != 1:
         raise TsaError(
             f"pinned TSA root PEM must hold exactly one certificate: {root_path}"
         )
@@ -1011,6 +1047,7 @@ def verify_timestamp_token(
         token_der = temp / "token.der"
         tst_info = temp / "tst-info.der"
         signer = temp / "signer.pem"
+        trusted_root = temp / "root.pem"
         empty_ca_dir = temp / "empty-ca"
         empty_ca_dir.mkdir()
         _run_openssl(
@@ -1077,6 +1114,19 @@ def verify_timestamp_token(
             "SSL_CERT_FILE": "/dev/null",
         }
         verification_time = str(int(gen_time.timestamp()))
+        # The -CAfile below is this re-encoding of the pinned root's first
+        # certificate, not the pinned file.  OpenSSL trusts every certificate
+        # a -CAfile holds, while the anchor's certificateSha256 and spkiSha256
+        # -- and every identity comparison _load_trust_bundle ran over them --
+        # describe only the first certificate OpenSSL reads out of that file.
+        # _root_material refuses a file holding any other number, and this
+        # makes the two agree by construction rather than by a count anyone
+        # has to get right: whatever else the bytes may hold, the only
+        # certificate trusted here is the one the identity pins (peer review,
+        # third gate round two).  These are the same bytes
+        # _certificate_identity hashed, so the certificate trusted below is
+        # the certificate the pins name.
+        _run_openssl(["x509", "-in", str(root_path), "-out", str(trusted_root)])
         _run_openssl(
             [
                 "ts",
@@ -1088,7 +1138,7 @@ def verify_timestamp_token(
                 "-in",
                 str(token_path),
                 "-CAfile",
-                str(root_path),
+                str(trusted_root),
                 "-CApath",
                 str(empty_ca_dir),
                 "-attime",
@@ -1105,7 +1155,7 @@ def verify_timestamp_token(
                 "-in",
                 str(token_der),
                 "-CAfile",
-                str(root_path),
+                str(trusted_root),
                 "-no-CApath",
                 "-no-CAstore",
                 "-purpose",

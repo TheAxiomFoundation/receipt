@@ -15,7 +15,10 @@ from __future__ import annotations
 import dataclasses
 import inspect
 import json
+import os
 import pathlib
+import re
+import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -24,6 +27,7 @@ import pytest
 
 from receipt.canonical import canonical_bytes, canonical_sha256
 from receipt.tsa import (
+    _certificate_count,
     _decode_oid,
     _load_trust_bundle,
     _BUNDLE_CLAIM_FIELDS,
@@ -559,6 +563,61 @@ def token_claim(tree: WitnessTree, anchor: LocalAnchor) -> dict[str, Any]:
         if entry.get("tsaAnchorId") == anchor.anchor_id
     )
     return {**payload, **outcome}
+
+
+def claim_against(
+    tree: WitnessTree,
+    reference: Mapping[str, Any],
+    anchor: LocalAnchor,
+    token: pathlib.Path,
+    *,
+    signer: Mapping[str, str] | None = None,
+    policy_oid: str | None = None,
+) -> dict[str, Any]:
+    """The claim ``verify_timestamp_token`` takes, against a named bundle.
+
+    ``token_claim`` reads what a witness already says; this composes a claim
+    for a bundle version no witness in the tree names, which is how a test
+    reaches ``verify_timestamp_token`` for one anchor of one bundle without
+    also arranging the activation and transition state ``verify_witness``
+    would demand of the whole tree.
+    """
+
+    pins = dict(signer or anchor.signer_pins)
+    return {
+        "tsaAnchorId": anchor.anchor_id,
+        "tsa": anchor.endpoint,
+        "trustBundleId": reference["bundleId"],
+        "trustBundlePath": reference["path"],
+        "trustBundleSha256": reference["sha256"],
+        "tokenPath": logical_path(tree.records, token),
+        "tokenSha256": sha256_bytes(token.read_bytes()),
+        "tsaPolicyOid": policy_oid or anchor.tsa.policy_oid,
+        "tsaImprintAlgorithmOid": SHA256_IMPRINT_OID,
+        "tsaSignerCertificateSha256": pins["certificateSha256"],
+        "tsaSignerSpkiSha256": pins["spkiSha256"],
+    }
+
+
+def openssl_ts_verifies(
+    record: pathlib.Path, token: pathlib.Path, ca_file: pathlib.Path
+) -> bool:
+    """Whether ``openssl ts -verify`` accepts ``token`` against ``ca_file``.
+
+    The control the module's own refusals cannot state: what OpenSSL does
+    with a given ``-CAfile``, asked directly, so a test can show that the
+    file the verifier declines to pass would have been accepted.
+    """
+
+    completed = subprocess.run(
+        [
+            "openssl", "ts", "-verify", "-config", "/dev/null",
+            "-data", str(record), "-in", str(token), "-CAfile", str(ca_file),
+        ],
+        capture_output=True,
+        env={**os.environ, "OPENSSL_CONF": "/dev/null", "LC_ALL": "C"},
+    )
+    return completed.returncode == 0
 
 
 def rewrite_witness(
@@ -1628,53 +1687,364 @@ def test_requires_a_supplemental_outcome_for_a_reused_id_under_a_new_root(
     assert evidence.supplemental_tokens == ()
 
 
+#: The pattern OpenSSL's own count replaced (peer review, F1): a PEM BEGIN
+#: marker that ends its own line. It lives here, and nowhere in ``receipt``,
+#: so the tests below can state exactly which files it used to accept.
+SUPERSEDED_PEM_BEGIN_RE = re.compile(rb"^-----BEGIN ([A-Z0-9 ]+)-----[ \t]*\r?$", re.M)
+
+
+def relabel(pem: bytes, label: str) -> bytes:
+    """The same certificate under another PEM label ``-CAfile`` also loads."""
+
+    return pem.replace(b"BEGIN CERTIFICATE", f"BEGIN {label}".encode()).replace(
+        b"END CERTIFICATE", f"END {label}".encode()
+    )
+
+
+def bundle_over_root_file(
+    tree: WitnessTree,
+    anchor: LocalAnchor,
+    *,
+    name: str,
+    content: bytes,
+    version: int = 2,
+    signers: Mapping[str, dict[str, str]] | None = None,
+    mutate_anchor: Callable[[dict[str, Any]], None] | None = None,
+) -> tuple[pathlib.Path, dict[str, Any], TsaSpec]:
+    """Write ``content`` as a root file and pin a fresh bundle version at it.
+
+    Only the path and the PEM hash move; the anchor keeps the certificate and
+    SPKI hashes it already declares. That is the construction every root-file
+    test below needs, and the reason the rule exists: a file whose *first*
+    certificate is the pinned one satisfies all three declared hashes however
+    much else it holds.
+    """
+
+    root_path = tree.records / "trust" / name
+    root_path.write_bytes(content)
+
+    def point_at_it(entry: dict[str, Any]) -> None:
+        entry["rootCertificate"]["path"] = logical_path(tree.records, root_path)
+        entry["rootCertificate"]["pemSha256"] = sha256_bytes(content)
+        if mutate_anchor is not None:
+            mutate_anchor(entry)
+
+    reference, spec = add_bundle_version(
+        tree,
+        [anchor],
+        version=version,
+        signers=signers,
+        mutate_anchor=point_at_it,
+    )
+    return root_path, reference, spec
+
+
+def load_refusal(tree: WitnessTree, anchor: LocalAnchor, detail: str) -> str:
+    """The load-time wrapper a root-material refusal arrives inside."""
+
+    return (
+        f"TSA anchor {anchor.anchor_id} in bundle tsa-anchors-v2 references "
+        f"root material that fails validation: {detail}"
+    )
+
+
 @pytest.mark.parametrize(
     "label", ["TRUSTED CERTIFICATE", "X509 CERTIFICATE"], ids=["trusted", "x509"]
 )
 def test_refuses_a_root_pem_whose_second_authority_wears_another_pem_label(
     tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...], label: str
 ) -> None:
-    """OpenSSL's -CAfile loads more PEM labels than CERTIFICATE.
+    """OpenSSL's -CAfile loads more PEM labels than CERTIFICATE (F1).
 
     Counting only ``-----BEGIN CERTIFICATE-----`` blocks let the pinned root
     be followed by a second authority spelled as a ``TRUSTED CERTIFICATE`` or
     a legacy ``X509 CERTIFICATE`` object, which the count did not see and the
-    ``-CAfile`` verifications trust (peer review, fresh gate round four). Every
-    PEM object is counted, whatever its label, and the one object must be a
-    plain certificate.
+    ``-CAfile`` verifications trust (peer review, fresh gate round four).
+    Now counted by ``openssl storeutl``, which finds two here -- asserted,
+    because the count agreeing with what ``-CAfile`` loads is the whole basis
+    of the rule. Without the count the bundle loads clean.
     """
 
     alpha, beta = local_anchors[0], local_anchors[1]
-    relabelled = (
-        beta.tsa.root_pem.read_bytes()
-        .replace(b"BEGIN CERTIFICATE", f"BEGIN {label}".encode())
-        .replace(b"END CERTIFICATE", f"END {label}".encode())
+    combined = alpha.tsa.root_pem.read_bytes() + relabel(
+        beta.tsa.root_pem.read_bytes(), label
     )
-    combined = alpha.tsa.root_pem.read_bytes() + relabelled
     assert combined.count(b"-----BEGIN CERTIFICATE-----") == 1
     tree = build_witness_tree(tmp_path, local_anchors[:1])
-    root_name = f"combined-{label.split()[0].lower()}.pem"
-    (tree.records / "trust" / root_name).write_bytes(combined)
-
-    def point_at_the_combined_root(entry: dict[str, Any]) -> None:
-        entry["rootCertificate"]["path"] = f"records/trust/{root_name}"
-        entry["rootCertificate"]["pemSha256"] = sha256_bytes(combined)
-
-    reference, spec = add_bundle_version(
-        tree, local_anchors[:1], version=2, mutate_anchor=point_at_the_combined_root
+    root_path, reference, spec = bundle_over_root_file(
+        tree,
+        alpha,
+        name=f"combined-{label.split()[0].lower()}.pem",
+        content=combined,
     )
-    with pytest.raises(TsaError, match="must hold exactly one certificate"):
+    assert _certificate_count(root_path) == 2
+    with pytest.raises(TsaError) as caught:
         _load_trust_bundle(tree.records, reference, spec=spec)
+    assert str(caught.value) == load_refusal(
+        tree,
+        alpha,
+        f"pinned TSA root PEM must hold exactly one certificate: {root_path}",
+    )
+
+
+@pytest.mark.parametrize(
+    "whitespace", [b"\x0b", b"\x0c"], ids=["vertical-tab", "form-feed"]
+)
+def test_refuses_a_root_pem_whose_second_begin_marker_trails_whitespace(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...], whitespace: bytes
+) -> None:
+    """OpenSSL strips whitespace an end-of-line anchor does not (peer review, F1).
+
+    The superseded pattern required a BEGIN marker to end its line, allowing
+    a space or a tab after it and nothing else; OpenSSL's PEM reader also
+    strips a vertical tab and a form feed. A second authority whose BEGIN
+    line carries one was therefore invisible to the count -- asserted below
+    by running that pattern over these very bytes -- while ``-CAfile`` loaded
+    its certificate all the same. Without OpenSSL doing the counting this
+    file loads clean, its declared hashes describing alpha alone while the
+    verifications trust beta too.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    hidden = relabel(beta.tsa.root_pem.read_bytes(), "TRUSTED CERTIFICATE").replace(
+        b"-----BEGIN TRUSTED CERTIFICATE-----\n",
+        b"-----BEGIN TRUSTED CERTIFICATE-----" + whitespace + b"\n",
+        1,
+    )
+    combined = alpha.tsa.root_pem.read_bytes() + hidden
+    assert SUPERSEDED_PEM_BEGIN_RE.findall(combined) == [b"CERTIFICATE"]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    root_path, reference, spec = bundle_over_root_file(
+        tree,
+        alpha,
+        name=f"trailing-{whitespace.hex()}.pem",
+        content=combined,
+    )
+    assert _certificate_count(root_path) == 2
+    assert certificate_pins(root_path) == alpha.root_pins
+    with pytest.raises(TsaError) as caught:
+        _load_trust_bundle(tree.records, reference, spec=spec)
+    assert str(caught.value) == load_refusal(
+        tree,
+        alpha,
+        f"pinned TSA root PEM must hold exactly one certificate: {root_path}",
+    )
+
+
+def test_refuses_a_root_pem_whose_byte_order_mark_hides_the_first_marker(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """A UTF-8 BOM pushes the first BEGIN marker off the start of its line (F1).
+
+    OpenSSL skips the mark and reads both certificates. A pattern anchored to
+    line starts saw only the *second* certificate's boundary, counted one
+    object, found it labelled CERTIFICATE and accepted -- asserted below --
+    while ``openssl x509`` still read the first certificate, so the anchor's
+    declared hashes describe alpha, also asserted, and ``-CAfile`` trusts
+    beta as well. The mirror image of the trailing-whitespace case: there the
+    second boundary was hidden, here the first. Without OpenSSL doing the
+    counting the bundle loads clean.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    combined = (
+        b"\xef\xbb\xbf"
+        + alpha.tsa.root_pem.read_bytes()
+        + beta.tsa.root_pem.read_bytes()
+    )
+    assert SUPERSEDED_PEM_BEGIN_RE.findall(combined) == [b"CERTIFICATE"]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    root_path, reference, spec = bundle_over_root_file(
+        tree, alpha, name="byte-order-mark.pem", content=combined
+    )
+    assert _certificate_count(root_path) == 2
+    assert certificate_pins(root_path) == alpha.root_pins
+    with pytest.raises(TsaError) as caught:
+        _load_trust_bundle(tree.records, reference, spec=spec)
+    assert str(caught.value) == load_refusal(
+        tree,
+        alpha,
+        f"pinned TSA root PEM must hold exactly one certificate: {root_path}",
+    )
+
+
+def test_trusts_only_the_pinned_certificate_when_a_root_file_holds_a_second(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The verifications get the pinned certificate, not the pinned file (F1).
+
+    The load-time count is one guard; this is the other, and the one that
+    holds when the count is wrong. A root file carrying the pinned
+    certificate followed by beta's -- in the trailing-whitespace form the
+    superseded pattern accepted -- sits behind an anchor whose declared
+    hashes describe the first certificate, and the count is monkeypatched to
+    report one so verification proceeds exactly as it would have under the
+    guard this replaced. The two direct OpenSSL runs establish that the
+    refusal can only come from the substituted ``-CAfile``: the token
+    verifies against the raw file and does not verify against the pinned
+    certificate alone. Without the substitution ``verify_timestamp_token``
+    returns evidence, and an authority the consumer never pinned has
+    witnessed the record under a pinned authority's name.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    hidden = relabel(beta.tsa.root_pem.read_bytes(), "TRUSTED CERTIFICATE").replace(
+        b"-----BEGIN TRUSTED CERTIFICATE-----\n",
+        b"-----BEGIN TRUSTED CERTIFICATE-----\x0b\n",
+        1,
+    )
+    combined = alpha.tsa.root_pem.read_bytes() + hidden
+    assert SUPERSEDED_PEM_BEGIN_RE.findall(combined) == [b"CERTIFICATE"]
+    root_path, reference, spec = bundle_over_root_file(
+        tree,
+        alpha,
+        name="alpha-and-a-hidden-second-authority.pem",
+        content=combined,
+        # Beta's policy and signer are allowed, in the bundle and in the
+        # identity together, so that nothing but the chain is left to refuse.
+        signers={alpha.anchor_id: beta.signer_pins},
+        mutate_anchor=lambda entry: entry.__setitem__(
+            "allowedPolicyOids", [beta.tsa.policy_oid]
+        ),
+    )
+    token = tree.records / RECORD_DAY / f"{tree.record.stem}.beta-signed.tsr"
+    beta.tsa.stamp(sha256_bytes(tree.record.read_bytes()), token)
+
+    # The premise, asked of OpenSSL directly: the second certificate in the
+    # file is what makes this token chain, and the pinned one alone does not.
+    assert openssl_ts_verifies(tree.record, token, root_path)
+    assert not openssl_ts_verifies(tree.record, token, alpha.tsa.root_pem)
+    assert _certificate_count(root_path) == 2
+
+    monkeypatch.setattr("receipt.tsa._certificate_count", lambda path: 1)
+    with pytest.raises(TsaError) as caught:
+        verify_timestamp_token(
+            tree.record,
+            claim_against(
+                tree,
+                reference,
+                alpha,
+                token,
+                signer=beta.signer_pins,
+                policy_oid=beta.tsa.policy_oid,
+            ),
+            reference,
+            spec=spec,
+            records=tree.records,
+        )
+    message = str(caught.value)
+    # Pinned as exactly as this message can be: the ported wrapper and the
+    # whole command up to the ``-CAfile`` argument, which is the temporary
+    # re-encoding made fresh on each run, and then OpenSSL's own reason for
+    # refusing. The tail past that reason -- an error identifier, a source
+    # line, and the wording of the chain diagnosis -- is OpenSSL's to change.
+    assert message.startswith(
+        "OpenSSL command failed (openssl ts -verify -config /dev/null "
+        f"-data {tree.record} -in {token} -CAfile "
+    )
+    assert "certificate verify error" in message
+
+
+@pytest.mark.parametrize(
+    "kind", ["no-pem-object", "certificate-and-key"], ids=["no-object", "with-key"]
+)
+def test_refuses_a_root_pem_whose_certificates_openssl_cannot_count(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...], kind: str
+) -> None:
+    """A count that did not happen is not a count of one (peer review, F1).
+
+    ``openssl storeutl`` prints no total at all for a file holding no PEM
+    object, and fails outright on one holding an object its store loader
+    cannot decode -- a certificate beside its private key is the ordinary way
+    to meet the second. The superseded pattern refused both too, by counting
+    zero objects in one and two in the other, so what this binds is narrower
+    and worth saying plainly: where OpenSSL returns no total, the refusal
+    says the certificates could not be counted instead of substituting a
+    number of ours. Both assertions below are on the counting message and not
+    on the one-certificate message, so a ``_certificate_count`` that fell
+    back to zero -- refusing these two by the wrong rule, and trusting
+    whatever the next uncountable file turned out to hold -- fails here.
+    """
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    content = (
+        b"nothing here is a PEM object\n"
+        if kind == "no-pem-object"
+        else alpha.tsa.root_pem.read_bytes()
+        + (alpha.tsa.directory / "ca.key").read_bytes()
+    )
+    root_path, reference, spec = bundle_over_root_file(
+        tree, alpha, name=f"uncountable-{kind}.pem", content=content
+    )
+    with pytest.raises(TsaError) as counting:
+        _certificate_count(root_path)
+    assert str(counting.value).startswith(
+        f"pinned TSA root PEM certificates could not be counted: {root_path}: "
+    )
+    with pytest.raises(TsaError) as caught:
+        _load_trust_bundle(tree.records, reference, spec=spec)
+    assert str(caught.value).startswith(
+        load_refusal(
+            tree,
+            alpha,
+            f"pinned TSA root PEM certificates could not be counted: {root_path}: ",
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "label", ["TRUSTED CERTIFICATE", "X509 CERTIFICATE"], ids=["trusted", "x509"]
+)
+def test_accepts_a_root_pem_whose_one_object_wears_another_certificate_label(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...], label: str
+) -> None:
+    """The label stopped deciding anything once OpenSSL did the counting (F1).
+
+    The superseded pattern could not tell a lone ``TRUSTED CERTIFICATE`` from
+    the second object of a two-authority file, so it had to refuse both;
+    ``openssl storeutl`` counts one here and two there. What such a file
+    authorizes is settled elsewhere now: ``openssl x509`` re-encodes this
+    object to the plain certificate whose hashes the anchor declares --
+    asserted against the untouched root's pins -- and
+    ``verify_timestamp_token`` trusts that re-encoding and nothing else,
+    which the genuine token verified below exercises end to end.
+    """
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    root_path, reference, spec = bundle_over_root_file(
+        tree,
+        alpha,
+        name=f"single-{label.split()[0].lower()}.pem",
+        content=relabel(alpha.tsa.root_pem.read_bytes(), label),
+    )
+    assert _certificate_count(root_path) == 1
+    assert certificate_pins(root_path) == alpha.root_pins
+    evidence = verify_timestamp_token(
+        tree.record,
+        claim_against(tree, reference, alpha, tree.tokens[alpha.anchor_id]),
+        reference,
+        spec=spec,
+        records=tree.records,
+    )
+    assert evidence.trust_bundle_id == "tsa-anchors-v2"
+    assert evidence.tsa_spki_sha256 == alpha.signer_pins["spkiSha256"]
 
 
 def test_accepts_a_root_pem_whose_preamble_mentions_a_marker_mid_line(
     tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
 ) -> None:
-    """A marker inside a preamble line is text OpenSSL ignores, and so do we.
+    """A marker inside a preamble line is text OpenSSL ignores (peer review, F1).
 
     An unanchored pattern counted "# Example: -----BEGIN PRIVATE KEY-----"
-    as a second object and refused a valid single-certificate file (peer
-    review, third gate). Detection is anchored to real boundary lines.
+    as a second object and refused a valid single-certificate file (third
+    gate). Nothing is pattern-matched now: OpenSSL reads the file and finds
+    the one certificate, so the human-readable preamble distributors prepend
+    to a published root costs nothing.
     """
 
     alpha = local_anchors[0]
@@ -1683,49 +2053,9 @@ def test_accepts_a_root_pem_whose_preamble_mentions_a_marker_mid_line(
         + alpha.tsa.root_pem.read_bytes()
     )
     tree = build_witness_tree(tmp_path, local_anchors[:1])
-    root_name = "preamble-root.pem"
-    (tree.records / "trust" / root_name).write_bytes(with_preamble)
-
-    def point_at_the_preambled_root(entry: dict[str, Any]) -> None:
-        entry["rootCertificate"]["path"] = f"records/trust/{root_name}"
-        entry["rootCertificate"]["pemSha256"] = sha256_bytes(with_preamble)
-
-    reference, spec = add_bundle_version(
-        tree, local_anchors[:1], version=2, mutate_anchor=point_at_the_preambled_root
+    root_path, reference, spec = bundle_over_root_file(
+        tree, alpha, name="preamble-root.pem", content=with_preamble
     )
+    assert _certificate_count(root_path) == 1
     _path, payload = _load_trust_bundle(tree.records, reference, spec=spec)
     assert payload["bundleId"] == "tsa-anchors-v2"
-
-
-@pytest.mark.parametrize(
-    "label", ["TRUSTED CERTIFICATE", "X509 CERTIFICATE"], ids=["trusted", "x509"]
-)
-def test_refuses_a_root_pem_whose_only_object_is_not_a_plain_certificate(
-    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...], label: str
-) -> None:
-    """The one object must be a plain certificate, the form the pins describe.
-
-    Binds the label clause on its own: a file holding a single object under
-    another label counts as one, so only the label check refuses it (peer
-    review, third gate).
-    """
-
-    alpha = local_anchors[0]
-    relabelled = (
-        alpha.tsa.root_pem.read_bytes()
-        .replace(b"BEGIN CERTIFICATE", f"BEGIN {label}".encode())
-        .replace(b"END CERTIFICATE", f"END {label}".encode())
-    )
-    tree = build_witness_tree(tmp_path, local_anchors[:1])
-    root_name = f"single-{label.split()[0].lower()}.pem"
-    (tree.records / "trust" / root_name).write_bytes(relabelled)
-
-    def point_at_the_relabelled_root(entry: dict[str, Any]) -> None:
-        entry["rootCertificate"]["path"] = f"records/trust/{root_name}"
-        entry["rootCertificate"]["pemSha256"] = sha256_bytes(relabelled)
-
-    reference, spec = add_bundle_version(
-        tree, local_anchors[:1], version=2, mutate_anchor=point_at_the_relabelled_root
-    )
-    with pytest.raises(TsaError, match="must hold exactly one certificate"):
-        _load_trust_bundle(tree.records, reference, spec=spec)
