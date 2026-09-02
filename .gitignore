@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 .venv/
+# and as a symlink, which a worktree needs and the pattern above does not match
+.venv
 dist/
 build/
 *.egg-info/
