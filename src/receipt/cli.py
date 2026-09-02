@@ -223,6 +223,10 @@ to replace another (peer review, Sol round 3). The marker carries all
 sixty-four characters now, and because a digest is a distinguisher rather
 than a proof, :func:`_bounded_payload` refuses outright if two keys in one
 object come out of the bound equal.
+The boundaries below catch ``BaseException``, because ``SystemExit`` is not an
+``Exception``: a spec or a pass that raised one exited the interpreter with a
+status of its own choosing and printed no verdict at all. ``KeyboardInterrupt``
+is the single deliberate exception — the operator's interrupt is not a verdict.
 """
 
 from __future__ import annotations
@@ -1484,7 +1488,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         spec, spec_sha256 = load_spec(args.spec)
     except VerifySpecError as exc:
         return _refuse(as_json, "spec", str(exc), EXIT_USAGE)
-    except Exception as exc:  # noqa: BLE001 - reading the spec is fail-closed too
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException as exc:  # noqa: BLE001 - reading the spec is fail-closed
         return _refuse(
             as_json,
             "spec",
@@ -1495,7 +1501,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         root = args.root if args.root is not None else _default_root(args.spec)
         root_ok = root.is_dir()
-    except Exception as exc:  # noqa: BLE001 - resolving the root is fail-closed too
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException as exc:  # noqa: BLE001 - resolving the root is fail-closed
         return _refuse(
             as_json,
             "root",
@@ -1513,7 +1521,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             spec_sha256=spec_sha256,
             base_ref=args.base_ref,
         )
-    except Exception as exc:  # noqa: BLE001 - an unhandled error is still a refusal
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException as exc:  # noqa: BLE001 - an unhandled raise is a refusal
         return _refuse(
             as_json,
             "verification",
@@ -1547,7 +1557,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 encoding=encoding,
                 stream_encoding=stream_codec,
             )
-        except Exception as exc:  # noqa: BLE001 - rendering is inside the contract
+        except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+            raise
+        except BaseException as exc:  # noqa: BLE001 - rendering is in the contract
             return _refuse(
                 as_json,
                 "render",
@@ -1574,7 +1586,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 encoding=encoding,
                 stream_encoding=stream_codec,
             )
-        except Exception as exc:  # noqa: BLE001 - rendering is inside the contract
+        except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+            raise
+        except BaseException as exc:  # noqa: BLE001 - rendering is in the contract
             return _refuse(
                 False,
                 "render",
