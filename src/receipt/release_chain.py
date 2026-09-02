@@ -2143,7 +2143,7 @@ def assert_release_root_index_regular(root: pathlib.Path, spec: ChainSpec) -> No
     and on the push path the verdict is an acceptance that names no release
     at all. And a stage-0 regular entry the working tree does not carry —
     deleted from disk, or never checked out, as a sparse checkout leaves it
-    — is in no filesystem walk either, so `_working_release_files` reported
+    — is in no filesystem walk either, so ``_working_release_files`` reported
     a release root holding fewer files than the commit under review does.
     So the index and the filesystem are reconciled in both directions: with
     any entry under the root, the root must be a directory on disk, and
