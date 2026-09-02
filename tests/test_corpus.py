@@ -2033,3 +2033,95 @@ def test_a_forged_verdict_line_in_a_tree_name_is_escaped(
     message = str(caught.value)
     assert "\x1b" not in message and "\r" not in message
     assert "\\x1b[2K\\rVERDICT: PASS" in message
+
+
+def test_refuses_a_content_root_spelled_with_a_varied_case(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds F6: content-root membership was the one comparison not folded.
+
+    The suffix predicate folds, the alias guard folds, the tombstone search
+    folds — and a path's root was matched byte for byte. So on a
+    case-sensitive host ``RULES/evil.yaml`` sat outside the pinned ``rules/``
+    root, was not content, and was never swept; on a case-insensitive host
+    the same bytes are inside it. The same published corpus was closed on one
+    auditor's machine and open on another's.
+
+    Which refusal speaks depends on the host, and both are asserted here:
+    where the write lands inside ``rules/`` the file is an unlisted content
+    file, and where it lands beside it the tree entry aliases the root
+    component. Without the fix a case-sensitive host verifies this tree.
+    """
+
+    write_tree(tmp_path)
+    (tmp_path / "RULES").mkdir(exist_ok=True)
+    (tmp_path / "RULES/evil.yaml").write_text("name: evil\n")
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    message = str(caught.value)
+    assert "evil.yaml" in message or "RULES" in message
+
+
+def test_a_case_varied_content_root_makes_a_path_content(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds F6, the classification half: kind is decided from the fold key.
+
+    A producer could bind ``RULES/smuggled.yaml`` as attested — exempt from
+    the closed-world sweep by construction — because content_root_of compared
+    the root byte for byte and found none. Every consumer on a
+    case-insensitive filesystem reads that path as ``rules/smuggled.yaml``.
+    After folding it is a content path and the attested row is refused, at
+    parse time, before the tree is touched. Without the fix the row is
+    accepted and the run fails later for an unrelated reason, if at all.
+    """
+
+    body = "name: smuggled\n"
+    write_tree(tmp_path)
+    rows = journal_rows()
+    rows.append(
+        {
+            "schemaVersion": JOURNAL_SCHEMA,
+            "kind": "attested",
+            "path": "RULES/smuggled.yaml",
+            "sha256": sha256_text(body),
+            "state": "present",
+        }
+    )
+    reindex(rows)
+    with pytest.raises(CorpusError, match="must be swept closed-world"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_the_aliasing_root_component_refusal_names_the_entry(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds F6: the refusal a case-sensitive host raises, pinned on any host.
+
+    A case-insensitive filesystem cannot hold ``rules`` and ``RULES`` at once,
+    so the test above reaches the unlisted-file refusal here and the
+    aliasing-root-component refusal only on a case-sensitive host. The entry
+    is injected into the tree root's listing so the branch — and its exact
+    wording, which an auditor has to act on — is covered everywhere.
+    """
+
+    real = pathlib.Path.iterdir
+
+    def iterdir(self: pathlib.Path):
+        entries = list(real(self))
+        if self == tmp_path:
+            entries.append(self / "RULES")
+        return iter(entries)
+
+    write_tree(tmp_path)
+    monkeypatch.setattr(pathlib.Path, "iterdir", iterdir)
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        "tree entry 'RULES' aliases the pinned content root component 'rules' "
+        "on a case- or normalization-insensitive filesystem"
+    )
