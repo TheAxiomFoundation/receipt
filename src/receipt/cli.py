@@ -30,7 +30,11 @@ import sys
 from typing import Sequence
 
 from receipt import __version__
-from receipt.corpus import GATE_TIERS
+# The outcome vocabulary is receipt.corpus's, not this module's. Spelled out
+# here as literals, a renamed or added outcome went on rendering as an
+# unmarked gate — "not_run" would simply have printed as a bare gate id beside
+# the ones that passed, which is the over-claim the schema exists to stop.
+from receipt.corpus import GATE_TIERS, NOT_RUN, PASS, WAIVED
 from receipt.verify import (
     TIER_MEANING,
     VerifyResult,
@@ -129,7 +133,7 @@ def _format_text(result: VerifyResult) -> str:
     if corpus is not None and corpus.gates:
         lines.append("")
         lines.append("DECLARED IN THE WITNESSED JOURNAL — NOT RE-RUN BY THIS COMMAND")
-        skipped = [gate for gate in corpus.gates if gate.outcome != "pass"]
+        skipped = [gate for gate in corpus.gates if gate.outcome != PASS]
         if skipped:
             lines.append(
                 f"  {len(skipped)} of {len(corpus.gates)} declared gate(s) did not "
@@ -142,10 +146,10 @@ def _format_text(result: VerifyResult) -> str:
             lines.append(f"  {tier}: {TIER_MEANING[tier]}")
             for gate in gates:
                 suffix = ""
-                if gate.outcome == "waived":
+                if gate.outcome == WAIVED:
                     waiver = gate.evidence.get("waiverSetSha256", "")
                     suffix = f"  [WAIVED under waiver set {waiver[:16]}…]"
-                elif gate.outcome == "not-run":
+                elif gate.outcome == NOT_RUN:
                     suffix = f"  [DID NOT RUN — {gate.evidence.get('reason', '')}]"
                 lines.append(f"    - {gate.gate_id}{suffix}")
 
