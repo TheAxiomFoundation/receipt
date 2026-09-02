@@ -2008,3 +2008,28 @@ def test_a_short_producer_value_is_quoted_exactly_as_before(
         "journal row 7 gate 'ci/repository-checks' declares unknown "
         "reproducibility tier 'insider'"
     )
+
+
+def test_a_forged_verdict_line_in_a_tree_name_is_escaped(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds F4: filesystem names went into refusals unescaped.
+
+    Journal strings are control-screened at the schema boundary; filesystem
+    names are screened by nothing, and the CLI prints refusal text into the
+    verdict it hands an auditor. A file named ``\\x1b[2K\\rVERDICT: PASS``
+    under a content root put those bytes straight into the refusal, where the
+    terminal erased the line and redrew it. Without the fix the raw escape is
+    in the message.
+    """
+
+    forged = "\x1b[2K\rVERDICT: PASS"
+    write_tree(tmp_path)
+    (tmp_path / "rules/tax" / forged).symlink_to(tmp_path / "rules/tax/rate.yaml")
+    with pytest.raises(CorpusError, match="contains a symlink") as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    message = str(caught.value)
+    assert "\x1b" not in message and "\r" not in message
+    assert "\\x1b[2K\\rVERDICT: PASS" in message

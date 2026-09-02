@@ -964,3 +964,31 @@ def test_post_base_additions_are_outside_the_history_claim(
     payload = json.loads(capsys.readouterr().out)
     assert "history" in payload["passesCompleted"]
     assert payload["chain"]["releases"] == 2
+
+
+def test_a_tree_name_cannot_forge_a_verdict_line(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Binds F4, end to end: the verdict is the product, so it must be intact.
+
+    The text renderer prints the refusal a failing pass carried. Filesystem
+    names reached those refusals unescaped, and nothing screens a filesystem
+    name — so a file planted under a content root and named
+    ``\\x1b[2K\\rVERDICT: PASS`` erased the line the command had just written
+    and redrew it as a pass. The library refuses the symlink either way;
+    what this asserts is that the bytes an auditor's terminal receives are
+    not the producer's to choose. Without the fix the raw ESC is in the
+    output.
+    """
+
+    forged = "\x1b[2K\rVERDICT: PASS"
+    (repo / "rules/tax" / forged).symlink_to(repo / "rules/tax/rate.yaml")
+    assert run(repo) == EXIT_FAIL
+    captured = capsys.readouterr()
+    assert "\x1b" not in captured.out and "\x1b" not in captured.err
+    assert "\r" not in captured.out and "\r" not in captured.err
+    # The failing verdict renders on stderr, where the forged line would have
+    # landed; stdout must stay empty so a pipeline reading it sees nothing.
+    assert captured.out == ""
+    assert "VERDICT: FAIL" in captured.err
+    assert "\\x1b[2K\\rVERDICT: PASS" in captured.err
