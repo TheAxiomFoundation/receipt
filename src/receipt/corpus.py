@@ -41,10 +41,10 @@ Three row kinds, one journal:
     the host resolve the exact spelling, and does any fold-equal spelling
     survive in a listing — because a filesystem resolves names its own
     enumeration does not emit. The second question walks the tree, so it is
-    bounded: every directory entry read from a listing and every candidate a
-    search visits is charged against one budget for the whole pass, and a
-    listing wider than what is left of that budget stops part-way rather than
-    being read in full.
+    bounded: every entry taken from a listing and every candidate a search
+    visits is charged against one budget for the whole pass, and a listing
+    wider than what is left of that budget is abandoned part-way rather than
+    sorted and indexed whole.
 
 ``gate``
     A declaration that some verification gate ran, carrying a reproducibility
@@ -148,10 +148,10 @@ MAX_REMOVED_TEXT = 262144
 #: directory once and shares it across every removed path, so the real cost is
 #: the tree, and this bounds that.
 #:
-#: An entry is charged when it is consumed from a listing and again each time
-#: a search visits it as a candidate, because both are work and neither was
+#: An entry is charged when it is taken from a listing and again each time a
+#: search visits it as a candidate, because both are work and neither was
 #: bounded by counting listings alone: the whole of an arbitrarily wide
-#: directory was read and sorted before anything checked the budget, and a
+#: directory was sorted and indexed before anything checked the budget, and a
 #: cached fold-collision bucket was re-traversed by every tombstone for free
 #: (peer review, round four).
 MAX_TOMBSTONE_WORK = 262144
@@ -844,8 +844,17 @@ class _TombstoneIndex:
 
     A listing is consumed one entry at a time and charged as it is consumed,
     so a directory wider than the budget stops the pass part-way through
-    rather than being read and sorted in full first; each bucket is sorted
+    rather than being sorted and indexed whole first; each bucket is sorted
     once, here, so a search that revisits it never sorts it again.
+
+    What that bounds is this module's work per entry, which is all it can
+    bound: ``pathlib.Path.iterdir`` reads the directory's names from the
+    operating system in one eager call on every supported interpreter — 3.11
+    and 3.12 through ``os.listdir``, 3.13 and 3.14 through ``os.scandir`` —
+    and hands back an iterator over what it already holds. The syscall is not
+    ours to interrupt. The sort, the screen, the fold, and the index are, and
+    those were what the old code did to every entry of a directory of any
+    width before consulting the budget.
 
     The cache is keyed by the directory's exact spelling as the search walked
     it — the ``/``-joined component names, ``""`` for the root — and never by
@@ -895,11 +904,11 @@ class _TombstoneIndex:
         entries: list[pathlib.Path] = []
         try:
             for entry in directory.iterdir():
-                # Charged as it is consumed, and refused from inside the loop:
-                # sorting the listing first read an arbitrarily wide directory
-                # in full — and sorted it — before anything looked at the
-                # budget, so the constant named no bound on the work actually
-                # done (peer review, round four).
+                # Charged as it is consumed, and refused from inside the
+                # loop: sorting the listing first meant a directory of any
+                # width was sorted, screened and indexed in full before
+                # anything looked at the budget, so the constant named no
+                # bound on the work actually done (peer review, round four).
                 self.charge(relative)
                 entries.append(entry)
         except (FileNotFoundError, NotADirectoryError):

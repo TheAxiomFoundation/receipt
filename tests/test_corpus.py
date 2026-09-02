@@ -1728,18 +1728,21 @@ def test_the_tombstone_index_is_shared_across_removed_paths(
 def test_the_tombstone_pass_stops_consuming_a_directory_wider_than_its_budget(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Binds F2: the listing was read and sorted in full before the check.
+    """Binds F2: the listing was drained and sorted before the check.
 
-    ``sorted(directory.iterdir())`` drains a directory before anything looks
-    at the budget, so the constant bounded the refusal and not the work: a
-    tombstone under a directory of ten million entries read and sorted ten
-    million of them, and only then said it had exceeded its budget. That is
-    the resource exhaustion the budget exists to stop, done by the code that
-    was supposed to stop it.
+    ``sorted(directory.iterdir())`` takes every entry a directory has before
+    anything looks at the budget, so the constant bounded the refusal and not
+    the work: a tombstone under a directory of ten million entries sorted,
+    screened and indexed ten million of them, and only then said it had
+    exceeded its budget. That is the exhaustion the budget exists to stop,
+    performed by the code meant to stop it.
 
     A listing is now consumed one entry at a time and charged as it is
-    consumed. Without the fix the generator below is drained to its last
-    entry; with it, enumeration stops inside the budget.
+    consumed. What that bounds is this module's per-entry work: CPython's
+    ``iterdir`` reads the directory's names from the OS in one eager call on
+    every supported version, so the wrapper below is what a lazy listing would
+    look like and the assertion is about what the module takes from it.
+    Without the fix it is drained to its last entry.
     """
 
     width = 10000
@@ -1911,10 +1914,10 @@ class _CaseFoldingPath:
 
     ``pathlib.WindowsPath`` folds case in ``__eq__`` and ``__hash__`` — that is
     the platform's own rule, not an approximation — so two spellings of one
-    name are a single dict key there. NTFS has carried per-directory case
-    sensitivity since Windows 10 1803, so those two spellings can be two real
-    directories at the same time. No POSIX host can hold both, which is why the
-    listings here are declared rather than written to disk.
+    name are a single dict key there. NTFS carries an opt-in per-directory
+    case-sensitivity flag, so those two spellings can be two real directories
+    at the same time. No POSIX host can hold both, which is why the listings
+    here are declared rather than written to disk.
 
     Only what the tombstone pass touches is modelled: ``iterdir``, ``name``,
     and an ``lstat`` that reports a plain directory.
