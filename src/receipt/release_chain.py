@@ -1581,34 +1581,54 @@ def _working_release_files(
     return files
 
 
-def assert_file_modes_authoritative(root: pathlib.Path) -> None:
-    """Refuse to compare file modes on a checkout that does not carry them.
-
-    The mode comparisons read the candidate's executable bit from ``stat``.
-    With ``core.fileMode`` false — set by git itself on a filesystem that
-    cannot materialise the bit, or by hand — the working tree says nothing
-    about the mode git records, so a comparison would accept any index-side
-    change while the verdict claimed mode identity (peer review). Unset means
-    git's default, which is true.
-    """
+def _git_bool(root: pathlib.Path, key: str) -> bool | None:
+    """One boolean git setting, or None when unset."""
 
     result = subprocess.run(
-        ["git", "-C", str(root), "config", "--bool", "core.fileMode"],
+        ["git", "-C", str(root), "config", "--bool", key],
         capture_output=True,
         text=True,
         check=False,
     )
     if result.returncode == 1 and not result.stdout.strip():
-        return
+        return None
     if result.returncode != 0:
         raise ReleaseChainError(
-            f"cannot read core.fileMode for {root}: {result.stderr.strip()[-500:]}"
+            f"cannot read {key} for {root}: {result.stderr.strip()[-500:]}"
         )
-    if result.stdout.strip() == "false":
+    return result.stdout.strip() == "true"
+
+
+def assert_file_modes_authoritative(root: pathlib.Path) -> None:
+    """Refuse to compare modes and types on a checkout that does not carry them.
+
+    The comparisons read the candidate's executable bit and file type from
+    ``stat``. With ``core.fileMode`` false — set by git itself on a
+    filesystem that cannot materialise the bit, or by hand — the working
+    tree says nothing about the mode git records, so a comparison would
+    accept any index-side change while the verdict claimed mode identity.
+    With ``core.symlinks`` false, git materialises a symlink entry as a
+    plain file holding the link target, so a symlink blob whose target text
+    equals a prior regular file's bytes would pass the byte comparison, the
+    component walk (which sees no link), and the synthesised mode, and turn
+    into a link on the next checkout that honours symlinks (peer review,
+    rounds two and three). Both settings default to true when unset.
+
+    These are properties of the checkout, not of any file, so they are
+    checked before any file-level comparison, deliberately: a checkout that
+    cannot be verified says so before any verdict about its files.
+    """
+
+    if _git_bool(root, "core.fileMode") is False:
         raise ReleaseChainError(
             "file modes cannot be verified: core.fileMode is false in this "
             "checkout, so the working tree does not carry the executable bit "
             "git records"
+        )
+    if _git_bool(root, "core.symlinks") is False:
+        raise ReleaseChainError(
+            "file types cannot be verified: core.symlinks is false in this "
+            "checkout, so a symlink entry is materialised as a plain file"
         )
 
 

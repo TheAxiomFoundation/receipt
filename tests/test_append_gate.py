@@ -476,19 +476,45 @@ def moving_base_repository(
 
     The two commits give different verdicts for the same working tree — two
     appended rows against the first, one against the second — so the verdict
-    text alone says which commit the whole run measured against.
+    text alone says which commit the whole run measured against. The later
+    commit also differs in the frozen prefix manifest and in the release
+    tree, so a consumer that read either at the moved ref would refuse
+    outright: the prefix anchor compares manifest fields and the release
+    history compares README bytes. That binds every base consumer, not only
+    the append count (peer review, round three).
     """
 
     first = base_repository(tmp_path)
+    readme = first.root / CHAIN_SPEC.release_root_relative / "README.md"
+    manifest = first.root / CHAIN_SPEC.prefix_relative
+    kept_readme, kept_manifest = readme.read_bytes(), manifest.read_bytes()
     rows = [observation_row(number) for number in range(1, BASE_ROW_COUNT + 2)]
     write_ledger(first.root, rows)
+    readme.write_text("Release journal, revised after the base.\n", encoding="utf-8")
+    write_prefix_manifest(first.root, [dict(rows[0], value=999.0), *rows[1:]])
     git(first.root, "add", "-A")
-    git(first.root, "commit", "--quiet", "-m", "third row")
+    git(first.root, "commit", "--quiet", "-m", "third row, revised prefix and release tree")
     later = git(first.root, "rev-parse", "HEAD")
     git(first.root, "branch", "moving", first.base)
+    readme.write_bytes(kept_readme)
+    manifest.write_bytes(kept_manifest)
     rows.append(observation_row(BASE_ROW_COUNT + 2))
     write_ledger(first.root, rows)
     return Candidate(root=first.root, base="moving"), first.base, later
+
+
+def test_the_later_commit_would_refuse_through_every_base_consumer(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Control for the moving-base fixture: against the later commit the same
+    working tree is refused, and by a consumer other than the append count,
+    so the mid-run test below proves each consumer read the first commit."""
+
+    moving, _first, later = moving_base_repository(tmp_path)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(moving, base_ref=later)
+    assert "appended" not in str(refusal.value)
 
 
 def test_the_success_text_names_the_commit_a_symbolic_base_resolved_to(
@@ -699,7 +725,8 @@ def test_a_retrieved_at_without_a_time_zone_is_refused(
         run_gate(candidate)
     assert str(refusal.value) == (
         "appended line 3 (fixture.series.observation_3) retrievedAt is not "
-        "an RFC 3339 timestamp with a time zone"
+        "a canonical RFC 3339 timestamp (uppercase T and Z or ±HH:MM, no "
+        "leap second)"
     )
 
 
@@ -715,7 +742,8 @@ def test_a_retrieved_at_that_is_not_a_timestamp_is_refused(
         run_gate(candidate)
     assert str(refusal.value) == (
         "appended line 3 (fixture.series.observation_3) retrievedAt is not "
-        "an RFC 3339 timestamp with a time zone"
+        "a canonical RFC 3339 timestamp (uppercase T and Z or ±HH:MM, no "
+        "leap second)"
     )
 
 
@@ -731,7 +759,8 @@ def test_a_retrieved_at_naming_an_impossible_day_is_refused(
         run_gate(candidate)
     assert str(refusal.value) == (
         "appended line 3 (fixture.series.observation_3) retrievedAt is not "
-        "an RFC 3339 timestamp with a time zone"
+        "a canonical RFC 3339 timestamp (uppercase T and Z or ±HH:MM, no "
+        "leap second)"
     )
 
 
@@ -764,7 +793,8 @@ def test_a_retrieved_at_with_an_overflowing_offset_is_refused(
         run_gate(candidate)
     assert str(refusal.value) == (
         "appended line 3 (fixture.series.observation_3) retrievedAt is not "
-        "an RFC 3339 timestamp with a time zone"
+        "a canonical RFC 3339 timestamp (uppercase T and Z or ±HH:MM, no "
+        "leap second)"
     )
 
 
@@ -947,3 +977,97 @@ def test_a_pre_existing_release_refusal_wins_over_a_binding_shape_refusal(
         run_gate(candidate)
     assert "ledgerRepoSha" not in str(refusal.value)
     assert "releases/README.md" in str(refusal.value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["2026-07-10t20:38:58Z", "2026-07-10T20:38:58z", "2016-12-31T23:59:60Z"],
+    ids=["lowercase-t", "lowercase-z", "leap-second"],
+)
+def test_forms_the_rfc_permits_but_the_profile_does_not_are_refused(
+    tmp_path: pathlib.Path, value: str
+) -> None:
+    """The validator is a stated profile, narrower than RFC 3339: uppercase T
+    and Z, ±HH:MM, no leap second (peer review, round three)."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate, retrievedAt=value)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "appended line 3 (fixture.series.observation_3) retrievedAt is not "
+        "a canonical RFC 3339 timestamp (uppercase T and Z or ±HH:MM, no "
+        "leap second)"
+    )
+
+
+def test_a_checkout_that_does_not_materialise_symlinks_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """With core.symlinks false a symlink blob is checked out as a plain file
+    holding its target, so byte, mode, and component-walk checks all pass
+    over a type change (peer review, round three)."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    git(candidate.root, "config", "core.symlinks", "false")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "file types cannot be verified: core.symlinks is false in this "
+        "checkout, so a symlink entry is materialised as a plain file"
+    )
+
+
+@pytest.mark.parametrize(
+    ("key", "message"),
+    [
+        (
+            "core.fileMode",
+            "file modes cannot be verified: core.fileMode is false in this "
+            "checkout, so the working tree does not carry the executable bit git "
+            "records",
+        ),
+        (
+            "core.symlinks",
+            "file types cannot be verified: core.symlinks is false in this "
+            "checkout, so a symlink entry is materialised as a plain file",
+        ),
+    ],
+    ids=["fileMode", "symlinks"],
+)
+def test_the_release_history_pass_refuses_a_non_authoritative_checkout_itself(
+    tmp_path: pathlib.Path, key: str, message: str
+) -> None:
+    """Binds the guard inside verify_release_history_immutable directly, since
+    through the gate check_state_modes would refuse the same way later
+    (peer review, round three)."""
+
+    from receipt.release_chain import ReleaseChainError, verify_release_history_immutable
+
+    candidate = base_repository(tmp_path)
+    git(candidate.root, "config", key, "false")
+
+    with pytest.raises(ReleaseChainError) as refusal:
+        verify_release_history_immutable(candidate.root, candidate.base, spec=CHAIN_SPEC)
+    assert str(refusal.value) == message
+
+
+def test_the_checkout_refusal_precedes_file_level_release_refusals(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Pins the one intended precedence over pre-existing release checks: a
+    checkout that cannot be verified says so before any verdict about its
+    files, even a rewritten base release file."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    readme = candidate.root / CHAIN_SPEC.release_root_relative / "README.md"
+    readme.write_text("rewritten\n", encoding="utf-8")
+    git(candidate.root, "config", "core.fileMode", "false")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value).startswith("file modes cannot be verified")
