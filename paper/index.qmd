@@ -4,13 +4,13 @@ author:
   - name: Max Ghenis
     affiliations:
       - name: Axiom Foundation
-date: 2026-08-17
+date: 2026-09-02
 date-format: iso
 kicker: working paper
-revision: "10"
+revision: "11"
 status: |
-  Working paper. It describes `receipt` 0.5.1 on PyPI; statements
-  about still-open pull requests are marked as such. Code:
+  Working paper. It describes `receipt` 0.5.2; statements about
+  still-open pull requests are marked as such. Code:
   [github.com/TheAxiomFoundation/receipt](https://github.com/TheAxiomFoundation/receipt).
   API reference: [axiom.org/receipt/api](https://axiom.org/receipt/api/).
 abstract: |
@@ -20,10 +20,13 @@ abstract: |
   than any person can witness them. The
   receipt package makes those records checkable after the fact. From a
   clone of the repository and trust anchors committed in the verifier's
-  own code, a verifier composes five checks over the saved evidence —
-  append-only history, witnessed time, producer signatures, workflow
-  provenance, and closed-world corpus binding — and each check
-  refuses rather than warns when its evidence falls short. The machinery reached one package under
+  own code, `receipt verify` composes three offline passes over the
+  saved evidence — release-chain custody (append-only history,
+  witnessed time, producer signatures), closed-world corpus binding,
+  and declaration completeness — and each pass refuses rather than
+  warns when its evidence falls short. A separate, networked check
+  authenticates a commit against a workflow identity on GitHub.
+  Neither establishes how the bytes were produced. The machinery reached one package under
   evidence standards this paper catalogs: a byte-identical port,
   differential extraction against unmodified source verifiers, a
   semantic adaptation of a production key-rotation incident, and new
@@ -66,8 +69,11 @@ is about. The pipeline path leaves a record: a new release in the
 chain, a gate declaration that validation ran, a workflow attestation
 naming the run that produced it. The hand edit leaves a hole: bytes
 that match no witnessed journal row, a release history that never
-mentions the change. `receipt verify` is the command that tells the
-two apart from a clone, after the fact.
+mentions the change. `receipt verify` is the command that tells those
+two record states apart from a clone, after the fact. It cannot tell a
+genuine encoder run from bytes a producer wrote by hand and then
+journaled, signed, and witnessed; that distinction needs a record of the
+run itself, admitted separately (@sec-adoption).
 
 ![One correction, two paths. The producer's pull-request gate can
 refuse the hand edit, but that check runs in the producer's own trust
@@ -127,10 +133,12 @@ among adjacent integrity systems (@sec-related).
 
 # What a verifier can conclude {#sec-guarantees}
 
-Four checks cover the record surface. The verifier composes them;
-each conclusion is conditional on the specification, trust material,
-and options the verifier itself supplied, and each check refuses
-rather than warns when its evidence falls short [@receipt-repo].
+Four checks cover the record surface. `receipt verify` composes the
+first three with the corpus binding below; the fourth is a separate,
+networked check callers compose themselves. Each conclusion is
+conditional on the specification, trust material, and options the
+verifier itself supplied, and each check refuses rather than warns when
+its evidence falls short [@receipt-repo].
 
 **Append-only history.** The release-chain verifier, run with its
 default options, establishes a contiguous, content-addressed,
@@ -149,7 +157,9 @@ time, under the consumer's timestamp-authority assumptions: the
 verifier checks the token cryptographically against the pinned root
 certificates, policy identifiers, and signer identities in the
 consumer's specification, for every anchor that specification
-configures. The claim is time-bounded, not rewrite-proof: nothing ties
+configures; a specification must configure at least one, and signed
+times are checked to the second. The claim is time-bounded, not
+rewrite-proof: nothing ties
 a token's signed time to the record's claimed creation time from
 above, so a producer who regenerates, re-signs, and re-witnesses an
 entire chain passes a first-contact check — what the tokens then bound
@@ -174,10 +184,11 @@ material with `allow_legacy=False` and may enable them for immutable
 history with `allow_legacy=True`, and malformed or mispinned key
 material fails the check outright rather than being skipped in favor
 of a sibling key that happens to verify. The strictness is
-key-directional: a missing or malformed per-key *signature* counts as
-absent, and the check still passes if enough other keys satisfy the
-threshold — so corrupting signature files degrades a keyring to its
-threshold minimum without refusing.
+key-directional: a missing per-key *signature* is reported as absent
+and a malformed one as failed; neither contributes a vote, and the
+check still passes if enough other keys satisfy the threshold — so
+corrupting signature files degrades a keyring to its threshold minimum
+without refusing.
 
 **Workflow provenance.** For commits touching a protected tree, the
 attestation check establishes that GitHub's attestation service
@@ -187,15 +198,18 @@ the other three: GitHub is a trusted third party for it, and its
 attestations ride Sigstore's machinery — Fulcio-issued certificates
 binding OIDC workflow identities, with transparency-log evidence
 [@Newman2022Sigstore] — delegated through the GitHub CLI, the
-package's one networked call. The anchored identity is a workflow
-path and ref; the producer controls that workflow's content. Callers
+package's one network-dependent surface. The anchored identity is a
+workflow path and a ref by name, not the workflow's bytes; the producer
+controls that workflow's content. Callers
 compose the provided helpers (protected-history enumeration,
 enforcement epochs) into a full-history sweep; the package supplies
 the pieces, not a single spanning call.
 
 The fifth layer [@receipt-pr14] is a closed-world binding between a witnessed
 journal and the configured corpus — within the specification's content
-roots, an unlisted file, a missing file, a rewritten byte, or a symlink
+roots, an unlisted regular file whose name carries a configured suffix
+(compared after case and normalization folding), a missing file, a
+rewritten byte, or a symlink
 where a regular file was recorded each refuses, as do two listed paths
 that collide under Unicode normalization or case folding and a bound
 file whose identity changes while verification runs — and a spanning
@@ -204,8 +218,8 @@ declaration-completeness passes in order, stopping at the first
 failure. Its verdict is fail-closed in the strict sense the verifier
 documents: pass only if every stage completed and every
 required declaration was found; anything else — an exception the
-verifier did not anticipate, a verdict it cannot render — is a
-failure. The command renders
+verifier did not anticipate, a process exit raised from inside the
+specification, a verdict it cannot render — is a failure. The command renders
 what it did not establish just as plainly — that any declared gate
 actually passed, that encoded rules read the law correctly, or that
 the presented history is the only one the producer maintains.
@@ -221,10 +235,13 @@ forensic sense (@sec-guarantees defines the difference), not evidence
 that the history is unique (@sec-scope), not evidence of content
 correctness, and not evidence of freshness. Two properties serve a
 verifier who must defend a verdict to someone else: the verifier
-prints the specification digest, the chain head digest, and a digest
-of the anchor bytes custody consumed, so an assessment can quote
-exactly which policy and which trust material produced which verdict
-over which bytes; and the differential harnesses ship with their rerun
+prints the specification digest, the chain head digest, the resolved
+base commit when one was supplied, and a digest of the anchor bytes
+custody consumed, so an assessment can quote exactly which policy and
+which trust material produced which verdict over which bytes. The
+specification digest names the executed source; a specification that
+reads other files evaluates whatever they contain, which is one reason
+the inert format in @sec-scope matters. The differential harnesses ship with their rerun
 commands and pins, so the tool's error behavior is itself examinable —
 the questions any serious challenge to a verification tool asks.
 The verifier must also be verifiable: releases publish to PyPI with
@@ -239,7 +256,10 @@ come to depend on the producer.
 **Trust anchors live in the verifier's committed code.** Key
 fingerprints, timestamp-authority roots, policy identifiers, content
 roots, and required declarations sit in a specification the consumer
-commits and reviews. The package ships no defaults: no configuration
+commits and reviews, and every specification object validates itself
+at construction — a fingerprint that is not a digest, an empty anchor
+set, or a malformed path refuses before any verification runs. The
+package ships no defaults: no configuration
 surface a producer could preload, no environment variable a deployment
 could override. The caller always supplies signing keys; the package
 neither stores key material nor reads trust configuration from the
@@ -247,9 +267,10 @@ environment.
 
 **Rotation is loud.** Replacing a key is a reviewed change to the
 consumer's repository that moves the retired key into an explicit
-legacy generation, and the caller chooses per call whether legacy
-generations may vouch at all. There are no time-based transition
-windows in which either key silently works.
+retired set, and the caller chooses per call whether retired keys may
+vouch at all; when they may, the current threshold applies across the
+combined set. There are no time-based transition windows in which
+either key silently works.
 
 **Verification of saved evidence runs offline on commodity tools.** A
 clone, Python, OpenSSL, and Git suffice for the chain, time, and
@@ -257,7 +278,9 @@ signature checks, so they work against a producer whose infrastructure
 is unavailable — or untrustworthy — at verification time. The
 workflow-attestation check is the explicit exception: it queries
 GitHub, and the package's differential evidence for that surface is
-scoped accordingly (@sec-extraction).
+scoped accordingly (@sec-extraction). Verification reads each receipt
+and anchor file once and feeds every cryptographic call from that
+snapshot.
 
 **Specified gaps refuse.** Missing witnesses, malformed rows, unknown
 keys, out-of-range times, unlistable directories, paths that escape
@@ -270,19 +293,20 @@ codes carry the verdict.
 
 # The machinery {#sec-machinery}
 
-Six modules verify a record set's
-history, timing, and authorship from saved evidence; the API reference
+Five modules verify a record set's
+history, timing, and authorship from saved evidence, and a sixth,
+`attest`, performs the networked check; the API reference
 at [axiom.org/receipt/api](https://axiom.org/receipt/api/) documents
 their public interfaces.
 
 | Module | A pass establishes |
 |---|---|
-| `canonical` | One byte stream per value: canonical JSON with UTF-16 code-unit key order and ECMAScript number formatting, byte-compatible with the producer's TypeScript implementation. |
+| `canonical` | One byte stream per value: canonical JSON with UTF-16 code-unit key order and ECMAScript number formatting, over JSON scalars and integers within the IEEE 754 safe range; the module is the ledger's Python serializer, pinned by hash. |
 | `release_chain` | With default options: a contiguous, content-addressed, producer-signed, witness-receipted manifest history matching recorded state; with a trusted base reference: byte-and-mode identity for every release file present at that ancestor. |
-| `append_gate` | With a base reference and a data-surface change: a candidate tree extends the trusted ledger exactly — prefix retained, rows valid, releases untouched, appends paired with exactly the next release set. Without a base reference, full-file invariants only. |
+| `append_gate` | With a base reference and a data-surface change, after witnessed genesis: a candidate tree extends the trusted ledger exactly — prefix retained, rows valid, releases untouched, appends paired with exactly the next release set. Without a base reference, full-file invariants only. |
 | `sign` | Raw Ed25519 signatures over exact bytes; N-of-M thresholds over a domain-separated payload under consumer-pinned keyrings, with legacy generations governed by the caller's `allow_legacy` choice. |
 | `tsa` | One RFC 3161 token matches one consumer-pinned anchor — root bytes, policy, imprint, signed time, signer identity — via OpenSSL; witness sidecars follow the trust-bundle transition rules. |
-| `attest` | GitHub's attestation service accepted the canonical subject for a commit under an anchored workflow identity; helpers enumerate protected-tree history and its enforcement epoch for callers to compose. |
+| `attest` | GitHub's attestation service accepted the canonical subject for a commit under a consumer-pinned workflow path and ref, named rather than pinned by bytes; helpers enumerate protected-tree history and its enforcement epoch for callers to compose. |
 
 Three more compose them into one verdict: `corpus` (the closed-world
 journal binding and gate-declaration parsing), `verify` (the spanning
@@ -353,7 +377,9 @@ adaptation with direct tests and no differential oracle.
 
 **New composition.** The corpus binding, spanning verifier,
 and CLI are new code composed from the extracted parts. They add no
-cryptography and no trust anchors of their own; their evidence is a
+signature scheme and no package-owned defaults — the corpus binding
+hashes files, and its roots, suffixes, and required declarations are
+consumer anchors like every other — and their evidence is a
 refusal battery over the closed-world binding rules, and every guard
 carries a regression test that fails with that guard removed
 [@receipt-pr14].
@@ -402,10 +428,24 @@ strength:
 | Thesis Institute forecast tooling | default | `receipt==0.5.1` (custody extra) | signature primitives in verifier and signer |
 | Chronicle | custody branch (unmerged) | `receipt==0.5.1` | release-chain and append-gate shims, differential harnesses re-run on package change |
 
-Each pin is the current release; the
+Each pin was the current release at that observation point; the
 receipt repository's own README states that the observation ledger
 consumes the package in production, a producer claim this paper
 reports without independent runtime observation.
+
+A package pin is custody, not admission. What an encoder run produced
+is a separate claim, and the foundation's rule corpora make it
+separately: the encoder signs an apply manifest binding source, tool,
+generated-output digest, and applied-file digests, and the shared
+validation workflow refuses a change to an atomic rule file that no
+manifest covers.^[rulespec-us at commit `d58cc0ce` calls the shared
+workflow at `7a1eb243` with the generated-file guard on and the
+`programs` composition root excluded; the encoder's manifest schema is
+`axiom-encode/applied-rulespec/v5` at `29b30fb7`. Observed 2026-09-01;
+repository controls are mutable after observation.] That check runs in
+the producer's trust domain, and it is what `receipt verify` cannot
+supply: the custody verdict says the journaled bytes are the ones a
+pinned key signed and pinned witnesses saw, however they were made.
 
 # Related systems {#sec-related}
 
@@ -525,34 +565,39 @@ that claim — and freshness requires an out-of-band expectation.
 The practical recipe for both the freshness and regeneration limits is
 trust on first use: record the chain head digest and witness times at
 first contact, and supply that ancestor as the base reference in every
-later check — after which rewriting or regenerating anything the
-verifier has once seen refuses. Equivocation — a producer maintaining
+later check — after which rewriting or regenerating any release object
+present at that ancestor refuses; later content may still be
+superseded through the journal, by design. Equivocation — a producer maintaining
 parallel histories for different verifiers — sits outside what any
 single clone can detect; verifiers who compare head digests out of
-band get split-view detection for the cost of a message, and the
+band learn that their views diverge for the cost of a message, and the
 transparency-log literature (@sec-related) supplies the systematic
 version. Consumers configure timestamp-authority diversity; the
 verifier enforces the configured anchor set and cannot prove that
 authorities fail independently, validates certificates as of the
-token's signed time via OpenSSL without revocation checking, and has
-no long-term renewal protocol for aging evidence [@RFC4998] — nor
-legacy generations for timestamp-authority signers, so an authority's
-own key rotation currently splits verification into eras the consumer
-spec must carry explicitly. The release-chain lane requires the exact
-configured receipt set, so a single configured authority's outage
-blocks release publication until the consumer revises policy — the
-witness lane's declared-unavailable escape (@sec-guarantees) does not
-exist there. The differential harnesses cover finite fixture and
+token's signed time via OpenSSL, to the second and without revocation
+checking, and has no long-term renewal protocol for aging evidence
+[@RFC4998] — nor generation or retirement semantics for
+timestamp-authority signers: an identity may allow several signer keys
+at once, and a rotation the consumer wants to bound is a new pinned
+identity in the spec. The release-chain lane requires the exact
+configured receipt set, so a release missing one configured authority's
+token cannot pass until the consumer revises policy — the witness
+lane's declared-unavailable escape (@sec-guarantees) does not exist
+there. The differential harnesses cover finite fixture and
 mutation batteries — each test file documents its commands, source
 pins, and exclusions, which is also the rerun recipe — not all
 possible inputs, and the package inherits the standard assumptions of
 its primitives: signature schemes and hash functions unbroken,
 timestamp authorities honest about time. Key compromise before
 rotation defeats the signature layer for the compromised generation.
-The package verifies; it does not yet produce — manifests, witnesses,
-and journals come from the producers' own tooling, and a
-producer-side reference implementation plus an inert specification
-format are the two pieces a second organization would most need. The
+The package verifies and supplies signing primitives; it does not
+produce manifests, witnesses, or journals — those come from the
+producers' own tooling — and a producer-side reference implementation
+plus an inert specification format are the two pieces a second
+organization would most need. A contributed producer-side record type,
+signed at emission and non-authorizing by construction, is under
+review as this revision goes out. The
 waiver ratchet and chronology tiers remain in their source systems
 pending extraction. The package is Python; producers on other stacks interoperate
 at the artifact layer (canonical JSON, manifests, tokens, signatures)
