@@ -747,7 +747,7 @@ def _list_directory(directory: pathlib.Path, relative: str) -> list[pathlib.Path
     except OSError as exc:
         raise CorpusError(
             f"cannot enumerate a directory under a content root, so the file "
-            f"set cannot be closed: {relative or '.'} ({exc.strerror})"
+            f"set cannot be closed: {_quoted(relative or '.')} ({exc.strerror})"
         ) from exc
 
 
@@ -894,7 +894,7 @@ def _fold_survivor(index: _TombstoneIndex, relative: str) -> str | None:
             if stat.S_ISLNK(info.st_mode) or getattr(info, "st_reparse_tag", 0):
                 raise CorpusError(
                     "removed path traverses a symlink or reparse point at "
-                    f"{'/'.join([*spelled, entry.name])!r}: {relative}"
+                    f"{_quoted('/'.join([*spelled, entry.name]))}: {relative}"
                 )
             found = search(entry, rest, [*spelled, entry.name])
             if found is not None:
@@ -961,6 +961,15 @@ def _tree_content_paths(root: pathlib.Path, spec: CorpusSpec) -> dict[str, pathl
     errors surfaced, every symlink refuses, and every non-regular entry
     refuses. What this returns is the complete set of content files, or the
     call raises — there is no third outcome where it returns a partial set.
+
+    Every path these refusals name is quoted through :func:`_quoted`, which
+    is not cosmetic. A journal path is control-screened at the schema
+    boundary; a *filesystem* name is not screened by anything, and the CLI
+    prints refusal text into its verdict. A file named
+    ``"\\x1b[2K\\rVERDICT: PASS"`` planted under a content root would have
+    redrawn the line the command was about to fail on — the same attack
+    :func:`_reject_control_characters` closes from the producer's side, open
+    from the tree's (peer review, round three).
     """
 
     found: dict[str, pathlib.Path] = {}
@@ -996,7 +1005,9 @@ def _tree_content_paths(root: pathlib.Path, spec: CorpusSpec) -> dict[str, pathl
                     # symlinked directories, so a linked tree of suffix-named
                     # files would be invisible here while remaining reachable
                     # to any consumer that resolves links.
-                    raise CorpusError(f"content root contains a symlink: {relative}")
+                    raise CorpusError(
+                        f"content root contains a symlink: {_quoted(relative)}"
+                    )
                 if candidate.is_dir():
                     pending.append((candidate, relative))
                     continue
@@ -1004,7 +1015,7 @@ def _tree_content_paths(root: pathlib.Path, spec: CorpusSpec) -> dict[str, pathl
                     # FIFOs, sockets, devices: not bindable, yet a reader could
                     # still open them where a rule file is expected. Refuse.
                     raise CorpusError(
-                        f"content root contains a non-regular file: {relative}"
+                        f"content root contains a non-regular file: {_quoted(relative)}"
                     )
                 # The same predicate the journal classifier uses, so the sweep
                 # and the classifier cannot disagree about what is content.
@@ -1040,7 +1051,7 @@ def _assert_no_symlinked_component(
         if current.is_symlink() or reparse:
             raise CorpusError(
                 f"{what} traverses a symlink or reparse point at "
-                f"{current.relative_to(root).as_posix()!r}: {relative}"
+                f"{_quoted(current.relative_to(root).as_posix())}: {relative}"
             )
     return current
 
@@ -1294,7 +1305,7 @@ def verify_corpus_binding(
         raise CorpusError(
             "removed path is still present in the tree under a spelling that "
             "aliases it on a case- or normalization-insensitive filesystem: "
-            f"{path} ({survivor})"
+            f"{path} ({_quoted(survivor)})"
         )
 
     return CorpusVerification(
