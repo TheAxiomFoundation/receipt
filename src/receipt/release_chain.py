@@ -1600,7 +1600,9 @@ def verify_release_history_immutable(
             raise ReleaseChainError(
                 f"existing release file was deleted relative to {commit}: {relative}"
             )
-        candidate_mode = "100755" if current.stat().st_mode & 0o111 else "100644"
+        # Git keys the executable category on the owner bit alone; see
+        # append_gate.check_state_modes for the reasoning.
+        candidate_mode = "100755" if current.stat().st_mode & 0o100 else "100644"
         if candidate_mode != entry.mode:
             raise ReleaseChainError(
                 f"existing release file mode changed relative to {commit}: "
