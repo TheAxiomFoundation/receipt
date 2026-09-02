@@ -9,7 +9,7 @@ through a frozen :class:`TsaSpec` supplied by consumer code.  This module
 ships no repository-specific trust defaults and performs no chain walk or
 producer signature verification.
 
-The port is stricter than the baseline in nine places, each a refusal the
+The port is stricter than the baseline in ten places, each a refusal the
 pinned tree never presents and so each outside the differential contract: a
 legacy witness over a bundle configuring more than one anchor; a bundle
 configuring an anchor the spec carries no identity for, or one whose
@@ -21,7 +21,11 @@ certificate, which the declared certificate hash and SPKI describe only the
 first of while the ``-CAfile`` verifications trust every certificate in the
 file; a bundle whose configured anchors are not exactly the anchors the
 spec's identities for that bundle name, so an identity the consumer scoped
-to it cannot be quietly absent from it; an
+to it cannot be quietly absent from it; a pending bundle anchor reusing an
+active anchor ID under a different code-pinned root, which is a new
+authority and so must carry a supplemental outcome before the transition can
+activate it -- the ported supplemental-outcome refusal, reaching a case the
+baseline let through because it took the ID alone for the identity; an
 unavailable witness of either schema whose reason is not a string, or that
 carries token evidence at the witness level (the v2 per-anchor outcome has
 always refused both); and an unavailable legacy witness that names a bundle
@@ -681,7 +685,7 @@ def _load_trust_bundle(
         # Existence is not agreement. _select_anchor compares an anchor's
         # root SPKI and allowed signers with its identity, but only for the
         # anchor a witness selects; a rotation bundle reuses the active
-        # anchor id, _supplemental_candidates skips ids already active, and
+        # anchor id and root, which _supplemental_candidates then skips, and
         # a transition could activate a bundle whose anchor contradicts the
         # identity pinned for it without any selection ever comparing the
         # two (peer review). Compared here for every anchor, at load, on the
@@ -833,7 +837,7 @@ def _root_material(records: Path, anchor: dict[str, Any]) -> dict[str, str]:
     hash, certificate hash, and SPKI hash match what the bundle declares.
     Factored out of ``_select_anchor`` so that ``_load_trust_bundle`` can run
     them for every anchor at load: a pending rotation reuses the active
-    anchor id, ``_supplemental_candidates`` skips ids already active, and so
+    anchor id and root, which ``_supplemental_candidates`` then skips, and so
     no selection ever validated the new bundle's root before a transition
     activated it (peer review).
 
@@ -1287,16 +1291,32 @@ def _v1_witness_evidence(
     )
 
 
-def _active_anchor_ids(
+def _anchor_authority(anchor: dict[str, Any]) -> tuple[str, str]:
+    """The authority an anchor stands for: its ID and its declared root SPKI.
+
+    An ID alone names a slot in a bundle, not an authority.  A new bundle
+    version reuses the ID -- that is how a signer rotation is carried -- and
+    so could a bundle that puts a different root behind it, which is a
+    different authority under a familiar name.  ``_load_trust_bundle`` has
+    already compared both halves with the anchor's code identity and with the
+    root material itself before any caller reads this pair.
+    """
+
+    root = anchor.get("rootCertificate")
+    declared_root = root.get("spkiSha256") if isinstance(root, dict) else None
+    return str(anchor["id"]), str(declared_root)
+
+
+def _active_anchor_identities(
     records: Path,
     trusted_bundles: Mapping[str, dict[str, Any]],
     *,
     spec: TsaSpec,
-) -> set[str]:
-    active: set[str] = set()
+) -> set[tuple[str, str]]:
+    active: set[tuple[str, str]] = set()
     for reference in trusted_bundles.values():
         _path, trust = _load_trust_bundle(records, reference, spec=spec)
-        active.update(str(anchor["id"]) for anchor in trust["anchors"])
+        active.update(_anchor_authority(anchor) for anchor in trust["anchors"])
     return active
 
 
@@ -1307,7 +1327,9 @@ def _supplemental_candidates(
     *,
     spec: TsaSpec,
 ) -> dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any]]]:
-    active_ids = _active_anchor_ids(records, trusted_bundles, spec=spec)
+    active_authorities = _active_anchor_identities(
+        records, trusted_bundles, spec=spec
+    )
     candidates: dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any]]] = {}
     for reference in transition_bundle_updates:
         bundle_path = str(reference["path"])
@@ -1316,7 +1338,15 @@ def _supplemental_candidates(
         _path, trust = _load_trust_bundle(records, reference, spec=spec)
         for anchor in trust["anchors"]:
             anchor_id = str(anchor["id"])
-            if anchor_id not in active_ids:
+            # Skipped by ID and root together, not by ID alone.  A pending
+            # bundle that reuses an active anchor ID under a different
+            # code-pinned root is a new authority wearing a familiar name;
+            # taking the ID as the identity let both bundles pass their own
+            # checks while the new authority was never asked for a
+            # supplemental outcome before the transition activated it (peer
+            # review).  A signer rotation keeps the root and is still
+            # skipped, as it was.
+            if _anchor_authority(anchor) not in active_authorities:
                 candidates[(bundle_path, anchor_id)] = (reference, anchor)
     return candidates
 

@@ -1530,3 +1530,99 @@ def test_refuses_a_bundle_missing_an_anchor_its_identities_pin(
             tree.record, spec=pins_an_absent_authority, records=tree.records
         )
     assert str(verifying.value) == message
+
+
+def test_requires_a_supplemental_outcome_for_a_reused_id_under_a_new_root(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_alpha: LocalTsa,
+) -> None:
+    """An anchor ID is a slot, not an authority (peer review, F3).
+
+    ``_supplemental_candidates`` skipped a pending anchor whose ID was already
+    active, so a pending bundle could reuse an active ID while putting a
+    different code-pinned root behind it. Both bundles pass their own load
+    checks -- each anchor agrees with the identity scoped to its own bundle --
+    and the new authority was admitted at activation without ever being asked
+    for a supplemental outcome, which is the ported mechanism for admitting
+    one. Keyed by ID and declared root SPKI, it is a candidate, and a witness
+    carrying no supplemental outcome for it is refused by the ported message.
+
+    Without the fix the pair below is skipped exactly as the control is, and
+    the witness verifies. The control is what keeps the rule narrow: a signer
+    rotation reuses the ID under the same root and is still skipped.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    (tree.records / "trust" / beta.tsa.root_pem.name).write_bytes(
+        beta.tsa.root_pem.read_bytes()
+    )
+
+    def put_betas_root_behind_alphas_id(entry: dict[str, Any]) -> None:
+        entry["rootCertificate"] = beta.entry()["rootCertificate"]
+
+    reference, spec = add_bundle_version(
+        tree,
+        local_anchors[:1],
+        version=2,
+        mutate_anchor=put_betas_root_behind_alphas_id,
+    )
+    # The v2 identity pins the root the v2 bundle actually declares, so the
+    # bundle and the spec agree with each other and both load clean.
+    spec = TsaSpec(
+        trust_bundles=spec.trust_bundles,
+        tsa_identities=(
+            *spec.tsa_identities[:-1],
+            dataclasses.replace(
+                spec.tsa_identities[-1],
+                root_spki_sha256=beta.root_pins["spkiSha256"],
+            ),
+        ),
+        legacy_witness_bundle_id=spec.legacy_witness_bundle_id,
+    )
+    pending = json.loads((tree.records / "trust" / "tsa-anchors-v2.json").read_text())
+    active = json.loads(tree.bundle.read_text())
+    # The premise: the ID is reused, so keying by ID alone skips this anchor.
+    assert {anchor["id"] for anchor in pending["anchors"]} == {
+        anchor["id"] for anchor in active["anchors"]
+    }
+    assert pending["anchors"][0]["rootCertificate"]["spkiSha256"] != (
+        active["anchors"][0]["rootCertificate"]["spkiSha256"]
+    )
+    with pytest.raises(TsaError) as caught:
+        verify_witness(
+            tree.record,
+            spec=spec,
+            records=tree.records,
+            trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+            transition_bundle_updates=[reference],
+        )
+    assert str(caught.value) == (
+        "supplemental TSA outcome mismatch: "
+        f"missing=[('{reference['path']}', '{alpha.anchor_id}')], extra=[]"
+    )
+
+    # The control: a genuine signer rotation reuses the ID under the same
+    # root, is not a new authority, and needs no supplemental outcome.
+    rotation, rotation_spec = add_bundle_version(
+        tree,
+        local_anchors[:1],
+        version=3,
+        signers={alpha.anchor_id: certificate_pins(rotated_alpha.signer_pem)},
+    )
+    rotated_pending = json.loads(
+        (tree.records / "trust" / "tsa-anchors-v3.json").read_text()
+    )
+    assert rotated_pending["anchors"][0]["rootCertificate"]["spkiSha256"] == (
+        active["anchors"][0]["rootCertificate"]["spkiSha256"]
+    )
+    evidence = verify_witness(
+        tree.record,
+        spec=rotation_spec,
+        records=tree.records,
+        trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+        transition_bundle_updates=[rotation],
+    )
+    assert evidence.status == "available"
+    assert evidence.supplemental_tokens == ()
