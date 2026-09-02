@@ -150,6 +150,11 @@ class VerifyResult:
     passes: tuple[PassResult, ...]
     chain: ChainVerification | None
     corpus: CorpusVerification | None
+    #: The full object id ``--base-ref`` resolved to, or None when no base ref
+    #: was supplied. A ref spelling is not evidence: "HEAD", a branch name, or
+    #: a tag names whatever it points at when the command runs, and the same
+    #: verdict text is reproducible at a later commit. The commit is.
+    base_commit: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -338,6 +343,7 @@ def run_verification(
     passes: list[PassResult] = []
     chain: ChainVerification | None = None
     corpus: CorpusVerification | None = None
+    base_commit: str | None = None
 
     def result(*, incomplete: str | None = None) -> VerifyResult:
         items = list(passes)
@@ -353,6 +359,7 @@ def run_verification(
             passes=tuple(items),
             chain=chain,
             corpus=corpus,
+            base_commit=base_commit,
         )
 
     # Every pass — the verification call AND the detail builder that reports
@@ -377,10 +384,18 @@ def run_verification(
     # git ref. Needs git and a repository; requested explicitly, never implied.
     if base_ref is not None:
         try:
-            verify_release_history_immutable(root, base_ref, spec=spec.chain)
+            # The commit the ref resolved to, from the one resolution the
+            # comparison itself used. Quoting only the spelling left the
+            # verdict unfalsifiable: "HEAD", a branch, or a tag names whatever
+            # it pointed at while the command ran, so the same sentence is
+            # reproducible at a different base later, and a reader cannot tell
+            # which snapshot was compared. The object id is the evidence.
+            base_commit, _, _ = verify_release_history_immutable(
+                root, base_ref, spec=spec.chain
+            )
             history_detail = (
-                f"every release object present at {base_ref} is byte- and "
-                "mode-identical in this tree"
+                f"every release object present at {base_ref} ({base_commit}) "
+                "is byte- and mode-identical in this tree"
             )
         except KeyboardInterrupt:  # the operator's interrupt, never a verdict
             raise
@@ -520,6 +535,11 @@ def result_to_dict(result: VerifyResult) -> dict[str, Any]:
             ],
         },
     }
+    if result.base_commit is not None:
+        # The object id the comparison actually ran against. The ref spelling
+        # stays in the history pass detail beside it; only one of the two is
+        # evidence a reader can re-check.
+        payload["history"] = {"baseCommit": result.base_commit}
     if result.chain is not None and result.chain.head is not None:
         payload["chain"] = {
             "releases": len(result.chain.releases),

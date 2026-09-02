@@ -1333,6 +1333,50 @@ def test_base_ref_json_reports_the_history_pass(
     assert "outside this claim" in claimed
 
 
+def test_the_history_verdict_names_the_resolved_commit_not_the_ref(
+    committed_repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A ref spelling is not evidence.
+
+    "HEAD", a branch, or a tag names whatever it pointed at while the command
+    ran, so a verdict quoting only the spelling is reproducible at a different
+    base later and a reader cannot tell which snapshot was compared. The full
+    object id the ref resolved to — the one resolution the comparison itself
+    used — appears in the JSON verdict and in the pass detail the text prints.
+    """
+
+    import re
+    import subprocess
+
+    expected = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=committed_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert re.fullmatch(r"[0-9a-f]{40}", expected)
+
+    assert run(committed_repo, "--base-ref", "HEAD", "--json") == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["history"]["baseCommit"] == expected
+    (history,) = [p for p in payload["passes"] if p["name"] == "history"]
+    assert f"present at HEAD ({expected})" in history["detail"]
+
+    assert run(committed_repo, "--base-ref", "HEAD") == EXIT_OK
+    assert expected in capsys.readouterr().out
+
+
+def test_a_verdict_without_a_base_ref_carries_no_history_block(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No base ref, no commit to name — and no empty block inviting a reader
+    to think one was compared."""
+
+    assert run(repo, "--json") == EXIT_OK
+    assert "history" not in json.loads(capsys.readouterr().out)
+
+
 def test_base_ref_refusal_is_a_fail_verdict(
     committed_repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
