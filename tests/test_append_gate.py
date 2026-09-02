@@ -2512,3 +2512,69 @@ def test_a_root_relinked_between_the_two_state_reads_is_refused(
     # The link really is there, and really does still resolve to the tree.
     assert candidate.root.is_symlink()
     assert (candidate.root / CHAIN_SPEC.prefix_relative).is_file()
+
+
+def test_the_index_comparison_uses_a_category_the_caller_supplies(
+    tmp_path: pathlib.Path,
+) -> None:
+    """R6-F3 at the comparison itself. ``assert_index_agrees_with_tree`` read
+    the working tree by resolving the path, which for a state file is a
+    resolution after the read that established the file and after the mode
+    comparison that precedes this call. It takes an already-observed category
+    instead when the caller has one. Here the tree carries an executable bit
+    the index does not record, so resolving the path refuses; supplied the
+    category a descriptor observed, the same call compares that and returns.
+    A caller that supplies nothing — every caller that predates the parameter
+    — gets the first behaviour, which is the one asserted first."""
+
+    candidate = base_repository(tmp_path)
+    ledger = candidate.root / CHAIN_SPEC.state_relative
+    ledger.chmod(ledger.stat().st_mode | 0o111)
+
+    with pytest.raises(ReleaseChainError) as refusal:
+        release_chain.assert_index_agrees_with_tree(
+            candidate.root, CHAIN_SPEC.state_relative
+        )
+    assert str(refusal.value) == (
+        "candidate working tree mode for ledger/official_observations.jsonl "
+        "disagrees with its index entry (100644 vs 100755)"
+    )
+    release_chain.assert_index_agrees_with_tree(
+        candidate.root, CHAIN_SPEC.state_relative, observed="100644"
+    )
+
+
+def test_the_push_paths_index_comparison_takes_the_snapshots_category(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R6-F3 at the push path's own call site, which is the only index
+    comparison that path makes: it resolved the state path once more, after
+    the read that had the file open. Every ``Path.lstat`` of the ledger here
+    reports an executable bit the file does not carry — what that second
+    resolution could be shown — and the gate answers ordinarily, because the
+    category comes from the snapshot. Asked to resolve the path itself, the
+    same comparison on the same tree refuses."""
+
+    candidate = base_repository(tmp_path)
+    ledger = candidate.root.resolve() / CHAIN_SPEC.state_relative
+    real_lstat = pathlib.Path.lstat
+
+    def lying_lstat(self: pathlib.Path, *arguments: Any) -> os.stat_result:
+        observed = real_lstat(self, *arguments)
+        if os.fspath(self) != os.fspath(ledger):
+            return observed
+        return os.stat_result((observed.st_mode | 0o111, *tuple(observed)[1:]))
+
+    monkeypatch.setattr(pathlib.Path, "lstat", lying_lstat)
+
+    assert run_push_gate(candidate) == (
+        "thesis-facts append check OK: 2 rows, immutable prefix 1"
+    )
+    with pytest.raises(ReleaseChainError) as refusal:
+        release_chain.assert_index_agrees_with_tree(
+            candidate.root, CHAIN_SPEC.state_relative
+        )
+    assert str(refusal.value) == (
+        "candidate working tree mode for ledger/official_observations.jsonl "
+        "disagrees with its index entry (100644 vs 100755)"
+    )
