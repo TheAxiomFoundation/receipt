@@ -616,3 +616,134 @@ def test_a_ledger_executable_at_the_base_may_stay_executable(
         "thesis-facts append check OK: 3 rows, immutable prefix 1, "
         "+1 appended vs base"
     )
+
+
+def test_a_response_archive_digest_that_is_not_a_digest_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The gap: presence was the whole check, so any truthy value bound the
+    row to an archived response that may not exist."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate, responseArchive={"sha256": "not-a-sha256"})
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "appended line 3 (fixture.series.observation_3) "
+        "responseArchive.sha256 is not a SHA-256 hex digest"
+    )
+
+
+def test_an_uppercase_response_archive_digest_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """One spelling per digest: an upper-case twin of the same bytes would
+    compare unequal to every digest this package recomputes."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(
+        candidate,
+        responseArchive={
+            "sha256": hashlib.sha256(b"response-3").hexdigest().upper()
+        },
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "appended line 3 (fixture.series.observation_3) "
+        "responseArchive.sha256 is not a SHA-256 hex digest"
+    )
+
+
+def test_an_abbreviated_ledger_repo_sha_is_refused(tmp_path: pathlib.Path) -> None:
+    """An abbreviation names a commit only until the repository grows one
+    that shares its prefix."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate, ledgerRepoSha="47ca684")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "appended line 3 (fixture.series.observation_3) ledgerRepoSha is "
+        "not a full 40-character commit id"
+    )
+
+
+def test_a_symbolic_ledger_repo_sha_is_refused(tmp_path: pathlib.Path) -> None:
+    """"HEAD" is truthy and binds nothing."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate, ledgerRepoSha="HEAD")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "appended line 3 (fixture.series.observation_3) ledgerRepoSha is "
+        "not a full 40-character commit id"
+    )
+
+
+def test_a_retrieved_at_without_a_time_zone_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A naive timestamp cannot be ordered against a witnessed genTime."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate, retrievedAt="2026-07-10T20:38:58")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "appended line 3 (fixture.series.observation_3) retrievedAt is not "
+        "an RFC 3339 timestamp with a time zone"
+    )
+
+
+def test_a_retrieved_at_that_is_not_a_timestamp_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Prose satisfied presence exactly as well as a timestamp did."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate, retrievedAt="yesterday")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "appended line 3 (fixture.series.observation_3) retrievedAt is not "
+        "an RFC 3339 timestamp with a time zone"
+    )
+
+
+def test_a_retrieved_at_naming_an_impossible_day_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The pattern accepts the shape; the parser is what rejects the day."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate, retrievedAt="2026-02-30T00:00:00Z")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "appended line 3 (fixture.series.observation_3) retrievedAt is not "
+        "an RFC 3339 timestamp with a time zone"
+    )
+
+
+def test_a_retrieved_at_with_a_non_utc_offset_is_accepted(
+    tmp_path: pathlib.Path,
+) -> None:
+    """RFC 3339 with a time zone, not UTC-only: the check adds a shape, not a
+    policy about which zone a resolver may report from."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate, retrievedAt="2026-07-10T20:38:58.5+05:30")
+
+    assert run_gate(candidate) == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 1, "
+        "+1 appended vs base"
+    )
