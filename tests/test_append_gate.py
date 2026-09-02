@@ -2802,3 +2802,75 @@ def test_a_gate_only_proposal_whose_index_rewrites_a_release_file_is_refused(
         "gate-only proposal changes unclassified release path(s): "
         "['releases/README.md']"
     )
+
+
+def serve_a_release_path_through_a_symlink(
+    candidate: Candidate, outside: pathlib.Path
+) -> None:
+    """Index ``releases/vendor/file.md`` and point ``vendor`` outside the tree.
+
+    The entry is written straight into the index because git will not add a
+    path that lies beyond a symlink — which is the whole shape of the case:
+    the commit records a release file, and the working tree answers for it
+    with a file the checkout does not contain.
+    """
+
+    outside.mkdir(parents=True)
+    (outside / "file.md").write_text("served from outside the tree\n", encoding="utf-8")
+    (candidate.root / CHAIN_SPEC.release_root_relative / "vendor").symlink_to(
+        outside, target_is_directory=True
+    )
+    blob = git(
+        candidate.root, "hash-object", "-w", "--stdin", stdin="served from outside\n"
+    )
+    git(
+        candidate.root,
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        f"100644,{blob},releases/vendor/file.md",
+    )
+
+
+def test_an_indexed_release_path_served_through_a_symlink_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds R7-F4: the release root's index and its working tree were
+    reconciled by asking ``is_file()`` about each indexed path, which resolves
+    every component of the name — while the traversal that would have seen
+    those components resolves none of them, because ``rglob`` yields a
+    symlinked directory without descending it and the scan skips it. So
+    ``releases/vendor -> /outside`` served an indexed release file: present,
+    regular, and no part of the candidate tree. Without the parent walk the
+    push path accepts this tree outright."""
+
+    candidate = base_repository(tmp_path)
+    serve_a_release_path_through_a_symlink(candidate, tmp_path / "outside")
+    # The name resolves to a regular file, which is exactly what the
+    # reconciliation used to ask about.
+    assert (candidate.root / "releases" / "vendor" / "file.md").is_file()
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate)
+    assert str(refusal.value) == (
+        "release path traverses a symlink at 'releases/vendor': "
+        "releases/vendor/file.md"
+    )
+
+
+def test_the_enumerations_symlink_refusal_still_comes_first_with_a_base(
+    tmp_path: pathlib.Path,
+) -> None:
+    """R7-F4's placement: on the base-ref path the same tree meets
+    ``_working_release_files`` first, which is on ``main`` and refuses the
+    link it walks into by name. That refusal is not pre-empted; the new walk
+    speaks only for the path no traversal reaches, which is why the push path
+    above is where it fires."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    serve_a_release_path_through_a_symlink(candidate, tmp_path / "outside")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == "release path is a symlink: releases/vendor"
