@@ -612,6 +612,11 @@ the package page at [axiom.org/receipt](https://axiom.org/receipt),
 and the API reference at
 [axiom.org/receipt/api](https://axiom.org/receipt/api/).
 
+# Acknowledgements {.unnumbered}
+
+Nathan Storey's review of revision 10 and his contributed evidence-record
+proposal shaped the account of the producer side in @sec-scope.
+
 # References {.unnumbered}
 
 ::: {#refs}
