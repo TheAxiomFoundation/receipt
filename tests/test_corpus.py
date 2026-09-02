@@ -1937,3 +1937,74 @@ def test_refuses_an_unassigned_code_point_in_a_tombstone_listing(
     with pytest.raises(CorpusError, match="unassigned in Unicode") as caught:
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
     assert "tree entry examined for a tombstone" in str(caught.value)
+
+
+def test_an_oversized_tier_is_quoted_within_bounds(tmp_path: pathlib.Path) -> None:
+    """Binds F5: only two fields were bounded when quoted, and tier was not.
+
+    _quoted was reached by duplicate keys and malformed gate ids alone. Every
+    other producer-controlled value a refusal names — kind, schemaVersion,
+    entryIndex, the unknown-key list, tier, outcome, sha256, state — was
+    reproduced verbatim, so a million-character tier put a million characters
+    into the verdict and scrolled away every line the auditor needed. Without
+    the fix this refusal is a megabyte long.
+    """
+
+    write_tree(tmp_path)
+    rows = journal_rows(
+        gates=[
+            {
+                "gateId": "rulespec/compile",
+                "tier": "T" * 1000000,
+                "outcome": "pass",
+                "evidence": {"command": "make validate"},
+            }
+        ]
+    )
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+    assert "unknown reproducibility tier" in str(caught.value)
+    assert len(str(caught.value)) < 600
+    assert "more characters]" in str(caught.value)
+
+
+def test_an_oversized_unknown_row_key_is_quoted_within_bounds(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds F5: the closed-world key refusal interpolated whole lists.
+
+    ``missing=`` and ``unknown=`` rendered their lists with str(), which is
+    repr of every element, so one long key name flooded the verdict the same
+    way. The list goes through _quoted now, which is byte-identical for the
+    short lists a real journal produces.
+    """
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+    rows[0]["K" * 1000000] = "x"
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+    assert "keys are not closed-world" in str(caught.value)
+    assert len(str(caught.value)) < 600
+
+
+def test_a_short_producer_value_is_quoted_exactly_as_before(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds F5: routing through _quoted must not restate any real refusal.
+
+    _quoted is plain repr under the bound, so every refusal a corpus of
+    ordinary size can produce is byte-identical to what it was. Pinned here
+    because the alternative — a bound that also reshaped short messages —
+    would silently invalidate the rest of this battery.
+    """
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+    rows[-1]["tier"] = "insider"
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+    assert str(caught.value) == (
+        "journal row 7 gate 'ci/repository-checks' declares unknown "
+        "reproducibility tier 'insider'"
+    )

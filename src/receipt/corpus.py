@@ -181,7 +181,7 @@ class CorpusSpec:
         for suffix in self.content_suffixes:
             if type(suffix) is not str or not suffix.startswith("."):
                 raise CorpusError(
-                    f"CorpusSpec content suffix must start with '.': {suffix!r}"
+                    f"CorpusSpec content suffix must start with '.': {_quoted(suffix)}"
                 )
         if type(self.required_attested_paths) is not frozenset:
             raise CorpusError("CorpusSpec required_attested_paths must be a frozenset")
@@ -192,14 +192,14 @@ class CorpusSpec:
         unknown = sorted(self.accepted_gate_tiers - set(GATE_TIERS))
         if unknown:
             raise CorpusError(
-                f"CorpusSpec accepts unknown reproducibility tier {unknown[0]!r}; "
+                f"CorpusSpec accepts unknown reproducibility tier {_quoted(unknown[0])}; "
                 f"known tiers are {', '.join(GATE_TIERS)}"
             )
         if type(self.required_gates) is not frozenset:
             raise CorpusError("CorpusSpec required_gates must be a frozenset")
         for gate_id in sorted(self.required_gates):
             if GATE_ID_RE.fullmatch(gate_id) is None:
-                raise CorpusError(f"CorpusSpec required gate id is malformed: {gate_id!r}")
+                raise CorpusError(f"CorpusSpec required gate id is malformed: {_quoted(gate_id)}")
 
     def content_root_of(self, path: str) -> pathlib.PurePosixPath | None:
         for root in self.content_roots:
@@ -264,7 +264,23 @@ class CorpusVerification:
 
 
 def _quoted(value: Any) -> str:
-    """repr of a producer-controlled value, truncated so a refusal is bounded."""
+    """repr of a producer-controlled value, truncated so a refusal is bounded.
+
+    Every value a refusal quotes goes through here, not only the two that
+    started it. A refusal is rendered into the verdict an auditor reads, and
+    the schema bounds only some of the strings a producer can put in one: a
+    row's ``kind``, ``schemaVersion``, ``entryIndex``, ``tier``, ``outcome``,
+    ``sha256`` and ``state``, and the unknown-key list, were all reproduced
+    verbatim, so a million-character tier scrolled the verdict away exactly
+    as an oversized evidence string would have (peer review, round three).
+    A path is bounded at ``MAX_PATH_TEXT``, which is still four times what
+    belongs on a line.
+
+    Under the bound this is plain ``repr``, so it changes no refusal a real
+    corpus can produce — and ``repr`` is also what escapes a control character
+    a filesystem name may carry, which is why tree-derived paths come through
+    here too.
+    """
 
     text = repr(value)
     if len(text) <= MAX_QUOTED_TEXT:
@@ -338,19 +354,19 @@ def _reject_control_characters(value: str, label: str) -> str:
         category = unicodedata.category(character)
         if code < 0x20 or code == 0x7F or 0x80 <= code <= 0x9F:
             raise CorpusError(
-                f"{label} contains a control character ({code:#04x}): {value!r}"
+                f"{label} contains a control character ({code:#04x}): {_quoted(value)}"
             )
         if _is_format_control(code, category):
             raise CorpusError(
-                f"{label} contains a Unicode format control ({code:#04x}): {value!r}"
+                f"{label} contains a Unicode format control ({code:#04x}): {_quoted(value)}"
             )
         if category == "Cs":
             raise CorpusError(
-                f"{label} contains a lone surrogate ({code:#04x}): {value!r}"
+                f"{label} contains a lone surrogate ({code:#04x}): {_quoted(value)}"
             )
         if code in (0x2028, 0x2029):
             raise CorpusError(
-                f"{label} contains a Unicode line separator ({code:#04x}): {value!r}"
+                f"{label} contains a Unicode line separator ({code:#04x}): {_quoted(value)}"
             )
     return value
 
@@ -433,15 +449,15 @@ def _validate_relative_path(value: Any, label: str) -> str:
             f"{label} is longer than {MAX_PATH_TEXT} characters ({len(value)})"
         )
     if "\\" in value:
-        raise CorpusError(f"{label} must use POSIX separators: {value!r}")
+        raise CorpusError(f"{label} must use POSIX separators: {_quoted(value)}")
     if value.startswith("/") or value.endswith("/"):
-        raise CorpusError(f"{label} must be relative with no trailing slash: {value!r}")
+        raise CorpusError(f"{label} must be relative with no trailing slash: {_quoted(value)}")
     segments = value.split("/")
     for segment in segments:
         if not segment:
-            raise CorpusError(f"{label} has an empty path segment: {value!r}")
+            raise CorpusError(f"{label} has an empty path segment: {_quoted(value)}")
         if segment in (".", ".."):
-            raise CorpusError(f"{label} contains a relative segment: {value!r}")
+            raise CorpusError(f"{label} contains a relative segment: {_quoted(value)}")
         if _aliases_natively(segment):
             # Two spellings Win32 resolves that no enumeration emits, so the
             # fold model cannot see them and a tombstone or a closed-world
@@ -462,7 +478,7 @@ def _validate_relative_path(value: Any, label: str) -> str:
         # joins drive-absolute under pathlib, letting a row reference a file
         # outside the root. No path in this schema legitimately contains a
         # colon; refuse rather than special-case the platform.
-        raise CorpusError(f"{label} contains ':': {value!r}")
+        raise CorpusError(f"{label} contains ':': {_quoted(value)}")
     return value
 
 
@@ -474,7 +490,7 @@ def _exact_keys(row: Any, expected: frozenset[str], label: str) -> dict[str, Any
         missing = sorted(expected - actual)
         unknown = sorted(actual - expected)
         raise CorpusError(
-            f"{label} keys are not closed-world: missing={missing}, unknown={unknown}"
+            f"{label} keys are not closed-world: missing={_quoted(missing)}, unknown={_quoted(unknown)}"
         )
     return row
 
@@ -488,7 +504,7 @@ def _string(value: Any, label: str) -> str:
 def _sha256(value: Any, label: str) -> str:
     text = _string(value, label)
     if SHA256_RE.fullmatch(text) is None:
-        raise CorpusError(f"{label} is not a lowercase SHA-256 hex digest: {text!r}")
+        raise CorpusError(f"{label} is not a lowercase SHA-256 hex digest: {_quoted(text)}")
     return text
 
 
@@ -505,19 +521,19 @@ def _parse_row(line: str, number: int, spec: CorpusSpec) -> dict[str, Any]:
     # refusing with the documented CorpusError.
     if type(kind) is not str or kind not in ROW_KINDS:
         raise CorpusError(
-            f"journal row {number} has unknown kind {kind!r}; "
+            f"journal row {number} has unknown kind {_quoted(kind)}; "
             f"expected one of {', '.join(sorted(ROW_KINDS))}"
         )
     row = _exact_keys(parsed, _ROW_KEYS[kind], f"journal row {number}")
     if row["schemaVersion"] != spec.schema_version:
         raise CorpusError(
-            f"journal row {number} declares schema {row['schemaVersion']!r}, "
-            f"but the pinned spec is {spec.schema_version!r}"
+            f"journal row {number} declares schema {_quoted(row['schemaVersion'])}, "
+            f"but the pinned spec is {_quoted(spec.schema_version)}"
         )
     index = row["entryIndex"]
     if type(index) is not int or index != number - 1:
         raise CorpusError(
-            f"journal row {number} entryIndex must be {number - 1}, found {index!r}"
+            f"journal row {number} entryIndex must be {number - 1}, found {_quoted(index)}"
         )
     return row
 
@@ -540,32 +556,32 @@ def _validate_gate(row: dict[str, Any], number: int, spec: CorpusSpec) -> GateDe
     tier = _string(row["tier"], f"journal row {number} tier")
     if tier not in GATE_TIERS:
         raise CorpusError(
-            f"journal row {number} gate {gate_id!r} declares unknown "
-            f"reproducibility tier {tier!r}"
+            f"journal row {number} gate {_quoted(gate_id)} declares unknown "
+            f"reproducibility tier {_quoted(tier)}"
         )
     if tier not in spec.accepted_gate_tiers:
         raise CorpusError(
-            f"journal row {number} gate {gate_id!r} declares tier {tier!r}, "
+            f"journal row {number} gate {_quoted(gate_id)} declares tier {_quoted(tier)}, "
             "which the pinned spec does not accept"
         )
     outcome = _string(row["outcome"], f"journal row {number} outcome")
     if outcome not in GATE_OUTCOMES:
         raise CorpusError(
-            f"journal row {number} gate {gate_id!r} has unknown outcome {outcome!r}"
+            f"journal row {number} gate {_quoted(gate_id)} has unknown outcome {_quoted(outcome)}"
         )
     evidence = row["evidence"]
     if type(evidence) is not dict or not evidence:
         raise CorpusError(
-            f"journal row {number} gate {gate_id!r} evidence must be a non-empty object"
+            f"journal row {number} gate {_quoted(gate_id)} evidence must be a non-empty object"
         )
     for key, value in evidence.items():
         if type(key) is not str or type(value) is not str:
             raise CorpusError(
-                f"journal row {number} gate {gate_id!r} evidence must map "
+                f"journal row {number} gate {_quoted(gate_id)} evidence must map "
                 "strings to strings"
             )
-        key_label = f"journal row {number} gate {gate_id!r} evidence key"
-        value_label = f"journal row {number} gate {gate_id!r} evidence value {key!r}"
+        key_label = f"journal row {number} gate {_quoted(gate_id)} evidence key"
+        value_label = f"journal row {number} gate {_quoted(gate_id)} evidence value {_quoted(key)}"
         _reject_oversized_text(key, key_label)
         _reject_oversized_text(value, value_label)
         _reject_control_characters(key, key_label)
@@ -577,18 +593,18 @@ def _validate_gate(row: dict[str, Any], number: int, spec: CorpusSpec) -> GateDe
     if outcome == WAIVED:
         if "waiverSetSha256" not in evidence:
             raise CorpusError(
-                f"journal row {number} gate {gate_id!r} is waived without naming "
+                f"journal row {number} gate {_quoted(gate_id)} is waived without naming "
                 "evidence.waiverSetSha256"
             )
         _sha256(
             evidence["waiverSetSha256"],
-            f"journal row {number} gate {gate_id!r} evidence.waiverSetSha256",
+            f"journal row {number} gate {_quoted(gate_id)} evidence.waiverSetSha256",
         )
     # Same principle for a gate that did not run: state why, or the
     # declaration is decoration. A whitespace-only reason is no reason.
     if outcome == NOT_RUN and not evidence.get("reason", "").strip():
         raise CorpusError(
-            f"journal row {number} gate {gate_id!r} is declared not-run "
+            f"journal row {number} gate {_quoted(gate_id)} is declared not-run "
             "without a non-empty evidence.reason"
         )
     return GateDeclaration(
@@ -643,7 +659,7 @@ def parse_journal(
             # earlier tier; every gate is stated once per journal.
             if gate.gate_id in gate_ids:
                 raise CorpusError(
-                    f"journal row {number} restates gate {gate.gate_id!r} "
+                    f"journal row {number} restates gate {_quoted(gate.gate_id)} "
                     f"from row {gate_ids[gate.gate_id]}"
                 )
             gate_ids[gate.gate_id] = number
@@ -654,7 +670,7 @@ def parse_journal(
         digest = _sha256(row["sha256"], f"journal row {number} sha256")
         state = _string(row["state"], f"journal row {number} state")
         if state not in FILE_STATES:
-            raise CorpusError(f"journal row {number} has unknown state {state!r}")
+            raise CorpusError(f"journal row {number} has unknown state {_quoted(state)}")
 
         target = content if kind == CONTENT_KIND else attested
         # Kind is a function of the path, not the producer's choice: the two
@@ -663,12 +679,12 @@ def parse_journal(
         # order-dependent cross-kind bookkeeping is needed.
         if kind == CONTENT_KIND and not spec.is_content_path(path):
             raise CorpusError(
-                f"journal row {number} binds {path!r} as content, but it is not "
+                f"journal row {number} binds {_quoted(path)} as content, but it is not "
                 "under a pinned content root with a pinned suffix"
             )
         if kind == ATTESTED_KIND and spec.is_content_path(path):
             raise CorpusError(
-                f"journal row {number} binds {path!r} as attested, but it is a "
+                f"journal row {number} binds {_quoted(path)} as attested, but it is a "
                 "content path and must be swept closed-world"
             )
 
@@ -680,7 +696,7 @@ def parse_journal(
         else:
             if path not in target:
                 raise CorpusError(
-                    f"journal row {number} removes {path!r}, which was never present"
+                    f"journal row {number} removes {_quoted(path)}, which was never present"
                 )
             # The tombstone must name the revision it retires. Otherwise
             # present(H1) → present(H2) → removed(H1) verifies, deleting the
@@ -688,7 +704,7 @@ def parse_journal(
             # that had already been superseded. (Found by cross-family review.)
             if target[path].sha256 != digest:
                 raise CorpusError(
-                    f"journal row {number} removes {path!r} naming digest "
+                    f"journal row {number} removes {_quoted(path)} naming digest "
                     f"{digest}, but the effective revision is "
                     f"{target[path].sha256}"
                 )
@@ -933,7 +949,7 @@ def _reject_aliasing_paths(relatives: list[str]) -> None:
             raise CorpusError(
                 "two declared paths would alias on a case- or "
                 "normalization-insensitive filesystem, so the closed-world set "
-                f"is ambiguous: {seen[key]!r} and {relative!r}"
+                f"is ambiguous: {_quoted(seen[key])} and {_quoted(relative)}"
             )
         seen[key] = relative
 
@@ -1129,7 +1145,7 @@ def verify_declarations(
     if missing:
         raise CorpusError(
             "the witnessed journal does not declare a gate the pinned spec "
-            f"requires: {missing[0]!r}"
+            f"requires: {_quoted(missing[0])}"
         )
     return verification.gates
 
@@ -1168,13 +1184,13 @@ def verify_corpus_binding(
     if unlisted:
         raise CorpusError(
             f"{len(unlisted)} content file(s) in the tree are not bound by the "
-            f"witnessed journal, starting with {unlisted[0]!r}"
+            f"witnessed journal, starting with {_quoted(unlisted[0])}"
         )
     absent = sorted(journal_paths - tree_paths)
     if absent:
         raise CorpusError(
             f"{len(absent)} content file(s) bound by the journal are missing "
-            f"from the tree, starting with {absent[0]!r}"
+            f"from the tree, starting with {_quoted(absent[0])}"
         )
 
     hashed: dict[str, _FileIdentity] = {}
@@ -1183,7 +1199,7 @@ def verify_corpus_binding(
         digest, identity = _regular_file_digest(root, path)
         if digest != content[path].sha256:
             raise CorpusError(
-                f"content file {path!r} does not match its witnessed digest: "
+                f"content file {_quoted(path)} does not match its witnessed digest: "
                 f"tree has {digest}, journal binds {content[path].sha256}"
             )
         hashed[path] = identity
@@ -1192,13 +1208,13 @@ def verify_corpus_binding(
     if missing_required:
         raise CorpusError(
             "the witnessed journal does not attest a path the pinned spec "
-            f"requires: {missing_required[0]!r}"
+            f"requires: {_quoted(missing_required[0])}"
         )
     for path in sorted(attested):
         digest, identity = _regular_file_digest(root, path)
         if digest != attested[path].sha256:
             raise CorpusError(
-                f"attested file {path!r} does not match its witnessed digest: "
+                f"attested file {_quoted(path)} does not match its witnessed digest: "
                 f"tree has {digest}, journal binds {attested[path].sha256}"
             )
         hashed[path] = identity
@@ -1224,7 +1240,7 @@ def verify_corpus_binding(
             after = os.lstat(_assert_no_symlinked_component(root, path))
         except OSError as exc:
             raise CorpusError(
-                f"bound file {path!r} disappeared during verification; the "
+                f"bound file {_quoted(path)} disappeared during verification; the "
                 "verdict is refused"
             ) from exc
         seen = hashed[path]
@@ -1235,7 +1251,7 @@ def verify_corpus_binding(
             after.st_mtime_ns,
         ) != (seen.device, seen.inode, seen.size, seen.mtime_ns):
             raise CorpusError(
-                f"bound file {path!r} changed during verification; the "
+                f"bound file {_quoted(path)} changed during verification; the "
                 "verdict is refused"
             )
 
