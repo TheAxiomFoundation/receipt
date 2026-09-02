@@ -806,28 +806,40 @@ class _TombstoneIndex:
     Failure to list is a refusal, not an absence, for the reason
     :func:`_list_directory` gives; a directory that is simply not there is an
     absence, cached as one.
+
+    The cache is keyed by the directory's exact spelling as the search walked
+    it — the ``/``-joined component names, ``""`` for the root — and never by
+    a :class:`pathlib.Path`. Path equality and hashing are case-insensitive on
+    Windows, so ``WindowsPath("A")`` and ``WindowsPath("a")`` are one key
+    there; with NTFS per-directory case sensitivity they are two directories,
+    and an empty ``A/`` cached under that shared key answered for a surviving
+    ``a/TARGET``, turning a tombstone this pass exists to refuse into a PASS
+    (peer review, round four). A string key means the cache distinguishes
+    exactly what the walk distinguishes, on every platform.
     """
 
     def __init__(self, root: pathlib.Path) -> None:
         self.root = root
-        self._directories: dict[pathlib.Path, dict[str, list[pathlib.Path]] | None] = {}
+        self._directories: dict[str, dict[str, list[pathlib.Path]] | None] = {}
         self._entries = 0
 
     def folded(
-        self, directory: pathlib.Path, relative: str
+        self, directory: pathlib.Path, key: str, relative: str
     ) -> dict[str, list[pathlib.Path]] | None:
         """This directory's entries by fold key, or None if it is not there.
 
-        ``relative`` is the removed path whose search wanted the directory; it
-        names the tombstone in any refusal this raises.
+        ``key`` is the directory's exact spelling relative to the tree root,
+        which is what the cache is keyed by; ``relative`` is the removed path
+        whose search wanted the directory, and it names the tombstone in any
+        refusal this raises.
         """
 
-        if directory in self._directories:
-            return self._directories[directory]
+        if key in self._directories:
+            return self._directories[key]
         try:
             entries = sorted(directory.iterdir(), key=lambda entry: entry.name)
         except (FileNotFoundError, NotADirectoryError):
-            self._directories[directory] = None
+            self._directories[key] = None
             return None
         except OSError as exc:
             raise CorpusError(
@@ -849,7 +861,7 @@ class _TombstoneIndex:
             # next, which decides whether a tombstone is honoured.
             _assert_assigned(entry.name, "tree entry examined for a tombstone")
             folded.setdefault(_path_fold(entry.name), []).append(entry)
-        self._directories[directory] = folded
+        self._directories[key] = folded
         return folded
 
 
@@ -890,7 +902,7 @@ def _fold_survivor(index: _TombstoneIndex, relative: str) -> str | None:
     def search(
         directory: pathlib.Path, components: list[str], spelled: list[str]
     ) -> str | None:
-        folded = index.folded(directory, relative)
+        folded = index.folded(directory, "/".join(spelled), relative)
         if folded is None:
             return None
         head, rest = components[0], components[1:]

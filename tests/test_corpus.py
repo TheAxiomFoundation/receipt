@@ -1675,6 +1675,83 @@ def test_the_tombstone_index_is_shared_across_removed_paths(
     assert verification.removed_paths == (".axiom/a.json", ".axiom/b.json")
 
 
+class _CaseFoldingPath:
+    """A path object that compares and hashes case-insensitively, as Windows does.
+
+    ``pathlib.WindowsPath`` folds case in ``__eq__`` and ``__hash__`` — that is
+    the platform's own rule, not an approximation — so two spellings of one
+    name are a single dict key there. NTFS has carried per-directory case
+    sensitivity since Windows 10 1803, so those two spellings can be two real
+    directories at the same time. No POSIX host can hold both, which is why the
+    listings here are declared rather than written to disk.
+
+    Only what the tombstone pass touches is modelled: ``iterdir``, ``name``,
+    and an ``lstat`` that reports a plain directory.
+    """
+
+    def __init__(self, spelling: str, listings: dict[str, list[str]]) -> None:
+        self.spelling = spelling
+        self.listings = listings
+
+    @property
+    def name(self) -> str:
+        return self.spelling.rsplit("/", 1)[-1]
+
+    def iterdir(self):
+        if self.spelling not in self.listings:
+            raise FileNotFoundError(self.spelling)
+        return iter(
+            _CaseFoldingPath(
+                f"{self.spelling}/{entry}" if self.spelling else entry, self.listings
+            )
+            for entry in self.listings[self.spelling]
+        )
+
+    def lstat(self):
+        import os
+        import stat
+
+        return os.stat_result((stat.S_IFDIR | 0o755, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, _CaseFoldingPath)
+            and self.spelling.lower() == other.spelling.lower()
+        )
+
+    def __hash__(self) -> int:
+        return hash(self.spelling.lower())
+
+
+def test_the_tombstone_index_keys_two_case_varied_directories_apart() -> None:
+    """Binds F1: the listing cache was keyed by a path object.
+
+    ``pathlib.Path`` equality and hashing ignore case on Windows, so an empty
+    ``A/`` and a populated ``a/`` shared one cache entry there. Whichever was
+    listed first answered for both: the empty one cached as ``A``'s listing was
+    returned for ``a``, the fold search found no survivor, and a tombstone for
+    ``A/target`` passed while ``a/TARGET`` sat on disk under a spelling that
+    opens the tombstoned name on the very filesystems this search models.
+
+    The cache is keyed by the exact spelling the walk used. Without the fix the
+    second ``folded`` call returns the first call's listing and the survivor is
+    never found.
+    """
+
+    from receipt.corpus import _fold_survivor, _TombstoneIndex
+
+    listings = {"": ["A", "a"], "A": [], "a": ["TARGET"]}
+    root = _CaseFoldingPath("", listings)
+    index = _TombstoneIndex(root)
+
+    upper = index.folded(_CaseFoldingPath("A", listings), "A", "A/target")
+    lower = index.folded(_CaseFoldingPath("a", listings), "a", "A/target")
+    assert upper == {}
+    assert list(lower) == ["target"]
+
+    assert _fold_survivor(index, "A/target") == "a/TARGET"
+
+
 def test_refuses_a_declared_path_with_a_trailing_dot_component(
     tmp_path: pathlib.Path,
 ) -> None:
