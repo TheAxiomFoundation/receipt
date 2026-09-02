@@ -41,22 +41,32 @@ speaks for, a state path that traverses a symlinked component is refused before
 it is read, the base is resolved to a commit once and carried to every
 consumer, every git read runs with ``refs/replace`` disabled so a replacement
 object cannot change what the printed OID reads as, each state file is read
-once through a snapshot reader that every consumer here is fed from and that
-re-checks the file at the end, the two state files keep the base's file mode,
-and the post-cutover binding values are validated for shape rather than
-presence alone. They run beside the extracted checks without altering any of
-their refusals, and every new refusal runs after every pre-existing file-level
-refusal — with one stated exception: the checkout-level
-``release_chain.assert_file_modes_authoritative``, which says a comparison
-cannot be made here rather than making it, runs ahead of the release-history
-file checks (and after the base ref is resolved, so a false setting cannot
-mask a base that names nothing). The per-file
-``release_chain.assert_index_agrees_with_tree`` runs after the comparisons it
-qualifies, so a comparison that passed while the working tree was not
-carrying what git recorded is caught afterwards and nothing pre-existing is
-pre-empted; the differential harness pins the upstream's mode-change refusal
-for an unstaged chmod, which is both. Both orders are pinned by tests. All of
-it carries its own tests in tests/test_append_gate.py.
+once — through directory descriptors, so no component of its path is resolved
+twice — and every consumer here, the release verification included, is fed
+those bytes rather than the path, with the file re-checked at the end, the two
+state files are tracked regular files that keep the base's file mode, the
+release root carries no index entry the working-tree walk cannot see, and the
+post-cutover binding values are validated for shape rather than presence
+alone.
+
+They run beside the extracted checks without altering any of their refusals,
+and every new refusal runs after every pre-existing file-level refusal — with
+two stated exceptions, both at entry and both saying that a comparison cannot
+be made here rather than making one. The checkout-level
+``release_chain.assert_file_modes_authoritative`` runs ahead of the
+release-history file checks (and after the base ref is resolved, so a false
+setting cannot mask a base that names nothing). The per-state-path
+``release_chain.assert_state_path_tracked`` runs ahead of everything that
+reads either state file, because an untracked state path, or one under a
+gitlink, is not this commit's content and nothing downstream can be a verdict
+about it. Nothing else is an exception: the per-file
+``release_chain.assert_index_agrees_with_tree`` and the release root's index
+scan both run after the comparisons they qualify, so a comparison that passed
+while the working tree was not carrying what git recorded is caught
+afterwards and nothing pre-existing is pre-empted; the differential harness
+pins the upstream's mode-change refusal for an unstaged chmod, which is both.
+Each order is pinned by a test. All of it carries its own tests in
+tests/test_append_gate.py.
 """
 
 from __future__ import annotations

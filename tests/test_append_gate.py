@@ -2107,3 +2107,29 @@ def test_a_release_directory_the_index_holds_an_entry_for_is_refused(
         "release path is a directory with an index entry: "
         "releases/vendor (100644)"
     )
+
+
+def test_file_level_release_refusals_precede_the_release_root_index_refusal(
+    tmp_path: pathlib.Path,
+) -> None:
+    """R5-F4's placement, pinned the way the per-file index check's is.
+
+    The release root's index scan is new, so it runs after every comparison
+    the release-history pass already made: a tree that both rewrites a base
+    release file and stages a gitlink beside it gets the byte refusal the
+    upstream verifier gives, which the ledger differential harness pins, not
+    the scan's.
+    """
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    readme = candidate.root / CHAIN_SPEC.release_root_relative / "README.md"
+    readme.write_text("Rewritten beside a gitlink.\n", encoding="utf-8")
+    stage_release_gitlink(candidate)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        f"existing release file bytes changed relative to {candidate.base}: "
+        "releases/README.md"
+    )
