@@ -1065,3 +1065,61 @@ def test_accepts_gate_evidence_exactly_at_the_bound(tmp_path: pathlib.Path) -> N
         tmp_path, render_journal(rows), spec=corpus_spec()
     )
     assert len(verification.gates[0].evidence["reason"]) == MAX_EVIDENCE_TEXT
+
+
+def test_refuses_a_removed_attested_path_that_is_still_in_the_tree(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A tombstone the tree does not honour.
+
+    Attested paths sit outside the content roots, so the closed-world sweep
+    never looks at them: a retired apply manifest could stay on disk, bound by
+    no row, while the verdict listed it under removedPaths and an auditor's
+    tools read it as current. Removal has to be true of the tree, not only of
+    the journal.
+    """
+
+    attested = dict(ATTESTED)
+    attested[".axiom/apply-manifest.json"] = '{"applied": true}\n'
+    write_tree(tmp_path, attested=attested)
+    rows = journal_rows(attested=attested)
+    rows.append(
+        {
+            "schemaVersion": JOURNAL_SCHEMA,
+            "kind": "attested",
+            "path": ".axiom/apply-manifest.json",
+            "sha256": sha256_text(attested[".axiom/apply-manifest.json"]),
+            "state": "removed",
+        }
+    )
+    reindex(rows)
+    with pytest.raises(CorpusError, match="removed path is still present in the tree"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_a_removed_attested_path_absent_from_the_tree_verifies(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The same journal against the tree it actually describes: the file is
+    gone, the binding passes, and the verdict names the path as removed."""
+
+    attested = dict(ATTESTED)
+    attested[".axiom/apply-manifest.json"] = '{"applied": true}\n'
+    write_tree(tmp_path, attested=attested)
+    rows = journal_rows(attested=attested)
+    rows.append(
+        {
+            "schemaVersion": JOURNAL_SCHEMA,
+            "kind": "attested",
+            "path": ".axiom/apply-manifest.json",
+            "sha256": sha256_text(attested[".axiom/apply-manifest.json"]),
+            "state": "removed",
+        }
+    )
+    reindex(rows)
+    (tmp_path / ".axiom/apply-manifest.json").unlink()
+    verification = verify_corpus_binding(
+        tmp_path, render_journal(rows), spec=corpus_spec()
+    )
+    assert verification.removed_paths == (".axiom/apply-manifest.json",)
+    assert ".axiom/apply-manifest.json" not in {e.path for e in verification.attested}
