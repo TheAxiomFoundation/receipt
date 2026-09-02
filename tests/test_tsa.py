@@ -623,6 +623,52 @@ def test_verifies_a_legacy_v1_witness_over_a_single_anchor_bundle(
     assert evidence.tokens[0].anchor_id == local_anchors[0].anchor_id
 
 
+def test_refuses_a_legacy_v1_witness_over_a_multi_anchor_bundle(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """One producer-selected token must not stand in for a whole bundle.
+
+    The legacy schema carries a single token and no per-anchor outcomes. Left
+    to cover a bundle configuring two authorities it would report ``available``
+    on whichever one answered and say nothing about the other, so a corpus
+    could claim dual witness while only ever reaching one authority.
+    """
+
+    tree = build_witness_tree(
+        tmp_path, local_anchors, schema="thesis_rfc3161_witness_v1"
+    )
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == (
+        "legacy witness schema requires a single-anchor bundle; "
+        f"{BUNDLE_ID} has {len(local_anchors)}"
+    )
+
+
+def test_refuses_a_bundle_anchor_the_verifier_code_does_not_pin(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """A bundle enters the trusted set before any witness is read.
+
+    The spec requires one identity per bundle, not one per anchor, so a bundle
+    can configure an authority the consumer never pinned. Its root and signer
+    would then be checked against the bundle alone -- the producer-side file --
+    rather than against code the consumer committed. The refusal belongs at
+    bundle load, not at whichever later check a witness happens to reach.
+    """
+
+    beta = local_anchors[1]
+    tree = build_witness_tree(
+        tmp_path, local_anchors, pinned=(local_anchors[0].anchor_id,)
+    )
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == (
+        f"TSA anchor {beta.anchor_id} in bundle {BUNDLE_ID} has no "
+        "verifier code identity"
+    )
+
+
 def test_refuses_a_token_whose_policy_the_anchor_does_not_allow(
     tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
 ) -> None:

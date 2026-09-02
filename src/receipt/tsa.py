@@ -601,6 +601,20 @@ def _load_trust_bundle(
             f"TSA trust bundle commitment mismatch for {logical}: "
             f"expected {reference}, got {actual_reference}"
         )
+    # Every anchor the bundle configures must also be pinned in verifier code.
+    # The spec only requires one identity per bundle, so a producer who could
+    # append an anchor to a bundle -- or ship a bundle the consumer pinned
+    # loosely -- would otherwise get an authority the consumer never named,
+    # whose root and signer are checked against the bundle alone.  Checked
+    # last, so an altered bundle still binds the commitment mismatch above.
+    bundle_id = str(payload["bundleId"])
+    for anchor in anchors:
+        anchor_id = str(anchor["id"])
+        if spec.identity(bundle_id, anchor_id) is None:
+            raise TsaError(
+                f"TSA anchor {anchor_id} in bundle {bundle_id} has no "
+                "verifier code identity"
+            )
     return path, payload
 
 
@@ -1287,6 +1301,21 @@ def verify_witness(
                 "legacy witness schema cannot cover a TSA trust transition "
                 "or a chain with v2 active"
             )
+        # The legacy schema carries one producer-selected token and no
+        # per-anchor outcomes, so against a bundle that configures several
+        # anchors it would let a producer satisfy the whole bundle with
+        # whichever single authority happened to answer -- and say nothing
+        # about the rest.  Dual witness is only dual under v2.
+        if preferred is not None:
+            _legacy_path, legacy_trust = _load_trust_bundle(
+                records, preferred, spec=spec
+            )
+            anchor_count = len(legacy_trust["anchors"])
+            if anchor_count > 1:
+                raise TsaError(
+                    "legacy witness schema requires a single-anchor bundle; "
+                    f"{legacy_trust['bundleId']} has {anchor_count}"
+                )
         return _v1_witness_evidence(
             path,
             witness,
