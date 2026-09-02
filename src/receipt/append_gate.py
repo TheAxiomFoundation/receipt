@@ -410,21 +410,25 @@ def check_prefix(lines: list[str], candidate: _CandidateTree) -> dict[str, Any]:
     return prefix
 
 
-def _is_rfc3339_with_zone(value: Any) -> bool:
-    """Accept exactly an RFC 3339 date-time that names its own time zone.
+def _is_canonical_rfc3339(value: Any) -> bool:
+    """Accept exactly the canonical RFC 3339 profile the ledger writer emits.
 
-    ``datetime.fromisoformat`` alone accepts a wider grammar — a bare date, a
-    space separator, a missing offset — and a naive timestamp cannot be
-    ordered against a witnessed genTime at all. So the shape is pinned by
-    pattern first and the calendar values are then checked by the parser,
-    which is what rejects a February 30th that matches the pattern. The
-    offset's hour and minute are bounded in the pattern as well, because the
-    parser does not refuse an overflowing offset: ``+01:60`` is normalised to
-    ``+02:00`` and accepted (peer review).
+    Narrower than RFC 3339 on purpose, and stated so: uppercase ``T`` and
+    ``Z``, an offset only as ``±HH:MM`` with bounded fields, an optional
+    fraction, and no leap second (``:60``). The lowercase ``t``/``z`` forms
+    and leap seconds the RFC permits are refused as outside the profile
+    (peer review, round three). ``datetime.fromisoformat`` alone accepts a
+    wider grammar — a bare date, a space separator, a missing offset — and a
+    naive timestamp cannot be ordered against a witnessed genTime at all. So
+    the shape is pinned by pattern first and the calendar values are then
+    checked by the parser, which is what rejects a February 30th that
+    matches the pattern. The offset's hour and minute are bounded in the
+    pattern as well, because the parser does not refuse an overflowing
+    offset: ``+01:60`` is normalised to ``+02:00`` and accepted (round one).
     """
 
     if not isinstance(value, str) or not re.fullmatch(
-        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]"
         r"(?:\.[0-9]+)?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])",
         value,
     ):
@@ -657,11 +661,15 @@ def check_binding_shapes(lines: list[str], prefix_count: int) -> None:
     the contract while binding nothing.
 
     Runs after every check that existed before it — row validation, the
-    release proposal, the release history — so no pre-existing refusal is
-    pre-empted for an input that violates both. Two review rounds moved it
-    here: first from ahead of the projection and supersession checks, then
-    from ahead of the release checks. The rows were parsed and validated by
-    check_rows already, so the loads below cannot fail.
+    release proposal, the release history — so no pre-existing file-level
+    refusal is pre-empted for an input that violates both. Two review rounds
+    moved it here: first from ahead of the projection and supersession
+    checks, then from ahead of the release checks. The one refusal that does
+    run ahead of the pre-existing release checks is the checkout-level one
+    in release_chain.assert_file_modes_authoritative, deliberately: a
+    checkout that cannot be verified says so before any verdict about its
+    files. The rows were parsed and validated by check_rows already, so the
+    loads below cannot fail.
     """
 
     for number, line in enumerate(lines, start=1):
@@ -681,10 +689,11 @@ def check_binding_shapes(lines: list[str], prefix_count: int) -> None:
                 f"appended line {number} ({record_id}) ledgerRepoSha is "
                 "not a full 40-character commit id"
             )
-        if not _is_rfc3339_with_zone(row["retrievedAt"]):
+        if not _is_canonical_rfc3339(row["retrievedAt"]):
             raise AppendError(
                 f"appended line {number} ({record_id}) retrievedAt is not "
-                "an RFC 3339 timestamp with a time zone"
+                "a canonical RFC 3339 timestamp (uppercase T and Z or "
+                "±HH:MM, no leap second)"
             )
 
 
