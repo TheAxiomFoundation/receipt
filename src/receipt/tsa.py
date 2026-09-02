@@ -2,12 +2,19 @@
 
 The witness and trust-transition machinery is a mechanical port of
 ``MaxGhenis/brier``'s ``scripts/verify_record_chain.py`` at commit
-``4b9e7be22debc8349e76b8bdfe5a0fe18ed31a3f``.  Refusal text is retained
-verbatim.  The extraction changes only where trust enters: bundle byte pins,
-TSA identities, anchor membership, and clock-skew limits arrive through a
-frozen :class:`TsaSpec` supplied by consumer code.  This module ships no
-repository-specific trust defaults and performs no chain walk or producer
-signature verification.
+``4b9e7be22debc8349e76b8bdfe5a0fe18ed31a3f``.  Ported refusal text is
+retained verbatim.  The extraction changes only where trust enters: bundle
+byte pins, TSA identities, anchor membership, and clock-skew limits arrive
+through a frozen :class:`TsaSpec` supplied by consumer code.  This module
+ships no repository-specific trust defaults and performs no chain walk or
+producer signature verification.
+
+The port is stricter than the baseline in four places, each a refusal the
+pinned tree never presents and so each outside the differential contract: a
+legacy witness over a bundle configuring more than one anchor, a bundle
+configuring an anchor the spec carries no identity for, and a legacy
+unavailable witness whose reason is not a string or that carries token
+evidence.  ``tests/test_tsa.py`` binds all four.
 """
 
 from __future__ import annotations
@@ -135,13 +142,19 @@ class TsaIdentitySpec:
 class TsaSpec:
     """All repository-specific TSA trust, committed in consumer code.
 
-    Scope limitation (tracked for a later release): a TSA identity pins one
-    signer per authority and carries no legacy signer generations of its own.
-    If a timestamp authority rotates its *own* signing key, tokens witnessed
-    before and after the rotation verify only under different pinned
-    identities, so the consumer spec must carry both eras explicitly (an added
-    identity for the new signer) rather than the package spanning the rotation
-    automatically the way producer-key legacy generations do.
+    Scope limitation (tracked for a later release): an identity's
+    :attr:`TsaIdentitySpec.signer_spki_sha256` is a set with no singleton
+    constraint, so one identity may hold several signer SPKIs and every one of
+    them is allowed concurrently.  A timestamp authority that rotates its
+    *own* signing key is therefore carried by adding the new fingerprint
+    beside the old one in the same identity -- not by splitting verification
+    into eras.  There are no generation or retirement semantics here: nothing
+    records which signer was valid over which interval, and nothing retires a
+    superseded one, so a token from a rotated-out key keeps verifying for as
+    long as the consumer leaves its fingerprint in the set.  That is the
+    contrast with producer-key legacy generations in :mod:`receipt.sign`,
+    where retired keys are named separately and vouch only where the caller
+    asks for immutable pre-rotation history.
     """
 
     trust_bundles: tuple[TrustBundleSpec, ...]

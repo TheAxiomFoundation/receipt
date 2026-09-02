@@ -39,7 +39,13 @@ from receipt.tsa import (
     verify_witness,
 )
 
-from corpus_fixture import LocalTsa, build_local_tsa, certificate_pins, sha256_bytes
+from corpus_fixture import (
+    LocalTsa,
+    build_local_tsa,
+    certificate_pins,
+    rotate_tsa_signer,
+    sha256_bytes,
+)
 
 UTC = timezone.utc
 HASH_A = "a" * 64
@@ -282,6 +288,7 @@ class LocalAnchor:
         *,
         policy_oids: list[str] | None = None,
         signer_spki: str | None = None,
+        extra_signers: Sequence[dict[str, str]] = (),
     ) -> dict[str, Any]:
         """One ``anchors`` member of a ``thesis_tsa_trust_bundle_v1`` bundle."""
 
@@ -299,7 +306,7 @@ class LocalAnchor:
             },
             "allowedPolicyOids": list(policy_oids or [self.tsa.policy_oid]),
             "allowedImprintAlgorithmOids": [SHA256_IMPRINT_OID],
-            "allowedSigners": [signer],
+            "allowedSigners": [signer, *(dict(extra) for extra in extra_signers)],
         }
 
 
@@ -338,6 +345,17 @@ def local_anchors(tmp_path_factory: pytest.TempPathFactory) -> tuple[LocalAnchor
     return tuple(anchors)
 
 
+@pytest.fixture(scope="module")
+def rotated_alpha(
+    tmp_path_factory: pytest.TempPathFactory, local_anchors: tuple[LocalAnchor, ...]
+) -> LocalTsa:
+    """A second signing certificate for the first authority, same root."""
+
+    return rotate_tsa_signer(
+        local_anchors[0].tsa, tmp_path_factory.mktemp("tsa-rotated") / "alpha"
+    )
+
+
 def build_witness_tree(
     root: pathlib.Path,
     anchors: Sequence[LocalAnchor],
@@ -346,6 +364,8 @@ def build_witness_tree(
     pinned: Sequence[str] | None = None,
     policy_oids: Mapping[str, list[str]] | None = None,
     pinned_signer_spki: Mapping[str, str] | None = None,
+    extra_signers: Mapping[str, LocalTsa] | None = None,
+    stamp_with: Mapping[str, LocalTsa] | None = None,
     available: bool = True,
     recorded_at: datetime | None = None,
     max_future_seconds: int = 0,
@@ -357,7 +377,22 @@ def build_witness_tree(
     ``pinned_signer_spki`` substitutes a signer SPKI in the bundle and in the
     spec at once, which is what reaches the token's own signer: substituting it
     in only one of them stops at the earlier bundle-versus-code comparison.
+    ``extra_signers`` allows a second signing certificate for an anchor, in the
+    bundle and in the spec identity together, and ``stamp_with`` makes that
+    certificate the one that actually signs -- the two knobs are separate so a
+    superseded signer can be left allowed while a rotated one does the work.
     """
+
+    extra_authorities = dict(extra_signers or {})
+    stamping = dict(stamp_with or {})
+    extra_pins = {
+        anchor_id: certificate_pins(authority.signer_pem)
+        for anchor_id, authority in extra_authorities.items()
+    }
+    stamper_pins = {
+        anchor_id: certificate_pins(authority.signer_pem)
+        for anchor_id, authority in stamping.items()
+    }
 
     records = root / "records"
     day = records / RECORD_DAY
@@ -384,7 +419,7 @@ def build_witness_tree(
         (trust / anchor.tsa.root_pem.name).write_bytes(anchor.tsa.root_pem.read_bytes())
         if available:
             token = day / f"{record.stem}.{anchor.anchor_id}.tsr"
-            anchor.tsa.stamp(digest, token)
+            stamping.get(anchor.anchor_id, anchor.tsa).stamp(digest, token)
             tokens[anchor.anchor_id] = token
 
     policy_oids = policy_oids or {}
@@ -396,6 +431,9 @@ def build_witness_tree(
             anchor.entry(
                 policy_oids=policy_oids.get(anchor.anchor_id),
                 signer_spki=pinned_signer_spki.get(anchor.anchor_id),
+                extra_signers=[extra_pins[anchor.anchor_id]]
+                if anchor.anchor_id in extra_pins
+                else [],
             )
             for anchor in anchors
         ],
@@ -435,7 +473,12 @@ def build_witness_tree(
                     {
                         pinned_signer_spki.get(
                             anchor.anchor_id, anchor.signer_pins["spkiSha256"]
-                        )
+                        ),
+                        *(
+                            [extra_pins[anchor.anchor_id]["spkiSha256"]]
+                            if anchor.anchor_id in extra_pins
+                            else []
+                        ),
                     }
                 ),
                 max_future_seconds=max_future_seconds,
@@ -452,14 +495,15 @@ def build_witness_tree(
         if not available:
             return selection
         token = tokens[anchor.anchor_id]
+        signer = stamper_pins.get(anchor.anchor_id, anchor.signer_pins)
         return {
             **selection,
             "tokenPath": logical_path(records, token),
             "tokenSha256": sha256_bytes(token.read_bytes()),
             "tsaPolicyOid": anchor.tsa.policy_oid,
             "tsaImprintAlgorithmOid": SHA256_IMPRINT_OID,
-            "tsaSignerCertificateSha256": anchor.signer_pins["certificateSha256"],
-            "tsaSignerSpkiSha256": anchor.signer_pins["spkiSha256"],
+            "tsaSignerCertificateSha256": signer["certificateSha256"],
+            "tsaSignerSpkiSha256": signer["spkiSha256"],
         }
 
     status = "available" if available else "unavailable"
@@ -609,6 +653,48 @@ def test_verifies_two_anchors_and_reports_the_earliest_token(
     earliest = min(evidence.tokens, key=lambda token: (token_time(token), token.anchor_id))
     assert evidence.anchor_id == earliest.anchor_id
     assert evidence.gen_time == earliest.gen_time
+
+
+def test_one_identity_allows_several_signers_at_once_and_retires_none(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_alpha: LocalTsa,
+) -> None:
+    """What a signer rotation actually costs a consumer spec, checked.
+
+    ``signer_spki_sha256`` is a frozenset with no singleton constraint and no
+    validity interval, so an authority that rotates its own signing key is
+    carried by adding the new fingerprint beside the old one in one identity.
+    Verification is not split into eras: both signers are allowed at once, and
+    the superseded one keeps verifying for as long as the consumer leaves it
+    in the set, because nothing here retires anything.
+    """
+
+    alpha = local_anchors[0]
+    rotated_pins = certificate_pins(rotated_alpha.signer_pem)
+    assert rotated_pins["spkiSha256"] != alpha.signer_pins["spkiSha256"]
+
+    rotated = build_witness_tree(
+        tmp_path / "rotated",
+        local_anchors[:1],
+        extra_signers={alpha.anchor_id: rotated_alpha},
+        stamp_with={alpha.anchor_id: rotated_alpha},
+    )
+    assert len(rotated.spec.tsa_identities) == 1
+    assert rotated.spec.tsa_identities[0].signer_spki_sha256 == frozenset(
+        {alpha.signer_pins["spkiSha256"], rotated_pins["spkiSha256"]}
+    )
+    assert verify_tree(rotated).tokens[0].tsa_spki_sha256 == rotated_pins["spkiSha256"]
+
+    superseded = build_witness_tree(
+        tmp_path / "superseded",
+        local_anchors[:1],
+        extra_signers={alpha.anchor_id: rotated_alpha},
+    )
+    assert (
+        verify_tree(superseded).tokens[0].tsa_spki_sha256
+        == alpha.signer_pins["spkiSha256"]
+    )
 
 
 def test_verifies_a_legacy_v1_witness_over_a_single_anchor_bundle(
