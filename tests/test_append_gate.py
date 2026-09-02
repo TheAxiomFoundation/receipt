@@ -2738,3 +2738,67 @@ def test_a_base_release_file_still_indexed_is_left_alone(
         "thesis-facts append check OK: 3 rows, immutable prefix 1, "
         "+1 appended vs base"
     )
+
+
+def test_a_gate_only_proposal_whose_index_changes_the_ledger_is_not_gate_only(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds R7-F3: surface classification was derived from the working
+    tree's diff against the base, and a gate-only match returned on it before
+    the ledger, the prefix, the release history, or any mode or index check
+    ran. The index is the commit under review, and it can differ: here it
+    records the ledger executable while the working tree carries 100644 and
+    only the gate script has changed on disk. Without the index's own changed
+    set the proposal classifies as gate-only and is accepted with
+    ``GATE_SURFACE changes=['scripts/check_append.py']``, carrying a ledger
+    mode change no check ever saw. With it the ledger is a DATA change, this
+    is not a gate-only proposal, and the data path's index comparison answers
+    for it."""
+
+    candidate = base_repository(tmp_path)
+    add_gate_file(candidate)
+    git(
+        candidate.root,
+        "update-index",
+        "--chmod=+x",
+        "--",
+        CHAIN_SPEC.state_relative.as_posix(),
+    )
+    # The working tree really does look gate-only: git diff against the base
+    # names the ledger nowhere.
+    assert "official_observations" not in git(
+        candidate.root, "diff", "--name-only", candidate.base, "--"
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "candidate working tree mode for ledger/official_observations.jsonl "
+        "disagrees with its index entry (100755 vs 100644)"
+    )
+
+
+def test_a_gate_only_proposal_whose_index_rewrites_a_release_file_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """R7-F3 for an unclassified release path, which is the gap the gate-only
+    confinement was added to close, one level down: the rewrite is staged and
+    then undone on disk, so the working tree matches the base exactly and the
+    proposal looks clean. The commit under review still rewrites
+    ``releases/README.md``. Without the index's changed set this is accepted
+    as a clean gate-only proposal."""
+
+    candidate = base_repository(tmp_path)
+    add_gate_file(candidate)
+    readme = candidate.root / CHAIN_SPEC.release_root_relative / "README.md"
+    original = readme.read_text(encoding="utf-8")
+    readme.write_text("Rewritten in the index alone.\n", encoding="utf-8")
+    git(candidate.root, "add", "--", "releases/README.md")
+    readme.write_text(original, encoding="utf-8")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "gate-only proposal changes unclassified release path(s): "
+        "['releases/README.md']"
+    )
