@@ -327,7 +327,7 @@ Drop `f5baf51` and `9cc369e` together if the branch should stay scoped to the
 module; the paper claim then needs raising separately, because it is a mechanism
 claim the code does not support.
 
-**Two commits on this branch are not mine, and one of them needs dropping.**
+**Four commits on this branch are not mine, and one of them needs dropping.**
 The branch is:
 
 ```
@@ -361,9 +361,10 @@ the code and tests it describes had already been committed one commit earlier.
 `git rebase --autosquash` would fold `9f26186` into `9fcbc42` and mis-attribute
 finding 2's code to finding 1. A squash merge makes the whole question moot. The
 net tree is correct either way — `git diff origin/main..HEAD` touches exactly
-`.gitignore`, `REPORT.md`, `src/receipt/tsa.py`, `tests/corpus_fixture.py`,
-`tests/test_brier_witness_equivalence.py` and `tests/test_tsa.py`, `.venv` is not
-tracked at HEAD, and `canonical.py` is untouched. I left the history alone
+`.gitignore`, `REPORT.md`, `paper/index.qmd`, `src/receipt/tsa.py`,
+`tests/corpus_fixture.py`, `tests/test_brier_witness_equivalence.py` and
+`tests/test_tsa.py`, `.venv` is not tracked at HEAD, and `canonical.py` is
+untouched. I left the history alone
 because rebase and reset are outside my ground rules.
 
 Related: I reached for `git stash` once to capture finding 2's before-state. A
