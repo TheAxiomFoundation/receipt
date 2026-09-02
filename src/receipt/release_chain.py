@@ -1944,14 +1944,26 @@ def _observed_git_category(path: pathlib.Path) -> str:
 def _index_entries(
     root: pathlib.Path, pathspec: str
 ) -> list[tuple[str, str, str]]:
-    """Every ``git ls-files -s`` record under one pathspec: mode, stage, path.
+    """Every ``git ls-files -s`` record under one path: mode, stage, path.
 
     The one place this package parses the index, shared by the checks below
     so they read it the same way and report an unreadable or unparseable
     index in the same words.
+
+    The path is passed as a literal pathspec. Given to git bare it is a
+    *pattern*: a filename carrying glob magic globs, and one beginning with
+    ``:`` is read as pathspec magic and silently becomes a different path
+    (``:odd/x`` asks about ``odd/x``, matches nothing, and exits zero), so a
+    tracked file could be reported as absent from the index — which every
+    caller below reads as "this path is untracked" and either returns on or
+    refuses over. The other direction is as wrong: ``a[b]c`` also matches a
+    sibling ``abc``, and the release root's scan, which has no single path to
+    filter on, would take entries beneath a name the caller never asked
+    about. ``:(literal)`` says what is meant: this exact path, matched as
+    written. The diagnostics keep naming the path itself, not the magic.
     """
 
-    completed = _git_run(root, ["ls-files", "-s", "-z", "--", pathspec])
+    completed = _git_run(root, ["ls-files", "-s", "-z", "--", f":(literal){pathspec}"])
     if completed.returncode != 0:
         diagnostic = completed.stderr.decode("utf-8", errors="replace").strip()
         raise ReleaseChainError(
