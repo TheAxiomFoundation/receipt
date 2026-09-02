@@ -1694,6 +1694,12 @@ def assert_index_agrees_with_tree(
 
     A path with no index entry is a new, untracked file with nothing to
     compare against, and returns.
+
+    Like the checkout guard, this runs ahead of the comparison it qualifies,
+    which at the release-file call site means ahead of two refusals that
+    predate it. That is deliberate and stated in append_gate's module
+    docstring: a tree that does not carry what git recorded should be told
+    so, not told that its proposal changed a mode.
     """
 
     path = (
