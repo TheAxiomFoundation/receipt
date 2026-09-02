@@ -40,7 +40,9 @@ Three row kinds, one journal:
     it was. Two questions are asked about a tombstone, in this order — does
     the host resolve the exact spelling, and does any fold-equal spelling
     survive in a listing — because a filesystem resolves names its own
-    enumeration does not emit. The second question walks the tree, so it is
+    enumeration does not emit. The pair is asked twice per verification, for
+    the reason the paragraph on pass order below gives. The second question
+    walks the tree, so it is
     bounded: every entry taken from a listing and every candidate a search
     visits is charged against one budget for the whole pass, and a listing
     wider than what is left of that budget is abandoned part-way — unread
@@ -56,11 +58,28 @@ Three row kinds, one journal:
     the distinction survives into the verdict.
 
 The order of the passes is itself load-bearing. Membership is swept, the
-tombstones are looked for, the bound bytes are hashed, and then membership and
-per-file identity are checked a second time. Those two re-checks are last so
-that every earlier pass — the tombstone walk above all, which is the longest
-traversal here — sits inside the window they close; a pass that ran after them
-was time in which the tree could change with nothing left to notice.
+tombstones are looked for, the bound bytes are hashed, membership and per-file
+identity are checked a second time, and the tombstones are looked for once
+more. The two re-checks sit after the hashing and after the first tombstone
+walk — the longest traversal here — so that both are inside the window they
+close; a pass that ran between them and the return would be time in which the
+tree could change with nothing left to notice.
+
+The tombstone pass is the one that runs twice, and the second run is handed a
+fresh index. It has to be. The first run decides absence from directory
+listings it caches and never re-reads, so a survivor that appears after its
+parent has been listed is invisible to every later search in that run — two
+tombstones sharing a parent is enough — and nothing afterwards looked at a
+removed path at all: the re-checks close their window over content and over
+the bound bytes, not over the paths the verdict calls removed (peer review,
+round five). Both runs charge one budget, carried across, so re-establishing
+absence cannot cost a second walk's worth of budget.
+
+What putting that run last costs is stated rather than hidden: no membership
+re-sweep follows it, so a content file inserted while that second walk reads
+directories is not observed. Verification of a mutable tree always has a last
+look. This puts it on the one claim the verdict makes whose subject no other
+pass revisits.
 
 Every trust anchor arrives from the consumer's committed :class:`CorpusSpec`.
 The module ships no defaults: not a content root, not a required gate, not an
@@ -155,7 +174,10 @@ MAX_REMOVED_TEXT = 262144
 #: cached fold-collision bucket was re-traversed by every tombstone for free
 #: (peer review, round four). The listing is fetched in batches and abandoned
 #: where the charge refuses, so the count bounds the directory read as well
-#: as the work done with what it named (peer review, round five).
+#: as the work done with what it named (peer review, round five). The two
+#: tombstone passes share the total: the second index is constructed with
+#: what the first one spent, so the pass that re-establishes absence cannot
+#: buy the tree a second walk's worth of budget.
 MAX_TOMBSTONE_WORK = 262144
 #: The most characters a refusal quotes of a producer-controlled value.
 MAX_QUOTED_TEXT = 256
@@ -872,12 +894,24 @@ class _TombstoneIndex:
     ``a/TARGET``, turning a tombstone this pass exists to refuse into a PASS
     (peer review, round four). A string key means the cache distinguishes
     exactly what the walk distinguishes, on every platform.
+
+    An index caches for one pass, not for one verification. The pass runs a
+    second time over a second index precisely so that nothing it concluded
+    from a cached listing goes unrechecked (peer review, round five), and the
+    work budget belongs to the verification rather than to the index, so the
+    second one is constructed with ``charged`` set to what the first spent.
     """
 
-    def __init__(self, root: pathlib.Path) -> None:
+    def __init__(self, root: pathlib.Path, *, charged: int = 0) -> None:
         self.root = root
         self._directories: dict[str, dict[str, list[pathlib.Path]] | None] = {}
-        self._work = 0
+        self._work = charged
+
+    @property
+    def work(self) -> int:
+        """Budget units charged so far, including whatever this index started at."""
+
+        return self._work
 
     def charge(self, relative: str) -> None:
         """Charge one directory entry against the pass budget.
@@ -1039,6 +1073,64 @@ def _fold_survivor(index: _TombstoneIndex, relative: str) -> str | None:
         return None
 
     return search(index.root, relative.split("/"), [])
+
+
+def _assert_tombstones_absent(
+    root: pathlib.Path,
+    removed: tuple[str, ...],
+    index: _TombstoneIndex,
+    *,
+    appeared: bool = False,
+) -> None:
+    """Refuse any removed path still in the tree, under any spelling.
+
+    Two questions per tombstone, in this order. Ask the filesystem about the
+    tombstoned spelling itself, then ask the fold model whether a fold-equal
+    spelling survives in a listing. :func:`_fold_survivor` decides absence
+    from the names a scan emits, and Win32 lookup resolves names enumeration
+    never emits: a trailing dot or space is stripped before the lookup, and
+    an NTFS 8.3 short name answers for a long one. Both would be reported
+    absent by a search over the listing while the file opens under the
+    tombstoned name (peer review, round three). The host that is running
+    knows its own aliases; ask it first.
+
+    The index arrives as a parameter rather than being built here because
+    :func:`verify_corpus_binding` runs this twice over two of them, and the
+    whole point of the second is that it has cached nothing. One function
+    serves both calls so the two passes cannot drift apart.
+
+    ``appeared`` says which of them is speaking, and changes nothing but the
+    first clause of a refusal. On the second pass every path here was proven
+    absent earlier, so a survivor is news about the tree moving under the
+    verifier rather than about the journal disagreeing with the tree.
+    """
+
+    still = (
+        "removed path appeared during verification"
+        if appeared
+        else "removed path is still present in the tree"
+    )
+    for path in removed:
+        try:
+            os.lstat(root / path)
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+        except OSError as exc:
+            raise CorpusError(
+                "cannot check whether a removed path is still in the tree, so "
+                f"the tombstone is unverifiable: {path} ({exc.strerror})"
+            ) from exc
+        else:
+            raise CorpusError(f"{still}: {path}")
+        survivor = _fold_survivor(index, path)
+        if survivor is None:
+            continue
+        if survivor == path:
+            raise CorpusError(f"{still}: {path}")
+        raise CorpusError(
+            f"{still} under a spelling that aliases it on a case- or "
+            f"normalization-insensitive filesystem: {path} ({_quoted(survivor)})"
+        )
 
 
 def _path_fold(relative: str) -> str:
@@ -1430,39 +1522,14 @@ def verify_corpus_binding(
     # unnoticed, and a bound file rewritten during it kept the verdict of the
     # bytes that were there before (peer review, round four). Everything that
     # follows this point re-reads the tree, so the membership re-sweep and the
-    # identity re-check are the last things this function does and they cover
-    # the tombstone walk too.
+    # identity re-check cover the tombstone walk too.
+    #
+    # This is the first of two runs. The second, at the end of the function,
+    # is what re-establishes absence; this one is what makes an ordinary
+    # unhonoured tombstone refuse before the verifier spends any IO hashing a
+    # tree it is going to refuse anyway.
     tombstones = _TombstoneIndex(root)
-    for path in removed:
-        # Ask the filesystem about the tombstoned spelling itself before
-        # asking the fold model about it. _fold_survivor decides absence from
-        # the names iterdir emits, and Win32 lookup resolves names enumeration
-        # never emits: a trailing dot or space is stripped before the lookup,
-        # and an NTFS 8.3 short name answers for a long one. Both would be
-        # reported absent by a search over the listing while the file opens
-        # under the tombstoned name (peer review, round three). The host that
-        # runs knows its own aliases; ask it first.
-        try:
-            os.lstat(root / path)
-        except (FileNotFoundError, NotADirectoryError):
-            pass
-        except OSError as exc:
-            raise CorpusError(
-                "cannot check whether a removed path is still in the tree, so "
-                f"the tombstone is unverifiable: {path} ({exc.strerror})"
-            ) from exc
-        else:
-            raise CorpusError(f"removed path is still present in the tree: {path}")
-        survivor = _fold_survivor(tombstones, path)
-        if survivor is None:
-            continue
-        if survivor == path:
-            raise CorpusError(f"removed path is still present in the tree: {path}")
-        raise CorpusError(
-            "removed path is still present in the tree under a spelling that "
-            "aliases it on a case- or normalization-insensitive filesystem: "
-            f"{path} ({_quoted(survivor)})"
-        )
+    _assert_tombstones_absent(root, removed, tombstones)
 
     hashed: dict[str, _FileIdentity] = {}
 
@@ -1501,9 +1568,9 @@ def verify_corpus_binding(
     # descriptor saw. A same-inode rewrite that also restores size and
     # mtime_ns is beneath this sweep's resolution; re-reading every byte
     # would double the verifier's IO to move that boundary, not remove it.
-    # They are the last two things this function does, deliberately: every
-    # earlier pass, the tombstone walk included, is inside the window they
-    # close.
+    # They come after every pass that reads the tree except the second
+    # tombstone pass below, deliberately: every earlier pass, the first
+    # tombstone walk included, is inside the window they close.
     if set(_tree_content_paths(root, spec)) != tree_paths:
         raise CorpusError(
             "the content tree changed during verification; the closed-world "
@@ -1528,6 +1595,32 @@ def verify_corpus_binding(
                 f"bound file {_quoted(path)} changed during verification; the "
                 "verdict is refused"
             )
+
+    # And the tombstones once more, over an index that has cached nothing.
+    # Absence was the one claim in the verdict that nothing re-established:
+    # the re-checks above close their window over content membership and over
+    # the bound bytes, and neither looks at a removed path. The first pass
+    # decided absence from listings it cached and never re-read, so a
+    # survivor that appeared after its parent directory had been listed was
+    # missed by every later search in that pass — two tombstones sharing a
+    # parent is enough — and the verdict named the path under removedPaths
+    # while the file sat on disk (peer review, round five). A fresh index
+    # asks the host and the listings again, after everything else has
+    # finished touching the tree.
+    #
+    # Charged against the same budget, carried across from the first pass, so
+    # a tree cannot be walked twice for the price of the cap once.
+    #
+    # What this position costs: no membership re-sweep runs after it, so a
+    # content file inserted while this walk reads directories is not
+    # observed. There is always a last look at a mutable tree, and this puts
+    # it on the claim no other pass revisits.
+    _assert_tombstones_absent(
+        root,
+        removed,
+        _TombstoneIndex(root, charged=tombstones.work),
+        appeared=True,
+    )
 
     return CorpusVerification(
         content=tuple(content[path] for path in sorted(content)),
