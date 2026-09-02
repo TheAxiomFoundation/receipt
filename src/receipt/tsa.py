@@ -9,8 +9,9 @@ through a frozen :class:`TsaSpec` supplied by consumer code.  This module
 ships no repository-specific trust defaults and performs no chain walk or
 producer signature verification.
 
-The port is stricter than the baseline in ten places, each a refusal the
-pinned tree never presents and so each outside the differential contract: a
+The port is stricter than the baseline in ten places, each refusing an input
+the pinned tree never presents and so each outside the differential
+contract: a
 legacy witness over a bundle configuring more than one anchor; a bundle
 configuring an anchor the spec carries no identity for, or one whose
 declared root SPKI or allowed signers differ from that identity, or whose
