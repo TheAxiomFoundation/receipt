@@ -908,3 +908,62 @@ def test_a_witness_with_every_authority_unavailable_carries_no_tokens(
     assert evidence.tokens == ()
     assert evidence.gen_time is None
     assert evidence.digest_sha256 == sha256_bytes(tree.record.read_bytes())
+
+
+def test_refuses_a_v2_unavailable_witness_whose_reason_is_not_a_string(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """The witness level holds the rule its own outcomes have always held.
+
+    Each per-anchor outcome of a v2 witness required a non-empty string reason
+    from the day it shipped; the witness-level field beside them was tested for
+    truth alone, so ``"reason": 503`` at the top passed while the same value in
+    an outcome refused. Peer review found the asymmetry.
+    """
+
+    tree = build_witness_tree(
+        tmp_path,
+        local_anchors[:1],
+        schema="thesis_rfc3161_witness_v2",
+        available=False,
+    )
+    assert verify_tree(tree).status == "unavailable"
+
+    rewrite_witness(tree, lambda payload: payload.__setitem__("reason", 503))
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == f"unavailable witness lacks a reason for {tree.record}"
+
+
+def test_refuses_a_v2_unavailable_witness_that_carries_token_evidence(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """Token fields at the witness level are not read by any outcome check.
+
+    The per-anchor rule looks only inside each outcome, so a v2 witness that
+    declared no verified token could still carry ``tokenSha256`` beside its
+    ``status`` and travel as unchecked provenance that reads like the checked
+    kind. The witness level now refuses them the way the outcomes do.
+    """
+
+    tree = build_witness_tree(
+        tmp_path,
+        local_anchors[:1],
+        schema="thesis_rfc3161_witness_v2",
+        available=False,
+    )
+    rewrite_witness(
+        tree,
+        lambda payload: payload.update(
+            {
+                "tokenPath": f"records/{RECORD_DAY}/never-fetched.tsr",
+                "tokenSha256": "0" * 64,
+            }
+        ),
+    )
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == (
+        f"unavailable witness contains token evidence for {tree.record}: "
+        "['tokenPath', 'tokenSha256']"
+    )

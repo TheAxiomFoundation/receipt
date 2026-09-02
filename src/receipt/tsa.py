@@ -9,12 +9,16 @@ through a frozen :class:`TsaSpec` supplied by consumer code.  This module
 ships no repository-specific trust defaults and performs no chain walk or
 producer signature verification.
 
-The port is stricter than the baseline in four places, each a refusal the
+The port is stricter than the baseline in five places, each a refusal the
 pinned tree never presents and so each outside the differential contract: a
 legacy witness over a bundle configuring more than one anchor, a bundle
-configuring an anchor the spec carries no identity for, and a legacy
-unavailable witness whose reason is not a string or that carries token
-evidence.  ``tests/test_tsa.py`` binds all four.
+configuring an anchor the spec carries no identity for, an unavailable
+witness of either schema whose reason is not a string, and one that carries
+token evidence at the witness level (the v2 per-anchor outcome has always
+refused both).  ``tests/test_tsa.py`` binds all five.  Because every bundle
+anchor is now identity-checked at load, ``_select_anchor``'s own identity
+refusal can no longer fire from within this module; its text is kept
+verbatim, as ported, and as defence in depth.
 """
 
 from __future__ import annotations
@@ -1273,8 +1277,22 @@ def _v2_witness_evidence(
             f"multi-token witness status {status!r} disagrees with verified "
             f"token evidence {expected_status!r}"
         )
-    if status == "unavailable" and not witness.get("reason"):
-        raise TsaError(f"unavailable witness lacks a reason for {path}")
+    if status == "unavailable":
+        # The same two rules the per-anchor outcomes above and the legacy
+        # path apply.  The witness-level check tested the reason for truth
+        # alone, so a v2 witness could carry a numeric reason, or token
+        # fields beside a claim of no token, that its own outcomes could
+        # not.  Peer review found the asymmetry; message and position are
+        # kept, the type rule is added, and the field rule is new here.
+        reason = witness.get("reason")
+        if not isinstance(reason, str) or not reason:
+            raise TsaError(f"unavailable witness lacks a reason for {path}")
+        forbidden = sorted(_TOKEN_EVIDENCE_FIELDS.intersection(witness))
+        if forbidden:
+            raise TsaError(
+                f"unavailable witness contains token evidence for {path}: "
+                f"{forbidden}"
+            )
     return _summarize_witness(
         status=status,
         digest_sha256=digest_sha256,

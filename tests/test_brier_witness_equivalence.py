@@ -31,13 +31,25 @@ Deliberately outside the mutation contract:
 
 - witness objects are open-world in the oracle; an unknown top-level field is
   accepted, so there is no refusal branch to bind;
-- the baseline's v1 unavailable path tests ``reason`` for truth and nothing
-  else, so it accepts a non-string reason and any token-looking field beside
-  it; the port refuses both, which is what the v2 per-anchor outcome contract
-  has always required.  The genesis witness carries neither, so every case
-  below still agrees byte for byte; a mutation introducing one would assert
-  only that the port is deliberately stricter, which belongs in
-  ``tests/test_tsa.py`` and not in a differential contract;
+- the baseline's unavailable path, v1 and the v2 witness level alike, tests
+  ``reason`` for truth and nothing else, so it accepts a non-string reason
+  and any token-looking field beside it; the port refuses both at every
+  level, which is what the v2 per-anchor outcome contract has always
+  required.  The genesis witness (the tree's only unavailable one, and v1)
+  carries neither, so every case below still agrees byte for byte; a
+  mutation introducing one would assert only that the port is deliberately
+  stricter, which belongs in ``tests/test_tsa.py`` and not in a
+  differential contract;
+- the baseline verifies exactly one token for a v1 witness whatever the
+  bundle configures; the port refuses a v1 witness over a bundle that
+  configures more than one anchor.  The pinned v1 bundle configures one, so
+  no case here can reach the refusal, and a future tree that adds an anchor
+  to ``tsa-anchors-v1.json`` will fail this harness by design;
+- the baseline identity-checks only the anchor a witness selects; the port
+  requires a code identity for every anchor a bundle configures, at load.
+  Every pinned bundle anchor has one, and a mutation that adds an anchor
+  changes the bundle bytes and trips the commitment mismatch first, so the
+  battery executes the check on every case and can fire it on none;
 - a true ``genTime``-after-wall-clock mutation is no longer reachable through
   the CLI because every pinned signed token is now in the past and the CLI has
   no ``--now`` input.  Editing only the declared time reaches the later claim
