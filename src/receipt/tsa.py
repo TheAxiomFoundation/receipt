@@ -868,7 +868,7 @@ def _certificate_count(path: Path) -> int:
     if match is None:
         raise TsaError(
             f"pinned TSA root PEM certificates could not be counted: {path}: "
-            f"openssl storeutl reported no total"
+            "openssl storeutl reported no total"
         )
     return int(match.group(1))
 
@@ -884,7 +884,9 @@ def _root_material(records: Path, anchor: dict[str, Any]) -> dict[str, str]:
     no selection ever validated the new bundle's root before a transition
     activated it (peer review).
 
-    One check is not ported: the file must hold exactly one certificate.
+    One check is not ported: the file must hold exactly one certificate, as
+    OpenSSL counts them, and a file OpenSSL cannot count is refused rather
+    than assumed.
     """
 
     root = anchor.get("rootCertificate")
@@ -1123,9 +1125,10 @@ def verify_timestamp_token(
         # makes the two agree by construction rather than by a count anyone
         # has to get right: whatever else the bytes may hold, the only
         # certificate trusted here is the one the identity pins (peer review,
-        # third gate round two).  These are the same bytes
-        # _certificate_identity hashed, so the certificate trusted below is
-        # the certificate the pins name.
+        # third gate round two).  `openssl x509` reads the same first object
+        # here as it did there, and re-encodes it the same way, so this is the
+        # certificate whose DER _certificate_identity hashed into the
+        # certificateSha256 and spkiSha256 the anchor was checked against.
         _run_openssl(["x509", "-in", str(root_path), "-out", str(trusted_root)])
         _run_openssl(
             [
