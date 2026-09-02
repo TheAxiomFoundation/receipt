@@ -19,9 +19,12 @@ codex/thesis-ledger-facts); see receipts/ledger-pin-source-hashes.txt. The only
 intended change is parameterization: every repo-specific constant moved into
 ChainSpec, supplied by the consumer's committed code. Behavior is gated by the
 differential harness in tests/test_ledger_equivalence.py. Additions since the
-extraction (the base-ref history pass, the anchor-set digest in the result) run
-beside the extracted checks without altering any of their refusals, and carry
-their own tests.
+extraction (the base-ref history pass, the anchor-set digest in the result,
+spec validation at construction, reading each receipt through one descriptor,
+and refusing a genTime finer than a microsecond) run beside the extracted
+checks and carry their own tests. None reworded an extracted refusal or moved
+one in the order they fire; the new refusals cover inputs the upstream battery
+never presents.
 """
 
 from __future__ import annotations
