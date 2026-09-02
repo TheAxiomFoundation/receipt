@@ -466,6 +466,10 @@ def test_json_output_marks_gates_as_not_re_run(
     assert payload["chain"]["releases"] == 1
     assert len(payload["chain"]["witnesses"]) == 2
     assert payload["binding"]["contentFiles"] == 3
+    # Named, and in order: a PASS is exactly these three passes having
+    # completed, and a reader keying on this list must not have to infer
+    # which ones a verdict was made of.
+    assert payload["passesCompleted"] == ["custody", "binding", "declaration"]
 
 
 def anchor_set_recomputed(repo: pathlib.Path) -> tuple[str, dict[str, str]]:
@@ -564,6 +568,59 @@ def test_a_gate_that_did_not_run_is_shouted_not_hidden(
     out = capsys.readouterr().out
     assert "1 of 2 declared gate(s) did not pass cleanly" in out
     assert "DID NOT RUN — run-generated-guard: false in the caller" in out
+
+
+def test_refuses_a_journal_that_omits_a_spec_required_gate(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The declaration pass, refused through the command rather than the
+    library.
+
+    Custody and binding both pass here: the chain is real, the witnesses are
+    real, and the journal describes this tree exactly. The corpus is simply
+    silent about a gate the consumer's committed spec requires, and silence is
+    the failure mode the third pass exists for — a corpus that never mentions
+    its compile gate must not verify more quietly than one that declares it
+    did not run.
+    """
+
+    root = tmp_path / "repo"
+    build_corpus(
+        root,
+        tmp_path / "tsa",
+        gates=[
+            {
+                "gateId": "oracle/licensed-parity",
+                "tier": "restricted",
+                "outcome": "pass",
+                "evidence": {"restrictedInput": "licensed bundle"},
+            },
+        ],
+    )
+    assert (
+        main(
+            [
+                "verify",
+                "--spec",
+                str(root / "verification/spec.py"),
+                "--root",
+                str(root),
+                "--json",
+            ]
+        )
+        == EXIT_FAIL
+    )
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["verdict"] == "FAIL"
+    assert payload["passesCompleted"] == ["custody", "binding"]
+    (declaration,) = [p for p in payload["passes"] if p["name"] == "declaration"]
+    assert declaration["ok"] is False
+    assert (
+        "the witnessed journal does not declare a gate the pinned spec "
+        "requires: 'rulespec/compile'" in declaration["failure"]
+    )
+    assert "VERDICT: FAIL" not in captured.out
 
 
 def test_json_output_carries_the_spec_digest(
