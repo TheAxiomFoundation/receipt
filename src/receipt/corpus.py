@@ -85,6 +85,14 @@ GATE_TIERS = (PUBLIC_TIER, RESTRICTED_TIER, CI_ATTESTED_TIER)
 #: Exactly one, and naming it here keeps the honesty rule in one place.
 INDEPENDENTLY_REPRODUCIBLE_TIERS = frozenset({PUBLIC_TIER})
 
+#: The longest gate-evidence key or value the schema accepts. Sanitising
+#: bounds what one character can do to a rendered verdict; nothing bounded how
+#: many of them a producer may supply. A gate whose evidence carries two
+#: hundred thousand blameless characters scrolls every line an auditor needed
+#: to read out of the terminal, which defeats the verdict as surely as an
+#: escape sequence would. (Found by cross-family review.)
+MAX_EVIDENCE_TEXT = 1024
+
 _ROW_KEYS: dict[str, frozenset[str]] = {
     CONTENT_KIND: frozenset(
         {"schemaVersion", "entryIndex", "kind", "path", "sha256", "state"}
@@ -224,7 +232,7 @@ class CorpusVerification:
 
 
 def _reject_control_characters(value: str, label: str) -> str:
-    """Refuse any C0/C1 control character or DEL in producer-supplied text.
+    """Refuse control, format, and line-separator code points in producer text.
 
     Every string in this schema is written by a producer and later rendered to
     a terminal. A carriage return, an ESC, or a line feed inside one lets the
@@ -233,6 +241,17 @@ def _reject_control_characters(value: str, label: str) -> str:
     gate did not run. The verdict is the product here, so the sanitising
     belongs at the schema boundary where the text enters, not only at the
     point where it is printed. (Found by cross-family review.)
+
+    The C0 block is not the only way to do it, so two more classes refuse here
+    (second cross-family round):
+
+    - Every code point in Unicode category Cf. These render as nothing while
+      changing what the reader sees: U+202E RIGHT-TO-LEFT OVERRIDE reverses
+      the remainder of the line, so a gate declared not-run can be spelled to
+      read as passed, and U+200B lets two evidence keys print identically.
+    - U+2028 and U+2029, line separators outside the C0 block, which split one
+      evidence string into as many verdict lines as the producer wants in any
+      renderer that honours them.
     """
 
     for character in value:
@@ -241,6 +260,31 @@ def _reject_control_characters(value: str, label: str) -> str:
             raise CorpusError(
                 f"{label} contains a control character ({code:#04x}): {value!r}"
             )
+        if unicodedata.category(character) == "Cf":
+            raise CorpusError(
+                f"{label} contains a Unicode format control ({code:#04x}): {value!r}"
+            )
+        if code in (0x2028, 0x2029):
+            raise CorpusError(
+                f"{label} contains a Unicode line separator ({code:#04x}): {value!r}"
+            )
+    return value
+
+
+def _reject_oversized_text(value: str, label: str) -> str:
+    """Refuse producer text too long to belong in a verdict a human reads.
+
+    Checked before the character screen, deliberately: that screen quotes the
+    offending value back, so refusing a two-hundred-thousand-character string
+    there would emit the flood it exists to prevent. This message carries the
+    length instead of the text. (Found by cross-family review.)
+    """
+
+    if len(value) > MAX_EVIDENCE_TEXT:
+        raise CorpusError(
+            f"{label} is longer than {MAX_EVIDENCE_TEXT} characters: "
+            f"{len(value)} characters"
+        )
     return value
 
 
@@ -365,12 +409,14 @@ def _validate_gate(row: dict[str, Any], number: int, spec: CorpusSpec) -> GateDe
                 f"journal row {number} gate {gate_id!r} evidence must map "
                 "strings to strings"
             )
-        _reject_control_characters(
-            key, f"journal row {number} gate {gate_id!r} evidence key"
+        key_label = f"journal row {number} gate {gate_id!r} evidence key"
+        value_label = (
+            f"journal row {number} gate {gate_id!r} evidence value {key!r}"
         )
-        _reject_control_characters(
-            value, f"journal row {number} gate {gate_id!r} evidence value {key!r}"
-        )
+        _reject_oversized_text(key, key_label)
+        _reject_oversized_text(value, value_label)
+        _reject_control_characters(key, key_label)
+        _reject_control_characters(value, value_label)
     # A waiver is the one outcome that admits a known failure. It has to name
     # the waiver set it was excused under by digest, or "waived" is
     # unfalsifiable — and a placeholder like "x" is no more falsifiable than a
