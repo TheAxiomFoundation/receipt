@@ -3,11 +3,18 @@
 tests/test_append_gate_equivalence.py proves the port reproduces its oracle's
 verdicts on the pinned production tree. This module covers what that battery
 never presents: proposals that stay inside the classified surfaces the gate
-speaks for, state paths that stay inside the candidate tree, and one base
-commit for the whole verdict. Every case here is a NEW refusal (or a
+speaks for, state paths that stay inside the candidate tree, one base commit
+for the whole verdict, one snapshot of each state file, and a checkout whose
+modes and types are what git recorded. Every case here is a NEW refusal (or a
 previously silent acceptance made explicit), so the differential gate is
 untouched. The state-path cases reach the shared reader in
 receipt.release_chain, so they are exercised here directly as well.
+
+Docstrings below labelled F1-F5 name the findings of the fourth review round,
+in that review's numbering: F1 the checkout guard the push path never reached,
+F2 the checkout settings that are a claim rather than evidence, F3 the
+check-then-open state reads, F4 the git reads a replacement object could
+redirect, F5 the guard that ran before the base ref was resolved.
 
 The fixture is a local git repository built from scratch — no network, no
 witnesses, no signatures. Its release tree holds a README and no manifests, so
@@ -1144,8 +1151,9 @@ def test_the_replacement_control_shows_the_environment_is_what_stops_it(
 
 
 def test_the_push_path_accepts_an_ordinary_tree(tmp_path: pathlib.Path) -> None:
-    """The push-path baseline, so the refusals below are the change: with no
-    base ref the verdict carries neither an append count nor a release."""
+    """The baseline for F1, so the refusals below are the change: with no base
+    ref the verdict carries neither an append count nor a release, and this
+    branch of verify_append_gate had no test at all before."""
 
     candidate = base_repository(tmp_path)
     append_one_row(candidate)
@@ -1377,8 +1385,10 @@ def test_a_fifo_at_the_ledger_path_is_refused_rather_than_waited_on(
 def test_a_fifo_at_the_prefix_path_is_refused_rather_than_waited_on(
     tmp_path: pathlib.Path,
 ) -> None:
-    """The frozen prefix is read by the same reader, at the point check_prefix
-    used to open it, so it is refused the same way and just as promptly."""
+    """F3 for the other state file: the frozen prefix is read by the same
+    reader, at the point check_prefix used to walk and open it, so a FIFO
+    there is refused the same way and just as promptly instead of stalling
+    the run."""
 
     candidate = base_repository(tmp_path)
     append_one_row(candidate)
@@ -1481,9 +1491,10 @@ def test_a_ledger_rewritten_between_consumers_is_refused(
 def test_a_prefix_manifest_rewritten_between_consumers_is_refused(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The frozen prefix is the other state file the release verification
-    re-reads, and it is re-checked the same way: its every field was compared
-    against the base from bytes read before this rewrite."""
+    """F3 for the other state file: the frozen prefix is what the release
+    verification re-reads and what every base comparison was made from, so it
+    is re-checked the same way. Without the re-check the run answered about a
+    manifest that no longer existed."""
 
     candidate = base_repository(tmp_path)
     append_one_row(candidate)
@@ -1506,7 +1517,7 @@ def test_a_prefix_manifest_rewritten_between_consumers_is_refused(
 def test_a_ledger_replaced_by_an_identical_copy_mid_verdict_is_refused(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The identity half of the re-check, which bytes alone cannot see: the
+    """The identity half of F3's re-check, which bytes alone cannot see: the
     ledger is replaced mid-run by a different file holding the same bytes.
     Nothing downstream would notice — every byte comparison still holds — but
     the file this verdict read is gone, and whatever replaced it was never
@@ -1567,8 +1578,9 @@ def test_a_state_file_that_cannot_be_re_read_is_refused_as_changed(
 
 
 def test_an_unchanged_tree_passes_the_re_read(tmp_path: pathlib.Path) -> None:
-    """The re-check costs an ordinary proposal nothing: same file, same bytes,
-    same verdict text as before this branch."""
+    """The acceptance F3 must not disturb: an ordinary proposal is the same
+    file with the same bytes at the end, and gets the verdict text it got
+    before the snapshot reader existed."""
 
     candidate = base_repository(tmp_path)
     append_one_row(candidate)
