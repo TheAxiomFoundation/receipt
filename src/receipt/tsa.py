@@ -13,8 +13,10 @@ The port is stricter than the baseline in seven places, each a refusal the
 pinned tree never presents and so each outside the differential contract: a
 legacy witness over a bundle configuring more than one anchor; a bundle
 configuring an anchor the spec carries no identity for, or one whose
-declared root SPKI or allowed signers differ from that identity (compared
-at load for every anchor, not only the one a witness selects); an
+declared root SPKI or allowed signers differ from that identity, or whose
+referenced root material fails the ported material checks or carries an
+SPKI other than the identity's (all compared at load for every anchor, not
+only the one a witness selects); an
 unavailable witness of either schema whose reason is not a string, or that
 carries token evidence at the witness level (the v2 per-anchor outcome has
 always refused both); and an unavailable legacy witness that names a bundle
@@ -688,6 +690,24 @@ def _load_trust_bundle(
                 f"TSA anchor {anchor_id} in bundle {bundle_id} declares allowed "
                 "signers that differ from its verifier code identity"
             )
+        # Declared values agreeing with the identity is not the root material
+        # agreeing with either. The material checks lived only in
+        # _select_anchor, which a pending rotation's reused anchor id never
+        # reaches (peer review, fresh gate round two). Run here for every
+        # anchor; the ported refusal text is carried inside a new load-time
+        # message so the ported message itself neither moves nor changes.
+        try:
+            material = _root_material(records, anchor)
+        except TsaError as exc:
+            raise TsaError(
+                f"TSA anchor {anchor_id} in bundle {bundle_id} references root "
+                f"material that fails validation: {exc}"
+            ) from exc
+        if material["spkiSha256"] != identity.root_spki_sha256:
+            raise TsaError(
+                f"TSA anchor {anchor_id} in bundle {bundle_id} references a root "
+                "whose SPKI differs from its verifier code identity"
+            )
     return path, payload
 
 
@@ -780,6 +800,34 @@ def preferred_active_trust_bundle(
     return dict(max(candidates, key=lambda item: item[0])[1])
 
 
+def _root_material(records: Path, anchor: dict[str, Any]) -> dict[str, str]:
+    """Validate an anchor's referenced root and return its certificate identity.
+
+    The ported checks, verbatim: the root path is a regular file, its PEM
+    hash, certificate hash, and SPKI hash match what the bundle declares.
+    Factored out of ``_select_anchor`` so that ``_load_trust_bundle`` can run
+    them for every anchor at load: a pending rotation reuses the active
+    anchor id, ``_supplemental_candidates`` skips ids already active, and so
+    no selection ever validated the new bundle's root before a transition
+    activated it (peer review).
+    """
+
+    root = anchor.get("rootCertificate")
+    if not isinstance(root, dict):
+        raise TsaError(f"TSA anchor {anchor.get('id')!r} lacks rootCertificate")
+    root_path = physical_path(records, str(root.get("path", "")))
+    if not root_path.is_file() or root_path.is_symlink():
+        raise TsaError(f"pinned TSA root is missing or not a regular file: {root_path}")
+    if sha256_file(root_path) != root.get("pemSha256"):
+        raise TsaError(f"pinned TSA root PEM hash mismatch: {root_path}")
+    identity = _certificate_identity(root_path)
+    if identity["certificateSha256"] != root.get("certificateSha256"):
+        raise TsaError(f"pinned TSA root certificate hash mismatch: {root_path}")
+    if identity["spkiSha256"] != root.get("spkiSha256"):
+        raise TsaError(f"pinned TSA root SPKI hash mismatch: {root_path}")
+    return identity
+
+
 def _select_anchor(
     records: Path,
     witness: dict[str, Any],
@@ -806,19 +854,7 @@ def _select_anchor(
     anchor = candidates[0]
     if anchor_id and endpoint != anchor.get("endpoint"):
         raise TsaError("witness TSA endpoint does not match its pinned anchor")
-    root = anchor.get("rootCertificate")
-    if not isinstance(root, dict):
-        raise TsaError(f"TSA anchor {anchor.get('id')!r} lacks rootCertificate")
-    root_path = physical_path(records, str(root.get("path", "")))
-    if not root_path.is_file() or root_path.is_symlink():
-        raise TsaError(f"pinned TSA root is missing or not a regular file: {root_path}")
-    if sha256_file(root_path) != root.get("pemSha256"):
-        raise TsaError(f"pinned TSA root PEM hash mismatch: {root_path}")
-    identity = _certificate_identity(root_path)
-    if identity["certificateSha256"] != root.get("certificateSha256"):
-        raise TsaError(f"pinned TSA root certificate hash mismatch: {root_path}")
-    if identity["spkiSha256"] != root.get("spkiSha256"):
-        raise TsaError(f"pinned TSA root SPKI hash mismatch: {root_path}")
+    identity = _root_material(records, anchor)
     bundle_id = str(trust.get("bundleId"))
     code_identity = spec.identity_claim(bundle_id, str(anchor.get("id")))
     if not isinstance(code_identity, dict):

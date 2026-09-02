@@ -52,8 +52,11 @@ Deliberately outside the mutation contract:
   battery executes the check on every case and can fire it on none;
 - the baseline compares an anchor's root SPKI and allowed signers with its
   code identity only when a witness selects that anchor; the port compares
-  every anchor's declared values with its identity at bundle load.  Every
-  pinned bundle agrees with its identities, so no case here reaches it;
+  every anchor's declared values with its identity at bundle load, and
+  validates every anchor's root material there too, carrying the ported
+  material refusals inside a new load-time message.  Every pinned bundle
+  agrees with its identities and its roots verify, so no case here reaches
+  either;
 - the baseline ignores bundle-claim fields on an unavailable v1 witness;
   the port resolves and counts a named bundle.  The genesis witness names
   none;

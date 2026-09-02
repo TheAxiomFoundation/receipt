@@ -980,6 +980,7 @@ def add_bundle_version(
     *,
     version: int,
     signers: Mapping[str, dict[str, str]] | None = None,
+    mutate_anchor: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[dict[str, Any], TsaSpec]:
     """Write a further immutable bundle version into the tree.
 
@@ -1004,6 +1005,8 @@ def add_bundle_version(
     for entry in payload["anchors"]:
         if entry["id"] in signers:
             entry["allowedSigners"] = [dict(signers[entry["id"]])]
+        if mutate_anchor is not None:
+            mutate_anchor(entry)
     path = tree.records / "trust" / f"{bundle_id}.json"
     path.write_bytes(canonical_bytes(payload) + b"\n")
     reference = {
@@ -1354,3 +1357,69 @@ def test_an_unavailable_legacy_witness_with_a_partial_bundle_claim_is_refused(
     with pytest.raises(TsaError) as caught:
         verify_tree(tree)
     assert str(caught.value) == "witness lacks a TSA trust-bundle path"
+
+
+def test_refuses_at_load_a_bundle_whose_root_material_is_missing_or_tampered(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_alpha: LocalTsa,
+) -> None:
+    """Declared values agreeing with the identity is not the root agreeing.
+
+    The root material checks lived only in _select_anchor, which a pending
+    rotation never reaches: the new bundle reuses the active anchor id and
+    _supplemental_candidates skips it, so a transition could activate a
+    bundle whose root file is missing or tampered (peer review, fresh gate
+    round two). The material is validated at load for every anchor.
+    """
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    rotated = certificate_pins(rotated_alpha.signer_pem)
+
+    def point_at_a_missing_root(entry: dict[str, Any]) -> None:
+        entry["rootCertificate"]["path"] = "records/trust/never-written-root.pem"
+
+    reference, spec = add_bundle_version(
+        tree,
+        local_anchors[:1],
+        version=2,
+        signers={alpha.anchor_id: rotated},
+        mutate_anchor=point_at_a_missing_root,
+    )
+    with pytest.raises(TsaError) as loading:
+        _load_trust_bundle(tree.records, reference, spec=spec)
+    message = str(loading.value)
+    assert message.startswith(
+        "TSA anchor alpha-root-2026 in bundle tsa-anchors-v2 references root "
+        "material that fails validation: pinned TSA root is missing or not a "
+        "regular file: "
+    )
+    # The reused-id pending transition: offered as an update, refused before
+    # anything activates.
+    with pytest.raises(TsaError, match="references root material that fails"):
+        verify_witness(
+            tree.record,
+            spec=spec,
+            records=tree.records,
+            trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+            transition_bundle_updates=[reference],
+        )
+
+    # Tampered rather than missing: a different root PEM under the declared
+    # hashes fails the PEM hash check inside the same load-time message.
+    def point_at_the_wrong_root(entry: dict[str, Any]) -> None:
+        entry["rootCertificate"]["path"] = f"records/trust/{local_anchors[1].tsa.root_pem.name}"
+
+    (tree.records / "trust" / local_anchors[1].tsa.root_pem.name).write_bytes(
+        local_anchors[1].tsa.root_pem.read_bytes()
+    )
+    reference, spec = add_bundle_version(
+        tree,
+        local_anchors[:1],
+        version=3,
+        signers={alpha.anchor_id: rotated},
+        mutate_anchor=point_at_the_wrong_root,
+    )
+    with pytest.raises(TsaError, match="fails validation: pinned TSA root PEM hash mismatch"):
+        _load_trust_bundle(tree.records, reference, spec=spec)
