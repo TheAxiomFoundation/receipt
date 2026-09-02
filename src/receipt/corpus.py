@@ -724,13 +724,31 @@ def _fold_survivor(root: pathlib.Path, relative: str) -> str | None:
         for entry in matches:
             if not rest:
                 return "/".join([*spelled, entry.name])
+            # One lstat, inside the handler, answering both questions below.
+            # It sat outside: a listed entry deleted between the listing and
+            # the probe raised FileNotFoundError, and an entry in a directory
+            # that is readable but not searchable raised PermissionError, and
+            # neither is a CorpusError — the verifier crashed where it should
+            # have refused (peer review, round three). A vanished entry is not
+            # a survivor; any other error means the tombstone could not be
+            # checked, which is the same "failure to look is not an absence"
+            # rule _list_directory states.
+            try:
+                info = entry.lstat()
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            except OSError as exc:
+                raise CorpusError(
+                    "cannot check whether a removed path is still in the tree, so "
+                    f"the tombstone is unverifiable: {relative} ({exc.strerror})"
+                ) from exc
             # An intermediate symlink is refused, as it is for every bound
             # path: a journal path never traverses a link. Following it
             # also made the walk unbounded, since case-varied links back
             # into the same directory branch without end (peer review,
             # round two). A link in the final position still counts as
             # present: it answers to the name.
-            if entry.is_symlink() or getattr(entry.lstat(), "st_reparse_tag", 0):
+            if stat.S_ISLNK(info.st_mode) or getattr(info, "st_reparse_tag", 0):
                 raise CorpusError(
                     "removed path traverses a symlink or reparse point at "
                     f"{'/'.join([*spelled, entry.name])!r}: {relative}"
