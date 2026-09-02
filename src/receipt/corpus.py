@@ -107,6 +107,19 @@ MAX_EVIDENCE_TEXT = 1024
 #: million characters into the verdict (peer review). Generous for any real
 #: corpus, which declares tens of gates with digest-sized evidence.
 MAX_GATE_TEXT = 262144
+#: The most characters one journal path may carry. Paths are quoted in
+#: refusals and, for removed paths, rendered in the verdict; the bound is
+#: checked before any other path rule so no refusal quotes a flood.
+MAX_PATH_TEXT = 1024
+#: The most characters the verdict's removedPaths may carry in total; the
+#: gate budget's counterpart for the other producer-controlled list the
+#: verdict renders verbatim (peer review, round two).
+MAX_REMOVED_TEXT = 262144
+#: The most directory listings one tombstone check may perform before it is
+#: refused as unverifiable rather than allowed to run on.
+MAX_TOMBSTONE_LISTINGS = 4096
+#: The most characters a refusal quotes of a producer-controlled value.
+MAX_QUOTED_TEXT = 256
 
 _ROW_KEYS: dict[str, frozenset[str]] = {
     CONTENT_KIND: frozenset(
@@ -238,6 +251,15 @@ class CorpusVerification:
         return tuple(gate for gate in self.gates if not gate.independently_reproducible)
 
 
+def _quoted(value: Any) -> str:
+    """repr of a producer-controlled value, truncated so a refusal is bounded."""
+
+    text = repr(value)
+    if len(text) <= MAX_QUOTED_TEXT:
+        return text
+    return f"{text[:MAX_QUOTED_TEXT]}…[{len(text) - MAX_QUOTED_TEXT} more characters]"
+
+
 #: Unicode category Cf as of Unicode 16.0.0, the table Python 3.14 ships,
 #: pinned here so the refusal does not depend on which interpreter renders
 #: the verdict: Python 3.11 carries Unicode 14, under which U+1343A is
@@ -343,6 +365,11 @@ def _validate_relative_path(value: Any, label: str) -> str:
 
     if type(value) is not str or not value:
         raise CorpusError(f"{label} must be a non-empty string")
+    if len(value) > MAX_PATH_TEXT:
+        # First, so that no refusal below quotes a flood.
+        raise CorpusError(
+            f"{label} is longer than {MAX_PATH_TEXT} characters ({len(value)})"
+        )
     if "\\" in value:
         raise CorpusError(f"{label} must use POSIX separators: {value!r}")
     if value.startswith("/") or value.endswith("/"):
@@ -354,6 +381,19 @@ def _validate_relative_path(value: Any, label: str) -> str:
         if segment in (".", ".."):
             raise CorpusError(f"{label} contains a relative segment: {value!r}")
     _reject_control_characters(value, label)
+    for character in value:
+        if unicodedata.category(character) == "Cn":
+            # The fold key (see _path_fold) is only stable across Unicode
+            # tables for assigned characters: the standard's stability
+            # policies fix case folding and normalization once a character
+            # is encoded, and say nothing before. An unassigned code point
+            # folded one way on Unicode 15 and another on 16 (U+10D50, peer
+            # review), so a path carrying one could alias under one
+            # interpreter and not another. Refused, naming the table.
+            raise CorpusError(
+                f"{label} contains a code point unassigned in Unicode "
+                f"{unicodedata.unidata_version} ({ord(character):#06x}): {value!r}"
+            )
     if ":" in value:
         # On Windows, "C:/x" survives every relative-path check above yet
         # joins drive-absolute under pathlib, letting a row reference a file
@@ -423,7 +463,7 @@ def _object_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
-            raise CorpusError(f"journal row has duplicate key {key!r}")
+            raise CorpusError(f"journal row has duplicate key {_quoted(key)}")
         result[key] = value
     return result
 
@@ -431,7 +471,9 @@ def _object_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def _validate_gate(row: dict[str, Any], number: int, spec: CorpusSpec) -> GateDeclaration:
     gate_id = _string(row["gateId"], f"journal row {number} gateId")
     if GATE_ID_RE.fullmatch(gate_id) is None:
-        raise CorpusError(f"journal row {number} gateId is malformed: {gate_id!r}")
+        raise CorpusError(
+            f"journal row {number} gateId is malformed: {_quoted(gate_id)}"
+        )
     tier = _string(row["tier"], f"journal row {number} tier")
     if tier not in GATE_TIERS:
         raise CorpusError(
@@ -600,6 +642,12 @@ def parse_journal(
             f"journal gate declarations total {rendered} characters of id and "
             f"evidence, over the verdict budget of {MAX_GATE_TEXT}"
         )
+    removed_text = sum(len(path) for path in removed)
+    if removed_text > MAX_REMOVED_TEXT:
+        raise CorpusError(
+            f"journal removed paths total {removed_text} characters, over the "
+            f"verdict budget of {MAX_REMOVED_TEXT}"
+        )
 
     return content, attested, tuple(gates), tuple(sorted(removed))
 
@@ -634,15 +682,30 @@ def _fold_survivor(root: pathlib.Path, relative: str) -> str | None:
     while ".AXIOM/APPLY-MANIFEST.JSON" remained, and that survivor answers to
     the tombstoned name on a case-insensitive consumer (peer review). So each
     component is matched by fold key against a listing of its directory,
-    exact spelling first, every fold-equal branch explored. Parent components
-    are followed as lstat followed them: the question is what answers to the
-    name in the tree a consumer reads. Failure to list is a refusal, not an
-    absence, for the reason _list_directory gives.
+    exact spelling first, every fold-equal branch explored. An intermediate
+    symlink refuses, as it does for every bound path, which also bounds the
+    walk by the tree; a listing budget refuses a tree wider than that.
+    Failure to list is a refusal, not an absence, for the reason
+    _list_directory gives.
     """
+
+    listings = 0
 
     def search(
         directory: pathlib.Path, components: list[str], spelled: list[str]
     ) -> str | None:
+        nonlocal listings
+        listings += 1
+        if listings > MAX_TOMBSTONE_LISTINGS:
+            # Every fold-equal branch is explored, and with symlinks refused
+            # below the branching is bounded by the tree itself; a tree wide
+            # enough to exceed this is refused as unverifiable rather than
+            # walked on (peer review, round two).
+            raise CorpusError(
+                "cannot check whether a removed path is still in the tree, so "
+                f"the tombstone is unverifiable: {relative} (more than "
+                f"{MAX_TOMBSTONE_LISTINGS} aliasing directories)"
+            )
         try:
             entries = list(directory.iterdir())
         except (FileNotFoundError, NotADirectoryError):
@@ -661,6 +724,17 @@ def _fold_survivor(root: pathlib.Path, relative: str) -> str | None:
         for entry in matches:
             if not rest:
                 return "/".join([*spelled, entry.name])
+            # An intermediate symlink is refused, as it is for every bound
+            # path: a journal path never traverses a link. Following it
+            # also made the walk unbounded, since case-varied links back
+            # into the same directory branch without end (peer review,
+            # round two). A link in the final position still counts as
+            # present: it answers to the name.
+            if entry.is_symlink() or getattr(entry.lstat(), "st_reparse_tag", 0):
+                raise CorpusError(
+                    "removed path traverses a symlink or reparse point at "
+                    f"{'/'.join([*spelled, entry.name])!r}: {relative}"
+                )
             found = search(entry, rest, [*spelled, entry.name])
             if found is not None:
                 return found
@@ -678,6 +752,10 @@ def _path_fold(relative: str) -> str:
     checked over.
     """
 
+    # Stable across interpreters only for assigned characters: the Unicode
+    # stability policies fix case folding and normalization once a character
+    # is encoded, so _validate_relative_path refuses unassigned code points
+    # and this key means the same thing under every supported table.
     # Normalized again after folding, deliberately: casefold itself can
     # produce decomposed text (U+00DF followed by U+0301 folds to s, s,
     # U+0301, whose composed form is s, U+015B), so a variant that differs
