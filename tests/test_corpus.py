@@ -3225,12 +3225,17 @@ def test_a_journal_just_under_both_budgets_renders_within_them(
     charged.
 
     Measured rather than asserted: this journal charges 519,096 and renders
-    599,972 characters, a ratio of 1.16, and the shape that renders most per
-    unit charged — the maximum number of gates, each with the shortest id and
-    smallest evidence, where the structural overhead the budget under-charges
-    dominates — measures 1.37. A factor of four is the bound pinned here, far
-    enough above both that rewording a verdict line does not fail the test
-    and close enough that a renderer growing multiples per gate would.
+    599,972 characters, a ratio of 1.16. The shape that renders most per unit
+    charged *at* the budget — the largest number of gates the declaration cap
+    allows, each with the shortest distinct id and the smallest evidence, so
+    that the structural overhead the budget under-charges dominates the
+    strings it charges exactly — measures 1.36. Below the budget the ratio
+    says nothing: about 1.2 kB of the verdict is fixed text no producer
+    controls, which is thirteen times the charge of a journal declaring one
+    gate and negligible for one at the cap. A factor of four is the bound
+    pinned here, far enough above the ratio at the budget that rewording a
+    verdict line does not fail the test and close enough that a renderer
+    growing multiples per gate would.
 
     Without the R6-F3 fix this test still passes: it is not a refusal test.
     It exists so that the two refusal tests above cannot be satisfied by a
