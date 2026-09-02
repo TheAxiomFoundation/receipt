@@ -305,14 +305,19 @@ def _confine_state_path(
 class _StateSnapshot:
     """One state file as it stood at one instant, and the bytes read then.
 
-    ``identity`` is ``(st_dev, st_ino, st_size, st_mtime_ns)`` observed on the
-    open descriptor after the read, so a later re-read can say whether the
-    same file is still there and still says the same thing.
+    ``identity`` is ``(st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns)``
+    observed on the open descriptor after the read, so a later re-read can
+    say whether the same file is still there and still says the same thing.
+    ``st_ctime_ns`` is in the tuple because the other four are all
+    forgeable by a candidate that puts the file back: a replacement written
+    in place and stamped with ``os.utime`` restores the device, the inode,
+    the size, and the modification time. The inode change time is set by the
+    kernel on every metadata write and cannot be set back.
     """
 
     relative: pathlib.PurePosixPath
     payload: bytes
-    identity: tuple[int, int, int, int]
+    identity: tuple[int, int, int, int, int]
 
 
 def _read_state_snapshot(
@@ -371,7 +376,13 @@ def _read_state_snapshot(
     return _StateSnapshot(
         relative=relative,
         payload=b"".join(chunks),
-        identity=(read.st_dev, read.st_ino, read.st_size, read.st_mtime_ns),
+        identity=(
+            read.st_dev,
+            read.st_ino,
+            read.st_size,
+            read.st_mtime_ns,
+            read.st_ctime_ns,
+        ),
     )
 
 
@@ -380,15 +391,19 @@ def _assert_state_unchanged(
 ) -> None:
     """Require a state file to be what it was when this verdict read it.
 
-    ``check_release_proposal`` hands the ledger and the frozen prefix to
-    ``release_chain``, which reads both paths again through its own reader —
-    deliberately left alone, since it is the release chain's own state
-    contract. That leaves a window this module can still close: after the
-    last consumer returns, read each state file again and require the same
-    file and the same bytes. A tree that changed underneath the run gets one
-    refusal naming the file, instead of a verdict assembled from two
-    different ledgers. A re-read that cannot be completed at all — the path
-    is now a link, a pipe, or gone — is the same answer: it changed.
+    ``check_release_proposal`` and ``check_release_chain_without_base`` now
+    hand the release verification the two snapshots this run read, so it no
+    longer opens either path by name and no consumer inside one verdict can
+    be shown a different file. What is left is the window around the whole
+    run: after the last consumer returns, read each state file again and
+    require the same file and the same bytes. A tree that changed underneath
+    the run gets one refusal naming the file, instead of a verdict assembled
+    from two different ledgers. A re-read that cannot be completed at all —
+    the path is now a link, a pipe, or gone — is the same answer: it
+    changed. The comparison is over the recorded identity as well as the
+    bytes, and that identity includes the inode change time, so a
+    replacement put back in place with its device, inode, size, and
+    modification time restored is still refused.
     """
 
     display = snapshot.relative.as_posix()
@@ -964,11 +979,30 @@ def _check_exact_byte_append(base_bytes: bytes, candidate_bytes: bytes) -> bytes
     return candidate_bytes[len(base_bytes) :]
 
 
+def _state_snapshot_bytes(
+    candidate: _CandidateTree, ledger_bytes: bytes, prefix_bytes: bytes
+) -> dict[str, bytes]:
+    """The two state snapshots, keyed the way ``release_chain`` reads them.
+
+    The release verification used to open the ledger and the frozen prefix
+    by name, which is a second read of each file inside one verdict: an
+    A-to-B-to-A replacement showed the row checks one ledger, the release
+    chain another, and put the first back before the closing re-read. Handing
+    it these bytes means there is only ever one read of each file per run.
+    """
+
+    return {
+        candidate.spec.chain.state_relative.as_posix(): ledger_bytes,
+        candidate.spec.chain.prefix_relative.as_posix(): prefix_bytes,
+    }
+
+
 def check_release_proposal(
     base: _BaseCommit,
     *,
     candidate: _CandidateTree,
     ledger_bytes: bytes,
+    prefix_bytes: bytes,
     anchor_dir: pathlib.Path | None = None,
     enforce_production_pins: bool | None = None,
 ) -> int | None:
@@ -1004,6 +1038,7 @@ def check_release_proposal(
         if (candidate.root / candidate.spec.chain.manifest_relative).is_dir()
         else False
     )
+    state_bytes = _state_snapshot_bytes(candidate, ledger_bytes, prefix_bytes)
     base_bytes = _base_ledger_bytes(commit, candidate)
     # The ledger this verdict speaks for is the one snapshot the run read, not
     # whatever the path holds by the time this check gets to it.
@@ -1036,6 +1071,7 @@ def check_release_proposal(
                 require_chain=True,
                 verify_state=True,
                 enforce_production_pins=enforce_production_pins,
+                state_bytes=state_bytes,
             )
         except ReleaseChainError as exc:
             raise AppendError(str(exc)) from exc
@@ -1075,6 +1111,7 @@ def check_release_proposal(
             require_chain=True,
             verify_state=True,
             enforce_production_pins=enforce_production_pins,
+            state_bytes=state_bytes,
         )
     except ReleaseChainError as exc:
         raise AppendError(str(exc)) from exc
@@ -1090,10 +1127,17 @@ def check_release_proposal(
 def check_release_chain_without_base(
     *,
     candidate: _CandidateTree,
+    ledger_bytes: bytes,
+    prefix_bytes: bytes,
     anchor_dir: pathlib.Path | None = None,
     enforce_production_pins: bool | None = None,
 ) -> int | None:
-    """On push, verify any initialized chain against working-tree state."""
+    """On push, verify any initialized chain against working-tree state.
+
+    The push path re-opened the two state files here exactly as the base-ref
+    path did, so it is fed the same snapshots for the same reason: one read
+    of each state file per verdict.
+    """
 
     manifest_directory = candidate.root / candidate.spec.chain.manifest_relative
     if not manifest_directory.is_dir() or not any(manifest_directory.iterdir()):
@@ -1108,6 +1152,7 @@ def check_release_chain_without_base(
             require_chain=True,
             verify_state=True,
             enforce_production_pins=enforce_production_pins,
+            state_bytes=_state_snapshot_bytes(candidate, ledger_bytes, prefix_bytes),
         )
     except ReleaseChainError as exc:
         raise AppendError(str(exc)) from exc
@@ -1223,12 +1268,15 @@ def verify_append_gate(
             base,
             candidate=candidate,
             ledger_bytes=ledger_state.payload,
+            prefix_bytes=prefix_state.payload,
             anchor_dir=anchor_dir,
             enforce_production_pins=production_pins,
         )
         if base is not None
         else check_release_chain_without_base(
             candidate=candidate,
+            ledger_bytes=ledger_state.payload,
+            prefix_bytes=prefix_state.payload,
             anchor_dir=anchor_dir,
             enforce_production_pins=production_pins,
         )

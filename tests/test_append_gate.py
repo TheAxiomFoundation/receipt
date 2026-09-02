@@ -16,6 +16,12 @@ F2 the checkout settings that are a claim rather than evidence, F3 the
 check-then-open state reads, F4 the git reads a replacement object could
 redirect, F5 the guard that ran before the base ref was resolved.
 
+Docstrings labelled R5-F1 to R5-F4 name the fifth round, whose numbering
+starts over: R5-F1 the snapshots the release verification was not given,
+R5-F2 the parent confinement that was still check-then-open, R5-F3 the state
+paths taken on the working tree's word rather than the index's, R5-F4 the
+release-root index entries the filesystem traversal cannot see.
+
 The fixture is a local git repository built from scratch — no network, no
 witnesses, no signatures. Its release tree holds a README and no manifests, so
 the gate's chain verification finds nothing to verify and the checks under
@@ -1640,3 +1646,100 @@ def test_file_level_release_refusals_precede_the_index_refusal(
         f"existing release file mode changed relative to {candidate.base}: "
         "releases/README.md (100644 -> 100755)"
     )
+
+
+def test_a_ledger_swapped_and_restored_inside_the_release_pass_is_refused(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds R5-F1: the closing re-read could be satisfied by a restoration.
+
+    A candidate that swaps the ledger while the release verification runs and
+    puts the original back before the run ends is invisible to a comparison
+    over device, inode, size, and modification time: writing the bytes back
+    in place keeps the first three, and ``os.utime`` restores the fourth.
+    That is the second half of the A-to-B-to-A hole — the first half, the
+    release verification reading the path again rather than being handed
+    what this run read, is bound in tests/test_release_chain.py, where a
+    chain exists to verify. The identity now carries ``st_ctime_ns``, which
+    the kernel stamps on every metadata write and no caller can set back.
+    Without it this run is accepted, with a verdict about a file that was
+    not there for the whole of it.
+    """
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    ledger = candidate.root / CHAIN_SPEC.state_relative
+    original = ledger.read_bytes()
+    before = ledger.stat()
+    verified = append_gate.verify_release_history_immutable
+
+    def swap(root: Any, commit: str, *, spec: Any) -> Any:
+        # B, in place: two more rows than the run read, and a valid byte
+        # append in its own right, so nothing downstream would object to it.
+        write_ledger(
+            candidate.root,
+            [observation_row(number) for number in range(1, BASE_ROW_COUNT + 3)],
+        )
+        try:
+            return verified(root, commit, spec=spec)
+        finally:
+            ledger.write_bytes(original)
+            os.utime(ledger, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+    monkeypatch.setattr(append_gate, "verify_release_history_immutable", swap)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "state file changed during verification: "
+        "ledger/official_observations.jsonl"
+    )
+    # The restoration really was complete in every field the identity carried
+    # before this round, so the change time is what refused.
+    after = ledger.stat()
+    assert ledger.read_bytes() == original
+    assert (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) == (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+    )
+    assert after.st_ctime_ns != before.st_ctime_ns
+
+
+def test_the_push_path_hands_the_release_verification_its_snapshots(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds R5-F1 at the gate: the release verification is given the bytes.
+
+    ``check_release_chain_without_base`` used to let ``verify_release_chain``
+    open the ledger and the frozen prefix by name, a second read of each file
+    inside one verdict. It now passes the snapshots this run took, keyed by
+    their relative POSIX paths. The fixture carries no chain, so the call is
+    made directly with the manifest directory stubbed non-empty; what is
+    asserted is the mapping the gate hands down.
+    """
+
+    candidate = base_repository(tmp_path)
+    manifests = candidate.root / CHAIN_SPEC.manifest_relative
+    manifests.mkdir(parents=True)
+    (manifests / "0000-0000000000000000.json").write_text("{}\n", encoding="utf-8")
+    captured: dict[str, Any] = {}
+
+    def capture(root: pathlib.Path, **keywords: Any) -> None:
+        captured.update(keywords)
+        raise ReleaseChainError("stop before verifying anything")
+
+    monkeypatch.setattr(append_gate, "verify_release_chain", capture)
+    tree = append_gate._set_root(candidate.root, GATE_SPEC)
+
+    with pytest.raises(AppendError):
+        append_gate.check_release_chain_without_base(
+            candidate=tree,
+            ledger_bytes=b"ledger snapshot",
+            prefix_bytes=b"prefix snapshot",
+        )
+    assert captured["state_bytes"] == {
+        "ledger/official_observations.jsonl": b"ledger snapshot",
+        "ledger/immutable_prefix.json": b"prefix snapshot",
+    }
