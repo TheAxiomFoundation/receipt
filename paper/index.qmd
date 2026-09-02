@@ -536,9 +536,11 @@ verifier enforces the configured anchor set and cannot prove that
 authorities fail independently, validates certificates as of the
 token's signed time via OpenSSL without revocation checking, and has
 no long-term renewal protocol for aging evidence [@RFC4998] — nor
-legacy generations for timestamp-authority signers, so an authority's
-own key rotation currently splits verification into eras the consumer
-spec must carry explicitly. The release-chain lane requires the exact
+generation or retirement semantics for timestamp-authority signers: an
+identity allows several signer fingerprints at once with no validity
+interval on any of them, so an authority's own key rotation is carried
+by adding the new fingerprint beside the old one, and the superseded
+signer keeps verifying until the consumer removes it. The release-chain lane requires the exact
 configured receipt set, so a single configured authority's outage
 blocks release publication until the consumer revises policy — the
 witness lane's declared-unavailable escape (@sec-guarantees) does not
