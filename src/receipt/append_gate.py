@@ -92,6 +92,7 @@ import pathlib
 import re
 import stat
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -340,11 +341,39 @@ class _StateSnapshot:
     in place and stamped with ``os.utime`` restores the device, the inode,
     the size, and the modification time. The inode change time is set by the
     kernel on every metadata write and cannot be set back.
+
+    ``mode`` is that same descriptor's ``st_mode``. The file's git category
+    was worked out twice more after this read, each time by resolving the
+    pathname again — once by ``check_state_modes`` for the base comparison
+    and once by the index comparison after it — so three answers could be
+    about three different files, and a shared parent exchanged A-to-B-to-A
+    between them left every one of them looking consistent. Both now take
+    the category recorded here.
+
+    ``ancestors`` is the identity of every directory the descriptor walk
+    opened on the way to this file, which the leaf's own identity cannot
+    supply: ``ledger/`` can be exchanged for a directory holding a hard link
+    to the same inode, and device, inode, size, modification time and change
+    time all still agree. The closing re-check compares these too, so a file
+    reached through different directories is a changed file.
     """
 
     relative: pathlib.PurePosixPath
     payload: bytes
     identity: tuple[int, int, int, int, int]
+    mode: int
+    ancestors: tuple[tuple[int, int], ...]
+
+    @property
+    def category(self) -> str:
+        """The git mode this file would be recorded as, from the read itself.
+
+        ``_read_state_snapshot`` refuses anything that is not a regular file,
+        so only the two blob categories are reachable, and git keys them on
+        the owner execute bit alone (see ``check_state_modes``).
+        """
+
+        return "100755" if self.mode & 0o100 else "100644"
 
 
 def _read_state_snapshot(
@@ -383,9 +412,10 @@ def _read_state_snapshot(
     if not stat.S_ISREG(before.st_mode):
         raise AppendError(f"state file is not a regular file: {display}")
     try:
-        descriptor = confined_state_descriptor(candidate.root, relative)
+        confined = confined_state_descriptor(candidate.root, relative)
     except ReleaseChainError as exc:
         raise AppendError(str(exc)) from exc
+    descriptor = confined.descriptor
     try:
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode):
@@ -408,6 +438,8 @@ def _read_state_snapshot(
             read.st_mtime_ns,
             read.st_ctime_ns,
         ),
+        mode=read.st_mode,
+        ancestors=confined.ancestors,
     )
 
 
@@ -438,7 +470,12 @@ def _assert_state_unchanged(
         raise AppendError(
             f"state file changed during verification: {display}"
         ) from exc
-    if (current.identity, current.payload) != (snapshot.identity, snapshot.payload):
+    if (
+        current.identity,
+        current.mode,
+        current.ancestors,
+        current.payload,
+    ) != (snapshot.identity, snapshot.mode, snapshot.ancestors, snapshot.payload):
         raise AppendError(f"state file changed during verification: {display}")
 
 
@@ -920,7 +957,12 @@ def check_binding_shapes(lines: list[str], prefix_count: int) -> None:
             )
 
 
-def check_state_modes(base: _BaseCommit, candidate: _CandidateTree) -> None:
+def check_state_modes(
+    base: _BaseCommit,
+    candidate: _CandidateTree,
+    *,
+    snapshots: Mapping[str, _StateSnapshot] | None = None,
+) -> None:
     """Require the ledger and the frozen prefix to keep the base's file mode.
 
     check_append_only and check_prefix_anchored_to_base compare bytes and
@@ -932,9 +974,19 @@ def check_state_modes(base: _BaseCommit, candidate: _CandidateTree) -> None:
     for the two files the append path itself reads. Git records only the
     executable category, so that is what is compared — a base symlink or
     gitlink entry is a category change too, and refuses here. The comparison
-    reads the candidate's stat, so it is only evidence while the working tree
+    reads the candidate's mode, so it is only evidence while the working tree
     carries what git recorded: assert_index_agrees_with_tree establishes that
     per file, and the checkout settings are checked as well.
+
+    ``snapshots`` are the state files this run already read, keyed by
+    relative POSIX path. The mode came from ``stat``-ing the pathname here
+    and the index comparison below then resolved that name a third time, so
+    the read, the mode, and the index answer were three separate resolutions
+    of one name and a parent exchanged between any two of them made them
+    answers about different files. With the snapshots both take the category
+    the one read recorded, from the descriptor it held open. Omitted — a
+    caller using this function on its own — each is worked out from the path
+    exactly as it was.
     """
 
     # verify_append_gate already refused a non-authoritative checkout at
@@ -962,16 +1014,28 @@ def check_state_modes(base: _BaseCommit, candidate: _CandidateTree) -> None:
         # materialised and this comparison would be fail-open, so such a
         # checkout is refused above rather than compared (peer review, round
         # two); the release-file check does the same.
-        executable = bool((candidate.root / relative).stat().st_mode & 0o100)
-        if ("100755" if executable else "100644") != entry.mode:
+        snapshot = (snapshots or {}).get(path)
+        if snapshot is None:
+            executable = bool((candidate.root / relative).stat().st_mode & 0o100)
+            category = "100755" if executable else "100644"
+        else:
+            category = snapshot.category
+        if category != entry.mode:
             raise AppendError(f"state file mode changed relative to base: {path}")
         # After the comparison it qualifies, as in the release-history pass:
         # the candidate's own index is what says the working tree carries
         # the mode and type git recorded for this path, and a comparison
         # that passed fail-open is caught here rather than pre-empting the
-        # mode-change refusal that existed before it.
+        # mode-change refusal that existed before it. It is given the
+        # category above rather than resolving the name again; without a
+        # snapshot there is none to give, and the fallback lstat also
+        # distinguishes a link, which the stat above cannot.
         try:
-            assert_index_agrees_with_tree(candidate.root, relative)
+            assert_index_agrees_with_tree(
+                candidate.root,
+                relative,
+                observed=None if snapshot is None else category,
+            )
         except ReleaseChainError as exc:
             raise AppendError(str(exc)) from exc
 
@@ -1381,8 +1445,12 @@ def verify_append_gate(
     # check that existed before them: the row checks, the release proposal,
     # and the release history. Peer review caught each earlier placement.
     check_binding_shapes(lines, binding_boundary)
+    snapshots = {
+        snapshot.relative.as_posix(): snapshot
+        for snapshot in (ledger_state, prefix_state)
+    }
     if base is not None:
-        check_state_modes(base, candidate)
+        check_state_modes(base, candidate, snapshots=snapshots)
     else:
         # The push path has no base to compare a mode against, so
         # check_state_modes does not run and nothing on this path asked
@@ -1392,9 +1460,13 @@ def verify_append_gate(
         # answers that without a base. It runs here, in the position
         # check_state_modes occupies on the other path and for the same
         # reason: after every check that existed before it.
-        for relative in (spec.chain.state_relative, spec.chain.prefix_relative):
+        # Given the category this run's own read recorded, for the reason
+        # check_state_modes is: the path is not resolved again here.
+        for snapshot in (ledger_state, prefix_state):
             try:
-                assert_index_agrees_with_tree(candidate.root, relative)
+                assert_index_agrees_with_tree(
+                    candidate.root, snapshot.relative, observed=snapshot.category
+                )
             except ReleaseChainError as exc:
                 raise AppendError(str(exc)) from exc
     # Last of all, and after the release verification's own re-reads: the two
