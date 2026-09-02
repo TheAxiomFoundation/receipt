@@ -1743,3 +1743,106 @@ def test_the_push_path_hands_the_release_verification_its_snapshots(
         "ledger/official_observations.jsonl": b"ledger snapshot",
         "ledger/immutable_prefix.json": b"prefix snapshot",
     }
+
+
+def test_a_state_parent_swapped_after_the_walk_cannot_be_followed(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds R5-F2: the parent confinement was still check-then-open.
+
+    The component walk inspects ``ledger/`` and then the reader opens
+    ``ledger/official_observations.jsonl`` by pathname, which resolves
+    ``ledger/`` all over again — so a checked parent could be replaced with a
+    symlink in between and the open would follow it. ``O_NOFOLLOW`` on the
+    leaf says nothing about its parents. Here the swap is performed on the
+    first ``lstat`` of the ledger path, which is after the walk has cleared
+    ``ledger/``, and the target holds a decoy ledger of four self-consistent
+    rows over the same frozen prefix.
+
+    Without the descriptor walk the reader follows the swapped parent and
+    the snapshot this verdict is built from is four rows from outside the
+    checkout. The run does still refuse — the frozen prefix is walked next
+    and sees the link that is there by then — but it refuses about
+    ``ledger/immutable_prefix.json``, having already read the ledger the
+    walk was taken to confine. What is bound here is that the ledger read
+    itself refuses, and names the component that moved.
+    """
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    decoy_root = tmp_path / "outside"
+    decoy_rows = [observation_row(number) for number in range(1, BASE_ROW_COUNT + 3)]
+    write_ledger(decoy_root, decoy_rows)
+    write_prefix_manifest(decoy_root, decoy_rows)
+
+    ledger = candidate.root / CHAIN_SPEC.state_relative
+    directory = candidate.root / "ledger"
+    real_lstat = os.lstat
+    swapped = {"done": False}
+
+    def swap_then_lstat(path: Any, *arguments: Any, **keywords: Any) -> os.stat_result:
+        try:
+            named = os.fspath(path)
+        except TypeError:
+            named = None
+        if named == os.fspath(ledger) and not swapped["done"]:
+            swapped["done"] = True
+            shutil.move(str(directory), str(tmp_path / "real-ledger"))
+            directory.symlink_to(decoy_root / "ledger", target_is_directory=True)
+        return real_lstat(path, *arguments, **keywords)
+
+    monkeypatch.setattr(os, "lstat", swap_then_lstat)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "state path traverses a symlink at 'ledger': "
+        "ledger/official_observations.jsonl"
+    )
+    # The swap really did happen, and the decoy really was reachable by name.
+    assert swapped["done"]
+    monkeypatch.undo()
+    assert len(ledger.read_text(encoding="utf-8").splitlines()) == BASE_ROW_COUNT + 2
+
+
+def test_the_state_reader_cannot_follow_a_parent_swapped_after_its_walk(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R5-F2 in the release-chain reader, which has the same two steps.
+
+    ``_regular_file_bytes`` checks the final component, walks the parents,
+    and then reads the pathname. Replacing ``ledger/`` immediately after the
+    walk returns is the gap; the read now goes through the descriptor walk,
+    which cannot resolve that name a second time, and refuses in the walk's
+    own words. Both refusals the reader already gave still come first and
+    still say what they said.
+    """
+
+    root = tmp_path / "repo"
+    (root / "ledger").mkdir(parents=True)
+    (root / CHAIN_SPEC.state_relative).write_text('{"real":true}\n', encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "official_observations.jsonl").write_text(
+        '{"decoy":true}\n', encoding="utf-8"
+    )
+    walked = release_chain.assert_no_symlinked_state_component
+
+    def walk_then_swap(
+        walk_root: pathlib.Path, relative: pathlib.PurePosixPath
+    ) -> None:
+        walked(walk_root, relative)
+        directory = walk_root / "ledger"
+        shutil.rmtree(directory)
+        directory.symlink_to(outside, target_is_directory=True)
+
+    monkeypatch.setattr(
+        release_chain, "assert_no_symlinked_state_component", walk_then_swap
+    )
+
+    with pytest.raises(ReleaseChainError) as refusal:
+        _regular_file_bytes(root, CHAIN_SPEC.state_relative)
+    assert str(refusal.value) == (
+        "state path traverses a symlink at 'ledger': "
+        "ledger/official_observations.jsonl"
+    )

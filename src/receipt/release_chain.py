@@ -995,6 +995,23 @@ def jsonl_line_offsets(payload: bytes, label: str) -> list[int]:
     return offsets
 
 
+def _symlinked_component_error(
+    relative: pathlib.PurePosixPath, walked: tuple[str, ...]
+) -> ReleaseChainError:
+    """The one refusal both confinement checks give for a linked component.
+
+    The component walk below and the descriptor walk that opens the file
+    raise this same text for the same fact, so a component that becomes a
+    link between them is refused in the words the walk already used rather
+    than in words of its own.
+    """
+
+    return ReleaseChainError(
+        "state path traverses a symlink at "
+        f"{'/'.join(walked)!r}: {relative.as_posix()}"
+    )
+
+
 def assert_no_symlinked_state_component(
     root: pathlib.Path, relative: pathlib.PurePosixPath
 ) -> None:
@@ -1013,8 +1030,10 @@ def assert_no_symlinked_state_component(
     """
 
     current = root
+    walked: tuple[str, ...] = ()
     for segment in relative.parts:
         current = current / segment
+        walked = (*walked, segment)
         # is_symlink() catches POSIX symlinks; on Windows a junction is not a
         # symlink but is reported by st_reparse_tag, so refuse any reparse
         # point as well. A dangling link does not exist() but still refuses.
@@ -1022,10 +1041,98 @@ def assert_no_symlinked_state_component(
             getattr(current.lstat(), "st_reparse_tag", 0) if current.exists() else 0
         )
         if current.is_symlink() or reparse:
-            raise ReleaseChainError(
-                "state path traverses a symlink at "
-                f"{current.relative_to(root).as_posix()!r}: {relative.as_posix()}"
-            )
+            raise _symlinked_component_error(relative, walked)
+
+
+STATE_OPEN_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+    | getattr(os, "O_BINARY", 0)
+)
+
+
+def _is_symlink_at(name: str, parent: int) -> bool:
+    """Whether one directory entry is a symlink, asked of the open parent.
+
+    Only ever used to choose the words for an open that has already failed,
+    so a further change underneath it costs a diagnosis, never a decision.
+    """
+
+    try:
+        return stat.S_ISLNK(os.lstat(name, dir_fd=parent).st_mode)
+    except OSError:
+        return False
+
+
+def confined_state_descriptor(
+    root: pathlib.Path, relative: pathlib.PurePosixPath
+) -> int:
+    """Open a state file component by component, never by whole pathname.
+
+    ``assert_no_symlinked_state_component`` inspects each component and the
+    reader then opens the pathname, which resolves every one of them again:
+    a parent the walk found to be a real directory can be replaced by a
+    symlink in that gap and the open follows it, so the walk's guarantee is
+    undone by the read it was taken for. Descriptors close the gap. The root
+    is opened once; each intermediate component is opened relative to the
+    descriptor of the component the walk actually reached, with
+    ``O_NOFOLLOW`` so a component that became a link fails instead of being
+    followed and ``O_DIRECTORY`` so one that became a file fails too; the
+    leaf is opened relative to the last of those, with ``O_NOFOLLOW`` and
+    ``O_NONBLOCK``. No name is resolved twice, and the caller ``fstat``s the
+    descriptor rather than the name.
+
+    A component that fails the no-follow open because it is now a link is
+    refused in the walk's own words, since it is the walk's own fact. Any
+    other failure is the caller's to see: a regular file at ``ledger`` has
+    always raised ``NotADirectoryError`` out of this reader and still does.
+
+    Where ``dir_fd`` is unsupported — Windows, where ``os.open`` is not in
+    ``os.supports_dir_fd`` — the pathname open is kept, so the walk remains
+    all the confinement there is on that platform.
+    """
+
+    if os.open not in os.supports_dir_fd:
+        return os.open(root / relative, STATE_OPEN_FLAGS)
+    directory_flags = (
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    )
+    parent = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    walked: tuple[str, ...] = ()
+    try:
+        *components, leaf = relative.parts
+        for segment in components:
+            walked = (*walked, segment)
+            try:
+                child = os.open(segment, directory_flags, dir_fd=parent)
+            except OSError as exc:
+                if _is_symlink_at(segment, parent):
+                    raise _symlinked_component_error(relative, walked) from exc
+                raise
+            os.close(parent)
+            parent = child
+        walked = (*walked, leaf)
+        try:
+            return os.open(leaf, STATE_OPEN_FLAGS, dir_fd=parent)
+        except OSError as exc:
+            if _is_symlink_at(leaf, parent):
+                raise _symlinked_component_error(relative, walked) from exc
+            raise
+    finally:
+        os.close(parent)
+
+
+def read_state_descriptor(descriptor: int) -> bytes:
+    """Read one open state file to the end, through that descriptor alone."""
+
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(descriptor, 1 << 20)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _regular_file_bytes(root: pathlib.Path, relative: pathlib.PurePosixPath) -> bytes:
@@ -1033,14 +1140,25 @@ def _regular_file_bytes(root: pathlib.Path, relative: pathlib.PurePosixPath) -> 
     # input it already rejected is rejected identically; the component walk
     # below only ever fires for a path this reader used to accept. Both state
     # reads in _verify_state_history come through here, so the walk covers the
-    # ledger and the immutable prefix alike.
+    # ledger and the immutable prefix alike. The read itself then goes through
+    # the descriptor walk rather than the pathname, so a component swapped
+    # between the walk and the open cannot be followed; every input either
+    # check already refused still gets that check's message, in its place.
     path = root / relative
     if path.is_symlink() or not path.is_file():
         raise ReleaseChainError(
             f"required state file is missing or non-regular: {path}"
         )
     assert_no_symlinked_state_component(root, relative)
-    return path.read_bytes()
+    descriptor = confined_state_descriptor(root, relative)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ReleaseChainError(
+                f"required state file is missing or non-regular: {path}"
+            )
+        return read_state_descriptor(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _exact_state_bytes(state_bytes: Mapping[str, bytes] | None) -> dict[str, bytes]:
