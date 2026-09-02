@@ -146,19 +146,27 @@ class TsaIdentitySpec:
 class TsaSpec:
     """All repository-specific TSA trust, committed in consumer code.
 
-    Scope limitation (tracked for a later release): an identity's
-    :attr:`TsaIdentitySpec.signer_spki_sha256` is a set with no singleton
-    constraint, so one identity may hold several signer SPKIs and every one of
-    them is allowed concurrently.  A timestamp authority that rotates its
-    *own* signing key is therefore carried by adding the new fingerprint
-    beside the old one in the same identity -- not by splitting verification
-    into eras.  There are no generation or retirement semantics here: nothing
-    records which signer was valid over which interval, and nothing retires a
-    superseded one, so a token from a rotated-out key keeps verifying for as
-    long as the consumer leaves its fingerprint in the set.  That is the
-    contrast with producer-key legacy generations in :mod:`receipt.sign`,
-    where retired keys are named separately and vouch only where the caller
-    asks for immutable pre-rotation history.
+    How a timestamp authority's own signer rotation is carried.  An
+    identity's :attr:`TsaIdentitySpec.signer_spki_sha256` must equal, as a
+    set, the ``allowedSigners`` of the anchor in the bundle it is scoped to
+    (see ``_select_anchor``), and a bundle is immutable: pinned by bytes, at
+    a versioned path that refuses reuse with new bytes.  So a fingerprint
+    cannot be added beside the old one in an existing identity without
+    invalidating the bundle already committed.  A rotation is a new bundle
+    version whose anchor lists the new signer, plus a new identity scoped to
+    that bundle with the same set, activated by a trust transition.  Version
+    order does the retiring: a v2-schema witness must use the newest active
+    bundle, so the superseded signer stops vouching for new records once the
+    new bundle is active, while records that named the old bundle keep
+    verifying under it.  Verification therefore splits into eras by bundle
+    version, each carried explicitly in the consumer spec.  Within one
+    bundle several signers may be allowed at once -- the set has no
+    singleton constraint -- which is concurrent authorization, not
+    rotation.  What is absent is any time interval: nothing records when a
+    signer was valid, only which bundle allowed it.  Compare producer-key
+    legacy generations in :mod:`receipt.sign`, where retired keys are named
+    separately and vouch only where the caller asks for immutable
+    pre-rotation history.
     """
 
     trust_bundles: tuple[TrustBundleSpec, ...]
@@ -1086,13 +1094,26 @@ def _v1_witness_evidence(
                 f"{forbidden}"
             )
         return WitnessEvidence(status=status, digest_sha256=digest_sha256)
-    bundle_reference, _trust = _bundle_for_claim(
+    bundle_reference, trust = _bundle_for_claim(
         records,
         witness,
         trusted_bundles,
         spec=spec,
         active_required=True,
     )
+    # The legacy schema carries one producer-selected token and no per-anchor
+    # outcomes, so against a bundle that configures several anchors it would
+    # let a producer satisfy the whole bundle with whichever single authority
+    # happened to answer -- and say nothing about the rest.  Dual witness is
+    # only dual under v2.  Counted on the bundle the witness actually selected
+    # (peer review): every active bundle stays selectable here, so counting
+    # the newest one let a witness name an older, wider bundle and pass.
+    anchor_count = len(trust["anchors"])
+    if anchor_count > 1:
+        raise TsaError(
+            "legacy witness schema requires a single-anchor bundle; "
+            f"{trust['bundleId']} has {anchor_count}"
+        )
     token = verify_timestamp_token(
         path,
         witness,
@@ -1345,21 +1366,6 @@ def verify_witness(
                 "legacy witness schema cannot cover a TSA trust transition "
                 "or a chain with v2 active"
             )
-        # The legacy schema carries one producer-selected token and no
-        # per-anchor outcomes, so against a bundle that configures several
-        # anchors it would let a producer satisfy the whole bundle with
-        # whichever single authority happened to answer -- and say nothing
-        # about the rest.  Dual witness is only dual under v2.
-        if preferred is not None:
-            _legacy_path, legacy_trust = _load_trust_bundle(
-                records, preferred, spec=spec
-            )
-            anchor_count = len(legacy_trust["anchors"])
-            if anchor_count > 1:
-                raise TsaError(
-                    "legacy witness schema requires a single-anchor bundle; "
-                    f"{legacy_trust['bundleId']} has {anchor_count}"
-                )
         return _v1_witness_evidence(
             path,
             witness,

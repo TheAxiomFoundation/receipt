@@ -655,19 +655,21 @@ def test_verifies_two_anchors_and_reports_the_earliest_token(
     assert evidence.gen_time == earliest.gen_time
 
 
-def test_one_identity_allows_several_signers_at_once_and_retires_none(
+def test_one_bundle_may_allow_several_signers_at_once(
     tmp_path: pathlib.Path,
     local_anchors: tuple[LocalAnchor, ...],
     rotated_alpha: LocalTsa,
 ) -> None:
-    """What a signer rotation actually costs a consumer spec, checked.
+    """Concurrent authorization within one immutable bundle, not rotation.
 
-    ``signer_spki_sha256`` is a frozenset with no singleton constraint and no
-    validity interval, so an authority that rotates its own signing key is
-    carried by adding the new fingerprint beside the old one in one identity.
-    Verification is not split into eras: both signers are allowed at once, and
-    the superseded one keeps verifying for as long as the consumer leaves it
-    in the set, because nothing here retires anything.
+    ``signer_spki_sha256`` is a frozenset with no singleton constraint, and it
+    must equal the bundle anchor's ``allowedSigners`` as a set, so a bundle
+    that lists two signers is verified against an identity holding both, and
+    tokens from either verify. That is what a set buys. It is not how a
+    rotation is carried, because the bundle is immutable: the two tests
+    below show a rotation as a new bundle version and what version order
+    retires. (The first draft of this test called this a rotation; peer
+    review corrected it.)
     """
 
     alpha = local_anchors[0]
@@ -967,3 +969,187 @@ def test_refuses_a_v2_unavailable_witness_that_carries_token_evidence(
         f"unavailable witness contains token evidence for {tree.record}: "
         "['tokenPath', 'tokenSha256']"
     )
+
+
+def add_bundle_version(
+    tree: WitnessTree,
+    anchors: Sequence[LocalAnchor],
+    *,
+    version: int,
+    signers: Mapping[str, dict[str, str]] | None = None,
+) -> tuple[dict[str, Any], TsaSpec]:
+    """Write a further immutable bundle version into the tree.
+
+    Returns its reference and a spec that pins every bundle in the tree with a
+    bundle-scoped identity for every anchor, the shape a consumer commits when
+    it carries a trust transition. ``signers`` replaces an anchor's allowed
+    signer with the given certificate pins, in the bundle and in the new
+    identity together, which is how a rotated signing key enters: as a new
+    version, never as an edit.
+    """
+
+    from receipt.canonical import canonical_sha256
+
+    signers = signers or {}
+    bundle_id = f"tsa-anchors-v{version}"
+    logical = f"records/trust/{bundle_id}.json"
+    payload: dict[str, Any] = {
+        "schemaVersion": "thesis_tsa_trust_bundle_v1",
+        "bundleId": bundle_id,
+        "anchors": [anchor.entry() for anchor in anchors],
+    }
+    for entry in payload["anchors"]:
+        if entry["id"] in signers:
+            entry["allowedSigners"] = [dict(signers[entry["id"]])]
+    path = tree.records / "trust" / f"{bundle_id}.json"
+    path.write_bytes(canonical_bytes(payload) + b"\n")
+    reference = {
+        "bundleId": bundle_id,
+        "path": logical,
+        "sha256": sha256_bytes(path.read_bytes()),
+        "size": path.stat().st_size,
+        "canonicalJsonSha256": canonical_sha256(payload),
+    }
+    identities = tuple(
+        TsaIdentitySpec(
+            bundle_id=bundle_id,
+            anchor_id=anchor.anchor_id,
+            root_spki_sha256=anchor.root_pins["spkiSha256"],
+            signer_spki_sha256=frozenset(
+                {signers.get(anchor.anchor_id, anchor.signer_pins)["spkiSha256"]}
+            ),
+            max_future_seconds=0,
+            max_token_lead_seconds=300,
+        )
+        for anchor in anchors
+    )
+    spec = TsaSpec(
+        trust_bundles=(
+            *tree.spec.trust_bundles,
+            TrustBundleSpec(
+                bundle_id=bundle_id,
+                path=logical,
+                sha256=str(reference["sha256"]),
+                size=int(reference["size"]),
+                canonical_json_sha256=str(reference["canonicalJsonSha256"]),
+            ),
+        ),
+        tsa_identities=(*tree.spec.tsa_identities, *identities),
+        legacy_witness_bundle_id=tree.spec.legacy_witness_bundle_id,
+    )
+    return reference, spec
+
+
+def test_a_legacy_witness_is_measured_against_the_bundle_it_names(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """The single-anchor rule counts the bundle the witness selects.
+
+    Every activated bundle stays selectable by a legacy witness, and the rule
+    was first checked against the newest one. So with a single-anchor bundle
+    newest and named as the legacy bundle, a v1 witness could still name the
+    older two-anchor bundle, verify one token against one of its authorities,
+    and pass. Found by peer review; the count now runs on the bundle the
+    witness actually resolved to.
+    """
+
+    tree = build_witness_tree(
+        tmp_path, local_anchors, schema="thesis_rfc3161_witness_v1"
+    )
+    reference, spec = add_bundle_version(tree, local_anchors[:1], version=2)
+    spec = dataclasses.replace(spec, legacy_witness_bundle_id="tsa-anchors-v2")
+    active = {BUNDLE_LOGICAL: tree.reference, str(reference["path"]): reference}
+    with pytest.raises(TsaError) as caught:
+        verify_witness(
+            tree.record,
+            spec=spec,
+            records=tree.records,
+            trusted_bundles=active,
+            transition_bundle_updates=[],
+        )
+    assert str(caught.value) == (
+        "legacy witness schema requires a single-anchor bundle; tsa-anchors-v1 has 2"
+    )
+
+
+def test_a_superseded_bundle_stops_vouching_for_new_records(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_alpha: LocalTsa,
+) -> None:
+    """Version order is the retirement mechanism, and it is prospective.
+
+    A record witnessed under bundle v1 keeps verifying under v1 for as long as
+    that is the newest active bundle. Once v2 -- here carrying a rotated
+    signer -- is active, a v2-schema witness that names v1 is refused: the
+    old signer no longer vouches for new records. History that named v1
+    before the transition is unaffected, because the verifier replays which
+    bundles were active at each record.
+    """
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    rotated = certificate_pins(rotated_alpha.signer_pem)
+    reference, spec = add_bundle_version(
+        tree, local_anchors[:1], version=2, signers={alpha.anchor_id: rotated}
+    )
+    before = {BUNDLE_LOGICAL: tree.reference}
+    assert (
+        verify_witness(
+            tree.record, spec=spec, records=tree.records, trusted_bundles=before,
+            transition_bundle_updates=[],
+        ).tokens[0].tsa_spki_sha256
+        == alpha.signer_pins["spkiSha256"]
+    )
+    after = {**before, str(reference["path"]): reference}
+    with pytest.raises(TsaError) as caught:
+        verify_witness(
+            tree.record, spec=spec, records=tree.records, trusted_bundles=after,
+            transition_bundle_updates=[],
+        )
+    assert str(caught.value) == (
+        "multi-token witness does not use the newest active TSA trust bundle"
+    )
+
+
+def test_a_rotated_signer_verifies_under_the_bundle_version_that_names_it(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_alpha: LocalTsa,
+) -> None:
+    """A rotation is a new bundle version plus a bundle-scoped identity.
+
+    The bundle is immutable and its anchor's ``allowedSigners`` must equal the
+    identity's set, so the rotated key cannot be added beside the old one in
+    place. A token from the rotated signer fails under v1, which never named
+    it, and verifies under v2, which does -- with v1 still active for the
+    records that predate the transition.
+    """
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(
+        tmp_path, local_anchors[:1], stamp_with={alpha.anchor_id: rotated_alpha}
+    )
+    with pytest.raises(TsaError):
+        verify_tree(tree)
+    rotated = certificate_pins(rotated_alpha.signer_pem)
+    reference, spec = add_bundle_version(
+        tree, local_anchors[:1], version=2, signers={alpha.anchor_id: rotated}
+    )
+    rewrite_witness(
+        tree,
+        lambda payload: payload.update(
+            {
+                "trustBundleId": "tsa-anchors-v2",
+                "trustBundlePath": str(reference["path"]),
+                "trustBundleSha256": reference["sha256"],
+            }
+        ),
+    )
+    active = {BUNDLE_LOGICAL: tree.reference, str(reference["path"]): reference}
+    evidence = verify_witness(
+        tree.record, spec=spec, records=tree.records, trusted_bundles=active,
+        transition_bundle_updates=[],
+    )
+    assert evidence.trust_bundle_id == "tsa-anchors-v2"
+    assert evidence.tokens[0].tsa_spki_sha256 == rotated["spkiSha256"]
