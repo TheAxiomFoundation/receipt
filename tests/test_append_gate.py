@@ -557,3 +557,62 @@ def test_a_branch_that_moves_mid_verdict_is_still_read_at_one_commit(
         f"+2 appended vs base moving ({first})"
     )
     assert git(moving.root, "rev-parse", "moving") == later
+
+
+def test_the_ledger_cannot_be_made_executable_by_a_proposal(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The gap: the append path compared bytes, never the mode git tracks."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    ledger = candidate.root / CHAIN_SPEC.state_relative
+    ledger.chmod(ledger.stat().st_mode | 0o111)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "state file mode changed relative to base: "
+        "ledger/official_observations.jsonl"
+    )
+
+
+def test_the_frozen_prefix_cannot_be_made_executable_by_a_proposal(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The manifest is candidate-controlled too, and its fields were the only
+    thing anchored to the base."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    prefix = candidate.root / CHAIN_SPEC.prefix_relative
+    prefix.chmod(prefix.stat().st_mode | 0o111)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "state file mode changed relative to base: ledger/immutable_prefix.json"
+    )
+
+
+def test_a_ledger_executable_at_the_base_may_stay_executable(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The invariant is "keeps the base's category", not "must be 644": a base
+    that already recorded 100755 accepts an ordinary append."""
+
+    candidate = base_repository(tmp_path)
+    ledger = candidate.root / CHAIN_SPEC.state_relative
+    ledger.chmod(ledger.stat().st_mode | 0o111)
+    git(candidate.root, "add", "-A")
+    git(candidate.root, "commit", "--quiet", "-m", "executable ledger")
+    executable_base = Candidate(
+        root=candidate.root, base=git(candidate.root, "rev-parse", "HEAD")
+    )
+    append_one_row(executable_base)
+    ledger.chmod(ledger.stat().st_mode | 0o111)
+
+    assert run_gate(executable_base) == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 1, "
+        "+1 appended vs base"
+    )

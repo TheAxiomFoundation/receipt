@@ -37,7 +37,9 @@ differential harness in tests/test_append_gate_equivalence.py.
 
 Additions since the extraction close confinement gaps the upstream battery
 never presented: a gate-only proposal is confined to the surfaces its verdict
-speaks for. They run beside the extracted checks without altering any of their
+speaks for, a state path that traverses a symlinked component is refused before
+it is read, and the base is resolved to a commit once and carried to every
+consumer. They run beside the extracted checks without altering any of their
 refusals or the order in which those refusals fire, and carry their own tests
 in tests/test_append_gate.py.
 """
@@ -598,6 +600,34 @@ def check_prefix_anchored_to_base(
     return int(base_prefix["prefixLineCount"])
 
 
+def check_state_modes(base: _BaseCommit, candidate: _CandidateTree) -> None:
+    """Require the ledger and the frozen prefix to keep the base's file mode.
+
+    check_append_only and check_prefix_anchored_to_base compare bytes and
+    manifest fields only, and verify_release_history_immutable compares modes
+    for ``releases/`` alone, so a proposal could leave both state files
+    byte-identical and still flip the ledger to executable. Git tracks that
+    bit, a merge carries it, and nothing on the append path looked at it.
+    Base release files are already mode-immutable; this is the same invariant
+    for the two files the append path itself reads. Git records only the
+    executable category, so that is what is compared — a base symlink or
+    gitlink entry is a category change too, and refuses here.
+    """
+
+    for relative in (
+        candidate.spec.chain.state_relative,
+        candidate.spec.chain.prefix_relative,
+    ):
+        path = relative.as_posix()
+        try:
+            entry = git_file_entry(candidate.root, base.commit, path)
+        except ReleaseChainError as exc:
+            raise AppendError(str(exc)) from exc
+        executable = bool((candidate.root / relative).stat().st_mode & 0o111)
+        if ("100755" if executable else "100644") != entry.mode:
+            raise AppendError(f"state file mode changed relative to base: {path}")
+
+
 def _release_triple(
     new_files: set[str],
     expected_index: int,
@@ -876,6 +906,9 @@ def verify_append_gate(
             candidate,
         )
         appended = check_append_only(base, lines, candidate)
+        # After the byte comparisons, so every refusal that existed before
+        # this check still fires first and in its own words.
+        check_state_modes(base, candidate)
     check_rows(lines, binding_boundary, spec)
     # On the PR path, the trusted code root is the detached base checkout.
     # Production verification must use those immutable anchors and the base
