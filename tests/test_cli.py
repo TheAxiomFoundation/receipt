@@ -1030,6 +1030,81 @@ def test_unexpected_exception_in_any_pass_is_a_fail_verdict_not_an_escape(
     assert any("RuntimeError: injected surprise" in p["failure"] for p in failed)
 
 
+# --- the fail-closed boundary holds against a raise that is not an Exception --
+
+
+@pytest.mark.parametrize("escape", ["SystemExit(0)", "GeneratorExit()"])
+def test_a_spec_that_exits_the_interpreter_is_refused_not_obeyed(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str], escape: str
+) -> None:
+    """A spec is executed, so a spec can try to end the command.
+
+    ``raise SystemExit(0)`` is not an ``Exception``. It unwound past the
+    Exception-only boundary around ``exec``, past every pass below it, and out
+    of the interpreter with status 0 and no verdict printed at all — the
+    producer's own configuration file declaring the audit successful, and a
+    ``--json`` consumer left with empty stdout. It is a load failure like any
+    other, and it refuses as one.
+    """
+
+    path = tmp_path / "spec.py"
+    path.write_text(
+        SPEC_TEMPLATE.format(name="exiting", spki="a" * 64) + f"\nraise {escape}\n"
+    )
+    assert (
+        main(["verify", "--spec", str(path), "--root", str(tmp_path), "--json"])
+        == EXIT_USAGE
+    )
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["verdict"] == "FAIL"
+    assert payload["stage"] == "spec"
+    assert payload["passesCompleted"] == []
+    assert escape.split("(")[0] in payload["failure"]
+    assert "PASS" not in captured.out
+
+
+def test_a_pass_that_exits_the_interpreter_is_a_fail_verdict(
+    repo: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same boundary, one layer in: a pass that raises SystemExit is a FAIL,
+    not an exit status the verification chose for itself."""
+
+    def exit_zero(*_args: object, **_kwargs: object) -> object:
+        raise SystemExit(0)
+
+    monkeypatch.setattr("receipt.verify.verify_release_chain", exit_zero)
+    assert run(repo, "--json") == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
+    assert payload["passesCompleted"] == []
+    assert any(
+        "SystemExit: 0" in item["failure"]
+        for item in payload["passes"]
+        if not item["ok"]
+    )
+
+
+def test_a_run_that_exits_the_interpreter_is_a_fail_verdict(
+    repo: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """And the CLI's own outer boundary, which is the last one standing."""
+
+    def exit_zero(*_args: object, **_kwargs: object) -> object:
+        raise SystemExit(0)
+
+    monkeypatch.setattr("receipt.cli.run_verification", exit_zero)
+    assert run(repo, "--json") == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
+    assert payload["stage"] == "verification"
+    assert "SystemExit" in payload["failure"]
+
+
 # --- second cross-family round: the coverage it found missing ----------------
 
 
