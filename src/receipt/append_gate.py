@@ -82,7 +82,9 @@ from receipt.release_chain import (
     MANIFEST_RE,
     ReleaseChainError,
     assert_no_symlinked_state_component,
+    confined_state_descriptor,
     git_blob_bytes,
+    read_state_descriptor,
     git_file_entry,
     verify_base_release_chain,
     verify_release_chain,
@@ -341,6 +343,12 @@ def _read_state_snapshot(
     to be the same regular file the ``lstat`` saw, and read the bytes through
     that one descriptor. Every consumer in this module is then fed these
     bytes rather than reading the path again.
+
+    The open goes through ``release_chain.confined_state_descriptor``, which
+    resolves the components against directory descriptors rather than
+    resolving the pathname a second time: ``O_NOFOLLOW`` on the leaf says
+    nothing about ``ledger/``, so a parent this walk found to be a real
+    directory could still be replaced by a link before the open followed it.
     """
 
     _confine_state_path(relative, candidate)
@@ -349,13 +357,10 @@ def _read_state_snapshot(
     before = os.lstat(path)
     if not stat.S_ISREG(before.st_mode):
         raise AppendError(f"state file is not a regular file: {display}")
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_NONBLOCK", 0)
-        | getattr(os, "O_BINARY", 0)
-    )
-    descriptor = os.open(path, flags)
+    try:
+        descriptor = confined_state_descriptor(candidate.root, relative)
+    except ReleaseChainError as exc:
+        raise AppendError(str(exc)) from exc
     try:
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode):
@@ -364,18 +369,13 @@ def _read_state_snapshot(
             raise AppendError(
                 f"state file was replaced while it was being read: {display}"
             )
-        chunks: list[bytes] = []
-        while True:
-            chunk = os.read(descriptor, 1 << 20)
-            if not chunk:
-                break
-            chunks.append(chunk)
+        payload = read_state_descriptor(descriptor)
         read = os.fstat(descriptor)
     finally:
         os.close(descriptor)
     return _StateSnapshot(
         relative=relative,
-        payload=b"".join(chunks),
+        payload=payload,
         identity=(
             read.st_dev,
             read.st_ino,
