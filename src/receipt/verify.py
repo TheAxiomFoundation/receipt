@@ -89,6 +89,12 @@ def _exception_detail(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
+#: The passes a PASS verdict is made of. A verdict is a claim about custody,
+#: binding, and declaration; a result missing any of them has no verdict to
+#: report, whatever else it recorded. Named here so ``ok`` states the
+#: requirement rather than inferring it from whatever happened to run.
+REQUIRED_PASSES = ("custody", "binding", "declaration")
+
 #: What each completed pass establishes, in the verdict's own words. Keyed by
 #: pass name so the JSON scope block can be built from actual results.
 _PASS_CLAIMS = {
@@ -158,7 +164,20 @@ class VerifyResult:
 
     @property
     def ok(self) -> bool:
-        return all(item.ok for item in self.passes)
+        """Every recorded pass succeeded, and the three that make a verdict ran.
+
+        ``all()`` on its own is vacuously true. A result carrying no passes —
+        a run that fell over before reaching the first one, or a result built
+        by a caller composing this library — reported PASS, and the command
+        printed "ESTABLISHED OFFLINE, FROM THIS CLONE ALONE" and exited 0 over
+        an empty list of passes. Absence of a failure is not the same as
+        presence of a verdict, so the required passes are named and checked.
+        """
+
+        completed = {item.name for item in self.passes if item.ok}
+        return all(item.ok for item in self.passes) and completed.issuperset(
+            REQUIRED_PASSES
+        )
 
     @property
     def head_name(self) -> str | None:
