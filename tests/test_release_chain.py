@@ -584,7 +584,6 @@ def test_standalone_receipts_shared_filename_divergence_refuses(
     assert reads["count"] == 2
 
 
-
 def test_a_receipt_swapped_mid_verification_cannot_mix_two_tokens(
     repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -684,7 +683,6 @@ def test_a_receipt_replaced_between_the_lstat_and_the_open_refuses(
         _receipt_bytes(receipt)
 
 
-
 def receipt_text(repo: pathlib.Path) -> tuple[str, pathlib.Path]:
     """The real `openssl ts -reply -text` output the verifier parses."""
 
@@ -744,7 +742,6 @@ def test_a_genTime_finer_than_a_microsecond_refuses(repo: pathlib.Path) -> None:
     text, alpha = receipt_text(repo)
     with pytest.raises(ReleaseChainError, match="finer than a microsecond"):
         _parse_receipt_text(with_fraction(text, ".1234567"), alpha)
-
 
 
 def test_default_mode_keeps_parts_based_purepath_joins(
