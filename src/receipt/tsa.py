@@ -851,10 +851,12 @@ def _certificate_count(path: Path) -> int:
     -certs``, whose ``-certs`` filter is the same population ``-CAfile``
     loads, and reads the total off the end of its listing.
 
-    Refuses rather than guesses when there is no total to read: ``storeutl``
-    is silent on a file holding no PEM object at all and fails outright on
-    one holding an object its store loader cannot decode, and neither is a
-    file a pinned root may be.
+    Refuses rather than guesses when there is no total to read.  A file
+    holding no PEM object at all gets ``Total found: 0`` from OpenSSL 3.0
+    (so the count is zero and the caller's one-certificate rule refuses)
+    and no total at all from OpenSSL 3.6 (so this refuses as uncountable);
+    a file holding an object the store loader cannot decode fails
+    outright on both.  None of these is a file a pinned root may be.
     """
 
     try:

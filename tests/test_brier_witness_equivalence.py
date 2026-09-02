@@ -62,13 +62,15 @@ Deliberately outside the mutation contract:
   then hands the whole file to ``openssl ts -verify -CAfile``, which trusts
   every certificate in it; the port refuses a pinned root PEM unless
   ``openssl storeutl -noout -certs`` counts exactly one certificate in it,
-  and gives the two ``-CAfile`` verifications that one certificate as
-  ``openssl x509`` re-encodes it rather than the pinned file.  ``storeutl``
+  and gives the two ``-CAfile`` verifications the pinned file itself, which
+  that count guarantees holds exactly that one object, auxiliary trust
+  settings included (a re-encoding through ``openssl x509`` was tried and
+  withdrawn: it dropped X509_AUX settings).  ``storeutl``
   counts one in each pinned root (``records/trust/freetsa-root-2016.pem``
   and ``records/trust/digicert-trusted-root-g4.pem``), so the refusal --
   which precedes the ported PEM-hash refusal, and the further refusal for a
   root whose certificates ``storeutl`` cannot count at all -- fires on no
-  case here; and each root re-encodes to the certificate its own
+  case here; and each root's one certificate is the certificate its own
   ``certificateSha256`` already pins (``a6379e7c...`` and ``552f7bdc...``),
   so the substituted ``-CAfile`` carries the same trust anchor the baseline
   passed and no case's outcome moves;

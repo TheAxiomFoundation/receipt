@@ -917,8 +917,8 @@ def test_refuses_a_token_whose_imprint_is_over_other_bytes(
         verify_tree(tree)
     message = str(caught.value)
     # Pinned to where the message stops being reproducible: the ported
-    # wrapper and the command up to the ``-CAfile`` argument, which is a
-    # temporary re-encoding made per run, then OpenSSL's own reason.
+    # wrapper and the command up to the ``-CAfile`` argument (the pinned
+    # root's path, then a temporary ``-CApath``), then OpenSSL's own reason.
     assert message.startswith(
         "OpenSSL command failed (openssl ts -verify -config /dev/null "
         f"-data {tree.record} -in {token} -CAfile "
@@ -1612,6 +1612,15 @@ def test_refuses_a_pinned_root_pem_that_carries_a_second_authority(
     # is the first certificate alone, which is alpha's root.
     assert beta.tsa.root_pem.read_bytes() in combined.read_bytes()
     assert certificate_pins(combined) == alpha.root_pins
+    # The premise, asked of OpenSSL directly: a token from the second
+    # authority chains against the combined file and not against the pinned
+    # certificate alone, so ``storeutl``'s count of two is the count of what
+    # ``-CAfile`` would trust (peer review, fourth gate).
+    digest = sha256_bytes(tree.record.read_bytes())
+    beta_token = tree.records / "trust" / "beta-over-the-record.tsr"
+    beta.tsa.stamp(digest, beta_token)
+    assert openssl_ts_verifies(tree.record, beta_token, combined)
+    assert not openssl_ts_verifies(tree.record, beta_token, alpha.tsa.root_pem)
 
     def point_at_the_two_certificate_pem(entry: dict[str, Any]) -> None:
         entry["rootCertificate"] = {
@@ -2042,11 +2051,11 @@ def test_accepts_a_root_pem_whose_one_object_wears_another_certificate_label(
     The superseded pattern could not tell a lone ``TRUSTED CERTIFICATE`` from
     the second object of a two-authority file, so it had to refuse both;
     ``openssl storeutl`` counts one here and two there. What such a file
-    authorizes is settled elsewhere now: ``openssl x509`` re-encodes this
-    object to the plain certificate whose hashes the anchor declares --
-    asserted against the untouched root's pins -- and
-    ``verify_timestamp_token`` trusts that re-encoding and nothing else,
-    which the genuine token verified below exercises end to end.
+    authorizes is settled by that count: ``openssl x509`` reads this one
+    object as the certificate whose hashes the anchor declares -- asserted
+    against the untouched root's pins -- and ``verify_timestamp_token``
+    trusts the pinned file, which holds that object and nothing else, as
+    the genuine token verified below exercises end to end.
     """
 
     alpha = local_anchors[0]
