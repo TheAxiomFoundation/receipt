@@ -528,6 +528,60 @@ def _assert_assigned(value: str, label: str) -> str:
     return value
 
 
+def _strips_to_another_name(segment: str) -> bool:
+    """Whether Win32 lookup strips this component down to a different name.
+
+    Trailing dots and spaces are removed from a component before the lookup,
+    so ``"x.yaml."`` and ``"x.yaml "`` open ``"x.yaml"``. No directory listing
+    emits the stripped spelling alongside the written one, and the two are not
+    fold-equal, so nothing built on fold keys can pair them.
+
+    Asked of *declared* paths by :func:`_aliases_natively` and of *tree entry
+    names* by the sweep, which is the half that was missing: the declared side
+    was screened from round three while the filesystem names that decide
+    closed-world membership were not (peer review, round six).
+    """
+
+    return segment != segment.rstrip(". ")
+
+
+def _short_name_carries_pinned_suffix(name: str, suffixes: tuple[str, ...]) -> bool:
+    """Whether 8.3 generation would give this name a pinned content suffix.
+
+    An NTFS volume with 8.3 generation on hands a long name a second,
+    addressable spelling: the stem shortened with a tilde-digit and the
+    extension truncated to its first three characters, uppercased. So with
+    ``.yml`` pinned, a file emitted as ``smuggled.ymlx`` is not content under
+    :func:`_has_pinned_suffix` — its suffix is ``.ymlx`` — while the
+    ``SMUGGL~1.YML`` that opens the same bytes is content, and sits outside
+    the closed world the sweep just called closed (peer review, round six).
+
+    Modelling 8.3 *generation* is not attempted: the stem depends on
+    collisions with names this verifier cannot see, and the whole scheme can
+    be off on the volume. What is modelled is the only part that decides
+    membership — the extension — and it is compared conservatively. The
+    truncation means a pin longer than three characters can never be carried
+    exactly, so the first three characters of the pin's own extension are
+    what the alias is matched against: with ``.yaml`` pinned, a file named
+    ``x.yamlx`` refuses too, though its alias would read ``.YAM``. Refusing a
+    name no real corpus carries is the cheap side of this trade.
+
+    Compared through :func:`_path_fold`, the key membership is decided by
+    everywhere else in this module, so ``.YML`` and ``.yml`` are one suffix
+    here exactly as they are there.
+    """
+
+    _, dot, extension = name.rpartition(".")
+    if not dot or not extension:
+        # No extension, so 8.3 generation produces a short name with none
+        # either, and a pinned suffix always begins with a dot.
+        return False
+    alias = "." + extension[:3].upper()
+    return any(
+        _path_fold(alias) == _path_fold("." + suffix[1:][:3]) for suffix in suffixes
+    )
+
+
 def _aliases_natively(segment: str) -> bool:
     """Whether Win32 resolves this component under a spelling nothing emits.
 
@@ -537,9 +591,16 @@ def _aliases_natively(segment: str) -> bool:
     and an NTFS volume with 8.3 generation on hands out a short name such as
     ``"RULESF~1.YAM"`` that opens the long name's file. Neither spelling is
     ever emitted by a directory listing, so no fold key can catch it.
+
+    This is the *declared* side. A path a journal names is refused outright
+    if it is spelled either way. What a tree entry may be named is a separate
+    question, answered by :func:`_strips_to_another_name` and
+    :func:`_short_name_carries_pinned_suffix` where the sweep meets it: a
+    file really named ``RULESF~1.YAM`` on a POSIX host is an ordinary file,
+    not an alias of anything, so the tilde shape is not refused there.
     """
 
-    if segment != segment.rstrip(". "):
+    if _strips_to_another_name(segment):
         return True
     return (
         SHORT_NAME_TILDE_RE.search(segment) is not None
@@ -1222,6 +1283,26 @@ def _reject_aliasing_paths(relatives: list[str]) -> None:
         seen[key] = relative
 
 
+def _assert_no_stripping_alias(name: str, relative: str) -> None:
+    """Refuse a tree entry Win32 lookup would strip down to another name.
+
+    One function so the refusal is byte-identical wherever the sweep meets
+    such a name: under a content root, and beside a component of one. The
+    two are the same hazard — on the filesystem this models, the entry
+    spelled with the trailing dot or space *is* the entry without it, so
+    which of the two an auditor's clone holds is not a question the tree can
+    answer.
+
+    Directories are screened as well as files: ``rules /x.yaml`` and
+    ``rules/x.yaml`` are one path there, and only one of them is swept here.
+    """
+
+    if _strips_to_another_name(name):
+        raise CorpusError(
+            f"content root contains an entry Windows would alias: {_quoted(relative)}"
+        )
+
+
 def _tree_content_paths(root: pathlib.Path, spec: CorpusSpec) -> dict[str, pathlib.Path]:
     """Enumerate every regular file the spec calls content.
 
@@ -1275,6 +1356,10 @@ def _tree_content_paths(root: pathlib.Path, spec: CorpusSpec) -> dict[str, pathl
                 # whether the closed world contains it — would depend on the
                 # verifier's interpreter rather than on the tree.
                 _assert_assigned(candidate.name, f"tree entry {_quoted(relative)}")
+                # And before anything decides what kind of entry it is: a
+                # trailing dot or space aliases a directory as readily as a
+                # file, and the name is all this question needs.
+                _assert_no_stripping_alias(candidate.name, relative)
                 try:
                     info = candidate.lstat()
                 except OSError as exc:
@@ -1319,6 +1404,18 @@ def _tree_content_paths(root: pathlib.Path, spec: CorpusSpec) -> dict[str, pathl
                 # The same predicate the journal classifier uses, so the sweep
                 # and the classifier cannot disagree about what is content.
                 if not _has_pinned_suffix(relative, spec.content_suffixes):
+                    # Not content under the name the listing emitted. On a
+                    # volume with 8.3 generation it may still be content
+                    # under the short name that opens the same bytes, and
+                    # that name no listing emits, so refuse rather than skip
+                    # (peer review, round six).
+                    if _short_name_carries_pinned_suffix(
+                        candidate.name, spec.content_suffixes
+                    ):
+                        raise CorpusError(
+                            "content root contains a file whose short-name alias "
+                            f"would carry a pinned suffix: {_quoted(relative)}"
+                        )
                     continue
                 found[relative] = candidate
     return found
@@ -1351,6 +1448,14 @@ def _assert_no_aliasing_root_component(root: pathlib.Path, relative: str) -> Non
             return
         for entry in _list_directory(current, "/".join(walked)):
             _assert_assigned(entry.name, f"tree entry beside {_quoted(relative)}")
+            # The trailing-dot/space rule reaches here too, and it is not a
+            # detail of tidiness: an entry named "rules " beside the pinned
+            # "rules" is that root on Windows, holding whatever a producer
+            # put in it, while a POSIX verifier sweeps only the spelling the
+            # spec pinned. The fold check below cannot pair them — the two
+            # names are not fold-equal — so the strip has to be asked
+            # separately (peer review, round six).
+            _assert_no_stripping_alias(entry.name, "/".join([*walked, entry.name]))
             if entry.name != component and _path_fold(entry.name) == _path_fold(
                 component
             ):
