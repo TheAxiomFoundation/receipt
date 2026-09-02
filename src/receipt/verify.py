@@ -310,6 +310,14 @@ def _custody_detail(verification: ChainVerification, spec: VerificationSpec) -> 
     assert anchor_set is not None
     return (
         f"{len(verification.releases)} release(s), HEAD {head.path.name}; "
+        # The filename carries only the first 16 hex of the head manifest's
+        # digest, and that digest is exactly the value an auditor compares out
+        # of band — freshness and uniqueness are the two things this command
+        # states it cannot establish from one clone, and comparing head
+        # digests is the remedy it names for both. A prefix is not quotable
+        # evidence for that comparison, so the full digest gets its own
+        # segment beside the filename an auditor can find on disk.
+        f"head {head.sha256}; "
         f"producer SPKI {spec.chain.producer_spki_sha256[:16]}…; "
         # Full digest, deliberately: the anchor-set digest exists so an
         # assessment can quote it from the verdict alone, and unlike the

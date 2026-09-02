@@ -505,16 +505,33 @@ def test_the_json_verdict_names_the_anchor_set_in_force(
     assert payload["chain"]["anchorFiles"] == per_file
 
 
-def test_the_text_verdict_carries_the_full_anchor_set_digest(
+def test_the_text_verdict_carries_every_quotable_digest_in_full(
     repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The digest exists to be quoted from the verdict alone, and it is
-    pinned nowhere else — a prefix would not be quotable evidence."""
+    """Three digests exist to be quoted from the verdict alone.
+
+    The spec digest names the configuration the run was made under, the head
+    digest is what an auditor compares out of band — freshness and uniqueness
+    are the two things this command says it cannot establish from one clone,
+    and comparing head digests is the remedy it names for both — and the
+    anchor-set digest names the trust material in force and is pinned nowhere
+    else. None of them is quotable evidence as a prefix, and the head digest
+    was reaching the text verdict only as the 16 hex characters in the
+    manifest's filename.
+    """
 
     combined, _ = anchor_set_recomputed(repo)
+    spec_digest = hashlib.sha256(
+        (repo / "verification/spec.py").read_bytes()
+    ).hexdigest()
+    head_digest = hashlib.sha256(manifest_stem(repo).read_bytes()).hexdigest()
     assert run(repo) == EXIT_OK
     out = capsys.readouterr().out
+    assert f"sha256 {spec_digest}" in out
+    assert f"head {head_digest}" in out
     assert f"anchor set {combined}" in out
+    for digest in (spec_digest, head_digest, combined):
+        assert len(digest) == 64, "a prefix is not quotable evidence"
 
 
 def test_a_gate_that_did_not_run_is_shouted_not_hidden(
