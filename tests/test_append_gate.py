@@ -29,6 +29,10 @@ step between, R6-F3 the state file's mode and parents resolved again after
 the read that established them, R6-F4 the descent that fell back to a
 pathname open and the root nothing vouched for.
 
+Docstrings labelled R7-F1 onward name that gate's second round, numbering
+from one again: R7-F6 the index reads that passed a path to git as a
+pattern.
+
 The fixture is a local git repository built from scratch — no network, no
 witnesses, no signatures. Its release tree holds a README and no manifests, so
 the gate's chain verification finds nothing to verify and the checks under
@@ -2582,4 +2586,106 @@ def test_the_push_paths_index_comparison_takes_the_snapshots_category(
     assert str(refusal.value) == (
         "candidate working tree mode for ledger/official_observations.jsonl "
         "disagrees with its index entry (100644 vs 100755)"
+    )
+
+
+def commit_all(candidate: Candidate, message: str) -> Candidate:
+    """Commit the working tree and return the candidate rebased on it."""
+
+    git(candidate.root, "add", "-A")
+    git(candidate.root, "commit", "--quiet", "-m", message)
+    return replace(candidate, base=git(candidate.root, "rev-parse", "HEAD"))
+
+
+def test_the_index_is_asked_about_a_path_not_a_pattern(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds R7-F6: every index read passed the path to git as a bare
+    pathspec, which is a *pattern*. ``releases/x[y]z.md`` is a legitimate
+    filename and a glob at the same time, so the read about it also returned
+    the sibling ``releases/xyz.md`` that the bracket expression matches —
+    entries for a path the caller never asked about, kept out of the two
+    exact-path checks only by their own ``listed == path`` filter and not
+    kept out of the release root's scan at all, which has no single path to
+    filter on. Without the literal pathspec the first assertion here gets
+    two records instead of one.
+
+    The missing-entry direction is bound by the two tests below; git compares
+    an exact pathspec literally before it tries the pattern, so a bracketed
+    name is still found today and this file's own checks pass either way.
+    They are asserted so the literal pathspec is pinned as not having lost
+    the ordinary match — including through the gate, where the release
+    history now requires every base release file to still be in the index."""
+
+    candidate = base_repository(tmp_path)
+    releases = candidate.root / CHAIN_SPEC.release_root_relative
+    (releases / "x[y]z.md").write_text("bracketed\n", encoding="utf-8")
+    (releases / "xyz.md").write_text("what the bracket matches\n", encoding="utf-8")
+    candidate = commit_all(candidate, "release files with glob magic in a name")
+    append_one_row(candidate)
+
+    assert release_chain._index_entries(candidate.root, "releases/x[y]z.md") == [
+        ("100644", "0", "releases/x[y]z.md")
+    ]
+    release_chain.assert_index_agrees_with_tree(candidate.root, "releases/x[y]z.md")
+    release_chain.assert_state_path_tracked(candidate.root, "releases/x[y]z.md")
+    assert run_gate(candidate) == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 1, "
+        "+1 appended vs base"
+    )
+
+
+MAGIC_STATE_PATH = ":odd/official_observations.jsonl"
+
+
+def track_a_path_git_reads_as_magic(candidate: Candidate) -> pathlib.Path:
+    """Commit a file whose first character git parses as pathspec magic.
+
+    ``:odd/x`` asked of ``git ls-files`` is not that path: the leading colon
+    introduces pathspec magic, the unrecognised ``o`` ends it, and git looks
+    for ``odd/x`` instead — matching nothing, exiting zero, and reporting a
+    tracked file as absent from the index.
+    """
+
+    path = candidate.root / MAGIC_STATE_PATH
+    path.parent.mkdir()
+    path.write_text("tracked, whatever the pathspec parser makes of it\n")
+    git(candidate.root, "add", "-A")
+    return path
+
+
+def test_a_state_path_git_would_read_as_pathspec_magic_is_tracked(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds R7-F6 in the direction that refuses: a path the index does hold,
+    reported as absent because git read its name as a pathspec instruction
+    rather than as a name. Without the literal pathspec this refuses
+    ``state path :odd/official_observations.jsonl is absent from the
+    candidate index`` — a tracked file the gate declines to verify."""
+
+    candidate = base_repository(tmp_path)
+    track_a_path_git_reads_as_magic(candidate)
+
+    release_chain.assert_state_path_tracked(candidate.root, MAGIC_STATE_PATH)
+
+
+def test_the_index_comparison_finds_a_path_git_would_read_as_magic(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds R7-F6 in the direction that accepts, which is the dangerous one:
+    the same misread name leaves ``assert_index_agrees_with_tree`` with no
+    entry to compare, and no entry is how a new untracked file looks — so it
+    returns, and a working tree that does not carry what git recorded passes
+    the check written to catch exactly that. Without the literal pathspec
+    this raises nothing at all."""
+
+    candidate = base_repository(tmp_path)
+    path = track_a_path_git_reads_as_magic(candidate)
+    path.chmod(0o755)
+
+    with pytest.raises(ReleaseChainError) as refusal:
+        release_chain.assert_index_agrees_with_tree(candidate.root, MAGIC_STATE_PATH)
+    assert str(refusal.value) == (
+        f"candidate working tree mode for {MAGIC_STATE_PATH} disagrees with "
+        "its index entry (100644 vs 100755)"
     )
