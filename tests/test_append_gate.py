@@ -1617,25 +1617,26 @@ def test_a_conflicted_index_entry_is_refused(tmp_path: pathlib.Path) -> None:
     )
 
 
-def test_the_index_refusal_precedes_file_level_release_refusals(
+def test_file_level_release_refusals_precede_the_index_refusal(
     tmp_path: pathlib.Path,
 ) -> None:
-    """The second half of the stated precedence exception, pinned like the
-    first: a base release file whose index and working tree disagree is
-    refused before the byte comparison that would otherwise fire, because
-    that file's mode comparison is evidence only while the tree carries what
-    git recorded. Without F2 this proposal got the byte refusal, having
-    compared a mode nothing established."""
+    """The per-file index check runs after the comparisons it qualifies.
+
+    An unstaged chmod on a base release file is both a mode change against
+    the base and an index/worktree disagreement. The upstream verifier
+    refuses it as a mode change, and the ledger differential harness pins
+    that text (`base_mode_change`), so the index refusal must not pre-empt
+    it: a comparison that passed fail-open is caught afterwards instead.
+    """
 
     candidate = base_repository(tmp_path)
     append_one_row(candidate)
     readme = candidate.root / CHAIN_SPEC.release_root_relative / "README.md"
-    readme.write_text("rewritten\n", encoding="utf-8")
-    git(candidate.root, "update-index", "--chmod=+x", "--", "releases/README.md")
+    readme.chmod(readme.stat().st_mode | 0o111)
 
     with pytest.raises(AppendError) as refusal:
         run_gate(candidate)
     assert str(refusal.value) == (
-        "candidate working tree mode for releases/README.md disagrees with "
-        "its index entry (100755 vs 100644)"
+        f"existing release file mode changed relative to {candidate.base}: "
+        "releases/README.md (100644 -> 100755)"
     )
