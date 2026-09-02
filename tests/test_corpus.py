@@ -1629,6 +1629,18 @@ def _tombstone_pass_entries(tmp_path: pathlib.Path) -> int:
     return len(list(tmp_path.iterdir())) + len(list((tmp_path / ".axiom").iterdir()))
 
 
+def _tombstone_pass_work(tmp_path: pathlib.Path) -> int:
+    """Budget units the two-tombstone pass charges, counting each once.
+
+    Two directories are listed — the tree root and ``.axiom`` — and every
+    entry consumed from a listing is one unit. Each of the two searches then
+    visits the ``.axiom`` candidate on its way down, and a visited candidate
+    is charged as well (F2), which is the two units added here.
+    """
+
+    return _tombstone_pass_entries(tmp_path) + 2
+
+
 def test_the_tombstone_budget_counts_entries_not_listings(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1657,22 +1669,112 @@ def test_the_tombstone_index_is_shared_across_removed_paths(
 ) -> None:
     """Binds F3: two tombstones must not pay twice for the same directory.
 
-    The budget is set to exactly the number of entries the pass needs to see,
-    counting each directory once. Both removed paths start at the tree root
-    and share their parent, so this passes only because the index reads each
-    directory once and hands the listing to the second search. Re-listing per
-    removed path — what the module did before — would double the count and
-    refuse.
+    The budget is set to exactly what the pass charges, counting each listed
+    entry once and each visited candidate once. Both removed paths start at
+    the tree root and share their parent, so this passes only because the
+    index reads each directory once and hands the listing to the second
+    search. Re-listing per removed path — what the module did before — would
+    push the count from five to eight and refuse.
     """
 
     write_tree(tmp_path)
     monkeypatch.setattr(
-        "receipt.corpus.MAX_TOMBSTONE_WORK", _tombstone_pass_entries(tmp_path)
+        "receipt.corpus.MAX_TOMBSTONE_WORK", _tombstone_pass_work(tmp_path)
     )
     verification = verify_corpus_binding(
         tmp_path, render_journal(_two_tombstone_rows()), spec=corpus_spec()
     )
     assert verification.removed_paths == (".axiom/a.json", ".axiom/b.json")
+
+
+def test_the_tombstone_pass_stops_consuming_a_directory_wider_than_its_budget(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds F2: the listing was read and sorted in full before the check.
+
+    ``sorted(directory.iterdir())`` drains a directory before anything looks
+    at the budget, so the constant bounded the refusal and not the work: a
+    tombstone under a directory of ten million entries read and sorted ten
+    million of them, and only then said it had exceeded its budget. That is
+    the resource exhaustion the budget exists to stop, done by the code that
+    was supposed to stop it.
+
+    A listing is now consumed one entry at a time and charged as it is
+    consumed. Without the fix the generator below is drained to its last
+    entry; with it, enumeration stops inside the budget.
+    """
+
+    width = 10000
+    budget = 64
+    consumed = 0
+    real = pathlib.Path.iterdir
+
+    def iterdir(self: pathlib.Path):
+        if self.name != "wide":
+            return real(self)
+
+        def entries():
+            nonlocal consumed
+            for index in range(width):
+                consumed += 1
+                yield self / f"entry-{index:05d}"
+
+        return entries()
+
+    body = '{"applied": true}\n'
+    write_tree(tmp_path)
+    (tmp_path / "wide").mkdir()
+    rows = _tombstone_rows("wide/apply-manifest.json", body)
+    monkeypatch.setattr("receipt.corpus.MAX_TOMBSTONE_WORK", budget)
+    monkeypatch.setattr(pathlib.Path, "iterdir", iterdir)
+    with pytest.raises(CorpusError, match="tombstone work budget"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+    assert consumed <= budget
+    assert consumed < width
+
+
+def test_many_tombstones_over_one_cached_bucket_exceed_the_budget(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds F2: re-traversing a cached bucket advanced no counter.
+
+    The index reads each directory once, so after the first tombstone every
+    later search walks buckets that are already in memory — and those visits
+    were free. R tombstones over a bucket of K entries examined R×K candidates
+    while the counter stayed at the entries indexed, which for this tree is
+    four, so the budget bounded the listings and nothing about the search.
+
+    Forty tombstones share one path here, and each of them re-walks the same
+    two cached components. Every visited candidate is now charged against the
+    same running total, so the pass refuses part-way through. Without the fix
+    it costs four units, the budget of twenty never fires, and the
+    verification returns all forty paths as removed.
+    """
+
+    body = '{"applied": true}\n'
+    write_tree(tmp_path)
+    (tmp_path / ".axiom/retired").mkdir(parents=True)
+    retired = [f".axiom/retired/gone-{index:03d}.json" for index in range(40)]
+    attested = dict(ATTESTED)
+    for path in retired:
+        attested[path] = body
+    rows = journal_rows(attested=attested)
+    for path in retired:
+        rows.append(
+            {
+                "schemaVersion": JOURNAL_SCHEMA,
+                "kind": "attested",
+                "path": path,
+                "sha256": sha256_text(body),
+                "state": "removed",
+            }
+        )
+    monkeypatch.setattr("receipt.corpus.MAX_TOMBSTONE_WORK", 20)
+    with pytest.raises(CorpusError, match="tombstone work budget") as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(reindex(rows)), spec=corpus_spec()
+        )
+    assert "tombstone is unverifiable: .axiom/retired/gone-" in str(caught.value)
 
 
 class _CaseFoldingPath:

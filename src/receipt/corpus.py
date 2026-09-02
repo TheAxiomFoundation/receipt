@@ -126,7 +126,7 @@ MAX_PATH_TEXT = 1024
 #: gate budget's counterpart for the other producer-controlled list the
 #: verdict renders verbatim (peer review, round two).
 MAX_REMOVED_TEXT = 262144
-#: The most directory entries the whole tombstone pass may index before it is
+#: The most directory entries the whole tombstone pass may touch before it is
 #: refused as unverifiable rather than allowed to run on. Counted in entries
 #: rather than listings, and once for the pass rather than once per removed
 #: path: a per-path listing budget bounded each search while leaving the pass
@@ -134,6 +134,13 @@ MAX_REMOVED_TEXT = 262144
 #: nothing to stop it (peer review, round three). The index below reads each
 #: directory once and shares it across every removed path, so the real cost is
 #: the tree, and this bounds that.
+#:
+#: An entry is charged when it is consumed from a listing and again each time
+#: a search visits it as a candidate, because both are work and neither was
+#: bounded by counting listings alone: the whole of an arbitrarily wide
+#: directory was read and sorted before anything checked the budget, and a
+#: cached fold-collision bucket was re-traversed by every tombstone for free
+#: (peer review, round four).
 MAX_TOMBSTONE_WORK = 262144
 #: The most characters a refusal quotes of a producer-controlled value.
 MAX_QUOTED_TEXT = 256
@@ -807,6 +814,11 @@ class _TombstoneIndex:
     :func:`_list_directory` gives; a directory that is simply not there is an
     absence, cached as one.
 
+    A listing is consumed one entry at a time and charged as it is consumed,
+    so a directory wider than the budget stops the pass part-way through
+    rather than being read and sorted in full first; each bucket is sorted
+    once, here, so a search that revisits it never sorts it again.
+
     The cache is keyed by the directory's exact spelling as the search walked
     it — the ``/``-joined component names, ``""`` for the root — and never by
     a :class:`pathlib.Path`. Path equality and hashing are case-insensitive on
@@ -821,7 +833,23 @@ class _TombstoneIndex:
     def __init__(self, root: pathlib.Path) -> None:
         self.root = root
         self._directories: dict[str, dict[str, list[pathlib.Path]] | None] = {}
-        self._entries = 0
+        self._work = 0
+
+    def charge(self, relative: str) -> None:
+        """Charge one directory entry against the pass budget.
+
+        Called for every entry consumed from a listing and for every candidate
+        a search visits. ``relative`` is the removed path whose search is being
+        charged, so the refusal names the tombstone that could not be checked.
+        """
+
+        self._work += 1
+        if self._work > MAX_TOMBSTONE_WORK:
+            raise CorpusError(
+                "cannot check whether a removed path is still in the tree, so "
+                f"the tombstone is unverifiable: {relative} (tombstone work "
+                f"budget of {MAX_TOMBSTONE_WORK} entries exceeded)"
+            )
 
     def folded(
         self, directory: pathlib.Path, key: str, relative: str
@@ -836,8 +864,16 @@ class _TombstoneIndex:
 
         if key in self._directories:
             return self._directories[key]
+        entries: list[pathlib.Path] = []
         try:
-            entries = sorted(directory.iterdir(), key=lambda entry: entry.name)
+            for entry in directory.iterdir():
+                # Charged as it is consumed, and refused from inside the loop:
+                # sorting the listing first read an arbitrarily wide directory
+                # in full — and sorted it — before anything looked at the
+                # budget, so the constant named no bound on the work actually
+                # done (peer review, round four).
+                self.charge(relative)
+                entries.append(entry)
         except (FileNotFoundError, NotADirectoryError):
             self._directories[key] = None
             return None
@@ -846,15 +882,11 @@ class _TombstoneIndex:
                 "cannot check whether a removed path is still in the tree, so "
                 f"the tombstone is unverifiable: {relative} ({exc.strerror})"
             ) from exc
-        self._entries += len(entries)
-        if self._entries > MAX_TOMBSTONE_WORK:
-            raise CorpusError(
-                "cannot check whether a removed path is still in the tree, so "
-                f"the tombstone is unverifiable: {relative} (tombstone work "
-                f"budget of {MAX_TOMBSTONE_WORK} entries exceeded)"
-            )
         folded: dict[str, list[pathlib.Path]] = {}
-        for entry in entries:
+        # Sorted once, here, rather than in every search that reaches this
+        # directory: the order a bucket is tried in does not depend on which
+        # tombstone is asking, only which spelling comes first does.
+        for entry in sorted(entries, key=lambda entry: entry.name):
             # Screened before it is folded, for the reason _assert_assigned
             # gives: an unassigned code point in an entry name would put the
             # entry in one fold bucket on one interpreter and another on the
@@ -906,14 +938,21 @@ def _fold_survivor(index: _TombstoneIndex, relative: str) -> str | None:
         if folded is None:
             return None
         head, rest = components[0], components[1:]
-        # The bucket is re-ordered rather than re-scanned: the shared index
-        # sorts by name, and only which spelling to try first depends on the
-        # component being matched.
-        matches = sorted(
-            folded.get(_path_fold(head), ()),
-            key=lambda entry: (entry.name != head, entry.name),
-        )
+        # The bucket is re-ordered rather than re-sorted: the index sorted it
+        # by name when it read the directory, and only which spelling to try
+        # first depends on the component being matched. Sorting here instead
+        # meant every tombstone that reached this bucket paid to sort it
+        # again (peer review, round four).
+        bucket = folded.get(_path_fold(head), ())
+        matches = [entry for entry in bucket if entry.name == head]
+        matches += [entry for entry in bucket if entry.name != head]
         for entry in matches:
+            # A visited candidate is a directory entry examined, so it is
+            # charged like an indexed one and against the same running total.
+            # Re-traversing a cached bucket was free before, so R tombstones
+            # over one collision bucket of K entries examined R×K candidates
+            # without the budget moving (peer review, round four).
+            index.charge(relative)
             if not rest:
                 return "/".join([*spelled, entry.name])
             # One lstat, inside the handler, answering both questions below.
