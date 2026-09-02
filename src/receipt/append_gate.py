@@ -93,6 +93,23 @@ class _CandidateTree:
     spec: AppendGateSpec
 
 
+@dataclass(frozen=True)
+class _BaseCommit:
+    """The base of one verdict, resolved once and carried to every consumer.
+
+    ``ref`` is what the caller named; ``commit`` is the OID that name pointed
+    at when the run began. Resolving by name at each consumer meant a branch
+    that moved mid-run was read at one commit for surface classification, a
+    second for the append-only diff and the frozen prefix, and a third for the
+    release history — one verdict about no single tree. Refusals keep naming
+    ``ref``, exactly the text they always carried; every git read takes
+    ``commit``.
+    """
+
+    ref: str
+    commit: str
+
+
 class AppendError(ValueError):
     """The proposed ledger change violates an append invariant."""
 
@@ -156,7 +173,7 @@ def _matches_surface(path: str, surface: frozenset[str]) -> bool:
 
 
 def check_surface_separation(
-    base_ref: str, candidate: _CandidateTree
+    base: _BaseCommit, candidate: _CandidateTree
 ) -> tuple[set[str], set[str], set[str]]:
     """Return data/gate/unclassified changes and reject a combined proposal.
 
@@ -166,7 +183,6 @@ def check_surface_separation(
     touched.
     """
 
-    commit = _resolve_base_commit(base_ref, candidate)
     changed = _nul_paths(
         _git_output(
             [
@@ -176,7 +192,7 @@ def check_surface_separation(
                 "--no-renames",
                 "--no-ext-diff",
                 "--no-textconv",
-                commit,
+                base.commit,
                 "--",
             ],
             candidate,
@@ -516,17 +532,17 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
 
 
 def check_append_only(
-    base_ref: str, lines: list[str], candidate: _CandidateTree
+    base: _BaseCommit, lines: list[str], candidate: _CandidateTree
 ) -> int:
     relative = candidate.ledger_path.relative_to(candidate.root).as_posix()
     try:
         base_text = subprocess.check_output(
-            ["git", "show", f"{base_ref}:{relative}"],
+            ["git", "show", f"{base.commit}:{relative}"],
             cwd=candidate.root,
             text=True,
         )
     except subprocess.CalledProcessError as exc:
-        raise AppendError(f"cannot read {relative} at base {base_ref}") from exc
+        raise AppendError(f"cannot read {relative} at base {base.ref}") from exc
     base_lines = _lines(base_text)
     if len(lines) < len(base_lines):
         raise AppendError(
@@ -542,21 +558,21 @@ def check_append_only(
     return len(lines) - len(base_lines)
 
 
-def _manifest_at_ref(base_ref: str, candidate: _CandidateTree) -> dict[str, Any]:
+def _manifest_at_ref(base: _BaseCommit, candidate: _CandidateTree) -> dict[str, Any]:
     relative = candidate.prefix_path.relative_to(candidate.root).as_posix()
     try:
         text = subprocess.check_output(
-            ["git", "show", f"{base_ref}:{relative}"],
+            ["git", "show", f"{base.commit}:{relative}"],
             cwd=candidate.root,
             text=True,
         )
     except subprocess.CalledProcessError as exc:
-        raise AppendError(f"cannot read {relative} at base {base_ref}") from exc
+        raise AppendError(f"cannot read {relative} at base {base.ref}") from exc
     return json.loads(text)
 
 
 def check_prefix_anchored_to_base(
-    base_ref: str,
+    base: _BaseCommit,
     candidate_prefix: dict[str, Any],
     candidate: _CandidateTree,
 ) -> int:
@@ -571,11 +587,11 @@ def check_prefix_anchored_to_base(
     Returns the BASE prefix line count, which callers use as the post-cutover
     binding boundary so a candidate-controlled count can never move it.
     """
-    base_prefix = _manifest_at_ref(base_ref, candidate)
+    base_prefix = _manifest_at_ref(base, candidate)
     for field in ("prefixLineCount", "prefixSha256", "lineSha256s"):
         if candidate_prefix.get(field) != base_prefix.get(field):
             raise AppendError(
-                f"immutable prefix manifest {field} changed vs base {base_ref}; "
+                f"immutable prefix manifest {field} changed vs base {base.ref}; "
                 "the frozen prefix cannot grow through the automated append path "
                 "— growing it is an explicit reviewed migration"
             )
@@ -650,7 +666,7 @@ def _check_exact_byte_append(base_bytes: bytes, candidate_bytes: bytes) -> bytes
 
 
 def check_release_proposal(
-    base_ref: str,
+    base: _BaseCommit,
     *,
     candidate: _CandidateTree,
     anchor_dir: pathlib.Path | None = None,
@@ -668,7 +684,7 @@ def check_release_proposal(
     try:
         commit, new_files, base_release_entries = verify_release_history_immutable(
             candidate.root,
-            base_ref,
+            base.commit,
             spec=candidate.spec.chain,
         )
     except ReleaseChainError as exc:
@@ -816,9 +832,18 @@ def verify_append_gate(
     """
 
     candidate = _set_root(root, spec)
-    if base_ref:
+    # One resolution for the whole verdict: the base was resolved by name at
+    # the surface check, again at the append-only diff and the frozen prefix,
+    # and again at the release history, so a branch that moved during the run
+    # was read at different commits inside a single answer.
+    base = (
+        _BaseCommit(ref=base_ref, commit=_resolve_base_commit(base_ref, candidate))
+        if base_ref
+        else None
+    )
+    if base is not None:
         _data_changes, gate_changes, unclassified = check_surface_separation(
-            base_ref,
+            base,
             candidate,
         )
         if gate_changes:
@@ -844,13 +869,13 @@ def verify_append_gate(
     # full-file invariants only — base-anchoring requires the PR path.
     binding_boundary = int(prefix["prefixLineCount"])
     appended = None
-    if base_ref:
+    if base is not None:
         binding_boundary = check_prefix_anchored_to_base(
-            base_ref,
+            base,
             prefix,
             candidate,
         )
-        appended = check_append_only(base_ref, lines, candidate)
+        appended = check_append_only(base, lines, candidate)
     check_rows(lines, binding_boundary, spec)
     # On the PR path, the trusted code root is the detached base checkout.
     # Production verification must use those immutable anchors and the base
@@ -861,19 +886,28 @@ def verify_append_gate(
     anchor_dir = release_anchor_dir or (trusted_code_root / spec.chain.anchor_relative)
     release_index = (
         check_release_proposal(
-            base_ref,
+            base,
             candidate=candidate,
             anchor_dir=anchor_dir,
             enforce_production_pins=production_pins,
         )
-        if base_ref
+        if base is not None
         else check_release_chain_without_base(
             candidate=candidate,
             anchor_dir=anchor_dir,
             enforce_production_pins=production_pins,
         )
     )
-    suffix = f", +{appended} appended vs base" if appended is not None else ""
+    # Name the commit the verdict was measured against whenever the caller
+    # named something that could move. A base given as its own OID already
+    # names it, and that verdict text stays exactly what it was — the shape
+    # the differential harness compares against its oracle byte for byte.
+    resolved = (
+        f" {base.ref} ({base.commit})"
+        if base is not None and base.ref != base.commit
+        else ""
+    )
+    suffix = f", +{appended} appended vs base{resolved}" if appended is not None else ""
     release_suffix = f", release {release_index}" if release_index is not None else ""
     return (
         f"thesis-facts append check OK: {len(lines)} rows, immutable prefix "
