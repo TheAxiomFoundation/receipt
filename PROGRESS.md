@@ -6,8 +6,8 @@ suite 267 passed, 94 deselected.
 
 ## State
 
-F4, F1, F5, and F2 are implemented, tested, and committed. F3 (the state-file
-snapshot reader) is next, then the PR body and the lane report.
+All five findings are implemented, tested, and committed. What is left is the
+PR body and the lane report.
 
 The differential harness never mutates a file mode and never leaves an
 index/worktree mode disagreement, so the F2 index check cannot fire there.
@@ -23,14 +23,14 @@ proposal does; their asserted messages are unchanged.
   `verify_append_gate`, after base resolution, for the push path too; the
   release-history pass resolves its base before its own guard; the module
   docstring states the one ordering exception. Push-path helper and tests.
-- F2 (this commit): `release_chain.assert_index_agrees_with_tree`, called for
+- F2 (65f76bd): `release_chain.assert_index_agrees_with_tree`, called for
   both state files in `check_state_modes` and for every compared release file
   in `verify_release_history_immutable`.
+- F3 (this commit): `_read_state_snapshot` reads each state file once
+  (`O_RDONLY|O_NOFOLLOW|O_NONBLOCK`, lstat before / fstat after, recorded
+  identity); every consumer in `append_gate` is fed those bytes, and
+  `_assert_state_unchanged` re-reads both files after the last consumer.
 
 ## Next
 
-1. F3: read each state file once through a snapshot reader
-   (`O_RDONLY|O_NOFOLLOW|O_NONBLOCK`, lstat before / fstat after, recorded
-   identity), feed every `append_gate` consumer from those bytes, and re-read
-   after the last consumer; FIFO and swapped-ledger tests.
-2. Update the PR body file and write the lane report.
+1. Update the PR body file and write the lane report.

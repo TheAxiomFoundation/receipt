@@ -40,10 +40,12 @@ never presented: a gate-only proposal is confined to the surfaces its verdict
 speaks for, a state path that traverses a symlinked component is refused before
 it is read, the base is resolved to a commit once and carried to every
 consumer, every git read runs with ``refs/replace`` disabled so a replacement
-object cannot change what the printed OID reads as, the two state files keep
-the base's file mode, and the post-cutover binding values are validated for
-shape rather than presence alone. They run beside the extracted checks without altering any of their
-refusals, and every new refusal runs after every pre-existing file-level
+object cannot change what the printed OID reads as, each state file is read
+once through a snapshot reader that every consumer here is fed from and that
+re-checks the file at the end, the two state files keep the base's file mode,
+and the post-cutover binding values are validated for shape rather than
+presence alone. They run beside the extracted checks without altering any of
+their refusals, and every new refusal runs after every pre-existing file-level
 refusal — with one stated exception: the checkout-level guard
 (``release_chain.assert_file_modes_authoritative``) runs before the
 release-history file checks, and after the base ref is resolved, because a
@@ -56,9 +58,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import locale
 import os
 import pathlib
 import re
+import stat
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
@@ -292,6 +296,123 @@ def _confine_state_path(
         raise AppendError(str(exc)) from exc
 
 
+@dataclass(frozen=True)
+class _StateSnapshot:
+    """One state file as it stood at one instant, and the bytes read then.
+
+    ``identity`` is ``(st_dev, st_ino, st_size, st_mtime_ns)`` observed on the
+    open descriptor after the read, so a later re-read can say whether the
+    same file is still there and still says the same thing.
+    """
+
+    relative: pathlib.PurePosixPath
+    payload: bytes
+    identity: tuple[int, int, int, int]
+
+
+def _read_state_snapshot(
+    relative: pathlib.PurePosixPath, candidate: _CandidateTree
+) -> _StateSnapshot:
+    """Read one candidate state file once, and record what was read.
+
+    Every state read here was check-then-open: the component walk looked at
+    the path, and a separate ``read_text`` later followed whatever the name
+    resolved to by then. Three things rode on that gap. A FIFO at the ledger
+    path blocked the reader indefinitely instead of being refused — the
+    walk sees no symlink, and ``open`` on a FIFO waits for a writer. The
+    final component could be swapped between the walk and the open, so the
+    bytes verified were never the ones inspected. And the ledger was read
+    again by the release verification, so one tree could satisfy the row
+    checks with one ledger and the release chain with another.
+
+    So: walk the components, ``lstat`` the path, open it with ``O_NOFOLLOW``
+    (never traverse a link that appeared since the walk) and ``O_NONBLOCK``
+    (never wait on a pipe or device), ``fstat`` the descriptor and require it
+    to be the same regular file the ``lstat`` saw, and read the bytes through
+    that one descriptor. Every consumer in this module is then fed these
+    bytes rather than reading the path again.
+    """
+
+    _confine_state_path(relative, candidate)
+    path = candidate.root / relative
+    display = relative.as_posix()
+    before = os.lstat(path)
+    if not stat.S_ISREG(before.st_mode):
+        raise AppendError(f"state file is not a regular file: {display}")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise AppendError(f"state file is not a regular file: {display}")
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise AppendError(
+                f"state file was replaced while it was being read: {display}"
+            )
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1 << 20)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        read = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    return _StateSnapshot(
+        relative=relative,
+        payload=b"".join(chunks),
+        identity=(read.st_dev, read.st_ino, read.st_size, read.st_mtime_ns),
+    )
+
+
+def _assert_state_unchanged(
+    snapshot: _StateSnapshot, candidate: _CandidateTree
+) -> None:
+    """Require a state file to be what it was when this verdict read it.
+
+    ``check_release_proposal`` hands the ledger and the frozen prefix to
+    ``release_chain``, which reads both paths again through its own reader —
+    deliberately left alone, since it is the release chain's own state
+    contract. That leaves a window this module can still close: after the
+    last consumer returns, read each state file again and require the same
+    file and the same bytes. A tree that changed underneath the run gets one
+    refusal naming the file, instead of a verdict assembled from two
+    different ledgers. A re-read that cannot be completed at all — the path
+    is now a link, a pipe, or gone — is the same answer: it changed.
+    """
+
+    display = snapshot.relative.as_posix()
+    try:
+        current = _read_state_snapshot(snapshot.relative, candidate)
+    except (AppendError, OSError) as exc:
+        raise AppendError(
+            f"state file changed during verification: {display}"
+        ) from exc
+    if (current.identity, current.payload) != (snapshot.identity, snapshot.payload):
+        raise AppendError(f"state file changed during verification: {display}")
+
+
+def _as_text(payload: bytes, encoding: str | None = None) -> str:
+    """Decode snapshot bytes exactly as ``Path.read_text`` decoded them.
+
+    The snapshot reader replaced two ``read_text`` calls, and this port's
+    refusals are compared with the upstream oracle's byte for byte, so the
+    decoding those calls performed is reproduced rather than approximated:
+    the caller's encoding or, where the call passed none, the same locale
+    default ``open`` would have used, and the universal-newline translation
+    text mode applies to a whole file (``\r\n`` and a lone ``\r`` both
+    become ``\n``).
+    """
+
+    decoded = payload.decode(encoding or locale.getpreferredencoding(False))
+    return decoded.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _lines(text: str) -> list[str]:
     return [line for line in text.split("\n") if line.strip()]
 
@@ -391,9 +512,13 @@ def effective_current_rows(
     return [row for row in rows if _effective_assertion_id(row, spec) not in superseded]
 
 
-def check_prefix(lines: list[str], candidate: _CandidateTree) -> dict[str, Any]:
-    _confine_state_path(candidate.spec.chain.prefix_relative, candidate)
-    prefix = json.loads(candidate.prefix_path.read_text())
+def check_prefix(
+    lines: list[str], prefix_text: str, candidate: _CandidateTree
+) -> dict[str, Any]:
+    # The manifest text comes from the caller's one snapshot read of the
+    # prefix path, taken where this function used to walk and read it, so the
+    # refusals below fire in exactly the order they always did.
+    prefix = json.loads(prefix_text)
     if prefix.get("schemaVersion") != candidate.spec.prefix_schema_version:
         raise AppendError(
             f"unsupported prefix manifest schema {prefix.get('schemaVersion')!r}"
@@ -833,6 +958,7 @@ def check_release_proposal(
     base: _BaseCommit,
     *,
     candidate: _CandidateTree,
+    ledger_bytes: bytes,
     anchor_dir: pathlib.Path | None = None,
     enforce_production_pins: bool | None = None,
 ) -> int | None:
@@ -869,8 +995,9 @@ def check_release_proposal(
         else False
     )
     base_bytes = _base_ledger_bytes(commit, candidate)
-    candidate_bytes = candidate.ledger_path.read_bytes()
-    appended_bytes = _check_exact_byte_append(base_bytes, candidate_bytes)
+    # The ledger this verdict speaks for is the one snapshot the run read, not
+    # whatever the path holds by the time this check gets to it.
+    appended_bytes = _check_exact_byte_append(base_bytes, ledger_bytes)
     ledger_changed = bool(appended_bytes)
     if enforce_production_pins is None:
         enforce_production_pins = anchor_dir is None
@@ -1047,11 +1174,18 @@ def verify_append_gate(
                 f"{sorted(gate_changes)}{unclassified_suffix}{base_suffix}"
             )
 
-    _confine_state_path(spec.chain.state_relative, candidate)
-    text = candidate.ledger_path.read_text(encoding="utf-8")
+    # One read of each state file, with its identity recorded, feeding every
+    # consumer below: the path was walked and then opened separately, and the
+    # ledger was opened again by the release verification, so a swap between
+    # any two of those reads produced a verdict about no single file.
+    ledger_state = _read_state_snapshot(spec.chain.state_relative, candidate)
+    text = _as_text(ledger_state.payload, "utf-8")
     reject_non_append_bytes(text)
     lines = _lines(text)
-    prefix = check_prefix(lines, candidate)
+    # Read where check_prefix used to walk and read it, so a proposal that
+    # violates both this and an earlier rule keeps the earlier refusal.
+    prefix_state = _read_state_snapshot(spec.chain.prefix_relative, candidate)
+    prefix = check_prefix(lines, _as_text(prefix_state.payload), candidate)
     # The post-cutover binding boundary is the BASE prefix count under a
     # base ref, so a PR cannot grandfather an unbound append by growing the
     # candidate manifest over it. Without a base ref (push) there is nothing
@@ -1078,6 +1212,7 @@ def verify_append_gate(
         check_release_proposal(
             base,
             candidate=candidate,
+            ledger_bytes=ledger_state.payload,
             anchor_dir=anchor_dir,
             enforce_production_pins=production_pins,
         )
@@ -1094,6 +1229,10 @@ def verify_append_gate(
     check_binding_shapes(lines, binding_boundary)
     if base is not None:
         check_state_modes(base, candidate)
+    # Last of all, and after the release verification's own re-reads: the two
+    # state files must still be the files this verdict read.
+    _assert_state_unchanged(ledger_state, candidate)
+    _assert_state_unchanged(prefix_state, candidate)
     # Name the commit the verdict was measured against whenever the caller
     # named something that could move. A base given as its own OID already
     # names it, and that verdict text stays exactly what it was — the shape

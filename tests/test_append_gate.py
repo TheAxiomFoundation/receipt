@@ -17,12 +17,15 @@ test are the ones that run before it.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import pathlib
 import shutil
+import signal
 import subprocess
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -1319,3 +1322,259 @@ def test_the_index_check_passes_over_a_path_the_index_does_not_hold(
     (candidate.root / "NOTES.md").write_text("new\n", encoding="utf-8")
 
     release_chain.assert_index_agrees_with_tree(candidate.root, "NOTES.md")
+
+
+@contextlib.contextmanager
+def time_limit(seconds: float) -> Iterator[None]:
+    """Fail rather than hang: a blocked open cannot be interrupted otherwise.
+
+    The gap the snapshot reader closes includes a reader that waits forever on
+    a FIFO, so the test for it must be able to say "did not return" instead of
+    stalling the suite.
+    """
+
+    def expire(_signum: int, _frame: Any) -> None:
+        raise TimeoutError(f"the gate did not return within {seconds}s")
+
+    previous = signal.signal(signal.SIGALRM, expire)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "mkfifo"), reason="the platform has no FIFOs to refuse"
+)
+def test_a_fifo_at_the_ledger_path_is_refused_rather_than_waited_on(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds F3: the state read was check-then-open. The component walk sees
+    no symlink at a FIFO, so the reader that followed opened it — and an open
+    of a FIFO with no writer blocks until one arrives, which for a proposal
+    that plants one is never. The gate stalls, holding CI, with no verdict.
+    The reader now lstats first and opens with O_NONBLOCK, so this returns
+    immediately; the time limit is what would fail if it did not."""
+
+    candidate = base_repository(tmp_path)
+    ledger = candidate.root / CHAIN_SPEC.state_relative
+    ledger.unlink()
+    os.mkfifo(ledger)
+
+    with time_limit(20):
+        with pytest.raises(AppendError) as refusal:
+            run_gate(candidate)
+    assert str(refusal.value) == (
+        "state file is not a regular file: ledger/official_observations.jsonl"
+    )
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "mkfifo"), reason="the platform has no FIFOs to refuse"
+)
+def test_a_fifo_at_the_prefix_path_is_refused_rather_than_waited_on(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The frozen prefix is read by the same reader, at the point check_prefix
+    used to open it, so it is refused the same way and just as promptly."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    prefix = candidate.root / CHAIN_SPEC.prefix_relative
+    prefix.unlink()
+    os.mkfifo(prefix)
+
+    with time_limit(20):
+        with pytest.raises(AppendError) as refusal:
+            run_gate(candidate)
+    assert str(refusal.value) == (
+        "state file is not a regular file: ledger/immutable_prefix.json"
+    )
+
+
+def test_a_state_file_swapped_between_the_check_and_the_open_is_refused(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds F3's other half of the check-then-open gap: the file the walk
+    inspected and the file the reader opened were resolved separately, so the
+    final component could be swapped in between and the bytes verified were
+    never the ones checked. Standing in a different file for every lstat of
+    the ledger path reproduces exactly that; the open's fstat no longer
+    matches what the check saw, and the run refuses instead of reading on."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    ledger = candidate.root / CHAIN_SPEC.state_relative
+    decoy = tmp_path / "decoy.jsonl"
+    decoy.write_text("{}\n", encoding="utf-8")
+    real_lstat = os.lstat
+
+    def swapped(path: Any, *arguments: Any, **keywords: Any) -> os.stat_result:
+        try:
+            named = os.fspath(path)
+        except TypeError:
+            return real_lstat(path, *arguments, **keywords)
+        if named == os.fspath(ledger):
+            return real_lstat(decoy)
+        return real_lstat(path, *arguments, **keywords)
+
+    monkeypatch.setattr(os, "lstat", swapped)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "state file was replaced while it was being read: "
+        "ledger/official_observations.jsonl"
+    )
+
+
+def rewrite_ledger_inside(
+    candidate: Candidate, monkeypatch: pytest.MonkeyPatch, rows: int
+) -> None:
+    """Let check_rows return, then rewrite the ledger before the next consumer.
+
+    check_rows is the last consumer of the parsed rows before the release
+    verification opens the ledger again, so this is the window in which one
+    tree could satisfy the row checks with one ledger and the release chain
+    with another.
+    """
+
+    checked = append_gate.check_rows
+
+    def rewrite(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> None:
+        checked(lines, prefix_count, spec)
+        write_ledger(
+            candidate.root,
+            [observation_row(number) for number in range(1, rows + 1)],
+        )
+
+    monkeypatch.setattr(append_gate, "check_rows", rewrite)
+
+
+def test_a_ledger_rewritten_between_consumers_is_refused(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds F3: the ledger was opened once for the row checks and again by
+    the release verification, so a proposal that rewrote it in between got a
+    verdict assembled from two different files — the row count, the prefix
+    hashes, and the append count from the first, the byte-append and release
+    state from the second. Every consumer in append_gate is now fed the one
+    snapshot, and the re-check at the end refuses a tree that moved."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    rewrite_ledger_inside(candidate, monkeypatch, rows=BASE_ROW_COUNT + 2)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "state file changed during verification: "
+        "ledger/official_observations.jsonl"
+    )
+    # The rewrite really did land: the refusal is about the tree, not a
+    # rewrite that never happened.
+    ledger = candidate.root / CHAIN_SPEC.state_relative
+    assert len(ledger.read_text(encoding="utf-8").splitlines()) == BASE_ROW_COUNT + 2
+
+
+def test_a_prefix_manifest_rewritten_between_consumers_is_refused(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The frozen prefix is the other state file the release verification
+    re-reads, and it is re-checked the same way: its every field was compared
+    against the base from bytes read before this rewrite."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    checked = append_gate.check_rows
+
+    def rewrite(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> None:
+        checked(lines, prefix_count, spec)
+        prefix = candidate.root / CHAIN_SPEC.prefix_relative
+        prefix.write_text(prefix.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+
+    monkeypatch.setattr(append_gate, "check_rows", rewrite)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "state file changed during verification: ledger/immutable_prefix.json"
+    )
+
+
+def test_a_ledger_replaced_by_an_identical_copy_mid_verdict_is_refused(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The identity half of the re-check, which bytes alone cannot see: the
+    ledger is replaced mid-run by a different file holding the same bytes.
+    Nothing downstream would notice — every byte comparison still holds — but
+    the file this verdict read is gone, and whatever replaced it was never
+    the one the walk, the lstat, and the open agreed on."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    ledger = candidate.root / CHAIN_SPEC.state_relative
+    checked = append_gate.check_rows
+
+    def replace(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> None:
+        checked(lines, prefix_count, spec)
+        payload = ledger.read_bytes()
+        ledger.unlink()
+        ledger.write_bytes(payload)
+
+    monkeypatch.setattr(append_gate, "check_rows", replace)
+    inode = ledger.stat().st_ino
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "state file changed during verification: "
+        "ledger/official_observations.jsonl"
+    )
+    # Same bytes, different file: only the recorded identity says so.
+    assert ledger.stat().st_ino != inode
+
+
+def test_a_state_file_that_cannot_be_re_read_is_refused_as_changed(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-read that cannot be completed at all is the same answer: the file
+    changed. Here the ledger becomes a link to bytes outside the tree after
+    the last consumer, which the re-read's component walk refuses — and the
+    caller reports the change, because the run had already answered about the
+    file that was there."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    compared = append_gate.check_state_modes
+
+    def relink(base: Any, tree: Any) -> None:
+        compared(base, tree)
+        ledger = candidate.root / CHAIN_SPEC.state_relative
+        outside = tmp_path / "outside.jsonl"
+        shutil.move(str(ledger), str(outside))
+        ledger.symlink_to(outside)
+
+    monkeypatch.setattr(append_gate, "check_state_modes", relink)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "state file changed during verification: "
+        "ledger/official_observations.jsonl"
+    )
+
+
+def test_an_unchanged_tree_passes_the_re_read(tmp_path: pathlib.Path) -> None:
+    """The re-check costs an ordinary proposal nothing: same file, same bytes,
+    same verdict text as before this branch."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+
+    assert run_gate(candidate) == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 1, "
+        "+1 appended vs base"
+    )
