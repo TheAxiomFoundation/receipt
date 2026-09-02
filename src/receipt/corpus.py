@@ -144,12 +144,39 @@ INDEPENDENTLY_REPRODUCIBLE_TIERS = frozenset({PUBLIC_TIER})
 #: to read out of the terminal, which defeats the verdict as surely as an
 #: escape sequence would.
 MAX_EVIDENCE_TEXT = 1024
-#: The most characters of gate id and evidence the effective view may carry
+#: The most characters of verdict text the effective view's gates may cost
 #: in total. The per-string bound above caps one flood; a journal of a
 #: thousand not-run gates each carrying a bound-length reason still put a
 #: million characters into the verdict (peer review). Generous for any real
 #: corpus, which declares tens of gates with digest-sized evidence.
+#:
+#: What is charged is what a gate costs the verdict, not what its producer
+#: typed. Counting only gate-id and evidence payload characters let thirty
+#: thousand gates carrying two characters of evidence each charge about two
+#: hundred and sixty thousand and pass, while rendering four hundred thousand
+#: characters of text and four million of JSON — the flood the constant
+#: exists to stop, assembled out of strings none of which is long (peer
+#: review, round five). So the fixed cost of the lines a gate produces is
+#: charged alongside the characters it declares.
 MAX_GATE_TEXT = 262144
+#: What one gate declaration is charged beyond the characters of its id: the
+#: outcome, the labels, and the punctuation and indentation of the verdict's
+#: text line and of its JSON object. Measured against the two renderers, one
+#: more gate adds about 130 characters of ``indent=2`` JSON beyond its id and
+#: evidence and six or more of text, so this is a floor on that cost rather
+#: than a model of it — enough that a gate can never be free, and not so
+#: exact that it has to be re-derived every time a verdict line is reworded.
+GATE_RENDER_OVERHEAD = 64
+#: The same for one evidence entry beyond its key and value: about twenty
+#: characters of quoting, separators and indentation, charged as 24.
+EVIDENCE_RENDER_OVERHEAD = 24
+#: The most gate declarations one journal may carry. The text budget bounds
+#: what a verdict renders; nothing bounded how many gates a producer could
+#: put in front of an auditor, and cardinality is worth bounding for its own
+#: sake — a verdict enumerating thousands of gates is unreadable however
+#: short each line is, and no honest corpus declares them (peer review,
+#: round five). Generous for any real one, which declares tens.
+MAX_GATE_DECLARATIONS = 2048
 #: The most characters one journal path may carry. Paths are quoted in
 #: refusals and, for removed paths, rendered in the verdict; the bound is
 #: checked before any other path rule so no refusal quotes a flood.
@@ -807,15 +834,27 @@ def parse_journal(
             del target[path]
             removed.add(path)
 
+    # Cardinality first, because it is the cheaper thing to say and the
+    # honest bound on a journal of thirty thousand gates: the count is what
+    # is wrong with it, whatever each declaration costs to render.
+    if len(gates) > MAX_GATE_DECLARATIONS:
+        raise CorpusError(
+            f"journal declares {len(gates)} gates, over the verdict budget of "
+            f"{MAX_GATE_DECLARATIONS} declarations"
+        )
     rendered = sum(
-        len(gate.gate_id)
-        + sum(len(key) + len(value) for key, value in gate.evidence.items())
+        GATE_RENDER_OVERHEAD
+        + len(gate.gate_id)
+        + sum(
+            EVIDENCE_RENDER_OVERHEAD + len(key) + len(value)
+            for key, value in gate.evidence.items()
+        )
         for gate in gates
     )
     if rendered > MAX_GATE_TEXT:
         raise CorpusError(
-            f"journal gate declarations total {rendered} characters of id and "
-            f"evidence, over the verdict budget of {MAX_GATE_TEXT}"
+            f"journal gate declarations cost {rendered} characters of verdict "
+            f"text, over the verdict budget of {MAX_GATE_TEXT}"
         )
     removed_text = sum(len(path) for path in removed)
     if removed_text > MAX_REMOVED_TEXT:
