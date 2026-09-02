@@ -2689,3 +2689,52 @@ def test_the_index_comparison_finds_a_path_git_would_read_as_magic(
         f"candidate working tree mode for {MAGIC_STATE_PATH} disagrees with "
         "its index entry (100644 vs 100755)"
     )
+
+
+def test_a_base_release_file_dropped_from_the_index_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds R7-F1: the release-history pass compared the base against the
+    working tree and asked the index only whether it disagreed with what was
+    on disk. ``git rm --cached`` produces no disagreement — it leaves the
+    file exactly where it was, byte-identical and at the base's mode, and
+    removes only the entry that makes it part of the commit under review, at
+    which point the agreement check has no entry to compare and returns. So
+    the mode matched, the bytes matched, the proposal was accepted, and
+    merging it deletes a release manifest, receipt, or signature this package
+    calls immutable. Without the new check this tree gets the ordinary
+    acceptance below."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    git(candidate.root, "rm", "--cached", "--quiet", "--", "releases/README.md")
+    # Nothing on disk moved: that is the whole point of the case.
+    assert (candidate.root / "releases" / "README.md").read_text(
+        encoding="utf-8"
+    ) == "Release journal for the fixture ledger.\n"
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "existing release file was removed from the candidate index: "
+        "releases/README.md"
+    )
+
+
+def test_a_base_release_file_still_indexed_is_left_alone(
+    tmp_path: pathlib.Path,
+) -> None:
+    """R7-F1's other half, and the reason the check is not a presence test on
+    the working tree: an ordinary proposal keeps every base release file in
+    the index, so the pass says nothing about them."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+
+    release_chain.assert_release_file_still_indexed(
+        candidate.root, "releases/README.md"
+    )
+    assert run_gate(candidate) == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 1, "
+        "+1 appended vs base"
+    )
