@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import pathlib
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -78,6 +79,10 @@ class LocalTsa:
     signer_certificate_sha256: str
     signer_spki_sha256: str
 
+    @property
+    def signer_pem(self) -> pathlib.Path:
+        return self.directory / "signer.pem"
+
     def stamp(self, digest: str, out: pathlib.Path) -> None:
         query = self.directory / f"{out.stem}.tsq"
         _openssl(
@@ -113,6 +118,41 @@ def _openssl(arguments: list[str], cwd: pathlib.Path | None = None) -> bytes:
             f"{completed.stderr.decode('utf-8', 'replace')}"
         )
     return completed.stdout
+
+
+def certificate_pins(pem: pathlib.Path) -> dict[str, str]:
+    """The exact identity dict the verifiers derive from a certificate.
+
+    A trust bundle's ``allowedSigners`` entry is compared for equality against
+    this dict, so a fixture that assembled it any other way would pin nothing:
+    a stray key or a differently formatted subject fails the comparison even
+    when the certificate is the right one, and the test would then prove only
+    that the verifier refuses its own fixture.
+    """
+
+    certificate_der = _openssl(["x509", "-in", str(pem), "-outform", "DER"])
+    with tempfile.TemporaryDirectory(prefix="receipt-fixture-") as temporary:
+        public_key_pem = pathlib.Path(temporary) / "public.pem"
+        public_key_pem.write_bytes(
+            _openssl(["x509", "-in", str(pem), "-pubkey", "-noout"])
+        )
+        spki_der = _openssl(
+            ["pkey", "-pubin", "-in", str(public_key_pem), "-outform", "DER"]
+        )
+    description = _openssl(
+        ["x509", "-in", str(pem), "-noout", "-serial", "-subject", "-nameopt", "RFC2253"]
+    ).decode("utf-8")
+    fields: dict[str, str] = {}
+    for line in description.splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            fields[key] = value
+    return {
+        "certificateSha256": sha256_bytes(certificate_der),
+        "spkiSha256": sha256_bytes(spki_der),
+        "serial": fields.get("serial", "").upper(),
+        "subject": fields.get("subject", ""),
+    }
 
 
 def build_local_tsa(directory: pathlib.Path, name: str, policy_oid: str) -> LocalTsa:
