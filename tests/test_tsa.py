@@ -1978,10 +1978,11 @@ def test_refuses_a_root_pem_whose_certificates_openssl_cannot_count(
 ) -> None:
     """A count that did not happen is not a count of one (peer review, F1).
 
-    ``openssl storeutl`` prints no total at all for a file holding no PEM
-    object, and fails outright on one holding an object its store loader
-    cannot decode -- a certificate beside its private key is the ordinary way
-    to meet the second. The superseded pattern refused both too, by counting
+    ``openssl storeutl`` 3.6 prints no total at all for a file holding no PEM
+    object (3.0 prints ``Total found: 0``, and the load then refuses on the
+    one-certificate rule instead), and fails outright on one holding an
+    object its store loader cannot decode -- a certificate beside its private
+    key is the ordinary way to meet the second. The superseded pattern refused both too, by counting
     zero objects in one and two in the other, so what this binds is narrower
     and worth saying plainly: where OpenSSL returns no total, the refusal
     says the certificates could not be counted instead of substituting a
@@ -2002,20 +2003,32 @@ def test_refuses_a_root_pem_whose_certificates_openssl_cannot_count(
     root_path, reference, spec = bundle_over_root_file(
         tree, alpha, name=f"uncountable-{kind}.pem", content=content
     )
+    uncounted = f"pinned TSA root PEM certificates could not be counted: {root_path}: "
+    if kind == "no-pem-object":
+        # OpenSSL 3.0 (CI's Ubuntu) prints "Total found: 0" for a file holding
+        # no PEM object, so the count is zero and the load refuses on the
+        # one-certificate rule; OpenSSL 3.6 prints no total at all, so the
+        # count refuses. Both refuse the file; which message depends on the
+        # OpenSSL the verifier runs, and the test accepts either.
+        try:
+            counted = _certificate_count(root_path)
+        except TsaError as exc:
+            assert str(exc).startswith(uncounted)
+        else:
+            assert counted == 0
+        with pytest.raises(TsaError) as caught:
+            _load_trust_bundle(tree.records, reference, spec=spec)
+        one = f"pinned TSA root PEM must hold exactly one certificate: {root_path}"
+        assert str(caught.value).startswith(load_refusal(tree, alpha, uncounted)) or str(
+            caught.value
+        ).startswith(load_refusal(tree, alpha, one))
+        return
     with pytest.raises(TsaError) as counting:
         _certificate_count(root_path)
-    assert str(counting.value).startswith(
-        f"pinned TSA root PEM certificates could not be counted: {root_path}: "
-    )
+    assert str(counting.value).startswith(uncounted)
     with pytest.raises(TsaError) as caught:
         _load_trust_bundle(tree.records, reference, spec=spec)
-    assert str(caught.value).startswith(
-        load_refusal(
-            tree,
-            alpha,
-            f"pinned TSA root PEM certificates could not be counted: {root_path}: ",
-        )
-    )
+    assert str(caught.value).startswith(load_refusal(tree, alpha, uncounted))
 
 
 @pytest.mark.parametrize(
