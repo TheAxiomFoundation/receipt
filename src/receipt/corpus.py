@@ -21,11 +21,13 @@ Three row kinds, one journal:
 ``content``
     A file inside a consumer-declared content root, with a consumer-declared
     suffix. These are swept closed-world: the effective present set must equal
-    the tree's set exactly, in both membership and digest. The sweep is
-    suffix-scoped after folding — path and suffix are compared under Unicode
-    NFC plus case folding — so a case- or normalization-varied spelling of a
-    pinned suffix cannot sit outside the closed world on a filesystem that
-    treats it as the same file.
+    the tree's set exactly, in both membership and digest. Membership is
+    decided after folding — root and suffix alike are compared under Unicode
+    NFC plus case folding — so neither a case- or normalization-varied
+    spelling of a pinned suffix nor one of a pinned root can sit outside the
+    closed world on a filesystem that treats it as the same file. A tree
+    entry that aliases a root's own spelling is refused by name rather than
+    merged.
 
 ``attested``
     An exact path bound by digest without a sweep — the toolchain pin, the
@@ -33,7 +35,10 @@ Three row kinds, one journal:
     which paths it *requires*, so a producer cannot quietly drop one.
     Retiring one is recorded by a ``removed`` row, and the file has to leave
     the tree with it: a removed path still on disk refuses, whichever kind
-    it was.
+    it was. Two questions are asked about a tombstone, in this order — does
+    the host resolve the exact spelling, and does any fold-equal spelling
+    survive in a listing — because a filesystem resolves names its own
+    enumeration does not emit.
 
 ``gate``
     A declaration that some verification gate ran, carrying a reproducibility
@@ -192,14 +197,17 @@ class CorpusSpec:
         unknown = sorted(self.accepted_gate_tiers - set(GATE_TIERS))
         if unknown:
             raise CorpusError(
-                f"CorpusSpec accepts unknown reproducibility tier {_quoted(unknown[0])}; "
+                "CorpusSpec accepts unknown reproducibility tier "
+                f"{_quoted(unknown[0])}; "
                 f"known tiers are {', '.join(GATE_TIERS)}"
             )
         if type(self.required_gates) is not frozenset:
             raise CorpusError("CorpusSpec required_gates must be a frozenset")
         for gate_id in sorted(self.required_gates):
             if GATE_ID_RE.fullmatch(gate_id) is None:
-                raise CorpusError(f"CorpusSpec required gate id is malformed: {_quoted(gate_id)}")
+                raise CorpusError(
+                    f"CorpusSpec required gate id is malformed: {_quoted(gate_id)}"
+                )
 
     def content_root_of(self, path: str) -> pathlib.PurePosixPath | None:
         """The pinned root this path sits under, compared by fold key.
@@ -371,7 +379,8 @@ def _reject_control_characters(value: str, label: str) -> str:
             )
         if _is_format_control(code, category):
             raise CorpusError(
-                f"{label} contains a Unicode format control ({code:#04x}): {_quoted(value)}"
+                f"{label} contains a Unicode format control "
+                f"({code:#04x}): {_quoted(value)}"
             )
         if category == "Cs":
             raise CorpusError(
@@ -379,7 +388,8 @@ def _reject_control_characters(value: str, label: str) -> str:
             )
         if code in (0x2028, 0x2029):
             raise CorpusError(
-                f"{label} contains a Unicode line separator ({code:#04x}): {_quoted(value)}"
+                f"{label} contains a Unicode line separator "
+                f"({code:#04x}): {_quoted(value)}"
             )
     return value
 
@@ -464,7 +474,9 @@ def _validate_relative_path(value: Any, label: str) -> str:
     if "\\" in value:
         raise CorpusError(f"{label} must use POSIX separators: {_quoted(value)}")
     if value.startswith("/") or value.endswith("/"):
-        raise CorpusError(f"{label} must be relative with no trailing slash: {_quoted(value)}")
+        raise CorpusError(
+            f"{label} must be relative with no trailing slash: {_quoted(value)}"
+        )
     segments = value.split("/")
     for segment in segments:
         if not segment:
@@ -503,7 +515,8 @@ def _exact_keys(row: Any, expected: frozenset[str], label: str) -> dict[str, Any
         missing = sorted(expected - actual)
         unknown = sorted(actual - expected)
         raise CorpusError(
-            f"{label} keys are not closed-world: missing={_quoted(missing)}, unknown={_quoted(unknown)}"
+            f"{label} keys are not closed-world: missing={_quoted(missing)}, "
+            f"unknown={_quoted(unknown)}"
         )
     return row
 
@@ -517,7 +530,9 @@ def _string(value: Any, label: str) -> str:
 def _sha256(value: Any, label: str) -> str:
     text = _string(value, label)
     if SHA256_RE.fullmatch(text) is None:
-        raise CorpusError(f"{label} is not a lowercase SHA-256 hex digest: {_quoted(text)}")
+        raise CorpusError(
+            f"{label} is not a lowercase SHA-256 hex digest: {_quoted(text)}"
+        )
     return text
 
 
@@ -546,7 +561,8 @@ def _parse_row(line: str, number: int, spec: CorpusSpec) -> dict[str, Any]:
     index = row["entryIndex"]
     if type(index) is not int or index != number - 1:
         raise CorpusError(
-            f"journal row {number} entryIndex must be {number - 1}, found {_quoted(index)}"
+            f"journal row {number} entryIndex must be {number - 1}, "
+            f"found {_quoted(index)}"
         )
     return row
 
@@ -574,18 +590,21 @@ def _validate_gate(row: dict[str, Any], number: int, spec: CorpusSpec) -> GateDe
         )
     if tier not in spec.accepted_gate_tiers:
         raise CorpusError(
-            f"journal row {number} gate {_quoted(gate_id)} declares tier {_quoted(tier)}, "
+            f"journal row {number} gate {_quoted(gate_id)} declares tier "
+            f"{_quoted(tier)}, "
             "which the pinned spec does not accept"
         )
     outcome = _string(row["outcome"], f"journal row {number} outcome")
     if outcome not in GATE_OUTCOMES:
         raise CorpusError(
-            f"journal row {number} gate {_quoted(gate_id)} has unknown outcome {_quoted(outcome)}"
+            f"journal row {number} gate {_quoted(gate_id)} has unknown "
+            f"outcome {_quoted(outcome)}"
         )
     evidence = row["evidence"]
     if type(evidence) is not dict or not evidence:
         raise CorpusError(
-            f"journal row {number} gate {_quoted(gate_id)} evidence must be a non-empty object"
+            f"journal row {number} gate {_quoted(gate_id)} evidence must be "
+            "a non-empty object"
         )
     for key, value in evidence.items():
         if type(key) is not str or type(value) is not str:
@@ -594,7 +613,10 @@ def _validate_gate(row: dict[str, Any], number: int, spec: CorpusSpec) -> GateDe
                 "strings to strings"
             )
         key_label = f"journal row {number} gate {_quoted(gate_id)} evidence key"
-        value_label = f"journal row {number} gate {_quoted(gate_id)} evidence value {_quoted(key)}"
+        value_label = (
+            f"journal row {number} gate {_quoted(gate_id)} evidence value "
+            f"{_quoted(key)}"
+        )
         _reject_oversized_text(key, key_label)
         _reject_oversized_text(value, value_label)
         _reject_control_characters(key, key_label)
@@ -606,7 +628,8 @@ def _validate_gate(row: dict[str, Any], number: int, spec: CorpusSpec) -> GateDe
     if outcome == WAIVED:
         if "waiverSetSha256" not in evidence:
             raise CorpusError(
-                f"journal row {number} gate {_quoted(gate_id)} is waived without naming "
+                f"journal row {number} gate {_quoted(gate_id)} is waived "
+                "without naming "
                 "evidence.waiverSetSha256"
             )
         _sha256(
@@ -683,7 +706,9 @@ def parse_journal(
         digest = _sha256(row["sha256"], f"journal row {number} sha256")
         state = _string(row["state"], f"journal row {number} state")
         if state not in FILE_STATES:
-            raise CorpusError(f"journal row {number} has unknown state {_quoted(state)}")
+            raise CorpusError(
+                f"journal row {number} has unknown state {_quoted(state)}"
+            )
 
         target = content if kind == CONTENT_KIND else attested
         # Kind is a function of the path, not the producer's choice: the two
@@ -709,7 +734,8 @@ def parse_journal(
         else:
             if path not in target:
                 raise CorpusError(
-                    f"journal row {number} removes {_quoted(path)}, which was never present"
+                    f"journal row {number} removes {_quoted(path)}, which was "
+                    "never present"
                 )
             # The tombstone must name the revision it retires. Otherwise
             # present(H1) → present(H2) → removed(H1) verifies, deleting the
