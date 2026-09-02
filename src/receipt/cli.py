@@ -254,10 +254,7 @@ from typing import Any, Sequence, TextIO
 from receipt import __version__
 from receipt._render import MAX_RENDERED_FIELD, bounded_encoded, bounded_key
 from receipt._unicode_repertoire import FORMAT_CONTROL_RANGES
-# The outcome vocabulary is receipt.corpus's, not this module's. Spelled out
-# here as literals, a renamed or added outcome went on rendering as an
-# unmarked gate — "not_run" would simply have printed as a bare gate id beside
-# the ones that passed, which is the over-claim the schema exists to stop.
+# The gate outcome vocabulary belongs to receipt.corpus; see _format_text.
 from receipt.corpus import GATE_TIERS, NOT_RUN, PASS, WAIVED
 from receipt.verify import (
     TIER_MEANING,
@@ -638,6 +635,11 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
     if corpus is not None and corpus.gates:
         lines.append("")
         lines.append("DECLARED IN THE WITNESSED JOURNAL — NOT RE-RUN BY THIS COMMAND")
+        # Compared against receipt.corpus's own constants, never against
+        # literals spelled again here. As literals, a renamed or added outcome
+        # went on rendering as an unmarked gate: "not_run" for "not-run", or a
+        # fourth outcome, prints as a bare gate id beside the ones that
+        # passed — the over-claim the outcome schema exists to stop.
         skipped = [gate for gate in corpus.gates if gate.outcome != PASS]
         if skipped:
             lines.append(
