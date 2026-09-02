@@ -1438,16 +1438,70 @@ def test_refuses_at_load_a_bundle_anchor_that_contradicts_its_identity(
         _load_trust_bundle(tree.records, reference, spec=wrong_root)
 
 
+@pytest.mark.parametrize(
+    ("kept", "message"),
+    [
+        ("trustBundleId", "witness lacks a TSA trust-bundle path"),
+        ("trustBundlePath", "witness TSA trust-bundle hash mismatch"),
+        ("trustBundleSha256", "witness lacks a TSA trust-bundle path"),
+    ],
+)
 def test_an_unavailable_legacy_witness_with_a_partial_bundle_claim_is_refused(
-    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    kept: str,
+    message: str,
 ) -> None:
-    """The divergence, stated and bound: the baseline ignored these fields.
+    """The divergence, bound for each field that triggers it (peer review, F3).
 
-    An unavailable v1 marker that names a bundle by any claim field has that
-    claim resolved like an available witness's, so a partial claim refuses
-    where the baseline accepted it (peer review asked for the test).
+    An unavailable v1 marker naming a bundle by *any* of the three claim
+    fields has that claim resolved like an available witness's, so a partial
+    claim refuses where the baseline accepted it. The rule is written over
+    the set of three and only ``trustBundleId`` was bound, which left the
+    other two asserting nothing; each field alone is what the rule promises,
+    so each is here on the message it actually produces -- two of them stop
+    at the missing path, ``trustBundlePath`` alone gets further and refuses
+    on the hash it does not carry. A complete claim is accepted, which
+    ``test_refuses_a_legacy_unavailable_witness_whose_reason_is_not_a_string``
+    relies on, and a marker naming nothing is accepted just below. Without
+    the resolution rule all three of these verify ``unavailable``.
     """
 
+    tree = build_witness_tree(
+        tmp_path,
+        local_anchors[:1],
+        schema="thesis_rfc3161_witness_v1",
+        available=False,
+    )
+    dropped = sorted(_BUNDLE_CLAIM_FIELDS - {kept})
+    rewrite_witness(
+        tree, lambda payload: [payload.pop(field, None) for field in dropped]
+    )
+    claimed = json.loads(tree.witness.read_text())
+    assert _BUNDLE_CLAIM_FIELDS.intersection(claimed) == {kept}
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == message
+
+
+def test_an_unavailable_legacy_marker_naming_no_bundle_is_accepted(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """The other side of the same rule: nothing named, nothing resolved (F3).
+
+    The three fields above are the whole of what naming a bundle means, and
+    that is asserted here, so a fourth claim field would fail this test
+    rather than quietly escape the parametrization. A marker carrying none of
+    them names no bundle, is measured against the newest active one instead,
+    and must still verify -- it is the shape of the pinned tree's own genesis
+    witness, and the case the port must not start refusing.
+    """
+
+    assert _BUNDLE_CLAIM_FIELDS == {
+        "trustBundleId",
+        "trustBundlePath",
+        "trustBundleSha256",
+    }
     tree = build_witness_tree(
         tmp_path,
         local_anchors[:1],
@@ -1457,12 +1511,13 @@ def test_an_unavailable_legacy_witness_with_a_partial_bundle_claim_is_refused(
     rewrite_witness(
         tree,
         lambda payload: [
-            payload.pop(field, None) for field in ("trustBundlePath", "trustBundleSha256")
+            payload.pop(field, None) for field in sorted(_BUNDLE_CLAIM_FIELDS)
         ],
     )
-    with pytest.raises(TsaError) as caught:
-        verify_tree(tree)
-    assert str(caught.value) == "witness lacks a TSA trust-bundle path"
+    evidence = verify_tree(tree)
+    assert evidence.status == "unavailable"
+    assert evidence.tokens == ()
+    assert evidence.trust_bundle_id is None
 
 
 def test_refuses_at_load_a_bundle_whose_root_material_is_missing_or_tampered(
