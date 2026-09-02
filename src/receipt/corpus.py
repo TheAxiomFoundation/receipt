@@ -10,6 +10,12 @@ rows enumerate content files by digest, and verification is a closed-world
 comparison against the working tree. An unlisted file, a missing file, a
 rewritten byte, a symlink where a regular file was recorded — each refuses.
 
+A binding covers the bytes and the regular-file type, not the permission bits
+— no row kind carries a mode, so a content file that gained the execute bit
+after witnessing still matches its digest and still verifies here, while
+release-object modes are covered separately by ``receipt verify --base-ref``,
+which holds every release file present at that ref byte- and mode-identical.
+
 Three row kinds, one journal:
 
 ``content``
