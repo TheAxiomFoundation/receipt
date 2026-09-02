@@ -41,12 +41,14 @@ Three row kinds, one journal:
     the host resolve the exact spelling, and does any fold-equal spelling
     survive in a listing — because a filesystem resolves names its own
     enumeration does not emit. The pair is asked twice per verification, for
-    the reason the paragraph on pass order below gives. The second question
-    walks the tree, so it is bounded: every entry taken from a listing and
-    every candidate a search visits is charged against one budget for the
-    whole pass, and a listing wider than what is left of that budget is
-    abandoned part-way — unread past the batch in hand — rather than
-    fetched, sorted and indexed whole.
+    the reason the paragraph on pass order below gives, and the second asking
+    shares no listing between one tombstone and the next, so a directory read
+    for an earlier tombstone cannot answer for a later one. The second
+    question walks the tree, so it is bounded: every entry taken from a
+    listing and every candidate a search visits is charged against one budget
+    for both askings together, and a listing wider than what is left of that
+    budget is abandoned part-way — unread past the batch in hand — rather
+    than fetched, sorted and indexed whole.
 
 ``gate``
     A declaration that some verification gate ran, carrying a reproducibility
@@ -65,21 +67,38 @@ walk — the longest traversal here — so that both are inside the window they
 close; a pass that ran between them and the return would be time in which the
 tree could change with nothing left to notice.
 
-The tombstone pass is the one that runs twice, and the second run is handed a
-fresh index. It has to be. The first run decides absence from directory
-listings it caches and never re-reads, so a survivor that appears after its
-parent has been listed is invisible to every later search in that run — two
-tombstones sharing a parent is enough — and nothing afterwards looked at a
-removed path at all: the re-checks close their window over content and over
-the bound bytes, not over the paths the verdict calls removed (peer review,
-round five). Both runs charge one budget, carried across, so re-establishing
-absence cannot cost a second walk's worth of budget.
+The tombstone pass is the one that runs twice, and the second run caches
+nothing whatever. It has to be that way twice over. The first run decides
+absence from directory listings it caches and never re-reads, so a survivor
+that appears after its parent has been listed is invisible to every later
+search in that run — two tombstones sharing a parent is enough — and nothing
+afterwards looked at a removed path at all: the re-checks close their window
+over content and over the bound bytes, not over the paths the verdict calls
+removed (peer review, round five). A second run that cached within itself
+would then reproduce exactly that staleness one pass later, inside the pass
+added to close it (peer review, round six), so every tombstone in it lists its
+own directories. Both runs charge one budget, carried across, and a re-read is
+charged like any other read, so re-establishing absence cannot buy the tree a
+second walk's worth of budget.
 
-What putting that run last costs is stated rather than hidden: no membership
-re-sweep follows it, so a content file inserted while that second walk reads
-directories is not observed. Verification of a mutable tree always has a last
-look. This puts it on the one claim the verdict makes whose subject no other
-pass revisits.
+Putting that run last used to cost a window: no membership re-sweep follows
+it, so a content file inserted while it walked, or a bound file rewritten by
+rename while it walked, was never looked at again. A third re-sweep would only
+move that boundary, so the walk is watched by generation instead. Every
+directory the closing membership sweep and that walk read is stamped — device,
+inode, mtime, ctime — an instant before it is read, and every stamp is
+re-stated after the walk has finished. An entry added, removed or renamed
+moves its parent's mtime and ctime, so the change is refused although nothing
+re-derived the set.
+
+What remains is one instant: between the last stamp re-read and the return the
+tree can still change, and nothing in this shape of verification removes that
+— only verifying a snapshot the verifier holds open would (tracked as
+follow-up; not done here). Two narrower things sit inside it as well: a
+rewrite in place through the same inode after the identity re-check, which
+moves the file's own stamps and not its parent's, and a change on a filesystem
+whose directory timestamps are too coarse to distinguish it from the stamp
+taken an instant earlier.
 
 Every trust anchor arrives from the consumer's committed :class:`CorpusSpec`.
 The module ships no defaults: not a content root, not a required gate, not an
@@ -204,7 +223,11 @@ MAX_REMOVED_TEXT = 262144
 #: as the work done with what it named (peer review, round five). The two
 #: tombstone passes share the total: the second index is constructed with
 #: what the first one spent, so the pass that re-establishes absence cannot
-#: buy the tree a second walk's worth of budget.
+#: buy the tree a second walk's worth of budget. That second pass shares no
+#: listing between one tombstone and the next (peer review, round six), so it
+#: costs more than the first — a directory on the path of R removed paths is
+#: read R times rather than once — and every one of those reads is charged
+#: here, which is the point: a re-read is work, and the cap is on work.
 MAX_TOMBSTONE_WORK = 262144
 #: The most characters a refusal quotes of a producer-controlled value.
 MAX_QUOTED_TEXT = 256
@@ -927,7 +950,12 @@ def parse_journal(
     return content, attested, tuple(gates), tuple(sorted(removed))
 
 
-def _list_directory(directory: pathlib.Path, relative: str) -> list[pathlib.Path]:
+def _list_directory(
+    directory: pathlib.Path,
+    relative: str,
+    *,
+    generations: "_DirectoryGenerations | None" = None,
+) -> list[pathlib.Path]:
     """List one directory, refusing to continue if it cannot be read.
 
     ``Path.rglob`` swallows ``PermissionError`` while descending, so a
@@ -936,8 +964,15 @@ def _list_directory(directory: pathlib.Path, relative: str) -> list[pathlib.Path
     A closed-world sweep built on that behaviour reports "no extra files"
     when it simply could not look. Enumeration failure must be a refusal, not
     an empty result. (Found by cross-family review.)
+
+    ``generations``, when given, is told what this directory looked like an
+    instant before the listing, so a later pass can be asked whether it still
+    looks that way. The recorder is passed only by the *final* membership
+    sweep; see :class:`_DirectoryGenerations`.
     """
 
+    if generations is not None:
+        generations.record(directory, relative)
     try:
         return sorted(directory.iterdir(), key=lambda entry: entry.name)
     except OSError as exc:
@@ -945,6 +980,79 @@ def _list_directory(directory: pathlib.Path, relative: str) -> list[pathlib.Path
             f"cannot enumerate a directory under a content root, so the file "
             f"set cannot be closed: {_quoted(relative or '.')} ({exc.strerror})"
         ) from exc
+
+
+def _directory_generation(
+    directory: pathlib.Path,
+) -> tuple[int, int, int, int] | None:
+    """Identity and both change stamps of a directory, or None if unreadable.
+
+    ``st_mtime_ns`` moves when an entry is added, removed or renamed;
+    ``st_ctime_ns`` moves for those and for a metadata change as well, and
+    on POSIX nothing in userspace can set it backwards. Together with the
+    device and inode — which say it is still the same directory and not a new
+    one swapped in under the name — that is what "this directory has not
+    changed since I read it" means here.
+    """
+
+    try:
+        info = os.lstat(directory)
+    except OSError:
+        return None
+    return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
+
+
+class _DirectoryGenerations:
+    """What each directory the closing passes read looked like when read.
+
+    The two re-checks answer for the sets they re-derive: membership is
+    re-swept and every bound file's identity is re-stated. Neither says
+    anything about a directory the *second tombstone pass* reads afterwards,
+    and that pass is a walk of the tree — the last window in the run, and one
+    nothing was watching. A content file inserted while it ran was never
+    enumerated again, and a bound file rewritten by rename while it ran kept
+    the identity the re-check had already accepted (peer review, round six).
+
+    So every directory those closing passes list is stamped an instant before
+    the listing, and every stamp is re-stated once the last of them has
+    finished. A directory whose generation moved refuses the verdict: an
+    insertion, a removal, a rename over an existing name — each of them moves
+    the parent's mtime and ctime, whatever it does to the file itself.
+
+    The first reading of a directory wins. A directory the uncached tombstone
+    pass lists repeatedly is therefore held against what it looked like the
+    first time anything in the closing sequence read it, not the last, so the
+    window the check closes is the widest one available rather than the
+    narrowest.
+
+    A directory that could not be stat-ed is kept as ``None`` and refuses at
+    the re-check. That is the module's standing rule — a failure to look is
+    not an absence — and in practice the listing that follows the stamp
+    refuses first, with a message that says what could not be read.
+    """
+
+    def __init__(self) -> None:
+        self._seen: dict[
+            str, tuple[pathlib.Path, tuple[int, int, int, int] | None]
+        ] = {}
+
+    def record(self, directory: pathlib.Path, relative: str) -> None:
+        """Stamp this directory, if the closing sequence has not stamped it yet."""
+
+        if relative in self._seen:
+            return
+        self._seen[relative] = (directory, _directory_generation(directory))
+
+    def assert_unchanged(self) -> None:
+        """Refuse if any stamped directory is not what it was when it was read."""
+
+        for relative in sorted(self._seen):
+            directory, generation = self._seen[relative]
+            if generation is None or _directory_generation(directory) != generation:
+                raise CorpusError(
+                    "the tree changed during verification; the closed-world "
+                    "verdict is refused"
+                )
 
 
 class _TombstoneIndex:
@@ -1000,12 +1108,36 @@ class _TombstoneIndex:
     from a cached listing goes unrechecked (peer review, round five), and the
     work budget belongs to the verification rather than to the index, so the
     second one is constructed with ``charged`` set to what the first spent.
+
+    The second index caches nothing at all — ``cache=False``. A fresh index
+    that still caches within itself repeats the first pass's own staleness on
+    a smaller scale: one tombstone lists a shared parent, a survivor of the
+    next tombstone appears in it, and the next tombstone reads the listing
+    the first one left behind. Two tombstones under one directory is enough,
+    and it is the exact defect the second pass exists to close (peer review,
+    round six). So every tombstone in that pass lists its own directories,
+    and every entry of every one of those listings is charged against the
+    same carried budget — a re-read is work, and the budget bounds work.
+
+    ``generations``, when given, is told what each directory looked like an
+    instant before it was listed. See :class:`_DirectoryGenerations`: the
+    second pass is the last thing in the run that reads the tree, so it is
+    the one window nothing downstream can close by re-deriving a set.
     """
 
-    def __init__(self, root: pathlib.Path, *, charged: int = 0) -> None:
+    def __init__(
+        self,
+        root: pathlib.Path,
+        *,
+        charged: int = 0,
+        cache: bool = True,
+        generations: "_DirectoryGenerations | None" = None,
+    ) -> None:
         self.root = root
         self._directories: dict[str, dict[str, list[pathlib.Path]] | None] = {}
         self._work = charged
+        self._cache = cache
+        self._generations = generations
 
     @property
     def work(self) -> int:
@@ -1040,8 +1172,10 @@ class _TombstoneIndex:
         refusal this raises.
         """
 
-        if key in self._directories:
+        if self._cache and key in self._directories:
             return self._directories[key]
+        if self._generations is not None:
+            self._generations.record(directory, key)
         names: list[str] = []
         try:
             # Scanned inside a ``with`` and charged as each name arrives, so
@@ -1058,7 +1192,8 @@ class _TombstoneIndex:
                     self.charge(relative)
                     names.append(entry.name)
         except (FileNotFoundError, NotADirectoryError):
-            self._directories[key] = None
+            if self._cache:
+                self._directories[key] = None
             return None
         except OSError as exc:
             raise CorpusError(
@@ -1076,7 +1211,8 @@ class _TombstoneIndex:
             # next, which decides whether a tombstone is honoured.
             _assert_assigned(name, "tree entry examined for a tombstone")
             folded.setdefault(_path_fold(name), []).append(directory / name)
-        self._directories[key] = folded
+        if self._cache:
+            self._directories[key] = folded
         return folded
 
 
@@ -1303,7 +1439,12 @@ def _assert_no_stripping_alias(name: str, relative: str) -> None:
         )
 
 
-def _tree_content_paths(root: pathlib.Path, spec: CorpusSpec) -> dict[str, pathlib.Path]:
+def _tree_content_paths(
+    root: pathlib.Path,
+    spec: CorpusSpec,
+    *,
+    generations: "_DirectoryGenerations | None" = None,
+) -> dict[str, pathlib.Path]:
     """Enumerate every regular file the spec calls content.
 
     Walks explicitly rather than globbing: every directory is listed with
@@ -1326,6 +1467,12 @@ def _tree_content_paths(root: pathlib.Path, spec: CorpusSpec) -> dict[str, pathl
     redrawn the line the command was about to fail on — the same attack
     :func:`_reject_control_characters` closes from the producer's side, open
     from the tree's (peer review, round three).
+
+    ``generations``, when given, is told what every directory this walk reads
+    looked like an instant before it read it — the root-component listings
+    included, since a new directory aliasing a root component appears in one
+    of those and nowhere else. Only the closing sweep passes a recorder;
+    :class:`_DirectoryGenerations` says what it is for.
     """
 
     found: dict[str, pathlib.Path] = {}
@@ -1337,7 +1484,7 @@ def _tree_content_paths(root: pathlib.Path, spec: CorpusSpec) -> dict[str, pathl
         base = _assert_no_symlinked_component(
             root, base_relative, what="pinned content root"
         )
-        _assert_no_aliasing_root_component(root, base_relative)
+        _assert_no_aliasing_root_component(root, base_relative, generations=generations)
         if not base.exists():
             raise CorpusError(
                 f"pinned content root is absent from the tree: {base_relative}"
@@ -1348,7 +1495,9 @@ def _tree_content_paths(root: pathlib.Path, spec: CorpusSpec) -> dict[str, pathl
         pending: list[tuple[pathlib.Path, str]] = [(base, base_relative)]
         while pending:
             directory, directory_relative = pending.pop()
-            for candidate in _list_directory(directory, directory_relative):
+            for candidate in _list_directory(
+                directory, directory_relative, generations=generations
+            ):
                 relative = candidate.relative_to(root).as_posix()
                 # Before the suffix predicate folds this name. A tree entry
                 # carrying an unassigned code point folds differently on
@@ -1421,7 +1570,12 @@ def _tree_content_paths(root: pathlib.Path, spec: CorpusSpec) -> dict[str, pathl
     return found
 
 
-def _assert_no_aliasing_root_component(root: pathlib.Path, relative: str) -> None:
+def _assert_no_aliasing_root_component(
+    root: pathlib.Path,
+    relative: str,
+    *,
+    generations: "_DirectoryGenerations | None" = None,
+) -> None:
     """Refuse a tree entry that aliases a component of a pinned content root.
 
     :meth:`CorpusSpec.content_root_of` folds, so a path under "RULES/" is
@@ -1446,7 +1600,9 @@ def _assert_no_aliasing_root_component(root: pathlib.Path, relative: str) -> Non
     for component in relative.split("/"):
         if current.is_symlink() or not current.is_dir():
             return
-        for entry in _list_directory(current, "/".join(walked)):
+        for entry in _list_directory(
+            current, "/".join(walked), generations=generations
+        ):
             _assert_assigned(entry.name, f"tree entry beside {_quoted(relative)}")
             # The trailing-dot/space rule reaches here too, and it is not a
             # detail of tidiness: an entry named "rules " beside the pinned
@@ -1715,7 +1871,17 @@ def verify_corpus_binding(
     # They come after every pass that reads the tree except the second
     # tombstone pass below, deliberately: every earlier pass, the first
     # tombstone walk included, is inside the window they close.
-    if set(_tree_content_paths(root, spec)) != tree_paths:
+    #
+    # What the second tombstone pass then does to the tree is watched by
+    # generation instead of by re-derivation. Every directory this sweep
+    # reads is stamped an instant before it is read, and the stamps are
+    # re-stated after that pass has finished, so an insertion or a
+    # rewrite-by-rename that lands while it walks moves its parent's mtime
+    # and ctime and is refused — the check no third re-sweep could give,
+    # because a third re-sweep would only move the boundary again (peer
+    # review, round six).
+    generations = _DirectoryGenerations()
+    if set(_tree_content_paths(root, spec, generations=generations)) != tree_paths:
         raise CorpusError(
             "the content tree changed during verification; the closed-world "
             "set is not stable and the verdict is refused"
@@ -1755,16 +1921,33 @@ def verify_corpus_binding(
     # Charged against the same budget, carried across from the first pass, so
     # a tree cannot be walked twice for the price of the cap once.
     #
-    # What this position costs: no membership re-sweep runs after it, so a
-    # content file inserted while this walk reads directories is not
-    # observed. There is always a last look at a mutable tree, and this puts
-    # it on the claim no other pass revisits.
+    # It caches nothing within itself either. An index that cached would
+    # repeat the first pass's staleness inside the pass meant to close it:
+    # one tombstone lists the shared parent, the next tombstone's survivor
+    # appears in it, and the next tombstone reads the listing the first one
+    # left behind (peer review, round six).
     _assert_tombstones_absent(
         root,
         removed,
-        _TombstoneIndex(root, charged=tombstones.work),
+        _TombstoneIndex(
+            root,
+            charged=tombstones.work,
+            cache=False,
+            generations=generations,
+        ),
         appeared=True,
     )
+
+    # Last, because it is the only check that can speak for the walk above.
+    # Every directory the closing sweep and that walk read is re-stated
+    # here; one whose generation moved means the tree changed under a pass
+    # that had nothing downstream to re-derive its claim.
+    #
+    # What is left after this is one instant: between the last stamp read
+    # here and the return, the tree can still change, and no amount of
+    # re-checking removes that — only verifying a snapshot the verifier
+    # holds open does (tracked as follow-up).
+    generations.assert_unchanged()
 
     return CorpusVerification(
         content=tuple(content[path] for path in sorted(content)),

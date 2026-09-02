@@ -675,8 +675,11 @@ def test_refuses_a_content_file_inserted_after_first_enumeration(
     real = corpus_mod._tree_content_paths
     calls = {"n": 0}
 
-    def enumerate_then_inject(root: pathlib.Path, spec: object) -> dict:
-        result = real(root, spec)
+    def enumerate_then_inject(root: pathlib.Path, spec: object, **passed) -> dict:
+        # The closing sweep is handed a directory-generation recorder (R6-F2);
+        # it is passed straight through so the stand-in stamps what the real
+        # sweep would have stamped.
+        result = real(root, spec, **passed)
         calls["n"] += 1
         if calls["n"] == 1:
             # Simulate an unlisted file landing after the closed-world set was
@@ -1762,19 +1765,31 @@ def _tombstone_pass_entries(tmp_path: pathlib.Path) -> int:
 
 
 def _tombstone_pass_work(tmp_path: pathlib.Path) -> int:
-    """Budget units *one* two-tombstone pass charges, counting each once.
+    """Budget units the *first* two-tombstone pass charges, counting each once.
 
     Two directories are listed — the tree root and ``.axiom`` — and every
     entry consumed from a listing is one unit. Each of the two searches then
     visits the ``.axiom`` candidate on its way down, and a visited candidate
     is charged as well (F2), which is the two units added here.
 
-    A verification runs the pass twice over the same tree (F1), charging both
-    runs against one budget, so what a whole verification costs is twice
-    this.
+    Only the first pass costs this. The second caches nothing (R6-F2), so it
+    pays the helper below instead, and both are charged against one budget.
     """
 
     return _tombstone_pass_entries(tmp_path) + 2
+
+
+def _uncached_tombstone_pass_work(tmp_path: pathlib.Path) -> int:
+    """Budget units the *second* two-tombstone pass charges, sharing nothing.
+
+    The second pass lists every directory afresh for every tombstone, which
+    is the point of it: a listing left behind by an earlier search in the
+    same pass is exactly the staleness that pass exists to close. So each of
+    the two searches pays for both listings itself, plus the one candidate it
+    visits on the way down.
+    """
+
+    return 2 * (_tombstone_pass_entries(tmp_path) + 1)
 
 
 def test_the_tombstone_budget_counts_entries_not_listings(
@@ -1805,17 +1820,18 @@ def test_the_tombstone_index_is_shared_across_removed_paths(
 ) -> None:
     """Binds F3: two tombstones must not pay twice for the same directory.
 
-    The budget is set to exactly what the two passes charge, counting each
-    listed entry once and each visited candidate once. Both removed paths
-    start at the tree root and share their parent, so this passes only
-    because the index reads each directory once and hands the listing to the
-    second search. Re-listing per removed path — what the module did before —
-    would push the count from five to eight per pass and refuse.
+    The budget is set to exactly what the two passes charge between them —
+    the first sharing its listings, the second sharing nothing. Both removed
+    paths start at the tree root and share their parent, so this passes only
+    because the *first* index reads each directory once and hands the listing
+    to the second search. Re-listing per removed path there too — what the
+    module did before — would push that pass from five to eight and refuse.
     """
 
     write_tree(tmp_path)
     monkeypatch.setattr(
-        "receipt.corpus.MAX_TOMBSTONE_WORK", 2 * _tombstone_pass_work(tmp_path)
+        "receipt.corpus.MAX_TOMBSTONE_WORK",
+        _tombstone_pass_work(tmp_path) + _uncached_tombstone_pass_work(tmp_path),
     )
     verification = verify_corpus_binding(
         tmp_path, render_journal(_two_tombstone_rows()), spec=corpus_spec()
@@ -2055,8 +2071,8 @@ def test_a_bound_file_rewritten_during_the_tombstone_pass_refuses(
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
 
 
-def _after_searching(after: str, act):
-    """A ``_fold_survivor`` that fires ``act`` once, after searching ``after``.
+def _after_nth_search(after: str, occurrence: int, act):
+    """A ``_fold_survivor`` firing ``act`` after the nth search for ``after``.
 
     The sibling helper above fires *before* the first search of the pass, so
     the change is inside the walk. These tests need the change to land after
@@ -2064,21 +2080,34 @@ def _after_searching(after: str, act):
     the two tombstone passes — or between one search and the next inside a
     pass — is opened deterministically. Which path to fire behind is the
     whole design of each test below, so it is named rather than counted.
+
+    Which *pass* is named the same way. A verification searches for every
+    removed path twice, so the first search for a path is the first pass's
+    and the second is the second pass's; ``occurrence`` picks between them,
+    and firing on the second is how a test puts its change inside the pass
+    that closes the run (R6-F2).
     """
 
     import receipt.corpus
 
     real = receipt.corpus._fold_survivor
-    fired: list[str] = []
+    seen: list[str] = []
 
     def fold_survivor(index, relative):
         found = real(index, relative)
-        if relative == after and not fired:
-            fired.append(relative)
-            act()
+        if relative == after:
+            seen.append(relative)
+            if len(seen) == occurrence:
+                act()
         return found
 
     return fold_survivor
+
+
+def _after_searching(after: str, act):
+    """Fire ``act`` after the *first* search for ``after`` — the first pass's."""
+
+    return _after_nth_search(after, 1, act)
 
 
 def _late_survivor_scandir(directory_name: str, survivor: str, planted: list[str]):
@@ -2930,3 +2959,139 @@ def test_an_ordinary_non_content_file_under_a_content_root_still_verifies(
         tmp_path, render_journal(journal_rows()), spec=corpus_spec()
     )
     assert len(verification.content) == len(CONTENT)
+
+
+def test_a_survivor_planted_inside_the_second_tombstone_pass_refuses(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds R6-F2: the second pass repeated the first pass's own staleness.
+
+    Round five gave the second pass a fresh index, which closed the window
+    the first pass left open. It did not close the same window *inside*
+    itself: a fresh index that still cached listed the shared parent once for
+    the first tombstone and handed that listing to every tombstone after it.
+    So the defect the second pass exists to refuse — a survivor appearing
+    after its parent has been listed, with another tombstone still to be
+    checked under it — survived one pass later, and the verdict still named
+    the path under removedPaths while the file answered to it.
+
+    The change fires after the *second* pass's search for ``.axiom/a.json``,
+    which is exactly when that pass has cached the shared parent and has not
+    yet looked for ``.axiom/b.json``. The index now caches nothing, so the
+    second search lists ``.axiom`` again and finds the survivor. Without the
+    fix it reads the listing the first search left behind, finds nothing, and
+    the verification returns both paths as removed.
+
+    The survivor is declared rather than written, for the reason
+    ``_late_survivor_scandir`` gives, and it is also what isolates this
+    finding from its sibling: a name that is not on disk moves no directory's
+    mtime, so the generation check below cannot be what refuses here.
+    """
+
+    planted: list[str] = []
+    write_tree(tmp_path)
+    monkeypatch.setattr(
+        os, "scandir", _late_survivor_scandir(".axiom", "B.JSON", planted)
+    )
+    monkeypatch.setattr(
+        "receipt.corpus._fold_survivor",
+        _after_nth_search(".axiom/a.json", 2, lambda: planted.append("B.JSON")),
+    )
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(_two_tombstone_rows()), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        "removed path appeared during verification under a spelling that "
+        "aliases it on a case- or normalization-insensitive filesystem: "
+        ".axiom/b.json ('.axiom/B.JSON')"
+    )
+
+
+def test_a_content_file_inserted_during_the_second_tombstone_pass_refuses(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds R6-F2: nothing watched the tree while the last pass walked it.
+
+    Round four moved the tombstone walk ahead of the hashing so the two
+    re-checks would close a window over it; round five then put a second walk
+    *after* those re-checks, and stated the cost — no membership re-sweep
+    follows it. That cost was a false PASS: a content file inserted while the
+    second walk read directories was never enumerated again, and the verdict
+    called a set closed that had gained a file since it was last looked at.
+
+    A third re-sweep would only move the boundary, so the walk is watched by
+    generation instead. Every directory the closing sweep read is stamped an
+    instant before it is read and re-stated once the walk has finished, and
+    an insertion moves its parent's mtime and ctime. Without the fix this
+    verification returns a CorpusVerification with the smuggled rule file in
+    the tree it just called closed.
+
+    The check sees a write the host's directory timestamps distinguish from
+    the stamp taken before it; measured on this host, a create moves both
+    stamps. A filesystem with coarser directory timestamps would leave a
+    window this cannot see, which is a property of the stamp, not of the pass.
+    """
+
+    write_tree(tmp_path)
+    monkeypatch.setattr(
+        "receipt.corpus._fold_survivor",
+        _after_nth_search(
+            ".axiom/a.json",
+            2,
+            lambda: (tmp_path / "rules/tax/smuggled.yaml").write_text("name: evil\n"),
+        ),
+    )
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(_two_tombstone_rows()), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        "the tree changed during verification; the closed-world verdict is refused"
+    )
+
+
+def test_a_bound_file_rewritten_during_the_second_tombstone_pass_refuses(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds R6-F2: the identity re-check could not speak for the last walk.
+
+    The per-file identity re-check is what catches a hashed file replaced
+    afterwards, and it runs before the second tombstone pass — so a rewrite
+    landing during that pass kept the verdict of bytes that were no longer
+    there. This one replaces a bound content file by renaming another file
+    over its name, which is how a rewrite is done atomically and how it is
+    done by every tool that does it safely.
+
+    A rename over an existing name replaces a directory entry, so the
+    parent's mtime and ctime both move and the generation check refuses. The
+    replacement is staged outside the verified tree so the only change inside
+    it is the one under test. Without the fix this verification passes and
+    reports a digest the tree no longer holds.
+
+    What stays inside the residual, deliberately: a rewrite in place, through
+    the same inode, after the identity re-check has run. It moves the file's
+    own mtime and ctime, not its parent's, and nothing after the identity
+    re-check reads the file again. Closing that would mean re-hashing every
+    bound file after the last pass, which only moves the last look rather
+    than removing it.
+    """
+
+    staged = tmp_path.parent / f"{tmp_path.name}-staged.yaml"
+    staged.write_text("name: rate\nvalue: 0.99\n")
+    write_tree(tmp_path)
+    monkeypatch.setattr(
+        "receipt.corpus._fold_survivor",
+        _after_nth_search(
+            ".axiom/a.json",
+            2,
+            lambda: os.replace(staged, tmp_path / "rules/tax/rate.yaml"),
+        ),
+    )
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(_two_tombstone_rows()), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        "the tree changed during verification; the closed-world verdict is refused"
+    )
