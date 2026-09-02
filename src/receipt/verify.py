@@ -262,11 +262,27 @@ def load_spec(spec_path: pathlib.Path) -> tuple[VerificationSpec, str]:
     return candidate, digest
 
 
+def _witness_time(value: datetime) -> str:
+    """Render a witnessed genTime without discarding what the token signed.
+
+    An RFC 3161 authority may sign a fractional genTime, and whole-second
+    formatting printed a token witnessed at ``…:59.750000Z`` as ``…:59Z`` —
+    an instant strictly earlier than the one the receipt carries, quoted in a
+    verdict as though it were exact. Microseconds are printed whenever there
+    are any; when there are none they are omitted, so the ordinary case reads
+    as the authority wrote it.
+    """
+
+    if value.microsecond:
+        return value.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _custody_detail(verification: ChainVerification, spec: VerificationSpec) -> str:
     head = verification.head
     assert head is not None
     witnesses = " · ".join(
-        f"{anchor} {value.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        f"{anchor} {_witness_time(value)}"
         for anchor, value in sorted(head.receipt_times.items())
     )
     anchor_set = verification.anchor_set_sha256
@@ -516,7 +532,7 @@ def result_to_dict(result: VerifyResult) -> dict[str, Any]:
             "anchorSetSha256": result.chain.anchor_set_sha256,
             "anchorFiles": dict(result.chain.anchor_file_sha256s),
             "witnesses": {
-                anchor: value.strftime("%Y-%m-%dT%H:%M:%SZ")
+                anchor: _witness_time(value)
                 for anchor, value in sorted(result.chain.head.receipt_times.items())
             },
         }

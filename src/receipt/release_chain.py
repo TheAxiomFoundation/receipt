@@ -827,7 +827,22 @@ def _parse_receipt_text(output: str, receipt: pathlib.Path) -> tuple[datetime, s
         ) from exc
     fraction = match.group("fraction")
     if fraction:
-        parsed = parsed.replace(microsecond=int((fraction[1:] + "000000")[:6]))
+        digits = fraction[1:]
+        if len(digits) > 6:
+            # Keeping six digits and dropping the rest moves the parsed time
+            # EARLIER than the instant the authority actually signed, and that
+            # time is not merely reported: it is compared against createdAtUtc
+            # and against the previous release's witnesses, and it becomes the
+            # -attime the signer certificate is validated at. A verdict must
+            # not quote, or reason from, a time no receipt carries — so a
+            # precision this verifier cannot represent refuses instead of
+            # being silently rounded down.
+            raise ReleaseChainError(
+                f"RFC 3161 genTime for {receipt} is finer than a microsecond, "
+                f"which this verifier cannot represent exactly: "
+                f"{time_lines[0]!r}"
+            )
+        parsed = parsed.replace(microsecond=int((digits + "000000")[:6]))
     return parsed, policy_lines[0]
 
 
