@@ -975,9 +975,6 @@ def verify_append_gate(
             candidate,
         )
         appended = check_append_only(base, lines, candidate)
-        # After the byte comparisons, so every refusal that existed before
-        # this check still fires first and in its own words.
-        check_state_modes(base, candidate)
     check_rows(lines, binding_boundary, spec)
     # On the PR path, the trusted code root is the detached base checkout.
     # Production verification must use those immutable anchors and the base
@@ -1000,6 +997,12 @@ def verify_append_gate(
             enforce_production_pins=production_pins,
         )
     )
+    if base is not None:
+        # Last, after the row checks and the release proposal as well as the
+        # byte comparisons, so every refusal that existed before this check
+        # still fires first and in its own words. Peer review caught the
+        # earlier placement, which sat ahead of two of them.
+        check_state_modes(base, candidate)
     # Name the commit the verdict was measured against whenever the caller
     # named something that could move. A base given as its own OID already
     # names it, and that verdict text stays exactly what it was — the shape
