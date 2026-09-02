@@ -582,6 +582,44 @@ def test_spec_refuses_an_empty_content_root() -> None:
         corpus_spec(content_roots=())
 
 
+def test_spec_refuses_a_content_suffix_carrying_an_unassigned_code_point() -> None:
+    """Binds F3: the suffix was checked for its leading dot and nothing else.
+
+    ``_has_pinned_suffix`` folds the pinned suffix against every journal path
+    and every tree entry name, and a fold key is stable across Unicode tables
+    only for assigned characters. U+0378 has never been assigned, so a spec
+    pinning ``.yaml\u0378`` decides what the closed world contains one way on
+    the interpreter that encodes it next and another on every interpreter
+    today — the consumer's own trust anchor, silently interpreter-dependent.
+    Every other name this module folds is screened; this one was not.
+
+    Without the fix the spec constructs and the suffix is folded unexamined.
+    """
+
+    import unicodedata
+
+    assert unicodedata.category("\u0378") == "Cn"
+    with pytest.raises(CorpusError, match="unassigned in Unicode") as caught:
+        corpus_spec(content_suffixes=(".yaml\u0378",))
+    assert str(caught.value).startswith("CorpusSpec content suffix contains")
+
+
+def test_spec_refuses_a_content_root_carrying_an_unassigned_code_point() -> None:
+    """Binds F3, the root half: the same screen, named for the spec.
+
+    A root is folded by ``content_root_of`` for every path the journal binds,
+    so an unassigned code point in one has the same effect as in a suffix.
+    ``_validate_relative_path`` already refused it, under a label that named
+    a path; the screen now runs first and names the spec, because the fault
+    is in the consumer's committed code and that is what has to be edited.
+    Without the fix the refusal is the path-shaped one.
+    """
+
+    with pytest.raises(CorpusError, match="unassigned in Unicode") as caught:
+        corpus_spec(content_roots=(pathlib.PurePosixPath("ru\u0378les"),))
+    assert str(caught.value).startswith("CorpusSpec content root contains")
+
+
 def test_reproducible_and_unreproducible_gates_are_separated(
     tmp_path: pathlib.Path,
 ) -> None:
