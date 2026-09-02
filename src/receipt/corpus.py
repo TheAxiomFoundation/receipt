@@ -591,8 +591,7 @@ def _validate_gate(row: dict[str, Any], number: int, spec: CorpusSpec) -> GateDe
     if tier not in spec.accepted_gate_tiers:
         raise CorpusError(
             f"journal row {number} gate {_quoted(gate_id)} declares tier "
-            f"{_quoted(tier)}, "
-            "which the pinned spec does not accept"
+            f"{_quoted(tier)}, which the pinned spec does not accept"
         )
     outcome = _string(row["outcome"], f"journal row {number} outcome")
     if outcome not in GATE_OUTCOMES:
@@ -629,8 +628,7 @@ def _validate_gate(row: dict[str, Any], number: int, spec: CorpusSpec) -> GateDe
         if "waiverSetSha256" not in evidence:
             raise CorpusError(
                 f"journal row {number} gate {_quoted(gate_id)} is waived "
-                "without naming "
-                "evidence.waiverSetSha256"
+                "without naming evidence.waiverSetSha256"
             )
         _sha256(
             evidence["waiverSetSha256"],
@@ -1080,9 +1078,9 @@ def _assert_no_aliasing_root_component(root: pathlib.Path, relative: str) -> Non
     So each component of each pinned root is checked against a listing of its
     parent: an entry whose fold key matches the component but whose spelling
     does not is refused by name. A parent that is not there is left to the
-    absent/not-a-directory refusals below, which say something more useful,
-    and a symlinked parent has already been refused by
-    :func:`_assert_no_symlinked_component`.
+    absent and not-a-directory refusals in :func:`_tree_content_paths`, which
+    say something more useful, and a symlinked parent has already been
+    refused by :func:`_assert_no_symlinked_component`.
     """
 
     current = root
