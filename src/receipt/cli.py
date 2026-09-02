@@ -254,7 +254,11 @@ from typing import Any, Sequence, TextIO
 from receipt import __version__
 from receipt._render import MAX_RENDERED_FIELD, bounded_encoded, bounded_key
 from receipt._unicode_repertoire import FORMAT_CONTROL_RANGES
-from receipt.corpus import GATE_TIERS
+# The outcome vocabulary is receipt.corpus's, not this module's. Spelled out
+# here as literals, a renamed or added outcome went on rendering as an
+# unmarked gate — "not_run" would simply have printed as a bare gate id beside
+# the ones that passed, which is the over-claim the schema exists to stop.
+from receipt.corpus import GATE_TIERS, NOT_RUN, PASS, WAIVED
 from receipt.verify import (
     TIER_MEANING,
     VerifyResult,
@@ -634,7 +638,7 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
     if corpus is not None and corpus.gates:
         lines.append("")
         lines.append("DECLARED IN THE WITNESSED JOURNAL — NOT RE-RUN BY THIS COMMAND")
-        skipped = [gate for gate in corpus.gates if gate.outcome != "pass"]
+        skipped = [gate for gate in corpus.gates if gate.outcome != PASS]
         if skipped:
             lines.append(
                 f"  {len(skipped)} of {len(corpus.gates)} declared gate(s) did not "
@@ -647,13 +651,13 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
             lines.append(f"  {tier}: {TIER_MEANING[tier]}")
             for gate in gates:
                 suffix = ""
-                if gate.outcome == "waived":
+                if gate.outcome == WAIVED:
                     # Truncated first and escaped after, so the line still
                     # shows sixteen characters of the value rather than
                     # sixteen characters of its escaping.
                     waiver = gate.evidence.get("waiverSetSha256", "")[:16]
                     suffix = f"  [WAIVED under waiver set {rendered(waiver)}…]"
-                elif gate.outcome == "not-run":
+                elif gate.outcome == NOT_RUN:
                     reason = rendered(gate.evidence.get("reason", ""))
                     suffix = f"  [DID NOT RUN — {reason}]"
                 lines.append(f"    - {rendered(gate.gate_id)}{suffix}")

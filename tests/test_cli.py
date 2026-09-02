@@ -623,6 +623,70 @@ def test_refuses_a_journal_that_omits_a_spec_required_gate(
     assert "VERDICT: FAIL" not in captured.out
 
 
+def test_every_non_passing_outcome_is_marked_in_the_verdict(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The renderer's outcome vocabulary is receipt.corpus's.
+
+    Spelled out as literals in the CLI, a renamed or added outcome went on
+    rendering as an unmarked gate — a fourth outcome, or "not_run" for
+    "not-run", would print as a bare gate id beside the ones that passed,
+    which is exactly the over-claim the outcome schema exists to stop. This
+    walks the whole vocabulary rather than the two cases someone remembered.
+    """
+
+    from receipt.corpus import GATE_OUTCOMES, NOT_RUN, PASS, WAIVED
+
+    evidence: dict[str, dict[str, str]] = {
+        PASS: {"command": "make validate"},
+        WAIVED: {"waiverSetSha256": "f" * 64},
+        NOT_RUN: {"reason": "run-generated-guard: false in the caller"},
+    }
+    assert set(evidence) == set(GATE_OUTCOMES), (
+        "an outcome exists that this battery, and the renderer, do not handle"
+    )
+
+    root = tmp_path / "repo"
+    build_corpus(
+        root,
+        tmp_path / "tsa",
+        gates=[
+            {
+                "gateId": "rulespec/compile",
+                "tier": "public",
+                "outcome": PASS,
+                "evidence": evidence[PASS],
+            },
+            *(
+                {
+                    "gateId": f"guard/{outcome}",
+                    "tier": "ci-attested",
+                    "outcome": outcome,
+                    "evidence": evidence[outcome],
+                }
+                for outcome in sorted(GATE_OUTCOMES - {PASS})
+            ),
+        ],
+    )
+    assert (
+        main(
+            ["verify", "--spec", str(root / "verification/spec.py"), "--root", str(root)]
+        )
+        == EXIT_OK
+    )
+    out = capsys.readouterr().out
+    non_passing = sorted(GATE_OUTCOMES - {PASS})
+    assert f"{len(non_passing)} of {len(non_passing) + 1} declared gate(s) did not " \
+        "pass cleanly" in out
+    for outcome in non_passing:
+        (line,) = [
+            entry for entry in out.splitlines() if f"- guard/{outcome}" in entry
+        ]
+        assert "[" in line and "]" in line, (outcome, line)
+    (passing,) = [entry for entry in out.splitlines() if "- rulespec/compile" in entry]
+    assert passing.strip() == "- rulespec/compile"
+
+
 def test_json_output_carries_the_spec_digest(
     repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
