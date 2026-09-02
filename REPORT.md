@@ -13,7 +13,19 @@ $ PYTHONPATH=$PWD/src ./.venv/bin/python -c 'import receipt; print(receipt.__fil
 $ PYTHONPATH=$PWD/src ./.venv/bin/python -m pytest -q -p no:cacheprovider tests \
     --ignore=tests/test_ledger_equivalence.py --ignore=tests/test_append_gate_equivalence.py \
     --ignore=tests/test_attest_equivalence.py --ignore=tests/test_brier_witness_equivalence.py
-234 passed in 10.60s
+234 passed in 39.87s
+```
+
+The whole test module, base versus HEAD — the nine failures are exactly the
+nine new refusal tests, and the three tests that assert something is still
+*accepted* pass on both sides:
+
+```
+$ PYTHONPATH=$SP/base/src ./.venv/bin/python -m pytest -q -p no:cacheprovider tests/test_corpus.py
+9 failed, 51 passed in 3.42s
+
+$ PYTHONPATH=$PWD/src ./.venv/bin/python -m pytest -q -p no:cacheprovider tests/test_corpus.py
+60 passed in 0.68s
 ```
 
 Provenance, stated plainly: commits a41323f, 55a6215, c60606c, 8beb73d and
@@ -242,7 +254,8 @@ which is why I closed it rather than filing it.
 
 - **Every existing refusal message is preserved verbatim.** Compared by AST —
   every message shape raised by a `CorpusError`, f-string holes normalized — 64
-  in base, 64 of 64 still present at HEAD, 5 added (`removed path is still
+  distinct shapes across 67 raise sites in base, 64 of 64 still present at HEAD
+  across 72 sites, 0 removed or reworded, 5 added (`removed path is still
   present in the tree`, `Unicode format control`, `Unicode line separator`, `is
   longer than N characters`, `tombstone is unverifiable`).
 - **Row-kind schemas unchanged**: `_ROW_KEYS` is untouched; no row kind gained
@@ -252,8 +265,9 @@ which is why I closed it rather than filing it.
   same message. The evidence length check runs *before* the character screen —
   deliberate, and only reachable by input longer than 1,024 characters, which
   base accepted outright.
-- **Only `corpus.py` and `test_corpus.py` changed.** `canonical.py` untouched;
-  nothing outside the worktree touched.
+- **Only `corpus.py` and `test_corpus.py` changed**, beside this report.
+  `canonical.py` untouched (0 lines of diff; `tests/test_package.py`, which
+  pins its hash, passes); nothing outside the worktree touched.
 
 ## What I did not do, and why
 
@@ -284,9 +298,18 @@ which is why I closed it rather than filing it.
   legitimate binding of a different file. No false pass in either case, so I
   left the root matching alone.
 
+- **An automatic commit put a `.venv` symlink in the index** partway through
+  the session. It is session scaffolding pointing at the main clone's
+  interpreter, not a repository file, so `61aa029` untracks it. The symlink
+  stays on disk, untracked, because the ground rules name `./.venv/bin/python`
+  as the interpreter. I left `.gitignore` alone: its `.venv/` entry does not
+  match a symlink, but widening it is a repository-wide decision this branch
+  has no business making.
+
 ## Commits on this branch
 
 ```
+61aa029 Untrack the .venv symlink an auto-commit added
 cf90e46 Refuse a tombstone the verifier could not check
 0d26003 Cover the two refusals these fixes widened, and the one they did not
 dbc6b4a Drop review provenance this branch cannot vouch for
@@ -295,3 +318,5 @@ c60606c Refuse a tombstoned path that is still present in the tree
 55a6215 Refuse invisible and unbounded text in gate evidence
 a41323f Refuse a content file whose suffix escapes the sweep by case
 ```
+
+Plus this report and its revisions. No push, no PR.
