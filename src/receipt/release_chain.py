@@ -1634,6 +1634,10 @@ def assert_file_modes_authoritative(root: pathlib.Path) -> None:
     These are properties of the checkout, not of any file, so they are
     checked before any file-level comparison, deliberately: a checkout that
     cannot be verified says so before any verdict about its files.
+    ``append_gate.verify_append_gate`` calls this once at entry, so the push
+    path (no base ref, and therefore no release-history pass and no state
+    mode comparison) is covered too; the two callers below keep their own
+    calls so each is safe to use on its own.
     """
 
     if _git_bool(root, "core.fileMode") is False:
@@ -1655,8 +1659,12 @@ def verify_release_history_immutable(
     """Compare every base ``releases/`` file byte and mode to the candidate."""
 
     root = root.resolve()
-    assert_file_modes_authoritative(root)
+    # The base ref is resolved first so a checkout the guard would refuse
+    # cannot mask a base that names nothing; the guard then runs ahead of
+    # every file-level comparison below, which is the one place a refusal
+    # added after the extraction precedes a pre-existing one.
     commit = resolve_base_commit(root, base_ref)
+    assert_file_modes_authoritative(root)
     base_entries = git_tree_entries(root, commit, str(spec.release_root_relative))
     current_files = _working_release_files(root, spec)
     for relative, entry in base_entries.items():
