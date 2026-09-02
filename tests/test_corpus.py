@@ -7,6 +7,7 @@ happy-path test is one line; the value is entirely in the refusals.
 
 from __future__ import annotations
 
+import os
 import pathlib
 
 import pytest
@@ -1725,53 +1726,112 @@ def test_the_tombstone_index_is_shared_across_removed_paths(
     assert verification.removed_paths == (".axiom/a.json", ".axiom/b.json")
 
 
-def test_the_tombstone_pass_stops_consuming_a_directory_wider_than_its_budget(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds F2: the listing was drained and sorted before the check.
+class _NamedEntry:
+    """The one attribute the tombstone index reads off a scanned entry.
 
-    ``sorted(directory.iterdir())`` takes every entry a directory has before
-    anything looks at the budget, so the constant bounded the refusal and not
-    the work: a tombstone under a directory of ten million entries sorted,
-    screened and indexed ten million of them, and only then said it had
-    exceeded its budget. That is the exhaustion the budget exists to stop,
-    performed by the code meant to stop it.
-
-    A listing is now consumed one entry at a time and charged as it is
-    consumed. What that bounds is this module's per-entry work: CPython's
-    ``iterdir`` reads the directory's names from the OS in one eager call on
-    every supported version, so the wrapper below is what a lazy listing would
-    look like and the assertion is about what the module takes from it.
-    Without the fix it is drained to its last entry.
+    ``_TombstoneIndex.folded`` takes ``entry.name`` and builds the child path
+    itself, so a declared entry needs nothing more than a name to stand in
+    for a real ``os.DirEntry``.
     """
 
-    width = 10000
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _Scan:
+    """A stand-in for the iterator ``os.scandir`` hands back.
+
+    The tombstone index scans inside a ``with`` block and abandons the
+    iterator the moment the budget refuses, so a stand-in has to be a context
+    manager and an iterator both. It pulls from the real iterator only as the
+    module asks for the next entry, which is the property these tests are
+    about: an entry the module never asks for is an entry the host is never
+    asked to read.
+    """
+
+    def __init__(self, inner=None, *, pulled=None, hidden=(), extra=()) -> None:
+        self._inner = inner
+        self._pulled = pulled
+        self._hidden = frozenset(hidden)
+        self._extra = iter([_NamedEntry(name) for name in extra])
+
+    def __enter__(self) -> "_Scan":
+        return self
+
+    def __exit__(self, *exc_info: object) -> bool:
+        if self._inner is not None:
+            self._inner.__exit__(*exc_info)
+        return False
+
+    def __iter__(self) -> "_Scan":
+        return self
+
+    def __next__(self):
+        if self._inner is not None:
+            for entry in self._inner:
+                if self._pulled is not None:
+                    self._pulled.append(entry.name)
+                if entry.name not in self._hidden:
+                    return entry
+        return next(self._extra)
+
+
+def _scandir(directory_name: str, **reshape):
+    """An ``os.scandir`` that reshapes exactly one directory's listing.
+
+    Only the tombstone index scans; the content sweep lists through
+    ``pathlib.Path.iterdir``. On 3.13 and 3.14 ``iterdir`` is itself built on
+    ``os.scandir``, so the wrapper is scoped by directory name and hands back
+    the host's own iterator, untouched, for every other listing.
+    """
+
+    real = os.scandir
+
+    def scandir(target):
+        if pathlib.PurePath(os.fspath(target)).name != directory_name:
+            return real(target)
+        return _Scan(real(target), **reshape)
+
+    return scandir
+
+
+def test_the_tombstone_scan_stops_reading_a_directory_wider_than_its_budget(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds F2 (round five): the listing was read whole before the check.
+
+    ``pathlib.Path.iterdir`` materialises the entire directory before it
+    yields anything, so a per-entry charge against it bounded only what this
+    module did with the names. The read itself — which is the exhaustion an
+    adversary plants a wide directory to cause — went ahead in full, and
+    round four's test hid that by replacing ``iterdir`` with a lazy generator
+    production never has.
+
+    The index now scans with ``os.scandir`` inside a ``with`` and refuses
+    from inside the loop, so the iterator is closed early and the entries
+    after the one that broke the budget are never pulled. This wrapper hands
+    the module the host's real scandir iterator over a directory really on
+    disk and counts what the module takes from it: at most one entry past the
+    budget, out of two thousand. Without the fix every one of the two
+    thousand is read before the refusal.
+    """
+
+    width = 2000
     budget = 64
-    consumed = 0
-    real = pathlib.Path.iterdir
-
-    def iterdir(self: pathlib.Path):
-        if self.name != "wide":
-            return real(self)
-
-        def entries():
-            nonlocal consumed
-            for index in range(width):
-                consumed += 1
-                yield self / f"entry-{index:05d}"
-
-        return entries()
-
+    pulled: list[str] = []
     body = '{"applied": true}\n'
     write_tree(tmp_path)
-    (tmp_path / "wide").mkdir()
+    wide = tmp_path / "wide"
+    wide.mkdir()
+    for index in range(width):
+        (wide / f"entry-{index:05d}").write_text("")
     rows = _tombstone_rows("wide/apply-manifest.json", body)
     monkeypatch.setattr("receipt.corpus.MAX_TOMBSTONE_WORK", budget)
-    monkeypatch.setattr(pathlib.Path, "iterdir", iterdir)
+    monkeypatch.setattr(os, "scandir", _scandir("wide", pulled=pulled))
     with pytest.raises(CorpusError, match="tombstone work budget"):
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
-    assert consumed <= budget
-    assert consumed < width
+    assert len(pulled) <= budget + 1
+    assert len(pulled) < width
 
 
 def test_many_tombstones_over_one_cached_bucket_exceed_the_budget(
@@ -1919,8 +1979,9 @@ class _CaseFoldingPath:
     at the same time. No POSIX host can hold both, which is why the listings
     here are declared rather than written to disk.
 
-    Only what the tombstone pass touches is modelled: ``iterdir``, ``name``,
-    and an ``lstat`` that reports a plain directory.
+    Only what the tombstone pass touches is modelled: the ``__fspath__`` the
+    scan is given and the ``__truediv__`` the index builds children with,
+    ``name``, and an ``lstat`` that reports a plain directory.
     """
 
     def __init__(self, spelling: str, listings: dict[str, list[str]]) -> None:
@@ -1931,14 +1992,12 @@ class _CaseFoldingPath:
     def name(self) -> str:
         return self.spelling.rsplit("/", 1)[-1]
 
-    def iterdir(self):
-        if self.spelling not in self.listings:
-            raise FileNotFoundError(self.spelling)
-        return iter(
-            _CaseFoldingPath(
-                f"{self.spelling}/{entry}" if self.spelling else entry, self.listings
-            )
-            for entry in self.listings[self.spelling]
+    def __fspath__(self) -> str:
+        return self.spelling
+
+    def __truediv__(self, name: str) -> "_CaseFoldingPath":
+        return _CaseFoldingPath(
+            f"{self.spelling}/{name}" if self.spelling else name, self.listings
         )
 
     def lstat(self) -> _PlainDirectory:
@@ -1954,7 +2013,26 @@ class _CaseFoldingPath:
         return hash(self.spelling.lower())
 
 
-def test_the_tombstone_index_keys_two_case_varied_directories_apart() -> None:
+def _declared_scandir(listings: dict[str, list[str]]):
+    """An ``os.scandir`` serving listings no POSIX host could hold at once.
+
+    Keyed by the exact spelling the scanned object reports through
+    ``__fspath__``, so the stand-in distinguishes the two directories the
+    test is about and the index has to distinguish them for itself.
+    """
+
+    def scandir(target):
+        spelling = os.fspath(target)
+        if spelling not in listings:
+            raise FileNotFoundError(spelling)
+        return _Scan(extra=listings[spelling])
+
+    return scandir
+
+
+def test_the_tombstone_index_keys_two_case_varied_directories_apart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Binds F1: the listing cache was keyed by a path object.
 
     ``pathlib.Path`` equality and hashing ignore case on Windows, so an empty
@@ -1972,6 +2050,7 @@ def test_the_tombstone_index_keys_two_case_varied_directories_apart() -> None:
     from receipt.corpus import _fold_survivor, _TombstoneIndex
 
     listings = {"": ["A", "a"], "A": [], "a": ["TARGET"]}
+    monkeypatch.setattr(os, "scandir", _declared_scandir(listings))
     root = _CaseFoldingPath("", listings)
     index = _TombstoneIndex(root)
 
@@ -2043,8 +2122,8 @@ def test_refuses_a_declared_path_shaped_like_an_8_3_short_name(
     assert "Windows would alias" not in str(other.value)
 
 
-def _hiding_iterdir(directory_name: str, hidden: str):
-    """An ``iterdir`` that omits one entry, the way Win32 lookup aliases behave.
+def _hiding_scandir(directory_name: str, hidden: str):
+    """A scan that omits one entry, the way Win32 lookup aliases behave.
 
     Win32 resolves names no enumeration emits: it strips trailing dots and
     spaces before a lookup, and NTFS answers to 8.3 short names. No POSIX host
@@ -2053,15 +2132,7 @@ def _hiding_iterdir(directory_name: str, hidden: str):
     That is the whole premise of F1, and it is what this wrapper models.
     """
 
-    real = pathlib.Path.iterdir
-
-    def iterdir(self: pathlib.Path):
-        entries = list(real(self))
-        if self.name == directory_name:
-            return iter([entry for entry in entries if entry.name != hidden])
-        return iter(entries)
-
-    return iterdir
+    return _scandir(directory_name, hidden=[hidden])
 
 
 def test_a_tombstoned_path_the_listing_hides_but_the_host_resolves_refuses(
@@ -2086,7 +2157,7 @@ def test_a_tombstoned_path_the_listing_hides_but_the_host_resolves_refuses(
     (tmp_path / "retired/apply-manifest.json").write_text(body)
     rows = _tombstone_rows("retired/apply-manifest.json", body)
     monkeypatch.setattr(
-        pathlib.Path, "iterdir", _hiding_iterdir("retired", "apply-manifest.json")
+        os, "scandir", _hiding_scandir("retired", "apply-manifest.json")
     )
     with pytest.raises(CorpusError) as caught:
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
@@ -2095,23 +2166,27 @@ def test_a_tombstoned_path_the_listing_hides_but_the_host_resolves_refuses(
     )
 
 
-def _mutating_iterdir(directory_name: str, mutate):
-    """An ``iterdir`` that changes the tree after listing it, deterministically.
+def _mutating_scandir(directory_name: str, mutate):
+    """A scan that changes the tree after reading it, deterministically.
 
-    The window between listing a directory and stat-ing an entry it named is a
-    real one; firing the mutation from inside the listing call is only how it
-    is made to happen on every run.
+    The window between reading a directory's names and stat-ing an entry one
+    of them named is a real one; taking the whole listing here and firing the
+    mutation before the module is handed its first entry is only how that
+    window is made to open on every run.
     """
 
-    real = pathlib.Path.iterdir
+    real = os.scandir
 
-    def iterdir(self: pathlib.Path):
-        entries = list(real(self))
-        if self.name == directory_name:
-            mutate(self)
-        return iter(entries)
+    def scandir(target):
+        directory = pathlib.Path(os.fspath(target))
+        if directory.name != directory_name:
+            return real(target)
+        with real(target) as entries:
+            names = [entry.name for entry in entries]
+        mutate(directory)
+        return _Scan(extra=names)
 
-    return iterdir
+    return scandir
 
 
 def test_a_tombstone_entry_that_vanishes_after_the_listing_is_not_a_survivor(
@@ -2131,9 +2206,9 @@ def test_a_tombstone_entry_that_vanishes_after_the_listing_is_not_a_survivor(
     (tmp_path / "retired/vanishing").mkdir(parents=True)
     rows = _tombstone_rows("retired/vanishing/apply-manifest.json", body)
     monkeypatch.setattr(
-        pathlib.Path,
-        "iterdir",
-        _mutating_iterdir("retired", lambda d: (d / "vanishing").rmdir()),
+        os,
+        "scandir",
+        _mutating_scandir("retired", lambda d: (d / "vanishing").rmdir()),
     )
     verification = verify_corpus_binding(
         tmp_path, render_journal(rows), spec=corpus_spec()
@@ -2161,9 +2236,9 @@ def test_a_tombstone_entry_that_cannot_be_stat_after_the_listing_refuses(
     (tmp_path / "retired/sub").mkdir(parents=True)
     rows = _tombstone_rows("retired/sub/apply-manifest.json", body)
     monkeypatch.setattr(
-        pathlib.Path,
-        "iterdir",
-        _mutating_iterdir("retired", lambda d: os.chmod(d, 0o444)),
+        os,
+        "scandir",
+        _mutating_scandir("retired", lambda d: os.chmod(d, 0o444)),
     )
     try:
         with pytest.raises(CorpusError, match="tombstone is unverifiable"):
@@ -2173,7 +2248,7 @@ def test_a_tombstone_entry_that_cannot_be_stat_after_the_listing_refuses(
 
 
 def _listing_with(directory_name: str, extra: str):
-    """An ``iterdir`` that reports one more entry than the directory holds.
+    """An ``iterdir`` that reports one more entry than the content sweep holds.
 
     APFS refuses to create a filename carrying an unassigned code point at
     all — the ``open`` fails with EILSEQ — while ext4 and NTFS store the bytes
@@ -2241,7 +2316,7 @@ def test_refuses_an_unassigned_code_point_in_a_tombstone_listing(
     write_tree(tmp_path)
     (tmp_path / "retired").mkdir()
     rows = _tombstone_rows("retired/apply-manifest.json", body)
-    monkeypatch.setattr(pathlib.Path, "iterdir", _listing_with("retired", "sibling͸"))
+    monkeypatch.setattr(os, "scandir", _scandir("retired", extra=["sibling͸"]))
     with pytest.raises(CorpusError, match="unassigned in Unicode") as caught:
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
     assert "tree entry examined for a tombstone" in str(caught.value)

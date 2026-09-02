@@ -43,8 +43,8 @@ Three row kinds, one journal:
     enumeration does not emit. The second question walks the tree, so it is
     bounded: every entry taken from a listing and every candidate a search
     visits is charged against one budget for the whole pass, and a listing
-    wider than what is left of that budget is abandoned part-way rather than
-    sorted and indexed whole.
+    wider than what is left of that budget is abandoned part-way — unread
+    past the batch in hand — rather than fetched, sorted and indexed whole.
 
 ``gate``
     A declaration that some verification gate ran, carrying a reproducibility
@@ -153,7 +153,9 @@ MAX_REMOVED_TEXT = 262144
 #: bounded by counting listings alone: the whole of an arbitrarily wide
 #: directory was sorted and indexed before anything checked the budget, and a
 #: cached fold-collision bucket was re-traversed by every tombstone for free
-#: (peer review, round four).
+#: (peer review, round four). The listing is fetched in batches and abandoned
+#: where the charge refuses, so the count bounds the directory read as well
+#: as the work done with what it named (peer review, round five).
 MAX_TOMBSTONE_WORK = 262144
 #: The most characters a refusal quotes of a producer-controlled value.
 MAX_QUOTED_TEXT = 256
@@ -847,14 +849,19 @@ class _TombstoneIndex:
     rather than being sorted and indexed whole first; each bucket is sorted
     once, here, so a search that revisits it never sorts it again.
 
-    What that bounds is this module's work per entry, which is all it can
-    bound: ``pathlib.Path.iterdir`` reads the directory's names from the
-    operating system in one eager call on every supported interpreter — 3.11
-    and 3.12 through ``os.listdir``, 3.13 and 3.14 through ``os.scandir`` —
-    and hands back an iterator over what it already holds. The syscall is not
-    ours to interrupt. The sort, the screen, the fold, and the index are, and
-    those were what the old code did to every entry of a directory of any
-    width before consulting the budget.
+    That is also why the listing comes from ``os.scandir`` and not from
+    ``pathlib.Path.iterdir``. ``iterdir`` materialises the whole directory
+    before it yields anything — 3.11 and 3.12 through ``os.listdir``, 3.13
+    and 3.14 by draining ``os.scandir`` into a list — so charging per entry
+    against it bounded only what this module did with the names afterwards,
+    and the widest directory an adversary could plant was still read whole
+    before the budget could say no (peer review, round five). ``scandir``
+    fetches entries from the operating system in batches as they are
+    consumed, and it is used here as a context manager, so the refusal
+    raised from inside the loop closes the iterator and the batches after the
+    one in hand are never asked for. What is read is bounded by the budget
+    plus the batch it stopped in; what this module then does per entry — the
+    sort, the screen, the fold, the index — is bounded by the budget alone.
 
     The cache is keyed by the directory's exact spelling as the search walked
     it — the ``/``-joined component names, ``""`` for the root — and never by
@@ -901,16 +908,21 @@ class _TombstoneIndex:
 
         if key in self._directories:
             return self._directories[key]
-        entries: list[pathlib.Path] = []
+        names: list[str] = []
         try:
-            for entry in directory.iterdir():
-                # Charged as it is consumed, and refused from inside the
-                # loop: sorting the listing first meant a directory of any
-                # width was sorted, screened and indexed in full before
-                # anything looked at the budget, so the constant named no
-                # bound on the work actually done (peer review, round four).
-                self.charge(relative)
-                entries.append(entry)
+            # Scanned inside a ``with`` and charged as each name arrives, so
+            # the refusal below is raised from inside the loop and the
+            # iterator is closed on the way out. Both halves matter: sorting
+            # the listing first meant a directory of any width was sorted,
+            # screened and indexed in full before anything looked at the
+            # budget (peer review, round four), and reading it through
+            # ``iterdir`` meant the whole of it was fetched from the
+            # operating system first whatever the budget said (peer review,
+            # round five).
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    self.charge(relative)
+                    names.append(entry.name)
         except (FileNotFoundError, NotADirectoryError):
             self._directories[key] = None
             return None
@@ -923,13 +935,13 @@ class _TombstoneIndex:
         # Sorted once, here, rather than in every search that reaches this
         # directory: the order a bucket is tried in does not depend on which
         # tombstone is asking, only which spelling comes first does.
-        for entry in sorted(entries, key=lambda entry: entry.name):
+        for name in sorted(names):
             # Screened before it is folded, for the reason _assert_assigned
             # gives: an unassigned code point in an entry name would put the
             # entry in one fold bucket on one interpreter and another on the
             # next, which decides whether a tombstone is honoured.
-            _assert_assigned(entry.name, "tree entry examined for a tombstone")
-            folded.setdefault(_path_fold(entry.name), []).append(entry)
+            _assert_assigned(name, "tree entry examined for a tombstone")
+            folded.setdefault(_path_fold(name), []).append(directory / name)
         self._directories[key] = folded
         return folded
 
