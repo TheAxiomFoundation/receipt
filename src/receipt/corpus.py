@@ -115,9 +115,15 @@ MAX_PATH_TEXT = 1024
 #: gate budget's counterpart for the other producer-controlled list the
 #: verdict renders verbatim (peer review, round two).
 MAX_REMOVED_TEXT = 262144
-#: The most directory listings one tombstone check may perform before it is
-#: refused as unverifiable rather than allowed to run on.
-MAX_TOMBSTONE_LISTINGS = 4096
+#: The most directory entries the whole tombstone pass may index before it is
+#: refused as unverifiable rather than allowed to run on. Counted in entries
+#: rather than listings, and once for the pass rather than once per removed
+#: path: a per-path listing budget bounded each search while leaving the pass
+#: itself quadratic, so R tombstones against a root of E entries cost R×E with
+#: nothing to stop it (peer review, round three). The index below reads each
+#: directory once and shares it across every removed path, so the real cost is
+#: the tree, and this bounds that.
+MAX_TOMBSTONE_WORK = 262144
 #: The most characters a refusal quotes of a producer-controlled value.
 MAX_QUOTED_TEXT = 256
 
@@ -672,7 +678,67 @@ def _list_directory(directory: pathlib.Path, relative: str) -> list[pathlib.Path
         ) from exc
 
 
-def _fold_survivor(root: pathlib.Path, relative: str) -> str | None:
+class _TombstoneIndex:
+    """Every directory the tombstone pass reads, folded and indexed once.
+
+    One :func:`verify_corpus_binding` call may carry many removed paths, and
+    they overlap: each search starts at the tree root and most of them share
+    their leading components. Reading a directory per removed path made the
+    pass cost R×E for R tombstones over a root of E entries, and the budget
+    that was supposed to bound it counted listings *per removed path*, so it
+    bounded each search and nothing at all about the pass (peer review, round
+    three).
+
+    So a directory is listed once per verification and kept as
+    ``{fold key: [entries]}``, shared by every subsequent search, and the work
+    budget is a single running count of entries indexed for the whole pass.
+
+    Failure to list is a refusal, not an absence, for the reason
+    :func:`_list_directory` gives; a directory that is simply not there is an
+    absence, cached as one.
+    """
+
+    def __init__(self, root: pathlib.Path) -> None:
+        self.root = root
+        self._directories: dict[pathlib.Path, dict[str, list[pathlib.Path]] | None] = {}
+        self._entries = 0
+
+    def folded(
+        self, directory: pathlib.Path, relative: str
+    ) -> dict[str, list[pathlib.Path]] | None:
+        """This directory's entries by fold key, or None if it is not there.
+
+        ``relative`` is the removed path whose search wanted the directory; it
+        names the tombstone in any refusal this raises.
+        """
+
+        if directory in self._directories:
+            return self._directories[directory]
+        try:
+            entries = sorted(directory.iterdir(), key=lambda entry: entry.name)
+        except (FileNotFoundError, NotADirectoryError):
+            self._directories[directory] = None
+            return None
+        except OSError as exc:
+            raise CorpusError(
+                "cannot check whether a removed path is still in the tree, so "
+                f"the tombstone is unverifiable: {relative} ({exc.strerror})"
+            ) from exc
+        self._entries += len(entries)
+        if self._entries > MAX_TOMBSTONE_WORK:
+            raise CorpusError(
+                "cannot check whether a removed path is still in the tree, so "
+                f"the tombstone is unverifiable: {relative} (tombstone work "
+                f"budget of {MAX_TOMBSTONE_WORK} entries exceeded)"
+            )
+        folded: dict[str, list[pathlib.Path]] = {}
+        for entry in entries:
+            folded.setdefault(_path_fold(entry.name), []).append(entry)
+        self._directories[directory] = folded
+        return folded
+
+
+def _fold_survivor(index: _TombstoneIndex, relative: str) -> str | None:
     """The spelling under which a tombstoned path still answers, if any.
 
     The module's portability model is that two paths whose fold keys agree
@@ -684,41 +750,22 @@ def _fold_survivor(root: pathlib.Path, relative: str) -> str | None:
     component is matched by fold key against a listing of its directory,
     exact spelling first, every fold-equal branch explored. An intermediate
     symlink refuses, as it does for every bound path, which also bounds the
-    walk by the tree; a listing budget refuses a tree wider than that.
-    Failure to list is a refusal, not an absence, for the reason
-    _list_directory gives.
+    walk by the tree; :class:`_TombstoneIndex` reads each directory once and
+    refuses a tree wider than its work budget.
     """
-
-    listings = 0
 
     def search(
         directory: pathlib.Path, components: list[str], spelled: list[str]
     ) -> str | None:
-        nonlocal listings
-        listings += 1
-        if listings > MAX_TOMBSTONE_LISTINGS:
-            # Every fold-equal branch is explored, and with symlinks refused
-            # below the branching is bounded by the tree itself; a tree wide
-            # enough to exceed this is refused as unverifiable rather than
-            # walked on (peer review, round two).
-            raise CorpusError(
-                "cannot check whether a removed path is still in the tree, so "
-                f"the tombstone is unverifiable: {relative} (more than "
-                f"{MAX_TOMBSTONE_LISTINGS} aliasing directories)"
-            )
-        try:
-            entries = list(directory.iterdir())
-        except (FileNotFoundError, NotADirectoryError):
+        folded = index.folded(directory, relative)
+        if folded is None:
             return None
-        except OSError as exc:
-            raise CorpusError(
-                "cannot check whether a removed path is still in the tree, so "
-                f"the tombstone is unverifiable: {relative} ({exc.strerror})"
-            ) from exc
         head, rest = components[0], components[1:]
-        key = _path_fold(head)
+        # The bucket is re-ordered rather than re-scanned: the shared index
+        # sorts by name, and only which spelling to try first depends on the
+        # component being matched.
         matches = sorted(
-            (entry for entry in entries if _path_fold(entry.name) == key),
+            folded.get(_path_fold(head), ()),
             key=lambda entry: (entry.name != head, entry.name),
         )
         for entry in matches:
@@ -758,7 +805,7 @@ def _fold_survivor(root: pathlib.Path, relative: str) -> str | None:
                 return found
         return None
 
-    return search(root, relative.split("/"), [])
+    return search(index.root, relative.split("/"), [])
 
 
 def _path_fold(relative: str) -> str:
@@ -1113,9 +1160,12 @@ def verify_corpus_binding(
     # outside the content roots, so a retired toolchain pin or apply manifest
     # could sit on disk bound by no row, reported as removed, and be read as
     # current by every consumer. Look for both kinds, by fold key so an
-    # aliasing spelling counts, and refuse what is still there.
+    # aliasing spelling counts, and refuse what is still there. One index
+    # serves the whole pass: the searches overlap, and re-reading a directory
+    # per removed path was what made the pass quadratic.
+    tombstones = _TombstoneIndex(root)
     for path in removed:
-        survivor = _fold_survivor(root, path)
+        survivor = _fold_survivor(tombstones, path)
         if survivor is None:
             continue
         if survivor == path:
