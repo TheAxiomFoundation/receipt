@@ -27,7 +27,9 @@ Three row kinds, one journal:
     spelling of a pinned suffix nor one of a pinned root can sit outside the
     closed world on a filesystem that treats it as the same file. A tree
     entry that aliases a root's own spelling is refused by name rather than
-    merged.
+    merged, and an entry that is a symlink or any other reparse point is
+    refused rather than followed — a junction is not a symlink on Windows,
+    and descending one would sweep a directory outside the clone.
 
 ``attested``
     An exact path bound by digest without a sweep — the toolchain pin, the
@@ -38,7 +40,11 @@ Three row kinds, one journal:
     it was. Two questions are asked about a tombstone, in this order — does
     the host resolve the exact spelling, and does any fold-equal spelling
     survive in a listing — because a filesystem resolves names its own
-    enumeration does not emit.
+    enumeration does not emit. The second question walks the tree, so it is
+    bounded: every directory entry read from a listing and every candidate a
+    search visits is charged against one budget for the whole pass, and a
+    listing wider than what is left of that budget stops part-way rather than
+    being read in full.
 
 ``gate``
     A declaration that some verification gate ran, carrying a reproducibility
@@ -48,6 +54,13 @@ Three row kinds, one journal:
     reports a ``restricted`` or ``ci-attested`` gate as "verified" is
     misreporting; :func:`verify_corpus_binding` returns the tiers separated so
     the distinction survives into the verdict.
+
+The order of the passes is itself load-bearing. Membership is swept, the
+tombstones are looked for, the bound bytes are hashed, and then membership and
+per-file identity are checked a second time. Those two re-checks are last so
+that every earlier pass — the tombstone walk above all, which is the longest
+traversal here — sits inside the window they close; a pass that ran after them
+was time in which the tree could change with nothing left to notice.
 
 Every trust anchor arrives from the consumer's committed :class:`CorpusSpec`.
 The module ships no defaults: not a content root, not a required gate, not an
