@@ -86,9 +86,12 @@ NFD, which is not the set of names a filesystem may fold — one that folds
 part of a mixed-case name answers no to every probe and folds the name all
 the same — so it fails closed instead, and the search-only descent below is
 no longer reached with such a parent through either reader; the anchor-set
-digest in
-the result) run beside the extracted checks without altering any of their
-refusals, and carry their own tests. Every one of those index reads names its
+digest in the result; spec validation at construction; reading each receipt
+through one descriptor; and refusing a genTime finer than a microsecond) run
+beside the extracted checks without altering any of their refusals, and carry
+their own tests. None of the additions reworded an extracted refusal or moved
+one in the order they fire; the new refusals cover inputs the upstream battery
+never presents. Every one of those index reads names its
 path as a literal pathspec, so git is asked about the exact path rather than
 handed a name to interpret as a pattern — and so does the base tree's own
 enumeration, which is not an addition but was still handing git a configured
