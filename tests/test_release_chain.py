@@ -44,7 +44,9 @@ from receipt.release_chain import (
     ReleaseChainError,
     _combined_anchor_digest,
     _observe_anchor_bytes,
+    _receipt_bytes,
     assert_index_carries_no_protected_alias,
+    verify_receipt,
     verify_release_chain,
 )
 from receipt.cli import EXIT_FAIL, main
@@ -578,6 +580,107 @@ def test_standalone_receipts_shared_filename_divergence_refuses(
         )
     assert calls["count"] == 1
     assert reads["count"] == 2
+
+
+
+def test_a_receipt_swapped_mid_verification_cannot_mix_two_tokens(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One receipt, three OpenSSL invocations, and one file between them.
+
+    ``-text`` reads the genTime and the policy OID, ``-verify`` binds the
+    token to the manifest digest, and the signer pins run over a token
+    extracted a third time. Each reopened the path by name, so the tree under
+    audit could hand a different file to each call and the verdict would
+    report a time no verified token carried. Here the alpha receipt becomes
+    the beta receipt the instant the inspection returns — a token from an
+    authority whose root is not the CAfile in force, which the later calls
+    cannot verify.
+
+    With the bytes snapshotted once, the swap is inert: the reported genTime
+    is the inspected token's, and it is the token that verified. Before the
+    snapshot, the same swap refused instead — a refusal is a sound outcome
+    too, but the mixed genTime between them is not, and only reading once
+    rules it out.
+    """
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    manifests = repo / "releases/manifests"
+    manifest_path = sorted(manifests.glob("*.json"))[0]
+    digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    alpha = manifest_path.with_name(f"{manifest_path.stem}.alpha.tsr")
+    beta = manifest_path.with_name(f"{manifest_path.stem}.beta.tsr")
+
+    def check() -> object:
+        return verify_receipt(
+            digest,
+            alpha,
+            "alpha",
+            spec=spec.chain,
+            anchor_dir=repo / ANCHOR_DIR,
+            enforce_production_pins=True,
+        )
+
+    expected = check()
+
+    real_run = subprocess.run
+    swaps = {"count": 0}
+
+    def swapping(arguments: object, **kwargs: object) -> object:
+        completed = real_run(arguments, **kwargs)  # type: ignore[arg-type]
+        if isinstance(arguments, list) and "-text" in arguments:
+            swaps["count"] += 1
+            alpha.write_bytes(beta.read_bytes())
+        return completed
+
+    monkeypatch.setattr("receipt.release_chain.subprocess.run", swapping)
+    observed = check()
+    assert swaps["count"] == 1, "the inspection ran, so the swap landed"
+    assert alpha.read_bytes() == beta.read_bytes(), "the file really was swapped"
+    assert observed == expected
+
+
+def test_a_receipt_that_is_not_a_regular_file_refuses_before_opening(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The lstat runs before the open, deliberately: opening a fifo for
+    reading blocks until a writer arrives, so what kind of file this is has to
+    be decided from the directory entry rather than from the descriptor."""
+
+    import os
+
+    fifo = tmp_path / "receipt.tsr"
+    os.mkfifo(fifo)
+    with pytest.raises(ReleaseChainError, match="non-regular RFC 3161 receipt"):
+        _receipt_bytes(fifo)
+
+
+def test_a_receipt_replaced_between_the_lstat_and_the_open_refuses(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The descriptor is what gets read, so the descriptor is what gets
+    checked. A path that named one file at the lstat and another by the time
+    it was opened addresses a different file, and its (device, inode) pair
+    says so where the pathname cannot."""
+
+    import os
+
+    receipt = tmp_path / "receipt.tsr"
+    receipt.write_bytes(b"the inspected token")
+    other = tmp_path / "other.tsr"
+    other.write_bytes(b"a different token")
+
+    real_lstat = os.lstat
+
+    def lying(path: object, **kwargs: object) -> object:
+        if str(path) == str(receipt):
+            return real_lstat(other)
+        return real_lstat(path, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("receipt.release_chain.os.lstat", lying)
+    with pytest.raises(ReleaseChainError, match="replaced while it was being read"):
+        _receipt_bytes(receipt)
+
 
 
 def test_default_mode_keeps_parts_based_purepath_joins(
