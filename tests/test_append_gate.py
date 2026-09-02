@@ -2177,7 +2177,7 @@ def test_the_push_path_refuses_a_tracked_file_standing_for_the_release_root(
     with pytest.raises(AppendError) as refusal:
         run_push_gate(candidate)
     assert str(refusal.value) == (
-        "release root is not a directory while the index records 1 entries "
+        "release root is not a directory while the index records 1 entry "
         "under it"
     )
 
@@ -2201,7 +2201,7 @@ def test_a_tracked_file_standing_for_the_release_root_is_refused_with_a_base(
     with pytest.raises(ReleaseChainError) as scanned:
         release_chain.assert_release_root_index_regular(candidate.root, CHAIN_SPEC)
     assert str(scanned.value) == (
-        "release root is not a directory while the index records 1 entries "
+        "release root is not a directory while the index records 1 entry "
         "under it"
     )
 
