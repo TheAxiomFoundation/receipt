@@ -1517,8 +1517,8 @@ def test_refuses_gates_whose_rendering_cost_alone_floods_the_verdict(
     close: two thousand gates is inside the declaration budget, and two
     thousand forty-eight-character ids with two characters of evidence
     charged a hundred thousand — comfortably inside the text budget — while
-    the JSON they render is a quarter of a million characters before one
-    declared character is counted.
+    the JSON they render is over a third of a million characters, some
+    seventy per cent of it the fixed cost the old charge counted as nothing.
 
     Each gate is now charged the fixed cost of the lines it produces, and
     each evidence entry the cost of the member JSON puts around it, so this
@@ -1901,8 +1901,8 @@ def test_the_tombstone_scan_stops_reading_a_directory_wider_than_its_budget(
     yields anything, so a per-entry charge against it bounded only what this
     module did with the names. The read itself — which is the exhaustion an
     adversary plants a wide directory to cause — went ahead in full, and
-    round four's test hid that by replacing ``iterdir`` with a lazy generator
-    production never has.
+    round four's test hid that by replacing ``iterdir`` with a lazy
+    generator, which is a listing production never has.
 
     The index now scans with ``os.scandir`` inside a ``with`` and refuses
     from inside the loop, so the iterator is closed early and the entries
