@@ -187,6 +187,13 @@ class CorpusSpec:
         for root in self.content_roots:
             if not isinstance(root, pathlib.PurePosixPath):
                 raise CorpusError("CorpusSpec content_roots must be PurePosixPath")
+            # The spec's own two fold inputs are screened here, before the
+            # path rules, so a refusal names the committed spec that carries
+            # the fault rather than a path. A root also reaches
+            # _validate_relative_path below, which screens it again; a suffix
+            # reached nothing, which is the hole (see the suffix loop).
+            for component in root.as_posix().split("/"):
+                _assert_assigned(component, "CorpusSpec content root")
             _validate_relative_path(root.as_posix(), "content root")
         if type(self.content_suffixes) is not tuple or not self.content_suffixes:
             raise CorpusError("CorpusSpec must declare at least one content suffix")
@@ -195,6 +202,14 @@ class CorpusSpec:
                 raise CorpusError(
                     f"CorpusSpec content suffix must start with '.': {_quoted(suffix)}"
                 )
+            # A suffix was checked for its leading dot and nothing else, while
+            # _has_pinned_suffix folds it against every path in the tree and
+            # against every entry name the sweep sees. An unassigned code
+            # point in one folds differently under each supported table, so
+            # which files the closed world contained depended on the
+            # verifier's interpreter — the same defect _assert_assigned closes
+            # everywhere else this module folds (peer review, round four).
+            _assert_assigned(suffix, "CorpusSpec content suffix")
         if type(self.required_attested_paths) is not frozenset:
             raise CorpusError("CorpusSpec required_attested_paths must be a frozenset")
         for path in sorted(self.required_attested_paths):
