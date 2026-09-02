@@ -744,6 +744,22 @@ def test_a_genTime_finer_than_a_microsecond_refuses(repo: pathlib.Path) -> None:
         _parse_receipt_text(with_fraction(text, ".1234567"), alpha)
 
 
+def test_a_genTime_with_zeros_beyond_the_sixth_digit_is_exact(
+    repo: pathlib.Path,
+) -> None:
+    """Seven digits ending in zero name the same instant six digits do.
+
+    The refusal exists for precision the parser cannot hold; a trailing zero
+    holds none, so refusing it would be over-refusal in the fail-closed
+    direction for no gain. A seventh digit that is not zero still refuses."""
+
+    text, alpha = receipt_text(repo)
+    parsed, _ = _parse_receipt_text(with_fraction(text, ".1234560"), alpha)
+    assert parsed.microsecond == 123456
+    with pytest.raises(ReleaseChainError, match="finer than a microsecond"):
+        _parse_receipt_text(with_fraction(text, ".1234561"), alpha)
+
+
 def test_default_mode_keeps_parts_based_purepath_joins(
     repo: pathlib.Path,
 ) -> None:

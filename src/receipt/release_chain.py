@@ -206,7 +206,11 @@ TIME_STAMP_RE = re.compile(
 )
 #: A dotted-decimal object identifier as OpenSSL prints one. Arcs carry no
 #: leading zeros, because a spec pinning "1.02" would be comparing against a
-#: spelling no RFC 3161 receipt ever reports.
+#: spelling no RFC 3161 receipt ever reports. The pin is compared against the
+#: ``Policy OID:`` line OpenSSL prints, and OpenSSL renders an OID in its own
+#: table by name rather than in dotted decimal; no timestamping policy arc is
+#: in that table, so dotted decimal is the whole domain in practice, but that
+#: coupling is what this pattern assumes.
 OID_RE = re.compile(r"(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*))+\Z")
 
 
@@ -831,7 +835,7 @@ def _parse_receipt_text(output: str, receipt: pathlib.Path) -> tuple[datetime, s
     fraction = match.group("fraction")
     if fraction:
         digits = fraction[1:]
-        if len(digits) > 6:
+        if len(digits) > 6 and digits[6:].strip("0"):
             # Keeping six digits and dropping the rest moves the parsed time
             # EARLIER than the instant the authority actually signed, and that
             # time is not merely reported: it is compared against createdAtUtc
@@ -839,7 +843,8 @@ def _parse_receipt_text(output: str, receipt: pathlib.Path) -> tuple[datetime, s
             # -attime the signer certificate is validated at. A verdict must
             # not quote, or reason from, a time no receipt carries — so a
             # precision this verifier cannot represent refuses instead of
-            # being silently rounded down.
+            # being silently rounded down. Digits beyond the sixth that are
+            # all zero carry no precision and are accepted.
             raise ReleaseChainError(
                 f"RFC 3161 genTime for {receipt} is finer than a microsecond, "
                 f"which this verifier cannot represent exactly: "
@@ -1027,10 +1032,11 @@ def _receipt_bytes(receipt: pathlib.Path) -> bytes:
     token ever carried. The bytes are read once here and every call below is
     fed a private snapshot of them.
 
-    The open refuses a symlink outright where the platform offers
-    ``O_NOFOLLOW``, and the descriptor is stat'ed after opening: a path
-    swapped between the check above and the open here addresses a different
-    file, and its (device, inode) pair says so where the pathname cannot.
+    The lstat below refuses a symlink present at check time; ``O_NOFOLLOW``,
+    where the platform offers it, refuses one swapped in between that check
+    and the open; and the descriptor is stat'ed after opening, so a regular
+    file swapped in the same window addresses a different (device, inode)
+    pair, which says so where the pathname cannot.
     """
 
     # O_NOFOLLOW is POSIX but not universal; where it is absent the lstat
