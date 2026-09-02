@@ -1561,7 +1561,7 @@ def test_a_ledger_replaced_by_an_identical_copy_mid_verdict_is_refused(
         ledger.write_bytes(payload)
 
     monkeypatch.setattr(append_gate, "check_rows", replace)
-    inode = ledger.stat().st_ino
+    before = ledger.stat()
 
     with pytest.raises(AppendError) as refusal:
         run_gate(candidate)
@@ -1569,8 +1569,13 @@ def test_a_ledger_replaced_by_an_identical_copy_mid_verdict_is_refused(
         "state file changed during verification: "
         "ledger/official_observations.jsonl"
     )
-    # Same bytes, different file: only the recorded identity says so.
-    assert ledger.stat().st_ino != inode
+    # Same bytes, different file: only the recorded identity says so. A
+    # filesystem may hand the replacement the inode it just freed (ext4 does,
+    # APFS does not), in which case the inode change time is what still
+    # distinguishes the two; either way the identity the run recorded no
+    # longer holds.
+    after = ledger.stat()
+    assert (after.st_ino, after.st_ctime_ns) != (before.st_ino, before.st_ctime_ns)
 
 
 def test_a_state_file_that_cannot_be_re_read_is_refused_as_changed(
