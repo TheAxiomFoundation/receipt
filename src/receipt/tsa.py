@@ -20,9 +20,9 @@ witness selects); a pinned root PEM that OpenSSL's own parser (``openssl
 storeutl -noout -certs``) does not count exactly one certificate in, or whose
 certificates it cannot count at all -- the declared certificate hash and SPKI
 describe only the first certificate, while a ``-CAfile`` trusts every
-certificate it is given, so the two verifications are now handed that first
-certificate alone, as ``openssl x509`` re-encodes it, and what the identity
-pins is the whole of what they trust; a bundle whose configured anchors are
+certificate it is given, so with exactly one counted the pinned file itself
+is what the two verifications trust, auxiliary trust settings included, and
+what the identity pins is the whole of what they trust; a bundle whose configured anchors are
 not exactly the anchors the spec's identities for that bundle name, so an
 identity the consumer scoped to it cannot be quietly absent from it; a
 pending bundle anchor reusing an active anchor ID under a different
@@ -913,9 +913,11 @@ def _root_material(records: Path, anchor: dict[str, Any]) -> dict[str, str]:
     # byte-order mark before the first one -- and matching a parser by
     # imitation has no end, so _certificate_count asks the parser (peer
     # review, third gate round two).  The label no longer matters: whatever
-    # label the one object wears, `openssl x509` re-encodes it to the plain
-    # certificate that _certificate_identity hashes below and that
-    # verify_timestamp_token trusts, alone, as its -CAfile.
+    # label the one object wears, `openssl x509` reads it as the certificate
+    # _certificate_identity hashes below, and verify_timestamp_token trusts
+    # the pinned file itself, exactly one object by this count, so any
+    # auxiliary trust settings it carries apply as pinned rather than being
+    # dropped by a re-encoding (peer review, third gate round three).
     if _certificate_count(root_path) != 1:
         raise TsaError(
             f"pinned TSA root PEM must hold exactly one certificate: {root_path}"
@@ -1049,7 +1051,6 @@ def verify_timestamp_token(
         token_der = temp / "token.der"
         tst_info = temp / "tst-info.der"
         signer = temp / "signer.pem"
-        trusted_root = temp / "root.pem"
         empty_ca_dir = temp / "empty-ca"
         empty_ca_dir.mkdir()
         _run_openssl(
@@ -1116,20 +1117,15 @@ def verify_timestamp_token(
             "SSL_CERT_FILE": "/dev/null",
         }
         verification_time = str(int(gen_time.timestamp()))
-        # The -CAfile below is this re-encoding of the pinned root's first
-        # certificate, not the pinned file.  OpenSSL trusts every certificate
-        # a -CAfile holds, while the anchor's certificateSha256 and spkiSha256
-        # -- and every identity comparison _load_trust_bundle ran over them --
-        # describe only the first certificate OpenSSL reads out of that file.
-        # _root_material refuses a file holding any other number, and this
-        # makes the two agree by construction rather than by a count anyone
-        # has to get right: whatever else the bytes may hold, the only
-        # certificate trusted here is the one the identity pins (peer review,
-        # third gate round two).  `openssl x509` reads the same first object
-        # here as it did there, and re-encodes it the same way, so this is the
-        # certificate whose DER _certificate_identity hashed into the
-        # certificateSha256 and spkiSha256 the anchor was checked against.
-        _run_openssl(["x509", "-in", str(root_path), "-out", str(trusted_root)])
+        # The -CAfile below is the pinned file itself. _root_material has
+        # already had OpenSSL's own parser count exactly one certificate in
+        # it, so the trust anchor these verifications are given is the one
+        # object the anchor's certificateSha256 and spkiSha256 describe --
+        # and it is given as pinned, auxiliary trust settings included. A
+        # re-encoding through `openssl x509` was tried and withdrawn: it
+        # emits a plain certificate, so a pinned TRUSTED CERTIFICATE that
+        # rejects the timestamping purpose was laundered into a root that
+        # permits it (peer review, third gate round three).
         _run_openssl(
             [
                 "ts",
@@ -1141,7 +1137,7 @@ def verify_timestamp_token(
                 "-in",
                 str(token_path),
                 "-CAfile",
-                str(trusted_root),
+                str(root_path),
                 "-CApath",
                 str(empty_ca_dir),
                 "-attime",
@@ -1158,7 +1154,7 @@ def verify_timestamp_token(
                 "-in",
                 str(token_der),
                 "-CAfile",
-                str(trusted_root),
+                str(root_path),
                 "-no-CApath",
                 "-no-CAstore",
                 "-purpose",
