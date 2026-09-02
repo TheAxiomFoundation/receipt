@@ -101,6 +101,12 @@ INDEPENDENTLY_REPRODUCIBLE_TIERS = frozenset({PUBLIC_TIER})
 #: to read out of the terminal, which defeats the verdict as surely as an
 #: escape sequence would.
 MAX_EVIDENCE_TEXT = 1024
+#: The most characters of gate id and evidence the effective view may carry
+#: in total. The per-string bound above caps one flood; a journal of a
+#: thousand not-run gates each carrying a bound-length reason still put a
+#: million characters into the verdict (peer review). Generous for any real
+#: corpus, which declares tens of gates with digest-sized evidence.
+MAX_GATE_TEXT = 262144
 
 _ROW_KEYS: dict[str, frozenset[str]] = {
     CONTENT_KIND: frozenset(
@@ -232,6 +238,28 @@ class CorpusVerification:
         return tuple(gate for gate in self.gates if not gate.independently_reproducible)
 
 
+#: Unicode category Cf as of Unicode 16.0.0, the table Python 3.14 ships,
+#: pinned here so the refusal does not depend on which interpreter renders
+#: the verdict: Python 3.11 carries Unicode 14, under which U+1343A is
+#: unassigned and passed while 3.12 and 3.13 refused it (peer review). A code
+#: point refuses if it is in this table OR the running interpreter's table
+#: calls it Cf, so a later table can only widen the set, never narrow it.
+_FORMAT_CONTROL_RANGES = (
+    (0x00AD, 0x00AD), (0x0600, 0x0605), (0x061C, 0x061C), (0x06DD, 0x06DD),
+    (0x070F, 0x070F), (0x0890, 0x0891), (0x08E2, 0x08E2), (0x180E, 0x180E),
+    (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x2064), (0x2066, 0x206F),
+    (0xFEFF, 0xFEFF), (0xFFF9, 0xFFFB), (0x110BD, 0x110BD), (0x110CD, 0x110CD),
+    (0x13430, 0x1343F), (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A),
+    (0xE0001, 0xE0001), (0xE0020, 0xE007F),
+)
+
+
+def _is_format_control(code: int, category: str) -> bool:
+    if category == "Cf":
+        return True
+    return any(low <= code <= high for low, high in _FORMAT_CONTROL_RANGES)
+
+
 def _reject_control_characters(value: str, label: str) -> str:
     """Refuse control, format, and line-separator code points in producer text.
 
@@ -246,7 +274,9 @@ def _reject_control_characters(value: str, label: str) -> str:
     The C0 block is not the only way to do it, so two more classes refuse
     here:
 
-    - Every code point in Unicode category Cf. These render as nothing while
+    - Every code point in Unicode category Cf, as of Unicode 16.0 and pinned
+      in this module (``_FORMAT_CONTROL_RANGES``), or in the running
+      interpreter's own table. These render as nothing while
       changing what the reader sees: U+202E RIGHT-TO-LEFT OVERRIDE reverses
       the remainder of the line, so a gate declared not-run can be spelled to
       read as passed, and U+200B lets two evidence keys print identically.
@@ -276,7 +306,7 @@ def _reject_control_characters(value: str, label: str) -> str:
             raise CorpusError(
                 f"{label} contains a control character ({code:#04x}): {value!r}"
             )
-        if category == "Cf":
+        if _is_format_control(code, category):
             raise CorpusError(
                 f"{label} contains a Unicode format control ({code:#04x}): {value!r}"
             )
@@ -560,6 +590,17 @@ def parse_journal(
             del target[path]
             removed.add(path)
 
+    rendered = sum(
+        len(gate.gate_id)
+        + sum(len(key) + len(value) for key, value in gate.evidence.items())
+        for gate in gates
+    )
+    if rendered > MAX_GATE_TEXT:
+        raise CorpusError(
+            f"journal gate declarations total {rendered} characters of id and "
+            f"evidence, over the verdict budget of {MAX_GATE_TEXT}"
+        )
+
     return content, attested, tuple(gates), tuple(sorted(removed))
 
 
@@ -583,6 +624,51 @@ def _list_directory(directory: pathlib.Path, relative: str) -> list[pathlib.Path
         ) from exc
 
 
+def _fold_survivor(root: pathlib.Path, relative: str) -> str | None:
+    """The spelling under which a tombstoned path still answers, if any.
+
+    The module's portability model is that two paths whose fold keys agree
+    are one file on some real filesystem; the sweep and the alias guard are
+    built on it, and a tombstone checked by exact-spelling lstat was not. On
+    a case-sensitive host a tombstone for ".axiom/apply-manifest.json" passed
+    while ".AXIOM/APPLY-MANIFEST.JSON" remained, and that survivor answers to
+    the tombstoned name on a case-insensitive consumer (peer review). So each
+    component is matched by fold key against a listing of its directory,
+    exact spelling first, every fold-equal branch explored. Parent components
+    are followed as lstat followed them: the question is what answers to the
+    name in the tree a consumer reads. Failure to list is a refusal, not an
+    absence, for the reason _list_directory gives.
+    """
+
+    def search(
+        directory: pathlib.Path, components: list[str], spelled: list[str]
+    ) -> str | None:
+        try:
+            entries = list(directory.iterdir())
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        except OSError as exc:
+            raise CorpusError(
+                "cannot check whether a removed path is still in the tree, so "
+                f"the tombstone is unverifiable: {relative} ({exc.strerror})"
+            ) from exc
+        head, rest = components[0], components[1:]
+        key = _path_fold(head)
+        matches = sorted(
+            (entry for entry in entries if _path_fold(entry.name) == key),
+            key=lambda entry: (entry.name != head, entry.name),
+        )
+        for entry in matches:
+            if not rest:
+                return "/".join([*spelled, entry.name])
+            found = search(entry, rest, [*spelled, entry.name])
+            if found is not None:
+                return found
+        return None
+
+    return search(root, relative.split("/"), [])
+
+
 def _path_fold(relative: str) -> str:
     """A filesystem-insensitivity-proof key for a relative path.
 
@@ -592,7 +678,14 @@ def _path_fold(relative: str) -> str:
     checked over.
     """
 
-    return unicodedata.normalize("NFC", relative).casefold()
+    # Normalized again after folding, deliberately: casefold itself can
+    # produce decomposed text (U+00DF followed by U+0301 folds to s, s,
+    # U+0301, whose composed form is s, U+015B), so a variant that differs
+    # in case AND normalization at once produced an unequal key and the
+    # suffix predicate let it out of the sweep (peer review).
+    return unicodedata.normalize(
+        "NFC", unicodedata.normalize("NFC", relative).casefold()
+    )
 
 
 def _has_pinned_suffix(relative: str, suffixes: tuple[str, ...]) -> bool:
@@ -923,37 +1016,19 @@ def verify_corpus_binding(
     # unlisted. For an attested path nothing else looks: attested paths sit
     # outside the content roots, so a retired toolchain pin or apply manifest
     # could sit on disk bound by no row, reported as removed, and be read as
-    # current by every consumer. lstat both kinds and refuse what is still
-    # there.
+    # current by every consumer. Look for both kinds, by fold key so an
+    # aliasing spelling counts, and refuse what is still there.
     for path in removed:
-        # lstat follows every component but the last, deliberately; this is
-        # the one filesystem touch in the module without the component walk.
-        # A tombstone asks whether anything answers to this name in the tree
-        # a consumer would read, and a consumer resolves the same links; a
-        # dangling final-component link still lstats, and still refuses. Do
-        # not add _assert_no_symlinked_component here: it stats each
-        # component, and on a parent that is readable but not searchable
-        # that raises out of the walk instead of reaching the unverifiable
-        # refusal below.
-        try:
-            os.lstat(root / path)
-        except (FileNotFoundError, NotADirectoryError):
-            # Genuinely gone: nothing answers to the name, or a parent
-            # component is not a directory, so nothing can.
+        survivor = _fold_survivor(root, path)
+        if survivor is None:
             continue
-        except OSError as exc:
-            # Any other failure means the check could not look, which is not
-            # the same as the file being absent — lstat raises EACCES, not
-            # ENOENT, when a parent directory is readable but not searchable.
-            # Treating that as absence would report a file still on disk as
-            # removed on the strength of a permission error. _list_directory
-            # refuses failure-to-enumerate for this reason; the same rule
-            # applies here.
-            raise CorpusError(
-                "cannot check whether a removed path is still in the tree, so "
-                f"the tombstone is unverifiable: {path} ({exc.strerror})"
-            ) from exc
-        raise CorpusError(f"removed path is still present in the tree: {path}")
+        if survivor == path:
+            raise CorpusError(f"removed path is still present in the tree: {path}")
+        raise CorpusError(
+            "removed path is still present in the tree under a spelling that "
+            "aliases it on a case- or normalization-insensitive filesystem: "
+            f"{path} ({survivor})"
+        )
 
     return CorpusVerification(
         content=tuple(content[path] for path in sorted(content)),

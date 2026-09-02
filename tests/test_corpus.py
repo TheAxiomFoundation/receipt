@@ -1203,8 +1203,8 @@ def test_refuses_a_removed_path_the_verifier_cannot_look_for(
 ) -> None:
     """A tombstone nothing could check is not a tombstone honoured.
 
-    lstat raises EACCES rather than ENOENT when a parent directory is readable
-    but not searchable, so a removed path swallowed by "any error means gone"
+    Listing a parent that is neither readable nor searchable fails with
+    EACCES, not ENOENT, so a removed path swallowed by "any error means gone"
     is reported to the auditor as removed on the strength of a permission
     error while the file sits on disk. Failure to look is not an absence —
     the same rule the sweep applies to a directory it cannot enumerate.
@@ -1228,7 +1228,7 @@ def test_refuses_a_removed_path_the_verifier_cannot_look_for(
     )
     reindex(rows)
     journal = render_journal(rows)
-    os.chmod(tmp_path / "retired", 0o600)
+    os.chmod(tmp_path / "retired", 0o000)
     try:
         with pytest.raises(CorpusError, match="tombstone is unverifiable"):
             verify_corpus_binding(tmp_path, journal, spec=corpus_spec())
@@ -1269,6 +1269,156 @@ def test_refuses_a_lone_surrogate_in_a_journal_path(tmp_path: pathlib.Path) -> N
 
     write_tree(tmp_path)
     rows = journal_rows()
-    rows[0]["path"] = "rules/benefit/amo\ud800unt.yaml"
+    # An attested path, deliberately: a content path spelled this way is
+    # caught earlier, by the sweep, as unlisted; the attested read is what
+    # reached os.lstat.
+    row = next(row for row in rows if row["kind"] == "attested")
+    row["path"] = ".axiom/tool\ud800chain.toml"
     with pytest.raises(CorpusError, match="lone surrogate"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_refuses_a_removed_path_that_survives_under_an_aliasing_spelling(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A tombstone is honoured under the module's own portability model.
+
+    Two paths whose fold keys agree are one file on some real filesystem. A
+    tombstone checked by exact-spelling lstat ignored that: on a
+    case-sensitive host ``retired/apply-manifest.json`` could be reported
+    removed while ``retired/APPLY-MANIFEST.JSON`` remained, and that survivor
+    answers to the tombstoned name on a case-insensitive consumer. Found by
+    peer review. On a case-insensitive host the rename below is the same file
+    under a new spelling, and it refuses there too.
+    """
+
+    import os
+
+    body = '{"applied": true}\n'
+    attested = dict(ATTESTED)
+    attested["retired/apply-manifest.json"] = body
+    write_tree(tmp_path, attested=attested)
+    rows = journal_rows(attested=attested)
+    rows.append(
+        {
+            "schemaVersion": JOURNAL_SCHEMA,
+            "kind": "attested",
+            "path": "retired/apply-manifest.json",
+            "sha256": sha256_text(body),
+            "state": "removed",
+        }
+    )
+    reindex(rows)
+    os.rename(
+        tmp_path / "retired/apply-manifest.json",
+        tmp_path / "retired/APPLY-MANIFEST.JSON",
+    )
+    with pytest.raises(CorpusError, match="still present in the tree") as caught:
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+    assert "retired/APPLY-MANIFEST.JSON" in str(caught.value)
+
+
+def test_refuses_an_unlisted_content_file_varied_in_case_and_normalization_at_once(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Casefold can itself produce decomposed text.
+
+    U+00DF followed by U+0301 folds to s, s, U+0301, whose composed form is
+    s, U+015B; a pinned suffix spelled with U+015B folded to the composed
+    form. One NFC pass before folding left those keys unequal, so a file
+    varied in case and normalization at once was not content and escaped
+    the sweep. Found by peer review; the fold now normalizes again after
+    folding.
+    """
+
+    write_tree(tmp_path)
+    spec = corpus_spec(content_suffixes=(".yaml", ".s\u015b"))
+    (tmp_path / "rules/tax/smuggled.\u00df\u0301").write_text("name: smuggled\n")
+    with pytest.raises(CorpusError, match="not bound by the witnessed journal"):
+        verify_corpus_binding(tmp_path, render_journal(journal_rows()), spec=spec)
+
+
+def test_refuses_a_format_control_whatever_unicode_table_the_interpreter_carries(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The Cf set is pinned, so the verdict does not depend on the runtime.
+
+    U+1343A is Cf under Unicode 15 and later and unassigned under Unicode 14,
+    which Python 3.11 ships, so the same journal was refused on 3.12 and
+    accepted on 3.11 (peer review). The module pins Unicode 16.0's Cf set and
+    refuses anything in it or anything the running table calls Cf.
+    """
+
+    import unicodedata
+
+    from receipt.corpus import _FORMAT_CONTROL_RANGES
+
+    pinned = {
+        code for low, high in _FORMAT_CONTROL_RANGES for code in range(low, high + 1)
+    }
+    assert 0x1343A in pinned
+    running = {
+        code for code in range(0x110000) if unicodedata.category(chr(code)) == "Cf"
+    }
+    assert running <= pinned, sorted(running - pinned)[:5]
+
+    write_tree(tmp_path)
+    rows = journal_rows(
+        gates=[
+            {
+                "gateId": "rulespec/compile",
+                "tier": "public",
+                "outcome": "not-run",
+                "evidence": {"reason": "gate disabled \U0001343a"},
+            }
+        ]
+    )
+    with pytest.raises(CorpusError, match="Unicode format control"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_refuses_gate_declarations_over_the_verdict_budget(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The per-string bound caps one flood; cardinality was uncapped.
+
+    Three hundred not-run gates each carrying a bound-length reason are each
+    within the per-string bound and together put three hundred thousand
+    characters into the verdict. The effective view's gate text is bounded
+    as a whole (peer review).
+    """
+
+    write_tree(tmp_path)
+    rows = journal_rows(
+        gates=[
+            {
+                "gateId": f"flood/gate-{index}",
+                "tier": "public",
+                "outcome": "not-run",
+                "evidence": {"reason": "x" * 1024},
+            }
+            for index in range(300)
+        ]
+    )
+    with pytest.raises(CorpusError, match="over the verdict budget"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_refuses_a_gate_evidence_key_longer_than_the_bound(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The key is bounded like the value, and the reviewer asked for the test."""
+
+    write_tree(tmp_path)
+    rows = journal_rows(
+        gates=[
+            {
+                "gateId": "rulespec/compile",
+                "tier": "public",
+                "outcome": "pass",
+                "evidence": {"k" * 1025: "make validate"},
+            }
+        ]
+    )
+    with pytest.raises(CorpusError, match="is longer than 1024 characters"):
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
