@@ -1862,3 +1862,78 @@ def test_a_tombstone_entry_that_cannot_be_stat_after_the_listing_refuses(
             verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
     finally:
         os.chmod(tmp_path / "retired", 0o755)
+
+
+def _listing_with(directory_name: str, extra: str):
+    """An ``iterdir`` that reports one more entry than the directory holds.
+
+    APFS refuses to create a filename carrying an unassigned code point at
+    all — the ``open`` fails with EILSEQ — while ext4 and NTFS store the bytes
+    without comment. The verifier has to hold on the filesystems that allow
+    the name, so on this host the name reaches the sweep through the listing
+    rather than through the disk.
+    """
+
+    real = pathlib.Path.iterdir
+
+    def iterdir(self: pathlib.Path):
+        entries = list(real(self))
+        if self.name == directory_name:
+            entries.append(self / extra)
+        return iter(entries)
+
+    return iterdir
+
+
+def test_refuses_a_tree_entry_carrying_an_unassigned_code_point(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds F2: entry names were folded without being screened.
+
+    Declared paths refuse an unassigned code point because the fold key is
+    only stable across Unicode tables for assigned characters. Filesystem
+    entry names went straight into the same fold — U+A7CB folds to U+0264 on
+    Unicode 16 and to itself before it — so whether the sweep called a file
+    content, and so whether the closed world contained it, depended on the
+    verifier's interpreter rather than on the tree.
+
+    The screen has to run before anything else looks at the entry, and that
+    is what this pins: without it the name is folded, found to carry no
+    pinned suffix or to be no regular file, and the refusal is a different
+    one or none at all.
+    """
+
+    import unicodedata
+
+    assert unicodedata.category("͸") == "Cn"
+    write_tree(tmp_path)
+    monkeypatch.setattr(pathlib.Path, "iterdir", _listing_with("tax", "notes͸"))
+    with pytest.raises(CorpusError, match="unassigned in Unicode") as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    assert "tree entry 'rules/tax/notes" in str(caught.value)
+
+
+def test_refuses_an_unassigned_code_point_in_a_tombstone_listing(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds F2: the tombstone search folds entry names too.
+
+    The fold search buckets every name in a directory by fold key to decide
+    whether a removed path survives under an aliasing spelling. An unassigned
+    code point lands in one bucket on one interpreter and another on the next,
+    so the same tree honours the tombstone under one Python and refuses under
+    another. The index reads nothing but the name, so an injected entry is
+    exactly what a real one would be here: without the screen the name folds
+    unexamined, no survivor is found, and this verification passes.
+    """
+
+    body = '{"applied": true}\n'
+    write_tree(tmp_path)
+    (tmp_path / "retired").mkdir()
+    rows = _tombstone_rows("retired/apply-manifest.json", body)
+    monkeypatch.setattr(pathlib.Path, "iterdir", _listing_with("retired", "sibling͸"))
+    with pytest.raises(CorpusError, match="unassigned in Unicode") as caught:
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+    assert "tree entry examined for a tombstone" in str(caught.value)

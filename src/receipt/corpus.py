@@ -372,6 +372,37 @@ def _reject_oversized_text(value: str, label: str) -> str:
     return value
 
 
+def _assert_assigned(value: str, label: str) -> str:
+    """Refuse text carrying a code point no Unicode table has assigned yet.
+
+    The fold key (see :func:`_path_fold`) is only stable across Unicode tables
+    for assigned characters: the standard's stability policies fix case
+    folding and normalization once a character is encoded, and say nothing
+    before. An unassigned code point folded one way on Unicode 15 and another
+    on 16 (U+10D50, peer review), so text carrying one could alias under one
+    interpreter and not another.
+
+    Declared paths were screened here from the start. Filesystem entry names
+    were not, and they are folded by the sweep, by the suffix predicate, and
+    by the tombstone search — U+A7CB folds to U+0264 on Unicode 16 and to
+    itself before it, so which files a closed-world sweep considers the same
+    file depended on the verifier's interpreter (peer review, round three).
+    Every name this module folds passes through here first, so the fold key
+    means one thing on every supported table.
+
+    The refusal names the running table, since that is what decided it.
+    """
+
+    for character in value:
+        if unicodedata.category(character) == "Cn":
+            raise CorpusError(
+                f"{label} contains a code point unassigned in Unicode "
+                f"{unicodedata.unidata_version} ({ord(character):#06x}): "
+                f"{_quoted(value)}"
+            )
+    return value
+
+
 def _aliases_natively(segment: str) -> bool:
     """Whether Win32 resolves this component under a spelling nothing emits.
 
@@ -425,19 +456,7 @@ def _validate_relative_path(value: Any, label: str) -> str:
                 f"{label} has a component Windows would alias: {_quoted(value)}"
             )
     _reject_control_characters(value, label)
-    for character in value:
-        if unicodedata.category(character) == "Cn":
-            # The fold key (see _path_fold) is only stable across Unicode
-            # tables for assigned characters: the standard's stability
-            # policies fix case folding and normalization once a character
-            # is encoded, and say nothing before. An unassigned code point
-            # folded one way on Unicode 15 and another on 16 (U+10D50, peer
-            # review), so a path carrying one could alias under one
-            # interpreter and not another. Refused, naming the table.
-            raise CorpusError(
-                f"{label} contains a code point unassigned in Unicode "
-                f"{unicodedata.unidata_version} ({ord(character):#06x}): {value!r}"
-            )
+    _assert_assigned(value, label)
     if ":" in value:
         # On Windows, "C:/x" survives every relative-path check above yet
         # joins drive-absolute under pathlib, letting a row reference a file
@@ -771,6 +790,11 @@ class _TombstoneIndex:
             )
         folded: dict[str, list[pathlib.Path]] = {}
         for entry in entries:
+            # Screened before it is folded, for the reason _assert_assigned
+            # gives: an unassigned code point in an entry name would put the
+            # entry in one fold bucket on one interpreter and another on the
+            # next, which decides whether a tombstone is honoured.
+            _assert_assigned(entry.name, "tree entry examined for a tombstone")
             folded.setdefault(_path_fold(entry.name), []).append(entry)
         self._directories[directory] = folded
         return folded
@@ -944,6 +968,12 @@ def _tree_content_paths(root: pathlib.Path, spec: CorpusSpec) -> dict[str, pathl
             directory, directory_relative = pending.pop()
             for candidate in _list_directory(directory, directory_relative):
                 relative = candidate.relative_to(root).as_posix()
+                # Before the suffix predicate folds this name. A tree entry
+                # carrying an unassigned code point folds differently on
+                # different Unicode tables, so whether it is content — and so
+                # whether the closed world contains it — would depend on the
+                # verifier's interpreter rather than on the tree.
+                _assert_assigned(candidate.name, f"tree entry {_quoted(relative)}")
                 if candidate.is_symlink():
                     # ANY symlink under a content root defeats the closed-world
                     # claim, whatever it is named: a walk does not descend
