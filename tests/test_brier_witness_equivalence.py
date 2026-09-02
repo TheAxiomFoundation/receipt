@@ -65,6 +65,13 @@ Deliberately outside the mutation contract:
   (``records/trust/freetsa-root-2016.pem`` and
   ``records/trust/digicert-trusted-root-g4.pem``) hold exactly one, so this
   refusal, which precedes the ported PEM-hash refusal, fires on no case here;
+- the baseline compares a bundle's anchors with the code identities in one
+  direction only, so an identity scoped to a bundle whose anchors do not
+  include it is ignored; the port requires the two sets to be equal at load.
+  The pinned ``tsa-anchors-v1`` configures ``freetsa-root-2016`` and the spec
+  above pins exactly that identity for it, and ``tsa-anchors-v2`` configures
+  ``freetsa-root-2016`` and ``digicert-trusted-root-g4`` and the spec pins
+  exactly those two, so no case here reaches the refusal;
 - the baseline ignores bundle-claim fields on an unavailable v1 witness;
   the port resolves and counts a named bundle.  The genesis witness names
   none;

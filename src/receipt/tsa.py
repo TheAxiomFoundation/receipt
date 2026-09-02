@@ -9,7 +9,7 @@ through a frozen :class:`TsaSpec` supplied by consumer code.  This module
 ships no repository-specific trust defaults and performs no chain walk or
 producer signature verification.
 
-The port is stricter than the baseline in eight places, each a refusal the
+The port is stricter than the baseline in nine places, each a refusal the
 pinned tree never presents and so each outside the differential contract: a
 legacy witness over a bundle configuring more than one anchor; a bundle
 configuring an anchor the spec carries no identity for, or one whose
@@ -19,7 +19,9 @@ SPKI other than the identity's (all compared at load for every anchor, not
 only the one a witness selects); a pinned root PEM holding more than one
 certificate, which the declared certificate hash and SPKI describe only the
 first of while the ``-CAfile`` verifications trust every certificate in the
-file; an
+file; a bundle whose configured anchors are not exactly the anchors the
+spec's identities for that bundle name, so an identity the consumer scoped
+to it cannot be quietly absent from it; an
 unavailable witness of either schema whose reason is not a string, or that
 carries token evidence at the witness level (the v2 per-anchor outcome has
 always refused both); and an unavailable legacy witness that names a bundle
@@ -251,6 +253,15 @@ class TsaSpec:
             if identity.bundle_id == bundle_id and identity.anchor_id == anchor_id:
                 return identity
         return None
+
+    def identities_for(self, bundle_id: str) -> set[str]:
+        """Return the anchor IDs of every identity scoped to one bundle."""
+
+        return {
+            identity.anchor_id
+            for identity in self.tsa_identities
+            if identity.bundle_id == bundle_id
+        }
 
     def identity_claim(
         self, bundle_id: str, anchor_id: str
@@ -711,6 +722,18 @@ def _load_trust_bundle(
                 f"TSA anchor {anchor_id} in bundle {bundle_id} references a root "
                 "whose SPKI differs from its verifier code identity"
             )
+    # The loop above binds the bundle's anchors to the spec; this binds the
+    # spec's identities to the bundle. Without it the agreement is one-way:
+    # an identity scoped to this bundle whose anchor the bundle does not
+    # configure is simply ignored, so a consumer that pins two authorities
+    # verifies a corpus whose bundle carries one, and the second authority it
+    # committed to never has to answer for anything (peer review).
+    identity_ids = spec.identities_for(bundle_id)
+    if anchor_ids != identity_ids:
+        raise TsaError(
+            f"TSA bundle {bundle_id} configures anchors {sorted(anchor_ids)} "
+            f"but verifier code pins identities for {sorted(identity_ids)}"
+        )
     return path, payload
 
 

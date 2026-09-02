@@ -1483,3 +1483,50 @@ def test_refuses_a_pinned_root_pem_that_carries_a_second_authority(
             trusted_bundles={BUNDLE_LOGICAL: tree.reference},
             transition_bundle_updates=[reference],
         )
+
+
+def test_refuses_a_bundle_missing_an_anchor_its_identities_pin(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """Bundle-to-identity agreement runs both ways (peer review, F2).
+
+    The per-anchor loop refuses a bundle anchor the spec carries no identity
+    for; the reverse was ignored. An identity scoped to this bundle whose
+    anchor the bundle does not configure means a consumer that committed to
+    two authorities verifies a corpus whose bundle configures one, and the
+    second never has to answer for anything -- the same one-token-stands-for-
+    the-bundle weakness the legacy count refuses, arrived at from the spec
+    side. Without the set comparison this bundle loads clean and the witness
+    verifies ``available`` on alpha alone.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    pins_an_absent_authority = TsaSpec(
+        trust_bundles=tree.spec.trust_bundles,
+        tsa_identities=(
+            *tree.spec.tsa_identities,
+            TsaIdentitySpec(
+                bundle_id=BUNDLE_ID,
+                anchor_id=beta.anchor_id,
+                root_spki_sha256=beta.root_pins["spkiSha256"],
+                signer_spki_sha256=frozenset({beta.signer_pins["spkiSha256"]}),
+                max_future_seconds=0,
+                max_token_lead_seconds=300,
+            ),
+        ),
+        legacy_witness_bundle_id=tree.spec.legacy_witness_bundle_id,
+    )
+    message = (
+        f"TSA bundle {BUNDLE_ID} configures anchors ['{alpha.anchor_id}'] but "
+        f"verifier code pins identities for "
+        f"['{alpha.anchor_id}', '{beta.anchor_id}']"
+    )
+    with pytest.raises(TsaError) as loading:
+        _load_trust_bundle(tree.records, tree.reference, spec=pins_an_absent_authority)
+    assert str(loading.value) == message
+    with pytest.raises(TsaError) as verifying:
+        verify_witness(
+            tree.record, spec=pins_an_absent_authority, records=tree.records
+        )
+    assert str(verifying.value) == message
