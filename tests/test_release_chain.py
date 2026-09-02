@@ -41,9 +41,11 @@ import pytest
 from receipt import release_chain
 from receipt.canonical import canonical_sha256
 from receipt.release_chain import (
+    TIME_STAMP_RE,
     ReleaseChainError,
     _combined_anchor_digest,
     _observe_anchor_bytes,
+    _parse_receipt_text,
     _receipt_bytes,
     assert_index_carries_no_protected_alias,
     verify_receipt,
@@ -680,6 +682,68 @@ def test_a_receipt_replaced_between_the_lstat_and_the_open_refuses(
     monkeypatch.setattr("receipt.release_chain.os.lstat", lying)
     with pytest.raises(ReleaseChainError, match="replaced while it was being read"):
         _receipt_bytes(receipt)
+
+
+
+def receipt_text(repo: pathlib.Path) -> tuple[str, pathlib.Path]:
+    """The real `openssl ts -reply -text` output the verifier parses."""
+
+    manifest_path = sorted((repo / "releases/manifests").glob("*.json"))[0]
+    alpha = manifest_path.with_name(f"{manifest_path.stem}.alpha.tsr")
+    completed = subprocess.run(
+        ["openssl", "ts", "-reply", "-config", "/dev/null", "-in", str(alpha), "-text"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout, alpha
+
+
+def with_fraction(text: str, fraction: str) -> str:
+    """Rewrite only the genTime's fractional part, leaving the rest as OpenSSL
+    printed it — a locally generated authority stamps whole seconds, but a
+    production one need not."""
+
+    lines = []
+    for line in text.splitlines():
+        if line.startswith("Time stamp:"):
+            match = TIME_STAMP_RE.fullmatch(line.split(":", 1)[1].strip())
+            assert match is not None
+            line = (
+                f"Time stamp: {match.group('month')} {match.group('day')} "
+                f"{match.group('hour')}:{match.group('minute')}:"
+                f"{match.group('second')}{fraction} {match.group('year')} GMT"
+            )
+        lines.append(line)
+    return "\n".join(lines)
+
+
+@pytest.mark.parametrize(
+    ("fraction", "microsecond"),
+    [("", 0), (".1", 100_000), (".123456", 123_456)],
+)
+def test_a_fractional_genTime_keeps_every_digit_it_can_represent(
+    repo: pathlib.Path, fraction: str, microsecond: int
+) -> None:
+    """``.1`` is a tenth of a second, not a microsecond: the digits are the
+    fraction's leading digits, right-padded, never read as a count."""
+
+    text, alpha = receipt_text(repo)
+    parsed, _ = _parse_receipt_text(with_fraction(text, fraction), alpha)
+    assert parsed.microsecond == microsecond
+
+
+def test_a_genTime_finer_than_a_microsecond_refuses(repo: pathlib.Path) -> None:
+    """Truncating to six digits moves the parsed time earlier than the instant
+    the authority signed — and that time is not merely reported. It is
+    compared against createdAtUtc and against the previous release's
+    witnesses, and it selects the -attime the signer certificate is validated
+    at. A precision this verifier cannot hold refuses rather than rounding
+    down into a time no receipt carries."""
+
+    text, alpha = receipt_text(repo)
+    with pytest.raises(ReleaseChainError, match="finer than a microsecond"):
+        _parse_receipt_text(with_fraction(text, ".1234567"), alpha)
 
 
 

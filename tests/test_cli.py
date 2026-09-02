@@ -722,6 +722,57 @@ def test_a_verdict_with_no_witnesses_states_no_timing_claim(
     assert "This verdict makes no witnessed timing claim." in out
 
 
+def test_a_witnessed_time_with_no_fraction_is_rendered_whole(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The ordinary case reads as the authority wrote it: no trailing
+    ".000000" appears merely because the renderer can print one."""
+
+    import re
+
+    assert run(repo, "--json") == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["chain"]["witnesses"]
+    for stamp in payload["chain"]["witnesses"].values():
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", stamp), stamp
+
+
+@pytest.mark.parametrize("microsecond", [1, 750_000, 999_999])
+def test_a_fractional_witnessed_time_is_quoted_in_full(
+    repo: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    microsecond: int,
+) -> None:
+    """An RFC 3161 authority may sign a fractional genTime, and whole-second
+    formatting printed one witnessed at ...:59.999999Z as ...:59Z — an instant
+    strictly earlier than the receipt's, quoted in a verdict as if exact. The
+    fraction is carried through, and carried through without rolling the
+    second over: the time reported is the time signed."""
+
+    import receipt.release_chain as module
+
+    real = module._parse_receipt_text
+
+    def fractional(output: str, receipt: pathlib.Path) -> object:
+        parsed, policy = real(output, receipt)
+        return parsed.replace(microsecond=microsecond), policy
+
+    monkeypatch.setattr("receipt.release_chain._parse_receipt_text", fractional)
+
+    assert run(repo, "--json") == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    stamps = payload["chain"]["witnesses"]
+    assert stamps
+    for anchor, stamp in stamps.items():
+        assert stamp.endswith(f".{microsecond:06d}Z"), (anchor, stamp)
+
+    assert run(repo) == EXIT_OK
+    out = capsys.readouterr().out
+    for stamp in stamps.values():
+        assert stamp in out
+
+
 def test_refuses_an_edited_attested_file(repo: pathlib.Path) -> None:
     """The toolchain pin is bound too: swapping the corpus release must refuse."""
 
