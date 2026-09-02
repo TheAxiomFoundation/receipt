@@ -2332,6 +2332,52 @@ def test_a_forged_verdict_line_in_a_tree_name_is_escaped(
     assert "\\x1b[2K\\rVERDICT: PASS" in message
 
 
+def test_refuses_a_directory_reparse_point_under_a_content_root(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds F5: a Windows junction is not a symlink and was descended.
+
+    The sweep asked ``is_symlink()``, which answers for POSIX symlinks only.
+    On Windows a junction, and every other directory reparse point, reports
+    ``False`` there while redirecting the walk somewhere else entirely — so a
+    content root could be a link into an ambient directory, and the sweep
+    would descend it, hash whatever it found, and call the closed world
+    closed. ``st_reparse_tag`` is how Windows reports one, and it is the test
+    ``_assert_no_symlinked_component`` already applies to a bound path.
+
+    No POSIX host can create a reparse point, so the ``lstat`` for one entry
+    is answered here the way Windows would answer it. Without the fix the
+    walk descends and the refusal names the file inside instead — that is,
+    the junction itself is accepted as an ordinary directory.
+    """
+
+    import stat
+    import types
+
+    write_tree(tmp_path)
+    junction = tmp_path / "rules/junction"
+    junction.mkdir()
+    (junction / "evil.yaml").write_text("name: evil\n")
+    real = pathlib.Path.lstat
+
+    def lstat(self: pathlib.Path, *args: object, **kwargs: object):
+        if self == junction:
+            # IO_REPARSE_TAG_MOUNT_POINT, the tag a junction carries.
+            return types.SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o755, st_reparse_tag=0xA0000003
+            )
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "lstat", lstat)
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        "content root contains a symlink or reparse point: 'rules/junction'"
+    )
+
+
 def test_refuses_a_content_root_spelled_with_a_varied_case(
     tmp_path: pathlib.Path,
 ) -> None:

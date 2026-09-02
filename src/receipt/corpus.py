@@ -1061,9 +1061,16 @@ def _tree_content_paths(root: pathlib.Path, spec: CorpusSpec) -> dict[str, pathl
     """Enumerate every regular file the spec calls content.
 
     Walks explicitly rather than globbing: every directory is listed with
-    errors surfaced, every symlink refuses, and every non-regular entry
-    refuses. What this returns is the complete set of content files, or the
-    call raises — there is no third outcome where it returns a partial set.
+    errors surfaced, every symlink or reparse point refuses, and every
+    non-regular entry refuses. What this returns is the complete set of
+    content files, or the call raises — there is no third outcome where it
+    returns a partial set.
+
+    Each entry is examined through a single ``lstat``, which is both what
+    makes the three questions consistent — the entry judged a directory is the
+    entry judged not a link — and what lets the link question be asked in the
+    form Windows answers it, since a junction there is a reparse point and not
+    a symlink.
 
     Every path these refusals name is quoted through :func:`_quoted`, which
     is not cosmetic. A journal path is control-screened at the schema
@@ -1103,19 +1110,42 @@ def _tree_content_paths(root: pathlib.Path, spec: CorpusSpec) -> dict[str, pathl
                 # whether the closed world contains it — would depend on the
                 # verifier's interpreter rather than on the tree.
                 _assert_assigned(candidate.name, f"tree entry {_quoted(relative)}")
-                if candidate.is_symlink():
-                    # ANY symlink under a content root defeats the closed-world
-                    # claim, whatever it is named: a walk does not descend
-                    # symlinked directories, so a linked tree of suffix-named
-                    # files would be invisible here while remaining reachable
-                    # to any consumer that resolves links.
+                try:
+                    info = candidate.lstat()
+                except OSError as exc:
+                    # pathlib's predicates swallow every OSError and answer
+                    # False, so an entry that vanished between the listing and
+                    # the probe already arrived at the non-regular refusal
+                    # below. It still does; the cause is chained rather than
+                    # discarded, and the text an auditor reads is unchanged.
                     raise CorpusError(
-                        f"content root contains a symlink: {_quoted(relative)}"
+                        f"content root contains a non-regular file: {_quoted(relative)}"
+                    ) from exc
+                # ANY symlink under a content root defeats the closed-world
+                # claim, whatever it is named: a walk does not descend
+                # symlinked directories, so a linked tree of suffix-named
+                # files would be invisible here while remaining reachable
+                # to any consumer that resolves links.
+                #
+                # is_symlink() answers that for POSIX only. A Windows junction
+                # — or any other directory reparse point — is not a symlink
+                # and was descended as an ordinary directory, so a content
+                # root could reach outside the clone entirely while the sweep
+                # reported it swept (peer review, round four). st_reparse_tag
+                # is how Windows reports one, and it is the same test
+                # _assert_no_symlinked_component already applies to a bound
+                # path's components. One lstat answers this and both questions
+                # below, so nothing here can see a different file than the
+                # symlink check did.
+                if stat.S_ISLNK(info.st_mode) or getattr(info, "st_reparse_tag", 0):
+                    raise CorpusError(
+                        "content root contains a symlink or reparse point: "
+                        f"{_quoted(relative)}"
                     )
-                if candidate.is_dir():
+                if stat.S_ISDIR(info.st_mode):
                     pending.append((candidate, relative))
                     continue
-                if not candidate.is_file():
+                if not stat.S_ISREG(info.st_mode):
                     # FIFOs, sockets, devices: not bindable, yet a reader could
                     # still open them where a rule file is expected. Refuse.
                     raise CorpusError(
