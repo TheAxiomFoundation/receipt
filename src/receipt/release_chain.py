@@ -1072,9 +1072,28 @@ def _is_symlink_at(name: str, parent: int) -> bool:
         return False
 
 
+@dataclass(frozen=True)
+class ConfinedState:
+    """One open state file, and the identity of every directory walked to it.
+
+    ``ancestors`` holds the ``(st_dev, st_ino)`` of each directory descriptor
+    the walk opened, root first, taken from the descriptor rather than from
+    the name. A caller that records them can ask at the end of its run
+    whether the file it read is still reached through the same directories,
+    which the leaf's own identity cannot answer: ``ledger/`` can be exchanged
+    for another directory holding a hard link to the same inode, and every
+    field of the leaf's stat — device, inode, size, modification time, even
+    the inode change time, since linking happens before the read — still
+    agrees.
+    """
+
+    descriptor: int
+    ancestors: tuple[tuple[int, int], ...]
+
+
 def confined_state_descriptor(
     root: pathlib.Path, relative: pathlib.PurePosixPath
-) -> int:
+) -> ConfinedState:
     """Open a state file component by component, never by whole pathname.
 
     ``assert_no_symlinked_state_component`` inspects each component and the
@@ -1099,16 +1118,29 @@ def confined_state_descriptor(
     Where ``dir_fd`` is unsupported — Windows, where ``os.open`` is not in
     ``os.supports_dir_fd`` — the pathname open is kept, so the walk remains
     all the confinement there is on that platform.
+
+    The identity of every directory descriptor opened is returned alongside
+    the leaf, because a caller holding only the leaf's identity cannot say
+    the file is still the same file *in the same place*: a parent exchanged
+    for a directory holding a hard link to the same inode leaves every field
+    of the leaf's stat untouched.
     """
 
     if os.open not in os.supports_dir_fd:
-        return os.open(root / relative, STATE_OPEN_FLAGS)
+        # No descent to record: the whole path is resolved by one open, and
+        # the walk is all the confinement there is.
+        return ConfinedState(
+            descriptor=os.open(root / relative, STATE_OPEN_FLAGS), ancestors=()
+        )
     directory_flags = (
         os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     )
     parent = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     walked: tuple[str, ...] = ()
+    ancestors: list[tuple[int, int]] = []
     try:
+        opened = os.fstat(parent)
+        ancestors.append((opened.st_dev, opened.st_ino))
         *components, leaf = relative.parts
         for segment in components:
             walked = (*walked, segment)
@@ -1120,13 +1152,19 @@ def confined_state_descriptor(
                 raise
             os.close(parent)
             parent = child
+            # Asked of the descriptor the walk is standing on, so it names the
+            # directory this open actually reached, not the one its name
+            # resolves to afterwards.
+            opened = os.fstat(parent)
+            ancestors.append((opened.st_dev, opened.st_ino))
         walked = (*walked, leaf)
         try:
-            return os.open(leaf, STATE_OPEN_FLAGS, dir_fd=parent)
+            descriptor = os.open(leaf, STATE_OPEN_FLAGS, dir_fd=parent)
         except OSError as exc:
             if _is_symlink_at(leaf, parent):
                 raise _symlinked_component_error(relative, walked) from exc
             raise
+        return ConfinedState(descriptor=descriptor, ancestors=tuple(ancestors))
     finally:
         os.close(parent)
 
@@ -1158,15 +1196,15 @@ def _regular_file_bytes(root: pathlib.Path, relative: pathlib.PurePosixPath) -> 
             f"required state file is missing or non-regular: {path}"
         )
     assert_no_symlinked_state_component(root, relative)
-    descriptor = confined_state_descriptor(root, relative)
+    confined = confined_state_descriptor(root, relative)
     try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        if not stat.S_ISREG(os.fstat(confined.descriptor).st_mode):
             raise ReleaseChainError(
                 f"required state file is missing or non-regular: {path}"
             )
-        return read_state_descriptor(descriptor)
+        return read_state_descriptor(confined.descriptor)
     finally:
-        os.close(descriptor)
+        os.close(confined.descriptor)
 
 
 def _exact_state_bytes(state_bytes: Mapping[str, bytes] | None) -> dict[str, bytes]:
@@ -1963,7 +2001,10 @@ def assert_state_path_tracked(
 
 
 def assert_index_agrees_with_tree(
-    root: pathlib.Path, relative: pathlib.PurePosixPath | str
+    root: pathlib.Path,
+    relative: pathlib.PurePosixPath | str,
+    *,
+    observed: str | None = None,
 ) -> None:
     """Require a working-tree entry to be the mode and type the index records.
 
@@ -1980,6 +2021,17 @@ def assert_index_agrees_with_tree(
 
     A path with no index entry is a new, untracked file with nothing to
     compare against, and returns.
+
+    ``observed`` is a git category a caller has already established for this
+    path — from a descriptor it holds open, rather than from the pathname —
+    and stands in for the ``lstat`` below. Without it the name is resolved
+    here, which for the two state files is a second resolution after the
+    mode comparison that precedes this call and a third after the read: the
+    shared parent can be exchanged between any two of them, so each answer
+    is about a possibly different file. ``append_gate`` supplies the
+    category its one read of the file recorded. Omitted — every caller that
+    predates the parameter, including the per-release-file loop, which holds
+    no descriptor — the comparison is exactly the one it always was.
 
     Unlike the checkout guard, this runs after the comparisons it qualifies:
     an unstaged chmod is both a mode change and an index disagreement, and
@@ -2005,7 +2057,8 @@ def assert_index_agrees_with_tree(
         raise ReleaseChainError(f"candidate index holds an unmerged entry at {path}")
     index_mode = entries[0][0]
 
-    observed = _observed_git_category(root / pathlib.PurePosixPath(path))
+    if observed is None:
+        observed = _observed_git_category(root / pathlib.PurePosixPath(path))
     if index_mode == "120000":
         if observed != "120000":
             raise ReleaseChainError(

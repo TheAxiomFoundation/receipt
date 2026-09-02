@@ -25,7 +25,8 @@ release-root index entries the filesystem traversal cannot see.
 Docstrings labelled R6-F1 onward name the third gate's first round, whose
 numbering starts over again: R6-F1 the release-root index entries never
 reconciled with the filesystem, R6-F2 the closing state checks a writer could
-step between.
+step between, R6-F3 the state file's mode and parents resolved again after
+the read that established them.
 
 The fixture is a local git repository built from scratch — no network, no
 witnesses, no signatures. Its release tree holds a README and no manifests, so
@@ -1584,8 +1585,8 @@ def test_a_state_file_that_cannot_be_re_read_is_refused_as_changed(
     append_one_row(candidate)
     compared = append_gate.check_state_modes
 
-    def relink(base: Any, tree: Any) -> None:
-        compared(base, tree)
+    def relink(base: Any, tree: Any, **keywords: Any) -> None:
+        compared(base, tree, **keywords)
         ledger = candidate.root / CHAIN_SPEC.state_relative
         outside = tmp_path / "outside.jsonl"
         shutil.move(str(ledger), str(outside))
@@ -2303,3 +2304,111 @@ def test_a_ledger_rewritten_during_the_prefix_re_check_is_refused(
     # The rewrite really landed, and really was a different ledger.
     written = candidate.root / CHAIN_SPEC.state_relative
     assert len(written.read_text(encoding="utf-8").splitlines()) == BASE_ROW_COUNT + 2
+
+
+def test_a_state_parent_exchanged_after_the_snapshot_is_refused(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds R6-F3: the closing re-check compared the leaf and nothing else.
+
+    Device, inode, size, modification time and change time are all
+    properties of the file, not of where it is, so a candidate can exchange
+    ``ledger/`` for a different directory holding a hard link to the same
+    inode and every one of them still agrees. The bytes agree too. What has
+    changed is the directory the state path resolves through — the thing the
+    component walk and the descriptor walk exist to pin — and afterwards the
+    candidate owns it: the next run, and every reader that is not this one,
+    follows the new parent.
+
+    The snapshot now records the identity of every directory descriptor the
+    walk opened, and the re-check compares those as well. The assertions
+    below show that nothing else could have refused: the leaf's whole stat
+    and its bytes are what they were, and only the parent's inode moved.
+    """
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    directory = candidate.root / "ledger"
+    ledger = candidate.root / CHAIN_SPEC.state_relative
+    twin = tmp_path / "twin"
+    twin.mkdir()
+    for name in ("official_observations.jsonl", "immutable_prefix.json"):
+        # Linked before the run, so the change time the link bumps is already
+        # the one the snapshot records.
+        os.link(directory / name, twin / name)
+    payload = ledger.read_bytes()
+    before = ledger.stat()
+    directory_before = directory.stat().st_ino
+    checked = append_gate.check_rows
+
+    def exchange(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> None:
+        checked(lines, prefix_count, spec)
+        shutil.move(str(directory), str(tmp_path / "real-ledger"))
+        shutil.move(str(twin), str(directory))
+
+    monkeypatch.setattr(append_gate, "check_rows", exchange)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "state file changed during verification: "
+        "ledger/official_observations.jsonl"
+    )
+    after = ledger.stat()
+    assert ledger.read_bytes() == payload
+    assert (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    ) == (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    )
+    assert directory.stat().st_ino != directory_before
+
+
+def test_check_state_modes_takes_the_mode_from_the_snapshot(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds R6-F3's other half: the base mode comparison resolved the state
+    path all over again to ``stat`` it, so the mode it compared was about
+    whatever the name reached by then rather than about the file this run
+    read — and the index comparison after it resolved the name a third time.
+    Here every ``Path.stat`` of the ledger reports an executable bit the file
+    does not carry. Through the gate the snapshot's own ``fstat`` is what
+    answers and the ordinary verdict stands; called on its own, with no
+    snapshot to take, the same function believes the lie and refuses. The
+    tree is identical in both, so the difference is only where the mode came
+    from."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    ledger = candidate.root.resolve() / CHAIN_SPEC.state_relative
+    real_stat = pathlib.Path.stat
+
+    def lying_stat(self: pathlib.Path, **keywords: Any) -> os.stat_result:
+        observed = real_stat(self, **keywords)
+        if os.fspath(self) != os.fspath(ledger):
+            return observed
+        return os.stat_result((observed.st_mode | 0o111, *tuple(observed)[1:]))
+
+    monkeypatch.setattr(pathlib.Path, "stat", lying_stat)
+
+    assert run_gate(candidate) == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 1, "
+        "+1 appended vs base"
+    )
+    with pytest.raises(AppendError) as refusal:
+        append_gate.check_state_modes(
+            append_gate._BaseCommit(ref=candidate.base, commit=candidate.base),
+            append_gate._set_root(candidate.root, GATE_SPEC),
+        )
+    assert str(refusal.value) == (
+        "state file mode changed relative to base: "
+        "ledger/official_observations.jsonl"
+    )
