@@ -635,9 +635,9 @@ def _short_name_carries_pinned_suffix(name: str, suffixes: tuple[str, ...]) -> b
     ``x.yamlx`` refuses too, though its alias would read ``.YAM``. Refusing a
     name no real corpus carries is the cheap side of this trade.
 
-    Compared through :func:`_path_fold`, the key membership is decided by
-    everywhere else in this module, so ``.YML`` and ``.yml`` are one suffix
-    here exactly as they are there.
+    Compared through :func:`_path_fold`, the key by which membership is
+    decided everywhere else in this module, so ``.YML`` and ``.yml`` are one
+    suffix here exactly as they are there.
     """
 
     _, dot, extension = name.rpartition(".")
