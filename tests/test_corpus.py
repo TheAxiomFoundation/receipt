@@ -1269,11 +1269,20 @@ def test_refuses_a_lone_surrogate_in_a_journal_path(tmp_path: pathlib.Path) -> N
 
     write_tree(tmp_path)
     rows = journal_rows()
-    # An attested path, deliberately: a content path spelled this way is
-    # caught earlier, by the sweep, as unlisted; the attested read is what
-    # reached os.lstat.
-    row = next(row for row in rows if row["kind"] == "attested")
-    row["path"] = ".axiom/tool\ud800chain.toml"
+    # A further attested row, deliberately: a content path spelled this way
+    # is caught earlier, by the sweep, as unlisted, and mutating the one
+    # required attested row is caught earlier still, as missing. A new
+    # attested row is what reached os.lstat (peer review, round two).
+    rows.append(
+        {
+            "schemaVersion": JOURNAL_SCHEMA,
+            "kind": "attested",
+            "path": ".axiom/tool\ud800chain.toml",
+            "sha256": sha256_text("never on disk"),
+            "state": "present",
+        }
+    )
+    reindex(rows)
     with pytest.raises(CorpusError, match="lone surrogate"):
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
 
@@ -1422,3 +1431,142 @@ def test_refuses_a_gate_evidence_key_longer_than_the_bound(
     )
     with pytest.raises(CorpusError, match="is longer than 1024 characters"):
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_verifies_a_content_row_spelled_with_a_case_varied_suffix(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The acceptance half of the suffix fold, which the body discloses.
+
+    ``main`` refused a content row spelled ``.YAML`` at parse as not under a
+    pinned suffix; after the fold it classifies as content, is swept, and
+    verifies when the file is present and matching (peer review asked for
+    the positive case).
+    """
+
+    content = dict(CONTENT)
+    content["rules/tax/extra.YAML"] = "name: extra\nvalue: 1\n"
+    write_tree(tmp_path, content=content)
+    verification = verify_corpus_binding(
+        tmp_path, render_journal(journal_rows(content=content)), spec=corpus_spec()
+    )
+    assert "rules/tax/extra.YAML" in {binding.path for binding in verification.content}
+
+
+def test_refuses_a_removed_path_under_a_symlinked_parent(
+    tmp_path: pathlib.Path,
+) -> None:
+    """An intermediate symlink refuses, for tombstones as for bound paths.
+
+    Following it also made the fold walk unbounded: case-varied links back
+    into the same directory branch without end (peer review, round two).
+    """
+
+    import os
+
+    import shutil
+
+    body = '{"applied": true}\n'
+    attested = dict(ATTESTED)
+    attested["links/apply-manifest.json"] = body
+    write_tree(tmp_path, attested=attested)
+    rows = journal_rows(attested=attested)
+    rows.append(
+        {
+            "schemaVersion": JOURNAL_SCHEMA,
+            "kind": "attested",
+            "path": "links/apply-manifest.json",
+            "sha256": sha256_text(body),
+            "state": "removed",
+        }
+    )
+    reindex(rows)
+    # The file is gone; its parent is now a link to an empty directory. On a
+    # case-insensitive host a case-varied link would be the same entry, so
+    # the link is spelled exactly: what is refused is the traversal.
+    shutil.rmtree(tmp_path / "links")
+    (tmp_path / "retired").mkdir()
+    os.symlink("retired", tmp_path / "links")
+    with pytest.raises(CorpusError, match="traverses a symlink") as caught:
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+    assert "'links'" in str(caught.value)
+
+
+def test_refuses_a_path_carrying_an_unassigned_code_point(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The fold key is stable only for assigned characters.
+
+    Unicode fixes case folding and normalization once a character is
+    encoded and says nothing before, so a path with an unassigned code point
+    could alias under one interpreter's table and not another's (peer
+    review, round two). U+0378 has never been assigned.
+    """
+
+    import unicodedata
+
+    assert unicodedata.category("\u0378") == "Cn"
+    write_tree(tmp_path)
+    rows = journal_rows()
+    rows[0]["path"] = "rules/benefit/amo\u0378unt.yaml"
+    with pytest.raises(CorpusError, match="unassigned in Unicode"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_refuses_a_journal_path_longer_than_the_bound(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Paths are quoted in refusals and rendered as removedPaths; bounded first."""
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+    rows[0]["path"] = "rules/" + "a" * 1100 + ".yaml"
+    with pytest.raises(CorpusError, match="is longer than 1024 characters"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_refuses_removed_paths_over_the_verdict_budget(
+    tmp_path: pathlib.Path,
+) -> None:
+    """removedPaths is the other producer list the verdict renders verbatim."""
+
+    content = dict(CONTENT)
+    names = [f"rules/tax/{'r' * 900}{index:04d}.yaml" for index in range(300)]
+    for name in names:
+        content[name] = "name: r\n"
+    rows = journal_rows(content=content)
+    for name in names:
+        rows.append(
+            {
+                "schemaVersion": JOURNAL_SCHEMA,
+                "kind": "content",
+                "path": name,
+                "sha256": sha256_text("name: r\n"),
+                "state": "removed",
+            }
+        )
+    reindex(rows)
+    write_tree(tmp_path)
+    with pytest.raises(CorpusError, match="removed paths total"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_a_malformed_gate_id_is_quoted_within_bounds(tmp_path: pathlib.Path) -> None:
+    """A refusal never echoes a flood, even for a field it must name."""
+
+    write_tree(tmp_path)
+    rows = journal_rows(
+        gates=[
+            {
+                "gateId": "X" * 100000,
+                "tier": "public",
+                "outcome": "pass",
+                "evidence": {"command": "make validate"},
+            }
+        ]
+    )
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+    assert "gateId is malformed" in str(caught.value)
+    assert len(str(caught.value)) < 600
+    assert "more characters]" in str(caught.value)
