@@ -904,8 +904,22 @@ def verify_corpus_binding(
     for path in removed:
         try:
             os.lstat(root / path)
-        except OSError:
+        except (FileNotFoundError, NotADirectoryError):
+            # Genuinely gone: nothing answers to the name, or a parent
+            # component is not a directory, so nothing can.
             continue
+        except OSError as exc:
+            # Any other failure means the check could not look, which is not
+            # the same as the file being absent — lstat raises EACCES, not
+            # ENOENT, when a parent directory is readable but not searchable.
+            # Treating that as absence would report a file still on disk as
+            # removed on the strength of a permission error. _list_directory
+            # refuses failure-to-enumerate for this reason; the same rule
+            # applies here.
+            raise CorpusError(
+                "cannot check whether a removed path is still in the tree, so "
+                f"the tombstone is unverifiable: {path} ({exc.strerror})"
+            ) from exc
         raise CorpusError(f"removed path is still present in the tree: {path}")
 
     return CorpusVerification(
