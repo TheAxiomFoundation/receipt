@@ -1895,6 +1895,17 @@ def test_a_bound_file_rewritten_during_the_tombstone_pass_refuses(
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
 
 
+class _PlainDirectory:
+    """What ``lstat`` says about an ordinary directory.
+
+    Enough of a ``stat_result`` for the tombstone search, which reads the mode
+    to decide the entry is neither a symlink nor a reparse point.
+    """
+
+    st_mode = 0o040755
+    st_reparse_tag = 0
+
+
 class _CaseFoldingPath:
     """A path object that compares and hashes case-insensitively, as Windows does.
 
@@ -1927,11 +1938,8 @@ class _CaseFoldingPath:
             for entry in self.listings[self.spelling]
         )
 
-    def lstat(self):
-        import os
-        import stat
-
-        return os.stat_result((stat.S_IFDIR | 0o755, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+    def lstat(self) -> _PlainDirectory:
+        return _PlainDirectory()
 
     def __eq__(self, other: object) -> bool:
         return (
@@ -2340,9 +2348,9 @@ def test_refuses_a_directory_reparse_point_under_a_content_root(
     The sweep asked ``is_symlink()``, which answers for POSIX symlinks only.
     On Windows a junction, and every other directory reparse point, reports
     ``False`` there while redirecting the walk somewhere else entirely — so a
-    content root could be a link into an ambient directory, and the sweep
-    would descend it, hash whatever it found, and call the closed world
-    closed. ``st_reparse_tag`` is how Windows reports one, and it is the test
+    directory under a content root could be a link into an ambient tree, and
+    the sweep would descend it, hash whatever it found, and call the closed
+    world closed. ``st_reparse_tag`` is how Windows reports one, and it is the test
     ``_assert_no_symlinked_component`` already applies to a bound path.
 
     No POSIX host can create a reparse point, so the ``lstat`` for one entry
