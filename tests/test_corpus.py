@@ -1622,3 +1622,76 @@ def test_a_tombstone_probe_that_cannot_stat_an_entry_refuses(
             verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
     finally:
         os.chmod(tmp_path / "ß", 0o755)
+
+
+def _two_tombstone_rows() -> list[dict[str, object]]:
+    """A journal retiring two attested paths inside the same directory."""
+
+    body = '{"applied": true}\n'
+    attested = dict(ATTESTED)
+    attested[".axiom/a.json"] = body
+    attested[".axiom/b.json"] = body
+    rows = journal_rows(attested=attested)
+    for name in (".axiom/a.json", ".axiom/b.json"):
+        rows.append(
+            {
+                "schemaVersion": JOURNAL_SCHEMA,
+                "kind": "attested",
+                "path": name,
+                "sha256": sha256_text(body),
+                "state": "removed",
+            }
+        )
+    return reindex(rows)
+
+
+def _tombstone_pass_entries(tmp_path: pathlib.Path) -> int:
+    """Directory entries the two-tombstone pass must index, counting each once."""
+
+    return len(list(tmp_path.iterdir())) + len(list((tmp_path / ".axiom").iterdir()))
+
+
+def test_the_tombstone_budget_counts_entries_not_listings(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds F3: the old budget counted listings and reset per removed path.
+
+    ``MAX_TOMBSTONE_LISTINGS`` was a local counter inside one search, so it
+    bounded a single tombstone and said nothing about the pass: R tombstones
+    over a root of E entries cost R×E listings with no ceiling on the product.
+    The budget now counts entries indexed across the whole pass. Without the
+    fix nothing here refuses — the tree is three entries wide.
+    """
+
+    write_tree(tmp_path)
+    monkeypatch.setattr(
+        "receipt.corpus.MAX_TOMBSTONE_WORK", _tombstone_pass_entries(tmp_path) - 1
+    )
+    with pytest.raises(CorpusError, match="tombstone work budget of") as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(_two_tombstone_rows()), spec=corpus_spec()
+        )
+    assert "tombstone is unverifiable: .axiom/a.json" in str(caught.value)
+
+
+def test_the_tombstone_index_is_shared_across_removed_paths(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds F3: two tombstones must not pay twice for the same directory.
+
+    The budget is set to exactly the number of entries the pass needs to see,
+    counting each directory once. Both removed paths start at the tree root
+    and share their parent, so this passes only because the index reads each
+    directory once and hands the listing to the second search. Re-listing per
+    removed path — what the module did before — would double the count and
+    refuse.
+    """
+
+    write_tree(tmp_path)
+    monkeypatch.setattr(
+        "receipt.corpus.MAX_TOMBSTONE_WORK", _tombstone_pass_entries(tmp_path)
+    )
+    verification = verify_corpus_binding(
+        tmp_path, render_journal(_two_tombstone_rows()), spec=corpus_spec()
+    )
+    assert verification.removed_paths == (".axiom/a.json", ".axiom/b.json")
