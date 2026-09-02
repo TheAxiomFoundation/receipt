@@ -748,3 +748,121 @@ def test_a_retrieved_at_with_a_non_utc_offset_is_accepted(
         "thesis-facts append check OK: 3 rows, immutable prefix 1, "
         "+1 appended vs base"
     )
+
+
+@pytest.mark.parametrize("offset", ["+01:60", "+24:00", "-00:60"])
+def test_a_retrieved_at_with_an_overflowing_offset_is_refused(
+    tmp_path: pathlib.Path, offset: str
+) -> None:
+    """The parser normalises ``+01:60`` to ``+02:00`` rather than refusing it,
+    so the offset's hour and minute are bounded in the pattern (peer review)."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate, retrievedAt=f"2026-07-10T20:38:58{offset}")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "appended line 3 (fixture.series.observation_3) retrievedAt is not "
+        "an RFC 3339 timestamp with a time zone"
+    )
+
+
+def test_a_group_execute_bit_alone_is_not_a_mode_change(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Git keys the executable category on the owner bit, so 0655 is 100644
+    to git and an ordinary append with it is not a mode change."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    ledger = candidate.root / CHAIN_SPEC.state_relative
+    ledger.chmod(0o655)
+
+    assert run_gate(candidate) == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 1, "
+        "+1 appended vs base"
+    )
+
+
+def test_dropping_the_owner_execute_bit_is_a_mode_change_whatever_others_keep(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The case the any-bit test missed: 100755 at the base, 0655 in the
+    candidate, which git records as 100644 (peer review)."""
+
+    candidate = base_repository(tmp_path)
+    ledger = candidate.root / CHAIN_SPEC.state_relative
+    ledger.chmod(ledger.stat().st_mode | 0o111)
+    git(candidate.root, "add", "-A")
+    git(candidate.root, "commit", "--quiet", "-m", "executable ledger")
+    executable_base = Candidate(
+        root=candidate.root, base=git(candidate.root, "rev-parse", "HEAD")
+    )
+    append_one_row(executable_base)
+    ledger.chmod(0o655)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(executable_base)
+    assert str(refusal.value) == (
+        "state file mode changed relative to base: "
+        "ledger/official_observations.jsonl"
+    )
+
+
+def test_a_gate_only_verdict_names_the_commit_a_symbolic_base_resolved_to(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The gate-only acceptance returned before the resolved-base suffix was
+    built, so against a movable name it named no snapshot (peer review)."""
+
+    candidate = base_repository(tmp_path)
+    add_gate_file(candidate)
+
+    assert run_gate(candidate, base_ref="HEAD") == (
+        "thesis-facts append check OK: gate-only proposal; DATA_SURFACE "
+        f"unchanged; GATE_SURFACE changes=['{GATE_FILE}']; base HEAD "
+        f"({candidate.base})"
+    )
+
+
+def test_an_existing_row_refusal_wins_over_a_binding_shape_refusal(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A row that both duplicates a record without superseding it and carries
+    a symbolic ledgerRepoSha gets the refusal that existed before this branch:
+    the shape checks run last in the row (peer review)."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(
+        candidate,
+        source_record_id="fixture.series.observation_2",
+        value=999.0,
+        ledgerRepoSha="HEAD",
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "line 3 duplicates fixture.series.observation_2 (line 2) without "
+        "superseding an assertion version — corrections must be explicit"
+    )
+
+
+def test_an_existing_row_refusal_wins_over_the_mode_check(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Pins the order the mode check runs in: a proposal that both flips the
+    ledger's mode and appends a row lacking retrievedAt gets the row refusal,
+    which existed before the mode check did (peer review asked for this)."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate, retrievedAt=None)
+    ledger = candidate.root / CHAIN_SPEC.state_relative
+    ledger.chmod(ledger.stat().st_mode | 0o100)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "appended line 3 (fixture.series.observation_3) lacks retrievedAt"
+    )

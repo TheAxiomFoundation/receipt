@@ -416,12 +416,15 @@ def _is_rfc3339_with_zone(value: Any) -> bool:
     space separator, a missing offset — and a naive timestamp cannot be
     ordered against a witnessed genTime at all. So the shape is pinned by
     pattern first and the calendar values are then checked by the parser,
-    which is what rejects a February 30th that matches the pattern.
+    which is what rejects a February 30th that matches the pattern. The
+    offset's hour and minute are bounded in the pattern as well, because the
+    parser does not refuse an overflowing offset: ``+01:60`` is normalised to
+    ``+02:00`` and accepted (peer review).
     """
 
     if not isinstance(value, str) or not re.fullmatch(
         r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
-        r"(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})",
+        r"(?:\.[0-9]+)?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])",
         value,
     ):
         return False
@@ -510,34 +513,6 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
                 raise AppendError(
                     f"appended line {number} responseArchive lacks a digest"
                 )
-            # Presence alone was the whole check on these three. The digest
-            # is what binds the row to an archived response, the repo sha is
-            # what binds it to the code that produced it, and retrievedAt is
-            # what any chronology claim about the row is measured from — a
-            # placeholder in any of them satisfied the contract while binding
-            # nothing. These run after every presence refusal above, so no
-            # existing refusal is preempted.
-            digest = archive["sha256"]
-            if not isinstance(digest, str) or not re.fullmatch(
-                r"[0-9a-f]{64}", digest
-            ):
-                raise AppendError(
-                    f"appended line {number} ({record_id}) "
-                    "responseArchive.sha256 is not a SHA-256 hex digest"
-                )
-            repo_sha = row["ledgerRepoSha"]
-            if not isinstance(repo_sha, str) or not re.fullmatch(
-                r"[0-9a-f]{40}", repo_sha
-            ):
-                raise AppendError(
-                    f"appended line {number} ({record_id}) ledgerRepoSha is "
-                    "not a full 40-character commit id"
-                )
-            if not _is_rfc3339_with_zone(row["retrievedAt"]):
-                raise AppendError(
-                    f"appended line {number} ({record_id}) retrievedAt is not "
-                    "an RFC 3339 timestamp with a time zone"
-                )
             # Key PRESENCE pairs the binding, and present values must be
             # shape-valid: truthiness accepted targetContentHash "" with a
             # missing (or {}) projection, silently waiving the contract
@@ -596,6 +571,39 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
                 "no earlier row"
             )
         active_by_record_id[str(record_id)] = (number, effective_id)
+
+        if number > prefix_count:
+            # Presence alone was the whole check on these three. The digest
+            # is what binds the row to an archived response, the repo sha is
+            # what binds it to the code that produced it, and retrievedAt is
+            # what any chronology claim about the row is measured from — a
+            # placeholder in any of them satisfied the contract while binding
+            # nothing. They run last in the row, after every refusal that
+            # existed before them — presence, projection, and supersession —
+            # so no existing refusal is preempted. (Peer review found them
+            # ahead of the projection and supersession checks.)
+            archive = row["responseArchive"]
+            digest = archive["sha256"]
+            if not isinstance(digest, str) or not re.fullmatch(
+                r"[0-9a-f]{64}", digest
+            ):
+                raise AppendError(
+                    f"appended line {number} ({record_id}) "
+                    "responseArchive.sha256 is not a SHA-256 hex digest"
+                )
+            repo_sha = row["ledgerRepoSha"]
+            if not isinstance(repo_sha, str) or not re.fullmatch(
+                r"[0-9a-f]{40}", repo_sha
+            ):
+                raise AppendError(
+                    f"appended line {number} ({record_id}) ledgerRepoSha is "
+                    "not a full 40-character commit id"
+                )
+            if not _is_rfc3339_with_zone(row["retrievedAt"]):
+                raise AppendError(
+                    f"appended line {number} ({record_id}) retrievedAt is not "
+                    "an RFC 3339 timestamp with a time zone"
+                )
 
 
 def check_append_only(
@@ -690,7 +698,14 @@ def check_state_modes(base: _BaseCommit, candidate: _CandidateTree) -> None:
             entry = git_file_entry(candidate.root, base.commit, path)
         except ReleaseChainError as exc:
             raise AppendError(str(exc)) from exc
-        executable = bool((candidate.root / relative).stat().st_mode & 0o111)
+        # Git derives the category from the owner bit alone (ce_permissions:
+        # ``mode & 0100 ? 0755 : 0644``), so a file executable by group or
+        # other but not owner is 100644 to git. Testing any execute bit
+        # called that 100755 and missed a 100755 -> 100644 change (peer
+        # review). On a checkout with core.fileMode=false the bit is not
+        # materialised and this comparison is not meaningful; that is the
+        # same caveat the release-file check carries.
+        executable = bool((candidate.root / relative).stat().st_mode & 0o100)
         if ("100755" if executable else "100644") != entry.mode:
             raise AppendError(f"state file mode changed relative to base: {path}")
 
@@ -950,10 +965,21 @@ def verify_append_gate(
             unclassified_suffix = (
                 f"; unclassified changes={sorted(reported)}" if reported else ""
             )
+            # The same rule as the data path below: a base named by something
+            # that can move is quoted with the commit it resolved to, and a
+            # base named by its OID keeps the text the harness pins. This
+            # acceptance path returned before that suffix existed, so a
+            # gate-only verdict against a branch named no snapshot (peer
+            # review).
+            base_suffix = (
+                f"; base {base.ref} ({base.commit})"
+                if base.ref != base.commit
+                else ""
+            )
             return (
                 "thesis-facts append check OK: gate-only proposal; "
                 "DATA_SURFACE unchanged; GATE_SURFACE changes="
-                f"{sorted(gate_changes)}{unclassified_suffix}"
+                f"{sorted(gate_changes)}{unclassified_suffix}{base_suffix}"
             )
 
     _confine_state_path(spec.chain.state_relative, candidate)
