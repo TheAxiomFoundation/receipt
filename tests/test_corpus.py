@@ -1123,3 +1123,76 @@ def test_a_removed_attested_path_absent_from_the_tree_verifies(
     )
     assert verification.removed_paths == (".axiom/apply-manifest.json",)
     assert ".axiom/apply-manifest.json" not in {e.path for e in verification.attested}
+
+
+def test_refuses_a_case_varied_content_path_bound_as_attested(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The same escape approached from the other side of the fold.
+
+    While the suffix match was byte-exact, ``rules/tax/smuggled.YAML`` was not
+    a content path, so a producer could bind it as attested — exempt from the
+    closed-world sweep by construction — and every consumer on a
+    case-insensitive filesystem would read it as ``rules/tax/smuggled.yaml``.
+    Kind is a function of the path, and after folding this path is content.
+    """
+
+    body = "name: smuggled\n"
+    write_tree(tmp_path)
+    (tmp_path / "rules/tax/smuggled.YAML").write_text(body)
+    rows = journal_rows()
+    rows.append(
+        {
+            "schemaVersion": JOURNAL_SCHEMA,
+            "kind": "attested",
+            "path": "rules/tax/smuggled.YAML",
+            "sha256": sha256_text(body),
+            "state": "present",
+        }
+    )
+    reindex(rows)
+    with pytest.raises(CorpusError, match="must be swept closed-world"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_refuses_a_zero_width_joiner_in_a_journal_path(tmp_path: pathlib.Path) -> None:
+    """Paths are sanitised by the same helper the evidence strings are.
+
+    Widening that helper to Unicode category Cf widens what a path may spell,
+    which is where the format class does its other damage: a zero-width joiner
+    makes two rows binding two different files print as one name in the verdict
+    an auditor reads.
+    """
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+    rows[0]["path"] = "rules/benefit/amo\u200dunt.yaml"
+    with pytest.raises(CorpusError, match="Unicode format control"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_a_removed_content_path_still_in_the_tree_is_refused_as_unlisted(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The content half of the tombstone rule, and which check catches it.
+
+    A content file that outlived its removal row is caught by the closed-world
+    sweep before the tombstone check runs at all: the journal no longer binds
+    it, so it is an unlisted file in a content root. The refusal an auditor
+    sees is the sweep's, unchanged.
+    """
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+    rows.append(
+        {
+            "schemaVersion": JOURNAL_SCHEMA,
+            "kind": "content",
+            "path": "rules/tax/rate.yaml",
+            "sha256": sha256_text(CONTENT["rules/tax/rate.yaml"]),
+            "state": "removed",
+        }
+    )
+    reindex(rows)
+    with pytest.raises(CorpusError, match="not bound by the witnessed journal"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
