@@ -86,7 +86,11 @@ One refusal here is not about a tree at all, and is stated because it does
 pre-empt everything on every input wherever it applies: where ``os.open``
 cannot take a ``dir_fd``, the state reads refuse before anything is compared,
 because the confinement they claim is unavailable on that platform. That is
-the gate declining to answer, not a verdict about a proposal.
+the gate declining to answer, not a verdict about a proposal, and it is a
+stated requirement rather than a silent one: the append gate's state reads
+require an ``os.open`` that accepts ``dir_fd``, which is every POSIX platform
+CPython supports and not Windows; on Windows the gate refuses to verify
+rather than reading state through a weaker path. ``README.md`` says the same.
 
 All of it carries its own tests in tests/test_append_gate.py.
 """
