@@ -1902,9 +1902,20 @@ def check_append_only(
             cwd=candidate.root,
             text=True,
             env=_git_environment(),
+            # Uncaptured, git's own diagnostic went to whatever stderr this
+            # process holds — a library writing over its caller's output,
+            # which this module states it never does — while the refusal it
+            # raised named the file and never said why it could not be read.
+            # Folded into the message below instead, bounded so a
+            # pathological diagnostic cannot push the reason out of sight.
+            stderr=subprocess.PIPE,
+
         )
     except subprocess.CalledProcessError as exc:
-        raise AppendError(f"cannot read {relative} at base {base.ref}") from exc
+        diagnostic = (exc.stderr or "").strip()[-1000:] or "no git diagnostic"
+        raise AppendError(
+            f"cannot read {relative} at base {base.ref}: {diagnostic}"
+        ) from exc
     base_lines = _lines(base_text)
     if len(lines) < len(base_lines):
         raise AppendError(
@@ -1930,9 +1941,14 @@ def _manifest_at_ref(
             cwd=candidate.root,
             text=True,
             env=_git_environment(),
+            stderr=subprocess.PIPE,  # as in check_append_only, and for the same reason
+
         )
     except subprocess.CalledProcessError as exc:
-        raise AppendError(f"cannot read {relative} at base {base.ref}") from exc
+        diagnostic = (exc.stderr or "").strip()[-1000:] or "no git diagnostic"
+        raise AppendError(
+            f"cannot read {relative} at base {base.ref}: {diagnostic}"
+        ) from exc
     return json.loads(text)
 
 
