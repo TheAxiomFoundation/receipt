@@ -1973,11 +1973,13 @@ def _index_entries(
     (``:odd/x`` asks about ``odd/x``, matches nothing, and exits zero), so a
     tracked file could be reported as absent from the index — which every
     caller below reads as "this path is untracked" and either returns on or
-    refuses over. The other direction is as wrong: ``a[b]c`` also matches a
-    sibling ``abc``, and the release root's scan, which has no single path to
-    filter on, would take entries beneath a name the caller never asked
-    about. ``:(literal)`` says what is meant: this exact path, matched as
-    written. The diagnostics keep naming the path itself, not the magic.
+    refuses over. The other direction is as wrong: ``a[b]c`` also returns a
+    sibling ``abc``, so a read about one path answers with records for
+    others, and the checks that ask about exactly one path are correct only
+    because each filters the records afterwards — a filter the release
+    root's scan, which reads every record under a directory, does not have.
+    ``:(literal)`` says what is meant: this exact path, matched as written.
+    The diagnostics keep naming the path itself, not the magic.
     """
 
     completed = _git_run(root, ["ls-files", "-s", "-z", "--", f":(literal){pathspec}"])
