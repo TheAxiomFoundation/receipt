@@ -2386,28 +2386,42 @@ def test_check_state_modes_takes_the_mode_from_the_snapshot(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Binds R6-F3's other half: the base mode comparison resolved the state
-    path all over again to ``stat`` it, so the mode it compared was about
+    path all over again to read its mode, so what it compared was about
     whatever the name reached by then rather than about the file this run
     read — and the index comparison after it resolved the name a third time.
-    Here every ``Path.stat`` of the ledger reports an executable bit the file
-    does not carry. Through the gate the snapshot's own ``fstat`` is what
-    answers and the ordinary verdict stands; called on its own, with no
-    snapshot to take, the same function believes the lie and refuses. The
-    tree is identical in both, so the difference is only where the mode came
-    from."""
+    Here every ``Path.stat`` and ``Path.lstat`` of the ledger reports an
+    executable bit the file does not carry. Through the gate the snapshot's
+    own ``fstat`` is what answers and the ordinary verdict stands; called on
+    its own, with no snapshot to take, the same function believes the lie and
+    refuses. The tree is identical in both, so the difference is only where
+    the mode came from. (Both reads are made to lie because R7-F5 moved that
+    fallback from ``stat`` to ``lstat``, which is the read that can also tell
+    a link from a file.)"""
 
     candidate = base_repository(tmp_path)
     append_one_row(candidate)
     ledger = candidate.root.resolve() / CHAIN_SPEC.state_relative
+
+    def executable(observed: os.stat_result) -> os.stat_result:
+        return os.stat_result((observed.st_mode | 0o111, *tuple(observed)[1:]))
+
     real_stat = pathlib.Path.stat
+    real_lstat = pathlib.Path.lstat
 
     def lying_stat(self: pathlib.Path, **keywords: Any) -> os.stat_result:
         observed = real_stat(self, **keywords)
         if os.fspath(self) != os.fspath(ledger):
             return observed
-        return os.stat_result((observed.st_mode | 0o111, *tuple(observed)[1:]))
+        return executable(observed)
+
+    def lying_lstat(self: pathlib.Path, *arguments: Any) -> os.stat_result:
+        observed = real_lstat(self, *arguments)
+        if os.fspath(self) != os.fspath(ledger):
+            return observed
+        return executable(observed)
 
     monkeypatch.setattr(pathlib.Path, "stat", lying_stat)
+    monkeypatch.setattr(pathlib.Path, "lstat", lying_lstat)
 
     assert run_gate(candidate) == (
         "thesis-facts append check OK: 3 rows, immutable prefix 1, "
@@ -2874,3 +2888,44 @@ def test_the_enumerations_symlink_refusal_still_comes_first_with_a_base(
     with pytest.raises(AppendError) as refusal:
         run_gate(candidate)
     assert str(refusal.value) == "release path is a symlink: releases/vendor"
+
+
+def test_check_state_modes_refuses_a_symlinked_state_file_on_its_own(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds R7-F5: with no snapshot to take, the mode comparison read the
+    path with ``stat``, which follows a link. So a ledger replaced by a
+    symlink to a non-executable regular file reported that target's 100644,
+    compared equal to the base's 100644, and passed — a category change git
+    records, synthesised away by the read meant to observe it. The index
+    comparison after it does not save the case either: with the link staged,
+    the index says 120000 and the working tree holds 120000, which agree.
+    Without the ``lstat`` this function returns cleanly on this tree.
+
+    Through the gate the tree never gets this far — a 120000 state entry is
+    not a tracked regular file, and the entry check at the top says so, which
+    is asserted here as the scope of the finding."""
+
+    candidate = base_repository(tmp_path)
+    outside = tmp_path / "outside" / "official_observations.jsonl"
+    outside.parent.mkdir()
+    ledger = candidate.root / CHAIN_SPEC.state_relative
+    outside.write_text(ledger.read_text(encoding="utf-8"), encoding="utf-8")
+    ledger.unlink()
+    ledger.symlink_to(outside)
+    git(candidate.root, "add", "--", CHAIN_SPEC.state_relative.as_posix())
+
+    with pytest.raises(AppendError) as refusal:
+        append_gate.check_state_modes(
+            append_gate._BaseCommit(ref=candidate.base, commit=candidate.base),
+            append_gate._set_root(candidate.root, GATE_SPEC),
+        )
+    assert str(refusal.value) == (
+        "state file is a symlink: ledger/official_observations.jsonl"
+    )
+    with pytest.raises(AppendError) as through_the_gate:
+        run_gate(candidate)
+    assert str(through_the_gate.value) == (
+        "state path ledger/official_observations.jsonl has a non-regular "
+        "index entry: 120000"
+    )

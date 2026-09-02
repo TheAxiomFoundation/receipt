@@ -1062,8 +1062,9 @@ def check_state_modes(
     of one name and a parent exchanged between any two of them made them
     answers about different files. With the snapshots both take the category
     the one read recorded, from the descriptor it held open. Omitted — a
-    caller using this function on its own — each is worked out from the path
-    exactly as it was.
+    caller using this function on its own — each is worked out from the path,
+    which is now ``lstat``-ed rather than ``stat``-ed, and a symlink there is
+    refused instead of being followed to whatever it points at.
     """
 
     # verify_append_gate already refused a non-authoritative checkout at
@@ -1093,8 +1094,19 @@ def check_state_modes(
         # two); the release-file check does the same.
         snapshot = (snapshots or {}).get(path)
         if snapshot is None:
-            executable = bool((candidate.root / relative).stat().st_mode & 0o100)
-            category = "100755" if executable else "100644"
+            # lstat, and a symlink refused outright. stat() follows one, so a
+            # state file replaced by a link to a non-executable regular file
+            # reported the target's category and compared equal to a 100644
+            # base — a category change git records, synthesised away by the
+            # read that was meant to observe it. With the index also holding
+            # 120000 the comparison after this one agrees with the tree and
+            # says nothing either, so on its own this function accepted a
+            # state path that is no longer a file at all. Through the gate
+            # the snapshot answers, and a link never gets this far.
+            observed = (candidate.root / relative).lstat()
+            if stat.S_ISLNK(observed.st_mode):
+                raise AppendError(f"state file is a symlink: {path}")
+            category = "100755" if observed.st_mode & 0o100 else "100644"
         else:
             category = snapshot.category
         if category != entry.mode:
