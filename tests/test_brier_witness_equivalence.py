@@ -31,8 +31,13 @@ Deliberately outside the mutation contract:
 
 - witness objects are open-world in the oracle; an unknown top-level field is
   accepted, so there is no refusal branch to bind;
-- the v1 unavailable genesis witness accepts token-looking fields; the fatal
-  token-evidence rule is specifically the v2 per-anchor outcome contract;
+- the baseline's v1 unavailable path tests ``reason`` for truth and nothing
+  else, so it accepts a non-string reason and any token-looking field beside
+  it; the port refuses both, which is what the v2 per-anchor outcome contract
+  has always required.  The genesis witness carries neither, so every case
+  below still agrees byte for byte; a mutation introducing one would assert
+  only that the port is deliberately stricter, which belongs in
+  ``tests/test_tsa.py`` and not in a differential contract;
 - a true ``genTime``-after-wall-clock mutation is no longer reachable through
   the CLI because every pinned signed token is now in the past and the CLI has
   no ``--now`` input.  Editing only the declared time reaches the later claim
