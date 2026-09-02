@@ -34,6 +34,12 @@ codex/thesis-ledger-facts). The only intended behavioral change is
 parameterization: every repo-specific constant moved into ``AppendGateSpec``,
 supplied by the consumer's committed code. Behavior is gated by the
 differential harness in tests/test_append_gate_equivalence.py.
+
+Additions since the extraction close confinement gaps the upstream battery
+never presented: a gate-only proposal is confined to the surfaces its verdict
+speaks for. They run beside the extracted checks without altering any of their
+refusals or the order in which those refusals fire, and carry their own tests
+in tests/test_append_gate.py.
 """
 
 from __future__ import annotations
@@ -150,8 +156,14 @@ def _matches_surface(path: str, surface: frozenset[str]) -> bool:
 
 def check_surface_separation(
     base_ref: str, candidate: _CandidateTree
-) -> tuple[set[str], set[str]]:
-    """Return data/gate changes and reject a proposal that combines them."""
+) -> tuple[set[str], set[str], set[str]]:
+    """Return data/gate/unclassified changes and reject a combined proposal.
+
+    DATA and GATE do not have to cover the changed set: a path matching
+    neither surface is unclassified, and it is returned so no caller can
+    treat a surface match as a statement about everything else the proposal
+    touched.
+    """
 
     commit = _resolve_base_commit(base_ref, candidate)
     changed = _nul_paths(
@@ -191,7 +203,37 @@ def check_surface_separation(
             f"{sorted(data_changes)}; GATE_SURFACE changes="
             f"{sorted(gate_changes)}; split them into separate pull requests"
         )
-    return data_changes, gate_changes
+    return data_changes, gate_changes, changed - data_changes - gate_changes
+
+
+def check_gate_only_confinement(
+    unclassified: set[str], candidate: _CandidateTree
+) -> set[str]:
+    """Confine a gate-only proposal to the surfaces its verdict speaks for.
+
+    A gate-only verdict returns before the ledger is read, so the frozen
+    prefix, the append-only diff, the row bindings, and the release history
+    are all skipped. Surface classification never checked that DATA and GATE
+    covered the changed set, so a proposal that added a gate file AND
+    rewrote an unclassified file under the release root — ``releases/README.md``,
+    say — was accepted with none of those checks run. An unclassified change
+    inside the release root is refused here; the rest are returned for the
+    caller to name in its success text, so an unclassified change riding a
+    gate-only proposal is never silent.
+    """
+
+    release_root = candidate.spec.chain.release_root_relative.as_posix()
+    inside_release_root = sorted(
+        path
+        for path in unclassified
+        if path == release_root or path.startswith(f"{release_root}/")
+    )
+    if inside_release_root:
+        raise AppendError(
+            "gate-only proposal changes unclassified release path(s): "
+            f"{inside_release_root}"
+        )
+    return set(unclassified)
 
 
 def _lines(text: str) -> list[str]:
@@ -753,15 +795,19 @@ def verify_append_gate(
 
     candidate = _set_root(root, spec)
     if base_ref:
-        _data_changes, gate_changes = check_surface_separation(
+        _data_changes, gate_changes, unclassified = check_surface_separation(
             base_ref,
             candidate,
         )
         if gate_changes:
+            reported = check_gate_only_confinement(unclassified, candidate)
+            unclassified_suffix = (
+                f"; unclassified changes={sorted(reported)}" if reported else ""
+            )
             return (
                 "thesis-facts append check OK: gate-only proposal; "
                 "DATA_SURFACE unchanged; GATE_SURFACE changes="
-                f"{sorted(gate_changes)}"
+                f"{sorted(gate_changes)}{unclassified_suffix}"
             )
 
     text = candidate.ledger_path.read_text(encoding="utf-8")
