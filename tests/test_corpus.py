@@ -1570,3 +1570,55 @@ def test_a_malformed_gate_id_is_quoted_within_bounds(tmp_path: pathlib.Path) -> 
     assert "gateId is malformed" in str(caught.value)
     assert len(str(caught.value)) < 600
     assert "more characters]" in str(caught.value)
+
+
+def _tombstone_rows(path: str, body: str) -> list[dict[str, object]]:
+    """A journal that binds ``path`` as attested and then retires it."""
+
+    attested = dict(ATTESTED)
+    attested[path] = body
+    rows = journal_rows(attested=attested)
+    rows.append(
+        {
+            "schemaVersion": JOURNAL_SCHEMA,
+            "kind": "attested",
+            "path": path,
+            "sha256": sha256_text(body),
+            "state": "removed",
+        }
+    )
+    return reindex(rows)
+
+
+def test_a_tombstone_probe_that_cannot_stat_an_entry_refuses(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds F7: the intermediate-component probe sat outside the handler.
+
+    ``entry.lstat()`` was called in the same expression as the symlink test,
+    outside the ``except OSError`` arm, so an entry in a directory that is
+    readable but not searchable raised ``PermissionError`` — a bare crash out
+    of the verifier where the module's own rule is that a failure to look is a
+    refusal, not an absence. Without the fix this test errors with
+    PermissionError instead of raising CorpusError.
+
+    The directory is spelled U+00DF, whose fold key is "ss": no filesystem
+    resolves the tombstoned spelling natively, so the exact-path probe finds
+    nothing and the fold search runs on every host.
+    """
+
+    import os
+
+    body = '{"applied": true}\n'
+    write_tree(tmp_path)
+    (tmp_path / "ß/beta").mkdir(parents=True)
+    (tmp_path / "ß/beta/apply-manifest.json").write_text(body)
+    rows = _tombstone_rows("ss/beta/apply-manifest.json", body)
+    # Readable, so the listing succeeds; not searchable, so stat of a child
+    # inside it fails with EACCES.
+    os.chmod(tmp_path / "ß", 0o444)
+    try:
+        with pytest.raises(CorpusError, match="tombstone is unverifiable"):
+            verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+    finally:
+        os.chmod(tmp_path / "ß", 0o755)
