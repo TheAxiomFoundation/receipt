@@ -1027,6 +1027,21 @@ def _symlinked_component_error(
     )
 
 
+def _is_reparse_point(path: pathlib.Path) -> bool:
+    """Whether one component is a symlink or, on Windows, a junction.
+
+    A junction is not a symlink but redirects exactly like one, so both
+    walks below refuse either. A component that cannot be ``lstat``-ed is
+    not one of them, and is left to the check that follows the walk.
+    """
+
+    try:
+        entry = path.lstat()
+    except OSError:
+        return False
+    return stat.S_ISLNK(entry.st_mode) or bool(getattr(entry, "st_reparse_tag", 0))
+
+
 def assert_no_symlinked_state_component(
     root: pathlib.Path, relative: pathlib.PurePosixPath
 ) -> None:
@@ -1049,13 +1064,8 @@ def assert_no_symlinked_state_component(
     for segment in relative.parts:
         current = current / segment
         walked = (*walked, segment)
-        # is_symlink() catches POSIX symlinks; on Windows a junction is not a
-        # symlink but is reported by st_reparse_tag, so refuse any reparse
-        # point as well. A dangling link does not exist() but still refuses.
-        reparse = (
-            getattr(current.lstat(), "st_reparse_tag", 0) if current.exists() else 0
-        )
-        if current.is_symlink() or reparse:
+        # A dangling link is still a link, and still refuses.
+        if _is_reparse_point(current):
             raise _symlinked_component_error(relative, walked)
 
 
@@ -2169,6 +2179,34 @@ def assert_release_file_still_indexed(
         )
 
 
+def _assert_no_symlinked_release_component(root: pathlib.Path, listed: str) -> None:
+    """Refuse an indexed release path reached through a linked directory.
+
+    The reconciliation below asks whether an indexed path is a regular file
+    on disk, and ``is_file()`` answers about whatever the whole name resolves
+    to — every intermediate component followed. The traversal that would have
+    seen those components does not follow them: ``rglob`` yields a symlinked
+    directory and does not descend it, and the scan skips it. So an index
+    entry under ``releases/vendor``, with ``vendor`` a link to a directory
+    outside the checkout, was in no walk, was reported as present and
+    regular, and its content — no part of the candidate tree, no part of what
+    the base can be diffed against — stood in for the release file the commit
+    records. Walk the parents with ``lstat`` first, in the words the state
+    paths' walk uses for the same fact.
+    """
+
+    current = root
+    walked: tuple[str, ...] = ()
+    for segment in pathlib.PurePosixPath(listed).parts[:-1]:
+        current = current / segment
+        walked = (*walked, segment)
+        if _is_reparse_point(current):
+            raise ReleaseChainError(
+                "release path traverses a symlink at "
+                f"{'/'.join(walked)!r}: {listed}"
+            )
+
+
 def assert_release_root_index_regular(root: pathlib.Path, spec: ChainSpec) -> None:
     """Refuse an index entry under the release root that is not a regular file.
 
@@ -2254,8 +2292,14 @@ def assert_release_root_index_regular(root: pathlib.Path, spec: ChainSpec) -> No
     # The other direction, last: an entry the walk cannot find because the
     # working tree does not hold it as a regular file. A symlink counts as
     # not holding it — the enumeration refuses one it reaches, and this is
-    # the same fact for an entry it never reaches at all.
+    # the same fact for an entry it never reaches at all. Its parents are
+    # walked first, because ``is_file()`` resolves the whole name and the
+    # traversal above resolves none of it: ``rglob`` does not descend a
+    # symlinked directory, so a release path served through one was in no
+    # walk and yet answered "regular file" here, from wherever the link
+    # points. The leaf keeps its own refusal, below.
     for listed in sorted(modes):
+        _assert_no_symlinked_release_component(root, listed)
         recorded = root / pathlib.PurePosixPath(listed)
         if recorded.is_symlink() or not recorded.is_file():
             raise ReleaseChainError(
