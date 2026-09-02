@@ -24,6 +24,7 @@ import pytest
 
 from receipt.canonical import canonical_bytes, canonical_sha256
 from receipt.tsa import (
+    _BUNDLE_CLAIM_FIELDS,
     TokenEvidence,
     TrustBundleSpec,
     TsaError,
@@ -1173,6 +1174,18 @@ def test_refuses_an_unavailable_legacy_witness_over_a_multi_anchor_bundle(
         schema="thesis_rfc3161_witness_v1",
         available=False,
     )
+    # Genuinely bundle-less, as the pinned genesis marker is: the fixture
+    # writes the three claim fields, and with them present the claim path
+    # would refuse on its own, leaving the pre-dispatch count untested (peer
+    # review, round four).
+    rewrite_witness(
+        tree,
+        lambda payload: [
+            payload.pop(field, None)
+            for field in ("trustBundleId", "trustBundlePath", "trustBundleSha256")
+        ],
+    )
+    assert not _BUNDLE_CLAIM_FIELDS.intersection(json.loads(tree.witness.read_text()))
     with pytest.raises(TsaError) as caught:
         verify_tree(tree)
     assert str(caught.value) == (
