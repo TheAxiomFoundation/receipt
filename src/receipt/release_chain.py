@@ -996,6 +996,55 @@ def verify_producer_signature(
     )
 
 
+def _receipt_bytes(receipt: pathlib.Path) -> bytes:
+    """Read one RFC 3161 receipt through a single descriptor.
+
+    Three OpenSSL invocations consume each receipt — the ``-text`` inspection
+    that yields its genTime and policy OID, the ``-verify`` that binds it to
+    the manifest digest, and the token extraction the signer pins run over —
+    and each one reopened the path by name. Nothing held the path still
+    between them, so the tree under audit could present a different file to
+    each call: a token inspected for its genTime and policy, and a different
+    token verified and pinned, with the verdict reporting a time no verified
+    token ever carried. The bytes are read once here and every call below is
+    fed a private snapshot of them.
+
+    The open refuses a symlink outright where the platform offers
+    ``O_NOFOLLOW``, and the descriptor is stat'ed after opening: a path
+    swapped between the check above and the open here addresses a different
+    file, and its (device, inode) pair says so where the pathname cannot.
+    """
+
+    # O_NOFOLLOW is POSIX but not universal; where it is absent the lstat
+    # below plus the descriptor comparison still catch a swap, they simply
+    # catch it one step later.
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        before = os.lstat(receipt)
+        if not stat.S_ISREG(before.st_mode):
+            raise ReleaseChainError(
+                f"missing or non-regular RFC 3161 receipt: {receipt}"
+            )
+        descriptor = os.open(receipt, flags)
+    except OSError as exc:
+        raise ReleaseChainError(
+            f"cannot read RFC 3161 receipt {receipt}: {type(exc).__name__}"
+        ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or (
+            opened.st_dev,
+            opened.st_ino,
+        ) != (before.st_dev, before.st_ino):
+            raise ReleaseChainError(
+                f"RFC 3161 receipt was replaced while it was being read: {receipt}"
+            )
+        with open(descriptor, "rb", closefd=False) as handle:
+            return handle.read()
+    finally:
+        os.close(descriptor)
+
+
 def _verify_production_signer(
     receipt: pathlib.Path,
     anchor: pathlib.Path,
@@ -1003,10 +1052,15 @@ def _verify_production_signer(
     gen_time: datetime,
     temporary: pathlib.Path,
     environment: dict[str, str],
+    *,
+    # The snapshot the caller already read; the receipt path itself is kept
+    # for the labels and refusals, which name the file an auditor has.
+    source: pathlib.Path | None = None,
 ) -> None:
     token = temporary / "token.der"
     signer = temporary / "signer.pem"
     content = temporary / "tst-info.der"
+    read_from = receipt if source is None else source
     _openssl_binary(
         [
             "ts",
@@ -1014,7 +1068,7 @@ def _verify_production_signer(
             "-config",
             "/dev/null",
             "-in",
-            str(receipt),
+            str(read_from),
             "-token_out",
             "-out",
             str(token),
@@ -1087,7 +1141,13 @@ def verify_receipt(
     now: datetime | None = None,
     anchor_observer: dict[str, str] | None = None,
 ) -> datetime:
-    """Cryptographically verify one receipt and return its signed genTime."""
+    """Cryptographically verify one receipt and return its signed genTime.
+
+    The receipt bytes are read exactly once, through one descriptor, and every
+    OpenSSL invocation is fed a private snapshot of them, so the token whose
+    genTime and policy are reported is the same token that verified against
+    the anchor and satisfied the signer pins (see _receipt_bytes).
+    """
 
     if tsa not in spec.anchors:
         raise ReleaseChainError(f"unknown TSA receipt kind {tsa!r}")
@@ -1137,6 +1197,14 @@ def verify_receipt(
             snapshot = temporary / f"anchor-{tsa}.pem"
             snapshot.write_bytes(anchor_bytes)
             anchor = snapshot
+        # The receipt gets the same treatment, unconditionally: read once
+        # through one descriptor, snapshotted here, and handed to all three
+        # OpenSSL invocations below. Reopening the path per call let the
+        # inspected token and the verified token be different files — see
+        # _receipt_bytes. The original path is still what every label and
+        # refusal names.
+        receipt_source = temporary / f"receipt-{tsa}.tsr"
+        receipt_source.write_bytes(_receipt_bytes(receipt))
         try:
             text_result = subprocess.run(
                 [
@@ -1146,7 +1214,7 @@ def verify_receipt(
                     "-config",
                     "/dev/null",
                     "-in",
-                    str(receipt),
+                    str(receipt_source),
                     "-text",
                 ],
                 check=False,
@@ -1185,7 +1253,7 @@ def verify_receipt(
                 "-digest",
                 manifest_digest,
                 "-in",
-                str(receipt),
+                str(receipt_source),
                 "-CAfile",
                 str(anchor),
                 "-CApath",
@@ -1212,6 +1280,7 @@ def verify_receipt(
                 gen_time,
                 temporary,
                 environment,
+                source=receipt_source,
             )
     return gen_time
 
