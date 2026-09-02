@@ -43,12 +43,24 @@ consumer, every git read runs with ``refs/replace`` disabled so a replacement
 object cannot change what the printed OID reads as, each state file is read
 once — through directory descriptors, so no component of its path is resolved
 twice — and every consumer here, the release verification included, is fed
-those bytes rather than the path, with the file re-checked at the end, the two
-state files are tracked regular files that keep the base's file mode, the
-release root's index and working tree agree in both directions — no index
-entry the walk cannot see, and no entry the walk cannot find — and the
-post-cutover binding values are validated for shape rather than presence
-alone.
+those bytes rather than the path, with each file re-checked at the end,
+forwards and then backwards, the two state files are tracked regular files
+that keep the base's file mode, the release root's index and working tree
+agree in both directions — no index entry the walk cannot see, and no entry
+the walk cannot find — and the post-cutover binding values are validated for
+shape rather than presence alone.
+
+What the closing re-check cannot do is bound the whole run. Verifying a
+working tree means verifying something the candidate can write to for as long
+as the run lasts, and no immutable snapshot of one is available here: between
+the last two reads of a state file there is still an instant in which it can
+be replaced unseen, and further passes only move the instant. So this verdict
+speaks for the snapshot bytes it read — the bytes every consumer above was
+given, and which each state file still held at both of its re-reads — not for
+whatever the path holds afterwards. Removing that window means verifying the
+committed tree object rather than the working tree, which changes what the
+gate verifies rather than adding a check to it; it is tracked as follow-up
+work and is not done here.
 
 They run beside the extracted checks without altering any of their refusals,
 and every new refusal runs after every pre-existing file-level refusal — with
@@ -428,6 +440,45 @@ def _assert_state_unchanged(
         ) from exc
     if (current.identity, current.payload) != (snapshot.identity, snapshot.payload):
         raise AppendError(f"state file changed during verification: {display}")
+
+
+def _assert_states_unchanged(
+    snapshots: tuple[_StateSnapshot, ...], candidate: _CandidateTree
+) -> None:
+    """Re-check every state file forwards, then every state file backwards.
+
+    The closing checks were one per file, in order: the ledger, then the
+    frozen prefix. That leaves a writer a window it can aim at. Wait for the
+    ledger's re-check to return, rewrite the ledger while the prefix is being
+    re-checked, and the run answers OK — the ledger was the file this verdict
+    was mostly about, and the last thing that looked at it looked before the
+    rewrite.
+
+    Closing that window properly needs an immutable snapshot of the tree
+    under audit, and this gate has none: it verifies a working directory
+    that the candidate can write to for as long as the run lasts. What is
+    available is coherence between the closing reads, so the re-check runs
+    the files in order and then again in reverse — ledger, prefix, prefix,
+    ledger — each pass being the same identity-plus-bytes comparison, and a
+    change seen in any of them refusing in the message that already existed.
+    A rewrite aimed at the gap after one file's re-check is now seen by that
+    file's second re-check.
+
+    This narrows the window; it does not close it. Between the last two
+    reads of one file there is still an instant in which that file can be
+    replaced and the run will not see it, and adding further passes only
+    moves the instant. What the verdict states is what it read: the bytes of
+    the snapshots this run took, which every consumer here was fed and which
+    each file still held at both of its re-reads. Removing the window
+    altogether means verifying a committed tree object instead of a working
+    tree — reading the ledger and the prefix out of the commit under review,
+    which nothing can rewrite underneath the run — and that is a change to
+    what the gate verifies, not a check added to it. It is tracked as
+    follow-up work and is not done here.
+    """
+
+    for snapshot in (*snapshots, *reversed(snapshots)):
+        _assert_state_unchanged(snapshot, candidate)
 
 
 def _as_text(payload: bytes, encoding: str | None = None) -> str:
@@ -1347,9 +1398,11 @@ def verify_append_gate(
             except ReleaseChainError as exc:
                 raise AppendError(str(exc)) from exc
     # Last of all, and after the release verification's own re-reads: the two
-    # state files must still be the files this verdict read.
-    _assert_state_unchanged(ledger_state, candidate)
-    _assert_state_unchanged(prefix_state, candidate)
+    # state files must still be the files this verdict read. Forwards and
+    # then backwards, so a rewrite aimed at the gap after one file's re-check
+    # is seen by that file's second one; the residual window this leaves is
+    # stated on _assert_states_unchanged and in the module docstring.
+    _assert_states_unchanged((ledger_state, prefix_state), candidate)
     # Name the commit the verdict was measured against whenever the caller
     # named something that could move. A base given as its own OID already
     # names it, and that verdict text stays exactly what it was — the shape

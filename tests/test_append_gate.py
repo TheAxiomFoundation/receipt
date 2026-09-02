@@ -24,7 +24,8 @@ release-root index entries the filesystem traversal cannot see.
 
 Docstrings labelled R6-F1 onward name the third gate's first round, whose
 numbering starts over again: R6-F1 the release-root index entries never
-reconciled with the filesystem.
+reconciled with the filesystem, R6-F2 the closing state checks a writer could
+step between.
 
 The fixture is a local git repository built from scratch — no network, no
 witnesses, no signatures. Its release tree holds a README and no manifests, so
@@ -2248,3 +2249,57 @@ def test_a_release_entry_the_working_tree_lost_is_refused_against_a_base(
         "release file recorded in the index is absent or not a regular file: "
         "releases/extra.md"
     )
+
+
+def test_a_ledger_rewritten_during_the_prefix_re_check_is_refused(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds R6-F2: the closing re-checks were sequential, one per file.
+
+    The ledger was re-checked, then the frozen prefix, and nothing looked at
+    the ledger again — so a writer that waits for the ledger's re-check to
+    return and rewrites the ledger while the prefix is being re-checked gets
+    an acceptance. The verdict then reports a row count, a prefix hash, an
+    append count, and a release index measured on a ledger the tree no longer
+    holds, with the last look at that file taken before the rewrite.
+
+    The re-check now runs the files forwards and then backwards — ledger,
+    prefix, prefix, ledger — so the rewrite is seen by the ledger's second
+    re-read. The recorded call order is asserted because it is the whole
+    point: the mutation lands strictly after a ledger re-check that passed,
+    which is exactly the run the old order accepted.
+    """
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    ledger = CHAIN_SPEC.state_relative.as_posix()
+    prefix = CHAIN_SPEC.prefix_relative.as_posix()
+    read = append_gate._read_state_snapshot
+    asked: list[str] = []
+
+    def read_then_rewrite(
+        relative: pathlib.PurePosixPath, tree: Any
+    ) -> append_gate._StateSnapshot:
+        asked.append(relative.as_posix())
+        snapshot = read(relative, tree)
+        # The second time the prefix is asked for is the first prefix
+        # re-check, which is after the ledger's own re-check has returned.
+        if relative.as_posix() == prefix and asked.count(prefix) == 2:
+            write_ledger(
+                candidate.root,
+                [observation_row(number) for number in range(1, BASE_ROW_COUNT + 3)],
+            )
+        return snapshot
+
+    monkeypatch.setattr(append_gate, "_read_state_snapshot", read_then_rewrite)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "state file changed during verification: "
+        "ledger/official_observations.jsonl"
+    )
+    assert asked == [ledger, prefix, ledger, prefix, prefix, ledger]
+    # The rewrite really landed, and really was a different ledger.
+    written = candidate.root / CHAIN_SPEC.state_relative
+    assert len(written.read_text(encoding="utf-8").splitlines()) == BASE_ROW_COUNT + 2
