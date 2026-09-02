@@ -42,13 +42,15 @@ it is read, the base is resolved to a commit once and carried to every
 consumer, every git read runs with ``refs/replace`` disabled so a replacement
 object cannot change what the printed OID reads as, each state file is read
 once — through directory descriptors, so no component of its path is resolved
-twice — and every consumer here, the release verification included, is fed
-those bytes rather than the path, with each file re-checked at the end,
-forwards and then backwards, the two state files are tracked regular files
-that keep the base's file mode, the release root's index and working tree
-agree in both directions — no index entry the walk cannot see, and no entry
-the walk cannot find — and the post-cutover binding values are validated for
-shape rather than presence alone.
+twice, from a candidate root whose identity was recorded before the run began,
+and never through a weaker descent than that — every consumer here, the
+release verification included, is fed those bytes, and the file's mode and
+parent directories as that one read observed them, rather than the path, with
+each file re-checked at the end, forwards and then backwards, the two state
+files are tracked regular files that keep the base's file mode, the release
+root's index and working tree agree in both directions — no index entry the
+walk cannot see, and no entry the walk cannot find — and the post-cutover
+binding values are validated for shape rather than presence alone.
 
 What the closing re-check cannot do is bound the whole run. Verifying a
 working tree means verifying something the candidate can write to for as long
@@ -78,8 +80,15 @@ scan both run after the comparisons they qualify, so a comparison that passed
 while the working tree was not carrying what git recorded is caught
 afterwards and nothing pre-existing is pre-empted; the differential harness
 pins the upstream's mode-change refusal for an unstaged chmod, which is both.
-Each order is pinned by a test. All of it carries its own tests in
-tests/test_append_gate.py.
+Each order is pinned by a test.
+
+One refusal here is not about a tree at all, and is stated because it does
+pre-empt everything on every input wherever it applies: where ``os.open``
+cannot take a ``dir_fd``, the state reads refuse before anything is compared,
+because the confinement they claim is unavailable on that platform. That is
+the gate declining to answer, not a verdict about a proposal.
+
+All of it carries its own tests in tests/test_append_gate.py.
 """
 
 from __future__ import annotations
