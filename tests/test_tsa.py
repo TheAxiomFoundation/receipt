@@ -1178,3 +1178,37 @@ def test_refuses_an_unavailable_legacy_witness_over_a_multi_anchor_bundle(
     assert str(caught.value) == (
         "legacy witness schema requires a single-anchor bundle; tsa-anchors-v1 has 2"
     )
+
+
+def test_refuses_an_unavailable_legacy_witness_naming_an_older_multi_anchor_bundle(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """The unavailable marker's own bundle claim is resolved and counted.
+
+    With a single-anchor bundle newest and named as the legacy bundle, the
+    pre-dispatch count passes; an unavailable v1 marker that names the older
+    two-anchor bundle returned before that claim was resolved (peer review,
+    round three). The claim is resolved like an available witness's and the
+    bundle it names is counted.
+    """
+
+    tree = build_witness_tree(
+        tmp_path,
+        local_anchors,
+        schema="thesis_rfc3161_witness_v1",
+        available=False,
+    )
+    reference, spec = add_bundle_version(tree, local_anchors[:1], version=2)
+    spec = dataclasses.replace(spec, legacy_witness_bundle_id="tsa-anchors-v2")
+    active = {BUNDLE_LOGICAL: tree.reference, str(reference["path"]): reference}
+    with pytest.raises(TsaError) as caught:
+        verify_witness(
+            tree.record,
+            spec=spec,
+            records=tree.records,
+            trusted_bundles=active,
+            transition_bundle_updates=[],
+        )
+    assert str(caught.value) == (
+        "legacy witness schema requires a single-anchor bundle; tsa-anchors-v1 has 2"
+    )

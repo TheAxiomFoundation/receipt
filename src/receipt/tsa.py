@@ -1064,6 +1064,31 @@ def _summarize_witness(
     )
 
 
+#: The fields by which a witness names its trust bundle.
+_BUNDLE_CLAIM_FIELDS = frozenset({"trustBundleId", "trustBundlePath", "trustBundleSha256"})
+
+
+def _require_single_anchor(trust: dict[str, Any]) -> None:
+    """Refuse a legacy witness over a bundle that configures several anchors.
+
+    The legacy schema carries one producer-selected token and no per-anchor
+    outcomes, so against such a bundle it would let a producer satisfy the
+    whole bundle with whichever single authority happened to answer -- and
+    say nothing about the rest.  Dual witness is only dual under v2.  Applied
+    to the newest active bundle before dispatch (the only measure for a
+    marker naming no bundle), to the bundle an available witness selects,
+    and to the bundle an unavailable witness names; three review rounds
+    found each of the three in turn.
+    """
+
+    anchor_count = len(trust["anchors"])
+    if anchor_count > 1:
+        raise TsaError(
+            "legacy witness schema requires a single-anchor bundle; "
+            f"{trust['bundleId']} has {anchor_count}"
+        )
+
+
 def _v1_witness_evidence(
     path: Path,
     witness: dict[str, Any],
@@ -1093,6 +1118,21 @@ def _v1_witness_evidence(
                 f"unavailable witness contains token evidence for {path}: "
                 f"{forbidden}"
             )
+        # An unavailable legacy witness may still name a bundle, and every
+        # activated bundle stays selectable, so a claim naming an older,
+        # wider bundle was returned before the count ran (peer review,
+        # round three). A named bundle is resolved and counted here; a
+        # marker naming none is measured against the newest bundle in
+        # verify_witness.
+        if _BUNDLE_CLAIM_FIELDS.intersection(witness):
+            _reference, trust = _bundle_for_claim(
+                records,
+                witness,
+                trusted_bundles,
+                spec=spec,
+                active_required=True,
+            )
+            _require_single_anchor(trust)
         return WitnessEvidence(status=status, digest_sha256=digest_sha256)
     bundle_reference, trust = _bundle_for_claim(
         records,
@@ -1101,21 +1141,10 @@ def _v1_witness_evidence(
         spec=spec,
         active_required=True,
     )
-    # The legacy schema carries one producer-selected token and no per-anchor
-    # outcomes, so against a bundle that configures several anchors it would
-    # let a producer satisfy the whole bundle with whichever single authority
-    # happened to answer -- and say nothing about the rest.  Dual witness is
-    # only dual under v2.  Counted on the bundle the witness actually selected
-    # (peer review): every active bundle stays selectable here, so counting
-    # only the newest one let a witness name an older, wider bundle and pass.
-    # verify_witness counts the newest one as well, before dispatch, for the
-    # unavailable witness that names no bundle at all.
-    anchor_count = len(trust["anchors"])
-    if anchor_count > 1:
-        raise TsaError(
-            "legacy witness schema requires a single-anchor bundle; "
-            f"{trust['bundleId']} has {anchor_count}"
-        )
+    # Counted on the bundle the witness actually selected (peer review):
+    # every active bundle stays selectable here, so counting only the newest
+    # one let a witness name an older, wider bundle and pass.
+    _require_single_anchor(trust)
     token = verify_timestamp_token(
         path,
         witness,
@@ -1380,12 +1409,7 @@ def verify_witness(
             _legacy_path, legacy_trust = _load_trust_bundle(
                 records, preferred, spec=spec
             )
-            legacy_count = len(legacy_trust["anchors"])
-            if legacy_count > 1:
-                raise TsaError(
-                    "legacy witness schema requires a single-anchor bundle; "
-                    f"{legacy_trust['bundleId']} has {legacy_count}"
-                )
+            _require_single_anchor(legacy_trust)
         return _v1_witness_evidence(
             path,
             witness,
