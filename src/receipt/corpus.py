@@ -42,11 +42,11 @@ Three row kinds, one journal:
     survive in a listing — because a filesystem resolves names its own
     enumeration does not emit. The pair is asked twice per verification, for
     the reason the paragraph on pass order below gives. The second question
-    walks the tree, so it is
-    bounded: every entry taken from a listing and every candidate a search
-    visits is charged against one budget for the whole pass, and a listing
-    wider than what is left of that budget is abandoned part-way — unread
-    past the batch in hand — rather than fetched, sorted and indexed whole.
+    walks the tree, so it is bounded: every entry taken from a listing and
+    every candidate a search visits is charged against one budget for the
+    whole pass, and a listing wider than what is left of that budget is
+    abandoned part-way — unread past the batch in hand — rather than
+    fetched, sorted and indexed whole.
 
 ``gate``
     A declaration that some verification gate ran, carrying a reproducibility
@@ -152,8 +152,8 @@ MAX_EVIDENCE_TEXT = 1024
 #:
 #: What is charged is what a gate costs the verdict, not what its producer
 #: typed. Counting only gate-id and evidence payload characters let thirty
-#: thousand gates carrying two characters of evidence each charge about two
-#: hundred and sixty thousand and pass, while rendering four hundred thousand
+#: thousand gates carrying two characters of evidence each charge about a
+#: quarter of a million and pass, while rendering four hundred thousand
 #: characters of text and four million of JSON — the flood the constant
 #: exists to stop, assembled out of strings none of which is long (peer
 #: review, round five). So the fixed cost of the lines a gate produces is
