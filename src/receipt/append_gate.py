@@ -45,7 +45,8 @@ once — through directory descriptors, so no component of its path is resolved
 twice — and every consumer here, the release verification included, is fed
 those bytes rather than the path, with the file re-checked at the end, the two
 state files are tracked regular files that keep the base's file mode, the
-release root carries no index entry the working-tree walk cannot see, and the
+release root's index and working tree agree in both directions — no index
+entry the walk cannot see, and no entry the walk cannot find — and the
 post-cutover binding values are validated for shape rather than presence
 alone.
 

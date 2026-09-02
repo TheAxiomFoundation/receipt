@@ -22,6 +22,10 @@ R5-F2 the parent confinement that was still check-then-open, R5-F3 the state
 paths taken on the working tree's word rather than the index's, R5-F4 the
 release-root index entries the filesystem traversal cannot see.
 
+Docstrings labelled R6-F1 onward name the third gate's first round, whose
+numbering starts over again: R6-F1 the release-root index entries never
+reconciled with the filesystem.
+
 The fixture is a local git repository built from scratch — no network, no
 witnesses, no signatures. Its release tree holds a README and no manifests, so
 the gate's chain verification finds nothing to verify and the checks under
@@ -2132,4 +2136,115 @@ def test_file_level_release_refusals_precede_the_release_root_index_refusal(
     assert str(refusal.value) == (
         f"existing release file bytes changed relative to {candidate.base}: "
         "releases/README.md"
+    )
+
+
+def replace_release_root_with_a_tracked_file(candidate: Candidate) -> None:
+    """Stage a regular file where ``releases/`` stood, as a commit may do.
+
+    Git records this perfectly happily: one blob at ``releases``, and every
+    path that was under it gone from the index. The working tree then has no
+    release directory at all.
+    """
+
+    releases = candidate.root / CHAIN_SPEC.release_root_relative
+    shutil.rmtree(releases)
+    releases.write_text("releases is a file now.\n", encoding="utf-8")
+    git(candidate.root, "add", "-A")
+
+
+def test_the_push_path_refuses_a_tracked_file_standing_for_the_release_root(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds R6-F1: the release-root scan returned when the root was not a
+    directory, and every other release check on the push path is reached
+    through the manifest directory. A commit that replaces ``releases/`` with
+    a tracked regular file therefore makes chain initialisation false — there
+    is no ``releases/manifests`` to find — and the gate accepted the tree with
+    the whole chain gone, naming no release. The index says otherwise, and is
+    now read against the filesystem: an entry under the root with no
+    directory to hold it refuses."""
+
+    candidate = base_repository(tmp_path)
+    replace_release_root_with_a_tracked_file(candidate)
+    # The manifest directory really is unreachable, which is what made this
+    # an acceptance rather than a refusal.
+    assert not (candidate.root / CHAIN_SPEC.manifest_relative).is_dir()
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate)
+    assert str(refusal.value) == (
+        "release root is not a directory while the index records 1 entries "
+        "under it"
+    )
+
+
+def test_a_tracked_file_standing_for_the_release_root_is_refused_with_a_base(
+    tmp_path: pathlib.Path,
+) -> None:
+    """R6-F1 on the base-ref path, where a pre-existing refusal gets there
+    first and must keep doing so: ``_working_release_files`` enumerates the
+    release tree before any of this PR's checks and refuses a root that is
+    not a real directory in the words the extraction gave it. The reconciled
+    scan is asserted directly on the same tree, so both are bound and the
+    order between them is pinned."""
+
+    candidate = base_repository(tmp_path)
+    replace_release_root_with_a_tracked_file(candidate)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == "releases must be a real directory, not a symlink"
+    with pytest.raises(ReleaseChainError) as scanned:
+        release_chain.assert_release_root_index_regular(candidate.root, CHAIN_SPEC)
+    assert str(scanned.value) == (
+        "release root is not a directory while the index records 1 entries "
+        "under it"
+    )
+
+
+def test_the_push_path_refuses_a_release_entry_the_working_tree_lost(
+    tmp_path: pathlib.Path,
+) -> None:
+    """R6-F1's other direction: a stage-0 regular entry the filesystem walk
+    cannot find. ``_working_release_files`` derives the release files from the
+    working tree, so a release file deleted from disk — or never materialised,
+    as a sparse checkout leaves it — was simply not among them, and the push
+    path, which makes no base comparison, had nothing that would notice. The
+    index records the commit under review; every entry it holds must be on
+    disk as a regular file."""
+
+    candidate = base_repository(tmp_path)
+    (candidate.root / CHAIN_SPEC.release_root_relative / "README.md").unlink()
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate)
+    assert str(refusal.value) == (
+        "release file recorded in the index is absent or not a regular file: "
+        "releases/README.md"
+    )
+
+
+def test_a_release_entry_the_working_tree_lost_is_refused_against_a_base(
+    tmp_path: pathlib.Path,
+) -> None:
+    """R6-F1 on the base-ref path, for an entry the base does not carry: a
+    release file staged by the proposal and then removed from the working
+    tree. A base release file removed the same way already had a refusal —
+    the per-file loop says it was deleted relative to the base — but this one
+    is in neither the base tree nor the walk, so it was in ``new_files``
+    nowhere and no release-proposal rule was ever applied to it."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    extra = candidate.root / CHAIN_SPEC.release_root_relative / "extra.md"
+    extra.write_text("staged, then removed from the working tree.\n", encoding="utf-8")
+    git(candidate.root, "add", "--", "releases/extra.md")
+    extra.unlink()
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "release file recorded in the index is absent or not a regular file: "
+        "releases/extra.md"
     )

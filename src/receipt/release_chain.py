@@ -2044,10 +2044,29 @@ def assert_release_root_index_regular(root: pathlib.Path, spec: ChainSpec) -> No
     a gitlink already populated, or a blob entry standing where a directory
     is, which the mode scan alone would call supported.
 
+    A mode scan is only half of it, though, because it says nothing about
+    what is on disk. Two shapes got through. The scan returned early when
+    the release root was not a directory, so a commit that replaces
+    ``releases/`` with a tracked regular file passed with the chain gone:
+    the manifest directory does not exist, chain initialisation is false,
+    and on the push path the verdict is an acceptance that names no release
+    at all. And a stage-0 regular entry the working tree does not carry —
+    deleted from disk, or never checked out, as a sparse checkout leaves it
+    — is in no filesystem walk either, so `_working_release_files` reported
+    a release root holding fewer files than the commit under review does.
+    So the index and the filesystem are reconciled in both directions: with
+    any entry under the root, the root must be a directory on disk, and
+    every entry must be there as a regular file.
+
     Both callers run this after every comparison that existed before it, for
     the reason the per-file index check does: an entry that is also a mode or
     byte change against the base gets the refusal the upstream verifier
-    gives, and a comparison that passed fail-open is caught afterwards.
+    gives, and a comparison that passed fail-open is caught afterwards. The
+    two reconciliation refusals sit inside that same placement, and after the
+    two scans above, so a tree that is wrong in more than one way keeps the
+    most specific answer: an unsupported mode is named as a mode, a directory
+    the index records a blob for is named as a directory, and only what is
+    left is reported as absent.
     """
 
     release_root = spec.release_root_relative.as_posix()
@@ -2066,6 +2085,15 @@ def assert_release_root_index_regular(root: pathlib.Path, spec: ChainSpec) -> No
         modes[listed] = mode
     directory = root / spec.release_root_relative
     if directory.is_symlink() or not directory.is_dir():
+        # Not a directory, but the index records content under it: a tracked
+        # regular file standing where releases/ was, or a root deleted from
+        # the working tree without being removed from the index. Returning
+        # here made the whole release surface vanish from the verdict.
+        if modes:
+            raise ReleaseChainError(
+                "release root is not a directory while the index records "
+                f"{len(modes)} entries under it"
+            )
         return
     # rglob does not descend through symlinked directories, and a symlink the
     # walk does reach is the enumeration's own refusal, not this one's.
@@ -2077,6 +2105,17 @@ def assert_release_root_index_regular(root: pathlib.Path, spec: ChainSpec) -> No
             raise ReleaseChainError(
                 f"release path is a directory with an index entry: "
                 f"{listed} ({modes[listed]})"
+            )
+    # The other direction, last: an entry the walk cannot find because the
+    # working tree does not hold it as a regular file. A symlink counts as
+    # not holding it — the enumeration refuses one it reaches, and this is
+    # the same fact for an entry it never reaches at all.
+    for listed in sorted(modes):
+        recorded = root / pathlib.PurePosixPath(listed)
+        if recorded.is_symlink() or not recorded.is_file():
+            raise ReleaseChainError(
+                "release file recorded in the index is absent or not a "
+                f"regular file: {listed}"
             )
 
 
