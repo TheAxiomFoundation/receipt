@@ -1092,7 +1092,10 @@ class ConfinedState:
 
 
 def confined_state_descriptor(
-    root: pathlib.Path, relative: pathlib.PurePosixPath
+    root: pathlib.Path,
+    relative: pathlib.PurePosixPath,
+    *,
+    root_identity: tuple[int, int] | None = None,
 ) -> ConfinedState:
     """Open a state file component by component, never by whole pathname.
 
@@ -1116,8 +1119,23 @@ def confined_state_descriptor(
     a directory, ``ENOENT`` for one that is gone.
 
     Where ``dir_fd`` is unsupported — Windows, where ``os.open`` is not in
-    ``os.supports_dir_fd`` — the pathname open is kept, so the walk remains
-    all the confinement there is on that platform.
+    ``os.supports_dir_fd`` — this refuses rather than falling back to the
+    pathname open. The fallback silently returned the reader to exactly the
+    behaviour every check above exists to replace: the whole path resolved
+    again, with the walk's findings about the parents already stale. A
+    verifier that quietly weakens its confinement on some platforms states
+    an invariant it does not hold there, so it says instead that it cannot
+    read the state files here.
+
+    The root itself is opened with ``O_NOFOLLOW`` and ``O_DIRECTORY`` like
+    every component below it — it was opened without either, so a candidate
+    root that had become a symlink was followed by the one open the walk
+    never checked — and, when the caller has recorded what the root was, the
+    root descriptor's identity must still be that. ``append_gate`` records
+    it once, when the candidate tree is set up. A root open that fails at all
+    is the same answer for such a caller, since the directory it recorded was
+    there and openable when it recorded it; with no identity recorded the
+    failure is raised as it stands.
 
     The identity of every directory descriptor opened is returned alongside
     the leaf, because a caller holding only the leaf's identity cannot say
@@ -1127,20 +1145,32 @@ def confined_state_descriptor(
     """
 
     if os.open not in os.supports_dir_fd:
-        # No descent to record: the whole path is resolved by one open, and
-        # the walk is all the confinement there is.
-        return ConfinedState(
-            descriptor=os.open(root / relative, STATE_OPEN_FLAGS), ancestors=()
+        raise ReleaseChainError(
+            "state files cannot be read with secure descent on this platform "
+            "(os.open lacks dir_fd support)"
         )
     directory_flags = (
         os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     )
-    parent = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        parent = os.open(root, directory_flags)
+    except OSError as exc:
+        if root_identity is None:
+            raise
+        # A caller that recorded an identity established this directory when
+        # its run began. An open that fails now — a link standing where the
+        # directory was, the directory gone, its mode no longer allowing the
+        # open — says the root is not the one that was recorded, which is the
+        # same answer as an identity that does not match.
+        raise ReleaseChainError("candidate root changed during verification") from exc
     walked: tuple[str, ...] = ()
     ancestors: list[tuple[int, int]] = []
     try:
         opened = os.fstat(parent)
-        ancestors.append((opened.st_dev, opened.st_ino))
+        identity = (opened.st_dev, opened.st_ino)
+        if root_identity is not None and identity != root_identity:
+            raise ReleaseChainError("candidate root changed during verification")
+        ancestors.append(identity)
         *components, leaf = relative.parts
         for segment in components:
             walked = (*walked, segment)
