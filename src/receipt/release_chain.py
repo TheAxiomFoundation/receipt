@@ -1043,15 +1043,66 @@ def _regular_file_bytes(root: pathlib.Path, relative: pathlib.PurePosixPath) -> 
     return path.read_bytes()
 
 
+def _exact_state_bytes(state_bytes: Mapping[str, bytes] | None) -> dict[str, bytes]:
+    """Normalize a caller-supplied state snapshot to exact strs and bytes.
+
+    ChainSpec-style paranoia applied to the new parameter: a str subclass
+    could compare equal to a state path while rendering as something else,
+    and a bytes-like view could change under the verification that digests
+    it. Both are refused rather than coerced. ``None`` — every caller that
+    predates the parameter — yields an empty mapping, so every state read
+    below is exactly the read it always was.
+    """
+
+    if state_bytes is None:
+        return {}
+    if not isinstance(state_bytes, Mapping):
+        raise ReleaseChainError("state_bytes must be a mapping of state path to bytes")
+    exact: dict[str, bytes] = {}
+    for key, value in state_bytes.items():
+        if type(key) is not str or type(value) is not bytes:
+            raise ReleaseChainError(
+                "state_bytes must map exact str state paths to exact bytes"
+            )
+        exact[key] = value
+    return exact
+
+
+def _state_file_bytes(
+    root: pathlib.Path,
+    relative: pathlib.PurePosixPath,
+    supplied: Mapping[str, bytes],
+) -> bytes:
+    """One state file's bytes: the caller's snapshot, or a fresh read.
+
+    ``append_gate`` reads each state file once, records the file's identity,
+    and feeds those bytes to every consumer it owns. This verifier was not
+    one of them: it re-opened both paths by name, so a candidate could
+    satisfy the row checks with one ledger and the release chain with
+    another inside a single verdict — and restore the first before the
+    closing re-read looked, since that comparison saw the same device,
+    inode, size, and mtime it started with. A caller that has already read a
+    state path supplies its bytes and this path is not opened again at all.
+    With nothing supplied the read is the one it always was, in the same
+    place, with the same refusals.
+    """
+
+    key = relative.as_posix()
+    if key in supplied:
+        return supplied[key]
+    return _regular_file_bytes(root, relative)
+
+
 def _verify_state_history(
     records: list[ReleaseRecord],
     root: pathlib.Path,
     *,
     spec: ChainSpec,
     require_head_current: bool,
+    state_bytes: Mapping[str, bytes],
 ) -> None:
-    ledger = _regular_file_bytes(root, spec.state_relative)
-    prefix = _regular_file_bytes(root, spec.prefix_relative)
+    ledger = _state_file_bytes(root, spec.state_relative, state_bytes)
+    prefix = _state_file_bytes(root, spec.prefix_relative, state_bytes)
     offsets = jsonl_line_offsets(ledger, spec.state_path)
     total_lines = len(offsets) - 1
     prefix_digest = sha256_bytes(prefix)
@@ -1287,6 +1338,7 @@ def verify_release_chain(
     clock_skew_seconds: int = DEFAULT_CLOCK_SKEW_SECONDS,
     now: datetime | None = None,
     compute_anchor_set_digest: bool = False,
+    state_bytes: Mapping[str, bytes] | None = None,
 ) -> ChainVerification:
     """Verify all manifests, signatures, receipts, links, and state bytes.
 
@@ -1305,6 +1357,15 @@ def verify_release_chain(
     order with the same messages. The returned object does carry the two new
     (unset) fields, which is visible to reflection such as
     ``dataclasses.asdict``.
+
+    ``state_bytes`` maps a relative POSIX state path to the bytes a caller
+    has already read for it, and those bytes are used in place of reading
+    that path. It exists for a caller that reads each state file once and
+    holds the verdict to that one read: without it this verifier opened the
+    ledger and the frozen prefix again by name, so an A-to-B-to-A
+    replacement could show the caller's checks one file and the release
+    history another. Omitted (the default, and every pre-existing caller),
+    both files are read here exactly as before.
     """
 
     root = root.resolve()
@@ -1332,6 +1393,7 @@ def verify_release_chain(
         raise ReleaseChainError("clock_skew_seconds must be a non-negative integer")
     if type(compute_anchor_set_digest) is not bool:
         raise ReleaseChainError("compute_anchor_set_digest must be a boolean")
+    supplied_state = _exact_state_bytes(state_bytes)
     anchor_observer: dict[str, str] | None = (
         {} if compute_anchor_set_digest else None
     )
@@ -1451,6 +1513,7 @@ def verify_release_chain(
             root,
             spec=spec,
             require_head_current=not allow_pending_append,
+            state_bytes=supplied_state,
         )
     anchor_set_sha256: str | None = None
     anchor_file_sha256s: tuple[tuple[str, str], ...] = ()

@@ -17,6 +17,7 @@ import subprocess
 
 import pytest
 
+from receipt import release_chain
 from receipt.canonical import canonical_sha256
 from receipt.release_chain import (
     ReleaseChainError,
@@ -1145,3 +1146,89 @@ def test_pin_inference_follows_resolution_not_spelling(
             anchor_dir=spelled,
             compute_anchor_set_digest=True,
         )
+
+
+def state_paths(repo: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, dict[str, bytes]]:
+    """The two state files of a built chain, and their bytes keyed as supplied."""
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    ledger = repo / spec.chain.state_relative
+    prefix = repo / spec.chain.prefix_relative
+    return ledger, prefix, {
+        spec.chain.state_relative.as_posix(): ledger.read_bytes(),
+        spec.chain.prefix_relative.as_posix(): prefix.read_bytes(),
+    }
+
+
+def test_supplied_state_bytes_are_used_instead_of_reading_the_state_paths(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds round five's first finding: the verdict's one read of each file.
+
+    ``append_gate`` reads the ledger and the frozen prefix once, records what
+    it read, and feeds every consumer it owns from that snapshot. This
+    verifier was not one of them — it opened both paths again by name — so a
+    candidate could show the row checks one ledger and the release history
+    another inside a single verdict, then restore the first before the
+    closing re-read. Given the bytes, the paths are not opened here at all:
+    the reader is replaced with one that fails if it is called, and a decoy
+    is left on disk for anything that resolves the name anyway.
+    """
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    ledger, prefix, supplied = state_paths(repo)
+    ledger.write_bytes(b'{"decoy":true}\n')
+    prefix.write_bytes(b"{}\n")
+
+    def refuse(root: pathlib.Path, relative: pathlib.PurePosixPath) -> bytes:
+        raise AssertionError(f"state path was read by name: {relative}")
+
+    monkeypatch.setattr(release_chain, "_regular_file_bytes", refuse)
+
+    verification = verify_release_chain(repo, spec=spec.chain, state_bytes=supplied)
+    assert len(verification.releases) == 1
+
+
+def test_without_supplied_bytes_the_state_paths_are_read_exactly_as_before(
+    repo: pathlib.Path
+) -> None:
+    """The control the same finding requires: omitting the parameter changes
+    nothing. The identical decoy is refused, because the reader that predates
+    the parameter is the one that ran, on the same paths, in the same place."""
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    ledger, _prefix, _supplied = state_paths(repo)
+    ledger.write_bytes(b'{"decoy":true}\n')
+
+    with pytest.raises(ReleaseChainError) as refusal:
+        verify_release_chain(repo, spec=spec.chain)
+    assert "lineCount" in str(refusal.value)
+
+
+def test_state_bytes_must_map_exact_strings_to_exact_bytes(
+    repo: pathlib.Path
+) -> None:
+    """The parameter is trusted in place of a read, so it is checked the way
+    this module checks everything else it is handed: a str subclass could
+    compare equal to a state path while rendering as something else, and a
+    bytes-like view could change under the digests taken from it."""
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    _ledger, _prefix, supplied = state_paths(repo)
+
+    with pytest.raises(ReleaseChainError) as not_a_mapping:
+        verify_release_chain(repo, spec=spec.chain, state_bytes=[("a", b"b")])
+    assert str(not_a_mapping.value) == (
+        "state_bytes must be a mapping of state path to bytes"
+    )
+
+    key = next(iter(supplied))
+    with pytest.raises(ReleaseChainError) as not_exact:
+        verify_release_chain(
+            repo,
+            spec=spec.chain,
+            state_bytes={**supplied, key: bytearray(supplied[key])},
+        )
+    assert str(not_exact.value) == (
+        "state_bytes must map exact str state paths to exact bytes"
+    )
