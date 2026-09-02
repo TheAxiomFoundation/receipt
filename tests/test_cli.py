@@ -27,7 +27,7 @@ import pytest
 
 from receipt.cli import EXIT_FAIL, EXIT_OK, EXIT_USAGE, main
 from receipt.sign import generate_signing_keypair, sign_payload
-from receipt.verify import load_spec
+from receipt.verify import VerifySpecError, load_spec
 
 from corpus_fixture import CONTENT, append_release, build_corpus
 
@@ -972,6 +972,36 @@ SPEC = VerificationSpec(
 '''
 
 FROZEN_MTIME = 1_800_000_000
+
+
+def test_refuses_a_symlinked_spec(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The guard used to run after ``resolve()``, which follows every link on
+    the way, so nothing was left for it to catch.
+
+    Every other read in the package refuses a symlink, and the spec is the
+    trust configuration itself. It also breaks the one thing an auditor pins:
+    they record the spec's digest against a path, and a link can be repointed
+    at other bytes afterwards without that path changing.
+    """
+
+    real = tmp_path / "real-spec.py"
+    real.write_text(SPEC_TEMPLATE.format(name="linked", spki="a" * 64))
+    link = tmp_path / "spec.py"
+    link.symlink_to(real)
+
+    with pytest.raises(VerifySpecError, match="spec is a symlink"):
+        load_spec(link)
+
+    assert (
+        main(["verify", "--spec", str(link), "--root", str(tmp_path), "--json"])
+        == EXIT_USAGE
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
+    assert payload["stage"] == "spec"
+    assert "supply the regular file's path" in payload["failure"]
 
 
 def test_the_spec_that_runs_is_always_the_spec_that_was_hashed(

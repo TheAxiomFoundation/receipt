@@ -217,6 +217,10 @@ def load_spec(spec_path: pathlib.Path) -> tuple[VerificationSpec, str]:
     a future inert, schema-validated spec format would remove even the need to
     execute it, and is tracked as follow-up work.
 
+    The path is required to be a regular file, not a symlink to one, checked
+    as supplied rather than after resolution: a link can be repointed at other
+    bytes without the path the auditor pinned changing at all.
+
     The source is read once and compiled from those exact bytes, deliberately
     bypassing the import system. Going through ``importlib`` would consult
     ``__pycache__``, whose staleness check is (source mtime, source size) at
@@ -229,6 +233,18 @@ def load_spec(spec_path: pathlib.Path) -> tuple[VerificationSpec, str]:
 
     import types
 
+    # Before resolving, deliberately. Every other read in this package refuses
+    # a symlink — manifests, receipts, anchors, the witnessed journal — and the
+    # spec is the trust configuration itself, so it gets the same treatment.
+    # The check ran after ``resolve()``, which follows every link on the way,
+    # so nothing was ever left for it to catch. A symlink also breaks the one
+    # thing an auditor pins: they read the spec out of band and record its
+    # digest against a path, and the link can be repointed at other bytes
+    # afterwards without that path changing at all.
+    if spec_path.is_symlink():
+        raise VerifySpecError(
+            f"spec is a symlink; supply the regular file's path: {spec_path}"
+        )
     spec_path = spec_path.resolve()
     if spec_path.is_symlink() or not spec_path.is_file():
         raise VerifySpecError(f"spec is missing or not a regular file: {spec_path}")
