@@ -64,6 +64,12 @@ from typing import Any, NamedTuple
 
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 GATE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._/-]{0,127}\Z")
+#: The 8.3 shape an NTFS short name has: a stem of at most eight characters
+#: and an optional extension of at most three. A component of this shape that
+#: also carries a tilde-digit is the spelling Win32 hands out as an alias for
+#: a long name, and it opens the long name's file.
+SHORT_NAME_SHAPE_RE = re.compile(r"[^.]{1,8}(\.[^.]{1,3})?\Z")
+SHORT_NAME_TILDE_RE = re.compile(r"~[0-9]")
 
 CONTENT_KIND = "content"
 ATTESTED_KIND = "attested"
@@ -366,6 +372,25 @@ def _reject_oversized_text(value: str, label: str) -> str:
     return value
 
 
+def _aliases_natively(segment: str) -> bool:
+    """Whether Win32 resolves this component under a spelling nothing emits.
+
+    Two shapes, both of which open a file the fold model would call a
+    different name. Win32 strips trailing dots and spaces from a component
+    before the lookup, so ``"x.yaml."`` and ``"x.yaml "`` open ``"x.yaml"``;
+    and an NTFS volume with 8.3 generation on hands out a short name such as
+    ``"RULESF~1.YAM"`` that opens the long name's file. Neither spelling is
+    ever emitted by a directory listing, so no fold key can catch it.
+    """
+
+    if segment != segment.rstrip(". "):
+        return True
+    return (
+        SHORT_NAME_TILDE_RE.search(segment) is not None
+        and SHORT_NAME_SHAPE_RE.fullmatch(segment) is not None
+    )
+
+
 def _validate_relative_path(value: Any, label: str) -> str:
     """Reject anything that could escape the root or alias another entry."""
 
@@ -386,6 +411,19 @@ def _validate_relative_path(value: Any, label: str) -> str:
             raise CorpusError(f"{label} has an empty path segment: {value!r}")
         if segment in (".", ".."):
             raise CorpusError(f"{label} contains a relative segment: {value!r}")
+        if _aliases_natively(segment):
+            # Two spellings Win32 resolves that no enumeration emits, so the
+            # fold model cannot see them and a tombstone or a closed-world
+            # sweep would call the file absent while it still opens (peer
+            # review, round three). "rules.yaml." and "rules.yaml " are the
+            # same file as "rules.yaml" — the lookup strips trailing dots and
+            # spaces — and "RULESF~1.YAM" is the 8.3 short name NTFS hands
+            # out for a long one. A declared path spelled either way aliases
+            # a path this module cannot enumerate, so it is refused rather
+            # than modelled.
+            raise CorpusError(
+                f"{label} has a component Windows would alias: {_quoted(value)}"
+            )
     _reject_control_characters(value, label)
     for character in value:
         if unicodedata.category(character) == "Cn":
@@ -752,6 +790,24 @@ def _fold_survivor(index: _TombstoneIndex, relative: str) -> str | None:
     symlink refuses, as it does for every bound path, which also bounds the
     walk by the tree; :class:`_TombstoneIndex` reads each directory once and
     refuses a tree wider than its work budget.
+
+    What this search cannot see is a name the filesystem resolves but never
+    emits — Win32 strips trailing dots and spaces before a lookup, and NTFS
+    answers to 8.3 short names. Those are handled outside this function, from
+    both ends. A *declared* path spelled that way is refused at the schema
+    boundary by :func:`_aliases_natively`, so no tombstone names one. A *tree
+    entry* that answers to the tombstoned spelling is caught by the native
+    ``os.lstat`` of the exact path in :func:`verify_corpus_binding`, which
+    runs before this search and lets the host that is actually running decide
+    what its own lookup resolves.
+
+    That leaves one case modelled by neither, and it is deliberate: an entry
+    whose name aliases another *on Windows only*, examined on a POSIX host.
+    POSIX lstat will not resolve the alias and POSIX enumeration will not emit
+    it, so a tombstone can pass on Linux for a tree that would still hold the
+    file on Windows. Verifying on the filesystem you intend to use is the
+    remedy; this module refuses what it can see and does not pretend to model
+    a lookup it is not running.
     """
 
     def search(
@@ -1165,6 +1221,25 @@ def verify_corpus_binding(
     # per removed path was what made the pass quadratic.
     tombstones = _TombstoneIndex(root)
     for path in removed:
+        # Ask the filesystem about the tombstoned spelling itself before
+        # asking the fold model about it. _fold_survivor decides absence from
+        # the names iterdir emits, and Win32 lookup resolves names enumeration
+        # never emits: a trailing dot or space is stripped before the lookup,
+        # and an NTFS 8.3 short name answers for a long one. Both would be
+        # reported absent by a search over the listing while the file opens
+        # under the tombstoned name (peer review, round three). The host that
+        # runs knows its own aliases; ask it first.
+        try:
+            os.lstat(root / path)
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+        except OSError as exc:
+            raise CorpusError(
+                "cannot check whether a removed path is still in the tree, so "
+                f"the tombstone is unverifiable: {path} ({exc.strerror})"
+            ) from exc
+        else:
+            raise CorpusError(f"removed path is still present in the tree: {path}")
         survivor = _fold_survivor(tombstones, path)
         if survivor is None:
             continue

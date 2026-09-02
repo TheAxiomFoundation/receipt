@@ -1299,6 +1299,12 @@ def test_refuses_a_removed_path_that_survives_under_an_aliasing_spelling(
     answers to the tombstoned name on a case-insensitive consumer. Found by
     peer review. On a case-insensitive host the rename below is the same file
     under a new spelling, and it refuses there too.
+
+    Which of the two refusals speaks depends on the host, and the assertion
+    below follows the host rather than assuming one: where the tombstoned
+    spelling still resolves natively, the exact-path probe added for F1
+    answers first and names that spelling; where it does not, the fold search
+    names the survivor it found.
     """
 
     import os
@@ -1322,9 +1328,15 @@ def test_refuses_a_removed_path_that_survives_under_an_aliasing_spelling(
         tmp_path / "retired/apply-manifest.json",
         tmp_path / "retired/APPLY-MANIFEST.JSON",
     )
+    natively_aliased = (tmp_path / "retired/apply-manifest.json").exists()
     with pytest.raises(CorpusError, match="still present in the tree") as caught:
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
-    assert "retired/APPLY-MANIFEST.JSON" in str(caught.value)
+    if natively_aliased:
+        assert str(caught.value) == (
+            "removed path is still present in the tree: retired/apply-manifest.json"
+        )
+    else:
+        assert "retired/APPLY-MANIFEST.JSON" in str(caught.value)
 
 
 def test_refuses_an_unlisted_content_file_varied_in_case_and_normalization_at_once(
@@ -1590,40 +1602,6 @@ def _tombstone_rows(path: str, body: str) -> list[dict[str, object]]:
     return reindex(rows)
 
 
-def test_a_tombstone_probe_that_cannot_stat_an_entry_refuses(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Binds F7: the intermediate-component probe sat outside the handler.
-
-    ``entry.lstat()`` was called in the same expression as the symlink test,
-    outside the ``except OSError`` arm, so an entry in a directory that is
-    readable but not searchable raised ``PermissionError`` — a bare crash out
-    of the verifier where the module's own rule is that a failure to look is a
-    refusal, not an absence. Without the fix this test errors with
-    PermissionError instead of raising CorpusError.
-
-    The directory is spelled U+00DF, whose fold key is "ss": no filesystem
-    resolves the tombstoned spelling natively, so the exact-path probe finds
-    nothing and the fold search runs on every host.
-    """
-
-    import os
-
-    body = '{"applied": true}\n'
-    write_tree(tmp_path)
-    (tmp_path / "ß/beta").mkdir(parents=True)
-    (tmp_path / "ß/beta/apply-manifest.json").write_text(body)
-    rows = _tombstone_rows("ss/beta/apply-manifest.json", body)
-    # Readable, so the listing succeeds; not searchable, so stat of a child
-    # inside it fails with EACCES.
-    os.chmod(tmp_path / "ß", 0o444)
-    try:
-        with pytest.raises(CorpusError, match="tombstone is unverifiable"):
-            verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
-    finally:
-        os.chmod(tmp_path / "ß", 0o755)
-
-
 def _two_tombstone_rows() -> list[dict[str, object]]:
     """A journal retiring two attested paths inside the same directory."""
 
@@ -1695,3 +1673,192 @@ def test_the_tombstone_index_is_shared_across_removed_paths(
         tmp_path, render_journal(_two_tombstone_rows()), spec=corpus_spec()
     )
     assert verification.removed_paths == (".axiom/a.json", ".axiom/b.json")
+
+
+def test_refuses_a_declared_path_with_a_trailing_dot_component(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds F1: Win32 strips trailing dots before the lookup.
+
+    ``rules/tax/rate.yaml.`` and ``rules/tax/rate.yaml`` are one file there,
+    and no listing emits the dotted spelling, so nothing in the fold model
+    can pair them. A declared path spelled that way is refused instead.
+    Without the fix it is an ordinary path and binds a second row against the
+    same file.
+    """
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+    rows[0]["path"] = "rules/benefit/amount.yaml."
+    with pytest.raises(CorpusError, match="component Windows would alias"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_refuses_a_declared_path_with_a_trailing_space_component(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds F1: the same lookup strips trailing spaces.
+
+    A directory component is enough — the alias need not be the file itself.
+    Without the fix the path validates and the trailing space is invisible in
+    every rendered verdict.
+    """
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+    rows[0]["path"] = "rules/benefit /amount.yaml"
+    with pytest.raises(CorpusError, match="component Windows would alias"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_refuses_a_declared_path_shaped_like_an_8_3_short_name(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds F1: NTFS hands out 8.3 short names that open the long name.
+
+    ``RULESF~1.YAM`` is not emitted by any listing, so the fold model cannot
+    pair it with the long name it opens. Refused at the schema boundary; a
+    path of that shape but too long to be a short name is left alone, which
+    is what the second half asserts.
+    """
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+    rows[0]["path"] = "rules/RULESF~1.YAM"
+    with pytest.raises(CorpusError, match="component Windows would alias"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+    rows = journal_rows()
+    rows[0]["path"] = "rules/benefit/long~1name.yaml"
+    with pytest.raises(CorpusError, match="not bound by the witnessed journal") as other:
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+    assert "Windows would alias" not in str(other.value)
+
+
+def _hiding_iterdir(directory_name: str, hidden: str):
+    """An ``iterdir`` that omits one entry, the way Win32 lookup aliases behave.
+
+    Win32 resolves names no enumeration emits: it strips trailing dots and
+    spaces before a lookup, and NTFS answers to 8.3 short names. No POSIX host
+    does either, so the only way to put a verifier on this machine in front of
+    that filesystem is to hide from the listing a name the OS still resolves.
+    That is the whole premise of F1, and it is what this wrapper models.
+    """
+
+    real = pathlib.Path.iterdir
+
+    def iterdir(self: pathlib.Path):
+        entries = list(real(self))
+        if self.name == directory_name:
+            return iter([entry for entry in entries if entry.name != hidden])
+        return iter(entries)
+
+    return iterdir
+
+
+def test_a_tombstoned_path_the_listing_hides_but_the_host_resolves_refuses(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds F1: absence read off a listing is not absence.
+
+    _fold_survivor decided whether a removed path survived from the names
+    ``iterdir`` emits, and Win32 lookup resolves names enumeration never emits.
+    So a retired apply manifest that still opens under the tombstoned spelling
+    was reported gone, the tombstone was honoured, and the verdict listed the
+    path under removedPaths while the file sat on disk.
+
+    The exact-path ``os.lstat`` now runs before the fold search, letting the
+    host that is actually running answer for its own lookup rules. Without it
+    this verification passes and returns the path as removed.
+    """
+
+    body = '{"applied": true}\n'
+    write_tree(tmp_path)
+    (tmp_path / "retired").mkdir()
+    (tmp_path / "retired/apply-manifest.json").write_text(body)
+    rows = _tombstone_rows("retired/apply-manifest.json", body)
+    monkeypatch.setattr(
+        pathlib.Path, "iterdir", _hiding_iterdir("retired", "apply-manifest.json")
+    )
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+    assert str(caught.value) == (
+        "removed path is still present in the tree: retired/apply-manifest.json"
+    )
+
+
+def _mutating_iterdir(directory_name: str, mutate):
+    """An ``iterdir`` that changes the tree after listing it, deterministically.
+
+    The window between listing a directory and stat-ing an entry it named is a
+    real one; firing the mutation from inside the listing call is only how it
+    is made to happen on every run.
+    """
+
+    real = pathlib.Path.iterdir
+
+    def iterdir(self: pathlib.Path):
+        entries = list(real(self))
+        if self.name == directory_name:
+            mutate(self)
+        return iter(entries)
+
+    return iterdir
+
+
+def test_a_tombstone_entry_that_vanishes_after_the_listing_is_not_a_survivor(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds F7: a listed entry may be gone by the time it is stat-ed.
+
+    ``entry.lstat()`` sat outside the ``except OSError`` arm, so a directory
+    deleted between the listing and the probe raised FileNotFoundError out of
+    the verifier. Without the fix this test errors with FileNotFoundError;
+    with it the entry is simply not a survivor, and the tombstone — whose path
+    really is gone — is honoured.
+    """
+
+    body = '{"applied": true}\n'
+    write_tree(tmp_path)
+    (tmp_path / "retired/vanishing").mkdir(parents=True)
+    rows = _tombstone_rows("retired/vanishing/apply-manifest.json", body)
+    monkeypatch.setattr(
+        pathlib.Path,
+        "iterdir",
+        _mutating_iterdir("retired", lambda d: (d / "vanishing").rmdir()),
+    )
+    verification = verify_corpus_binding(
+        tmp_path, render_journal(rows), spec=corpus_spec()
+    )
+    assert verification.removed_paths == ("retired/vanishing/apply-manifest.json",)
+
+
+def test_a_tombstone_entry_that_cannot_be_stat_after_the_listing_refuses(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds F7: the same probe leaked PermissionError.
+
+    A directory that is readable but not searchable lists fine and refuses
+    every stat of a child. The permission drops after the listing here, so the
+    exact-path probe has already returned ENOENT and the fold search is the
+    one that meets the error. Without the fix it is a bare PermissionError out
+    of the verifier; with it, the module's own rule applies — a failure to
+    look is not an absence.
+    """
+
+    import os
+
+    body = '{"applied": true}\n'
+    write_tree(tmp_path)
+    (tmp_path / "retired/sub").mkdir(parents=True)
+    rows = _tombstone_rows("retired/sub/apply-manifest.json", body)
+    monkeypatch.setattr(
+        pathlib.Path,
+        "iterdir",
+        _mutating_iterdir("retired", lambda d: os.chmod(d, 0o444)),
+    )
+    try:
+        with pytest.raises(CorpusError, match="tombstone is unverifiable"):
+            verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+    finally:
+        os.chmod(tmp_path / "retired", 0o755)
