@@ -673,7 +673,8 @@ def test_an_abbreviated_ledger_repo_sha_is_refused(tmp_path: pathlib.Path) -> No
 
 
 def test_a_symbolic_ledger_repo_sha_is_refused(tmp_path: pathlib.Path) -> None:
-    """"HEAD" is truthy and binds nothing."""
+    """A symbolic name is truthy and binds nothing: it names whatever the
+    repository points it at today."""
 
     candidate = base_repository(tmp_path)
     append_one_row(candidate, ledgerRepoSha="HEAD")

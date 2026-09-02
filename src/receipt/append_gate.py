@@ -237,8 +237,9 @@ def check_gate_only_confinement(
     prefix, the append-only diff, the row bindings, and the release history
     are all skipped. Surface classification never checked that DATA and GATE
     covered the changed set, so a proposal that added a gate file AND
-    rewrote an unclassified file under the release root — ``releases/README.md``,
-    say — was accepted with none of those checks run. An unclassified change
+    rewrote an unclassified file under the release root — say
+    ``releases/README.md`` — was accepted with none of those checks run.
+    An unclassified change
     inside the release root is refused here; the rest are returned for the
     caller to name in its success text, so an unclassified change riding a
     gate-only proposal is never silent.
@@ -624,7 +625,9 @@ def check_append_only(
     return len(lines) - len(base_lines)
 
 
-def _manifest_at_ref(base: _BaseCommit, candidate: _CandidateTree) -> dict[str, Any]:
+def _manifest_at_ref(
+    base: _BaseCommit, candidate: _CandidateTree
+) -> dict[str, Any]:
     relative = candidate.prefix_path.relative_to(candidate.root).as_posix()
     try:
         text = subprocess.check_output(
@@ -931,7 +934,9 @@ def verify_append_gate(
     # and again at the release history, so a branch that moved during the run
     # was read at different commits inside a single answer.
     base = (
-        _BaseCommit(ref=base_ref, commit=_resolve_base_commit(base_ref, candidate))
+        _BaseCommit(
+            ref=base_ref, commit=_resolve_base_commit(base_ref, candidate)
+        )
         if base_ref
         else None
     )
@@ -1004,7 +1009,9 @@ def verify_append_gate(
         if base is not None and base.ref != base.commit
         else ""
     )
-    suffix = f", +{appended} appended vs base{resolved}" if appended is not None else ""
+    suffix = (
+        f", +{appended} appended vs base{resolved}" if appended is not None else ""
+    )
     release_suffix = f", release {release_index}" if release_index is not None else ""
     return (
         f"thesis-facts append check OK: {len(lines)} rows, immutable prefix "
