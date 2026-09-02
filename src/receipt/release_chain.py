@@ -2183,7 +2183,7 @@ def assert_release_root_index_regular(root: pathlib.Path, spec: ChainSpec) -> No
         if modes:
             raise ReleaseChainError(
                 "release root is not a directory while the index records "
-                f"{len(modes)} entries under it"
+                f"{len(modes)} {'entry' if len(modes) == 1 else 'entries'} under it"
             )
         return
     # rglob does not descend through symlinked directories, and a symlink the
