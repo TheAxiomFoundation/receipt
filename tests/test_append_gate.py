@@ -245,6 +245,20 @@ def append_one_row(candidate: Candidate, **overrides: Any) -> None:
     write_ledger(candidate.root, rows)
 
 
+def stage(candidate: Candidate) -> None:
+    """Record the working tree in the candidate's index, as a proposal does.
+
+    A pull request is reviewed from a checkout whose index git wrote from the
+    commit under review, so a mode the proposal changed is in the index too. A
+    test that only chmods the working tree leaves the index disagreeing with
+    it, which is now refused in its own words before any base comparison, so
+    every mode-change case below stages first and the base comparison is what
+    fires.
+    """
+
+    git(candidate.root, "add", "-A")
+
+
 def add_gate_file(candidate: Candidate) -> None:
     script = candidate.root / GATE_FILE
     script.parent.mkdir(parents=True, exist_ok=True)
@@ -594,6 +608,7 @@ def test_the_ledger_cannot_be_made_executable_by_a_proposal(
     append_one_row(candidate)
     ledger = candidate.root / CHAIN_SPEC.state_relative
     ledger.chmod(ledger.stat().st_mode | 0o111)
+    stage(candidate)
 
     with pytest.raises(AppendError) as refusal:
         run_gate(candidate)
@@ -613,6 +628,7 @@ def test_the_frozen_prefix_cannot_be_made_executable_by_a_proposal(
     append_one_row(candidate)
     prefix = candidate.root / CHAIN_SPEC.prefix_relative
     prefix.chmod(prefix.stat().st_mode | 0o111)
+    stage(candidate)
 
     with pytest.raises(AppendError) as refusal:
         run_gate(candidate)
@@ -831,6 +847,7 @@ def test_dropping_the_owner_execute_bit_is_a_mode_change_whatever_others_keep(
     )
     append_one_row(executable_base)
     ledger.chmod(0o655)
+    stage(executable_base)
 
     with pytest.raises(AppendError) as refusal:
         run_gate(executable_base)
@@ -931,6 +948,7 @@ def test_dropping_a_release_files_owner_execute_bit_is_refused(
     )
     append_one_row(executable_base)
     readme.chmod(0o655)
+    stage(executable_base)
 
     with pytest.raises(AppendError) as refusal:
         run_gate(executable_base)
@@ -1208,3 +1226,96 @@ def test_the_release_history_pass_resolves_the_base_before_its_checkout_guard(
     assert str(refusal.value).startswith(
         "cannot resolve base ref 'refs/heads/does-not-exist' to a commit:"
     )
+
+
+def test_a_symlink_staged_over_a_regular_state_file_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds F2: the checkout settings do not prove how the tree was
+    materialised. With core.symlinks true and the index holding a 120000
+    entry for the ledger, a working tree that carries a plain file there is
+    not what git recorded — the exact shape core.symlinks false produces, and
+    the shape a filesystem without symlinks leaves behind whatever the config
+    says. Nothing compared the two, so the byte and mode checks ran on a
+    regular file while git held a link."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    target = candidate.root / "link-target"
+    target.write_text("outside.jsonl", encoding="utf-8")
+    blob = git(candidate.root, "hash-object", "-w", "link-target")
+    target.unlink()
+    git(
+        candidate.root,
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        f"120000,{blob},{CHAIN_SPEC.state_relative.as_posix()}",
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "candidate index records a symlink at ledger/official_observations.jsonl "
+        "but the working tree holds a regular file"
+    )
+
+
+def test_a_state_file_whose_mode_the_working_tree_lost_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds F2: core.fileMode true is a claim, not evidence. Here the index
+    records the ledger executable and the working tree does not carry the bit
+    — a checkout on a filesystem that dropped it, or one that was chmodded
+    behind git's back. The base comparison would have read the tree's 100644
+    as the proposal's own mode; it refuses to compare instead."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    git(
+        candidate.root,
+        "update-index",
+        "--chmod=+x",
+        "--",
+        CHAIN_SPEC.state_relative.as_posix(),
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "candidate working tree mode for ledger/official_observations.jsonl "
+        "disagrees with its index entry (100755 vs 100644)"
+    )
+
+
+def test_a_release_file_whose_mode_the_working_tree_lost_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds F2 at the other call site: the release-history pass compares the
+    same kind of stat for every base release file, and it is evidence under
+    the same condition. This refusal comes from that pass, before the state
+    files are reached."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    git(candidate.root, "update-index", "--chmod=+x", "--", "releases/README.md")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "candidate working tree mode for releases/README.md disagrees with "
+        "its index entry (100755 vs 100644)"
+    )
+
+
+def test_the_index_check_passes_over_a_path_the_index_does_not_hold(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The other half of F2: a new untracked file has no index entry to
+    disagree with, so there is nothing to compare and nothing to refuse —
+    without which every release proposal, which adds files, would refuse."""
+
+    candidate = base_repository(tmp_path)
+    (candidate.root / "NOTES.md").write_text("new\n", encoding="utf-8")
+
+    release_chain.assert_index_agrees_with_tree(candidate.root, "NOTES.md")

@@ -31,6 +31,7 @@ import json
 import os
 import pathlib
 import re
+import stat
 import subprocess
 import tempfile
 from collections.abc import Mapping
@@ -1653,6 +1654,83 @@ def assert_file_modes_authoritative(root: pathlib.Path) -> None:
         )
 
 
+def _observed_git_category(path: pathlib.Path) -> str:
+    """The git mode a working-tree entry would be recorded as, or why not."""
+
+    try:
+        entry = path.lstat()
+    except FileNotFoundError:
+        return "absent"
+    if stat.S_ISLNK(entry.st_mode):
+        return "120000"
+    if stat.S_ISDIR(entry.st_mode):
+        return "040000"
+    if not stat.S_ISREG(entry.st_mode):
+        return "non-regular"
+    # Git keys the executable category on the owner bit alone; see
+    # append_gate.check_state_modes for the reasoning.
+    return "100755" if entry.st_mode & 0o100 else "100644"
+
+
+def assert_index_agrees_with_tree(
+    root: pathlib.Path, relative: pathlib.PurePosixPath | str
+) -> None:
+    """Require a working-tree entry to be the mode and type the index records.
+
+    ``core.fileMode`` and ``core.symlinks`` state what the checkout claims,
+    not how it was materialised: either can be set after the checkout, and a
+    filesystem that drops mode bits leaves ``core.fileMode`` true while the
+    working tree carries nothing. Neither setting is evidence about this
+    file. The index is: git wrote it from the same checkout every comparison
+    here reads, and it records the mode and type this path is supposed to
+    have. A disagreement means the stat these comparisons read describes
+    something other than what git would record — a dropped executable bit
+    read as a mode change the proposal never made, or an ambient one read as
+    the mode the proposal claims — so refuse instead of comparing.
+
+    A path with no index entry is a new, untracked file with nothing to
+    compare against, and returns.
+    """
+
+    path = (
+        relative.as_posix()
+        if isinstance(relative, pathlib.PurePosixPath)
+        else str(relative)
+    )
+    completed = _git_run(root, ["ls-files", "-s", "-z", "--", path])
+    if completed.returncode != 0:
+        diagnostic = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise ReleaseChainError(f"cannot read the index entry for {path}: {diagnostic}")
+    records = [record for record in completed.stdout.split(b"\0") if record]
+    if not records:
+        return
+    if len(records) > 1:
+        raise ReleaseChainError(f"candidate index holds an unmerged entry at {path}")
+    try:
+        metadata, _raw_path = records[0].split(b"\t", 1)
+        index_mode, _object_id, _stage = metadata.decode("ascii").split(" ")
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ReleaseChainError(f"cannot parse the index entry for {path}") from exc
+
+    observed = _observed_git_category(root / pathlib.PurePosixPath(path))
+    if index_mode == "120000":
+        if observed != "120000":
+            raise ReleaseChainError(
+                f"candidate index records a symlink at {path} but the working "
+                "tree holds a regular file"
+            )
+        return
+    if index_mode not in {"100644", "100755"}:
+        raise ReleaseChainError(
+            f"candidate index records a non-regular entry at {path}: {index_mode}"
+        )
+    if observed != index_mode:
+        raise ReleaseChainError(
+            f"candidate working tree mode for {path} disagrees with its index "
+            f"entry ({index_mode} vs {observed})"
+        )
+
+
 def verify_release_history_immutable(
     root: pathlib.Path, base_ref: str, spec: ChainSpec
 ) -> tuple[str, set[str], dict[str, GitEntry]]:
@@ -1677,6 +1755,10 @@ def verify_release_history_immutable(
             raise ReleaseChainError(
                 f"existing release file was deleted relative to {commit}: {relative}"
             )
+        # The mode read below is only evidence if the working tree carries
+        # what git recorded for this path, which the config settings alone do
+        # not establish.
+        assert_index_agrees_with_tree(root, relative)
         # Git keys the executable category on the owner bit alone; see
         # append_gate.check_state_modes for the reasoning.
         candidate_mode = "100755" if current.stat().st_mode & 0o100 else "100644"
