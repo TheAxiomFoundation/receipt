@@ -670,14 +670,23 @@ def test_every_non_passing_outcome_is_marked_in_the_verdict(
     )
     assert (
         main(
-            ["verify", "--spec", str(root / "verification/spec.py"), "--root", str(root)]
+            [
+                "verify",
+                "--spec",
+                str(root / "verification/spec.py"),
+                "--root",
+                str(root),
+            ]
         )
         == EXIT_OK
     )
     out = capsys.readouterr().out
     non_passing = sorted(GATE_OUTCOMES - {PASS})
-    assert f"{len(non_passing)} of {len(non_passing) + 1} declared gate(s) did not " \
-        "pass cleanly" in out
+    summary = (
+        f"{len(non_passing)} of {len(non_passing) + 1} declared gate(s) did not "
+        "pass cleanly"
+    )
+    assert summary in out
     for outcome in non_passing:
         (line,) = [
             entry for entry in out.splitlines() if f"- guard/{outcome}" in entry
