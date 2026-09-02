@@ -50,6 +50,16 @@ Deliberately outside the mutation contract:
   Every pinned bundle anchor has one, and a mutation that adds an anchor
   changes the bundle bytes and trips the commitment mismatch first, so the
   battery executes the check on every case and can fire it on none;
+- the baseline compares an anchor's root SPKI and allowed signers with its
+  code identity only when a witness selects that anchor; the port compares
+  every anchor's declared values with its identity at bundle load.  Every
+  pinned bundle agrees with its identities, so no case here reaches it;
+- the baseline ignores bundle-claim fields on an unavailable v1 witness;
+  the port resolves and counts a named bundle.  The genesis witness names
+  none;
+- the baseline decodes a policy OID's first subidentifier from one octet;
+  the port decodes it in full.  Every pinned policy OID's first
+  subidentifier fits one octet, so both decode the same here;
 - a true ``genTime``-after-wall-clock mutation is no longer reachable through
   the CLI because every pinned signed token is now in the past and the CLI has
   no ``--now`` input.  Editing only the declared time reaches the later claim

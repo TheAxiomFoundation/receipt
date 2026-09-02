@@ -9,16 +9,23 @@ through a frozen :class:`TsaSpec` supplied by consumer code.  This module
 ships no repository-specific trust defaults and performs no chain walk or
 producer signature verification.
 
-The port is stricter than the baseline in five places, each a refusal the
+The port is stricter than the baseline in seven places, each a refusal the
 pinned tree never presents and so each outside the differential contract: a
-legacy witness over a bundle configuring more than one anchor, a bundle
-configuring an anchor the spec carries no identity for, an unavailable
-witness of either schema whose reason is not a string, and one that carries
-token evidence at the witness level (the v2 per-anchor outcome has always
-refused both).  ``tests/test_tsa.py`` binds all five.  Because every bundle
-anchor is now identity-checked at load, ``_select_anchor``'s own identity
-refusal can no longer fire from within this module; its text is kept
-verbatim, as ported, and as defence in depth.
+legacy witness over a bundle configuring more than one anchor; a bundle
+configuring an anchor the spec carries no identity for, or one whose
+declared root SPKI or allowed signers differ from that identity (compared
+at load for every anchor, not only the one a witness selects); an
+unavailable witness of either schema whose reason is not a string, or that
+carries token evidence at the witness level (the v2 per-anchor outcome has
+always refused both); and an unavailable legacy witness that names a bundle
+by any of its three claim fields, whose claim is then resolved and counted
+where the baseline ignored those fields.  The port also corrects one
+baseline defect: ``_decode_oid`` read only the first octet of a policy OID
+as its combined first two arcs, so a first subidentifier spanning several
+octets (2.999.3) decoded wrongly.  ``tests/test_tsa.py`` binds all of
+these.  Because every bundle anchor is now identity-checked at load,
+``_select_anchor``'s own identity refusal can no longer fire from within
+this module; its text is kept verbatim, as ported, and as defence in depth.
 """
 
 from __future__ import annotations
@@ -418,18 +425,32 @@ def _read_der_tlv(data: bytes, offset: int) -> tuple[int, bytes, int]:
 def _decode_oid(data: bytes) -> str:
     if not data:
         raise TsaError("empty policy OID in RFC 3161 token")
-    first = data[0]
-    values = [min(first // 40, 2), first - min(first // 40, 2) * 40]
+    # Every subidentifier, the first included, is base-128 with continuation
+    # bits, and the first one carries the first two arcs combined (X*40+Y for
+    # X in 0..1, 80+Y for X = 2). The baseline read only the first octet as
+    # that combined value, so 2.999.3 (88 37 03) decoded as 2.56.55.3: a
+    # legitimate policy refused, or a disallowed one aliased onto an allowed
+    # spelling (peer review). Decoded in full here; a corrected defect, not a
+    # stricter rule, and recorded as such in the module docstring.
+    subidentifiers: list[int] = []
     current = 0
     continuation = False
-    for byte in data[1:]:
+    for byte in data:
         current = (current << 7) | (byte & 0x7F)
         continuation = bool(byte & 0x80)
         if not continuation:
-            values.append(current)
+            subidentifiers.append(current)
             current = 0
     if continuation:
         raise TsaError("truncated policy OID in RFC 3161 token")
+    first = subidentifiers[0]
+    if first < 40:
+        values = [0, first]
+    elif first < 80:
+        values = [1, first - 40]
+    else:
+        values = [2, first - 80]
+    values.extend(subidentifiers[1:])
     return ".".join(str(value) for value in values)
 
 
@@ -635,10 +656,37 @@ def _load_trust_bundle(
     bundle_id = str(payload["bundleId"])
     for anchor in anchors:
         anchor_id = str(anchor["id"])
-        if spec.identity(bundle_id, anchor_id) is None:
+        identity = spec.identity(bundle_id, anchor_id)
+        if identity is None:
             raise TsaError(
                 f"TSA anchor {anchor_id} in bundle {bundle_id} has no "
                 "verifier code identity"
+            )
+        # Existence is not agreement. _select_anchor compares an anchor's
+        # root SPKI and allowed signers with its identity, but only for the
+        # anchor a witness selects; a rotation bundle reuses the active
+        # anchor id, _supplemental_candidates skips ids already active, and
+        # a transition could activate a bundle whose anchor contradicts the
+        # identity pinned for it without any selection ever comparing the
+        # two (peer review). Compared here for every anchor, at load, on the
+        # declared values; _select_anchor still checks the certificate itself.
+        root = anchor.get("rootCertificate")
+        declared_root = root.get("spkiSha256") if isinstance(root, dict) else None
+        if declared_root != identity.root_spki_sha256:
+            raise TsaError(
+                f"TSA anchor {anchor_id} in bundle {bundle_id} declares a root "
+                "SPKI that differs from its verifier code identity"
+            )
+        signers = anchor.get("allowedSigners")
+        declared_signers = (
+            {signer.get("spkiSha256") for signer in signers if isinstance(signer, dict)}
+            if isinstance(signers, list)
+            else set()
+        )
+        if declared_signers != set(identity.signer_spki_sha256):
+            raise TsaError(
+                f"TSA anchor {anchor_id} in bundle {bundle_id} declares allowed "
+                "signers that differ from its verifier code identity"
             )
     return path, payload
 

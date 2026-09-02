@@ -24,6 +24,8 @@ import pytest
 
 from receipt.canonical import canonical_bytes, canonical_sha256
 from receipt.tsa import (
+    _decode_oid,
+    _load_trust_bundle,
     _BUNDLE_CLAIM_FIELDS,
     TokenEvidence,
     TrustBundleSpec,
@@ -1225,3 +1227,130 @@ def test_refuses_an_unavailable_legacy_witness_naming_an_older_multi_anchor_bund
     assert str(caught.value) == (
         "legacy witness schema requires a single-anchor bundle; tsa-anchors-v1 has 2"
     )
+
+
+def test_decodes_a_policy_oid_whose_first_subidentifier_spans_octets() -> None:
+    """The baseline read one octet as the combined first two arcs.
+
+    DER encodes the first subidentifier (X*40+Y, or 80+Y for X = 2) in
+    base-128 like every other, so 2.999.3 is 88 37 03 and decoded as
+    2.56.55.3: a legitimate policy refused, or a disallowed one aliased onto
+    an allowed spelling. Found by peer review; a corrected defect.
+    """
+
+    assert _decode_oid(bytes([0x88, 0x37, 0x03])) == "2.999.3"
+    assert _decode_oid(bytes([0x2A, 0x03])) == "1.2.3"
+    assert _decode_oid(bytes([0x88, 0x37, 0x81, 0x00])) == "2.999.128"
+    with pytest.raises(TsaError, match="truncated policy OID"):
+        _decode_oid(bytes([0x88]))
+
+
+def test_verifies_a_real_token_under_a_policy_whose_first_arc_spans_octets(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A genuine token stamped under policy 2.999.3 verifies end to end.
+
+    On the previous decoder the token's policy read as 2.56.55.3, outside the
+    anchor's allowed policies, and the witness was refused.
+    """
+
+    authority = build_local_tsa(tmp_path / "gamma", "gamma", "2.999.3")
+    gamma = LocalAnchor(
+        anchor_id="gamma-root-2026",
+        endpoint="https://gamma.timestamp.invalid/tsr",
+        tsa=authority,
+        root_pins=certificate_pins(authority.root_pem),
+        signer_pins=certificate_pins(authority.signer_pem),
+    )
+    tree = build_witness_tree(tmp_path / "tree", [gamma])
+    evidence = verify_tree(tree)
+    assert evidence.status == "available"
+    assert evidence.tokens[0].policy_oid == "2.999.3"
+
+
+def test_refuses_at_load_a_bundle_anchor_that_contradicts_its_identity(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_alpha: LocalTsa,
+) -> None:
+    """Existence of an identity is not agreement with it.
+
+    _select_anchor compares root and signers with the identity only for the
+    anchor a witness selects. A rotation bundle reuses the active anchor id,
+    so a transition could activate a bundle whose anchor lists a signer its
+    pinned identity does not, without any selection comparing the two (peer
+    review). Every anchor is compared at load, on its declared values.
+    """
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    rotated = certificate_pins(rotated_alpha.signer_pem)
+    reference, honest = add_bundle_version(
+        tree, local_anchors[:1], version=2, signers={alpha.anchor_id: rotated}
+    )
+    # The v2 identity pins the OLD signer while the v2 bundle lists the new one.
+    contradictory = TsaSpec(
+        trust_bundles=honest.trust_bundles,
+        tsa_identities=(
+            *honest.tsa_identities[:-1],
+            dataclasses.replace(
+                honest.tsa_identities[-1],
+                signer_spki_sha256=frozenset({alpha.signer_pins["spkiSha256"]}),
+            ),
+        ),
+        legacy_witness_bundle_id=honest.legacy_witness_bundle_id,
+    )
+    with pytest.raises(TsaError) as loading:
+        _load_trust_bundle(tree.records, reference, spec=contradictory)
+    assert str(loading.value) == (
+        "TSA anchor alpha-root-2026 in bundle tsa-anchors-v2 declares allowed "
+        "signers that differ from its verifier code identity"
+    )
+    # The pending-rotation path: the same bundle offered as a transition
+    # update is refused before anything activates.
+    with pytest.raises(TsaError, match="declares allowed signers that differ"):
+        verify_witness(
+            tree.record,
+            spec=contradictory,
+            records=tree.records,
+            trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+            transition_bundle_updates=[reference],
+        )
+    # A root contradiction is caught the same way.
+    wrong_root = TsaSpec(
+        trust_bundles=honest.trust_bundles,
+        tsa_identities=(
+            *honest.tsa_identities[:-1],
+            dataclasses.replace(honest.tsa_identities[-1], root_spki_sha256="0" * 64),
+        ),
+        legacy_witness_bundle_id=honest.legacy_witness_bundle_id,
+    )
+    with pytest.raises(TsaError, match="declares a root SPKI that differs"):
+        _load_trust_bundle(tree.records, reference, spec=wrong_root)
+
+
+def test_an_unavailable_legacy_witness_with_a_partial_bundle_claim_is_refused(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """The divergence, stated and bound: the baseline ignored these fields.
+
+    An unavailable v1 marker that names a bundle by any claim field has that
+    claim resolved like an available witness's, so a partial claim refuses
+    where the baseline accepted it (peer review asked for the test).
+    """
+
+    tree = build_witness_tree(
+        tmp_path,
+        local_anchors[:1],
+        schema="thesis_rfc3161_witness_v1",
+        available=False,
+    )
+    rewrite_witness(
+        tree,
+        lambda payload: [
+            payload.pop(field, None) for field in ("trustBundlePath", "trustBundleSha256")
+        ],
+    )
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == "witness lacks a TSA trust-bundle path"
