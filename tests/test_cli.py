@@ -875,7 +875,15 @@ SPEC = VerificationSpec(
         schema_version="t",
         producer_public_key_filename="p.pub",
         producer_spki_sha256="{spki}",
-        anchors={{}},
+        anchors={{
+            "alpha": AnchorSpec(
+                filename="alpha-root.pem",
+                pem_sha256="c" * 64,
+                policy_oid="1.3.6.1.4.1.99999.1.1",
+                signer_certificate_sha256="d" * 64,
+                signer_spki_sha256="e" * 64,
+            ),
+        }},
     ),
     corpus=CorpusSpec(
         schema_version="t",
@@ -1050,6 +1058,42 @@ def test_pin_inference_yields_only_to_an_explicit_choice(repo: pathlib.Path) -> 
         verify_state=True,
         enforce_production_pins=False,
     )
+
+
+def test_a_chain_resigned_under_a_substituted_key_refuses_by_spki_pin(
+    repo: pathlib.Path,
+) -> None:
+    """The pin must be what refuses, and it must say so.
+
+    A producer key swapped for a freshly generated one, with every manifest
+    re-signed under it, is internally valid at every step: the signature
+    verifies against the key sitting in the anchor directory. Only the SPKI
+    fingerprint in the consumer's committed spec distinguishes it, and the
+    refusal must name that fingerprint rather than arriving as some later,
+    incidental failure — which is what a spec with no producer pin used to
+    produce, having skipped the comparison entirely.
+    """
+
+    from receipt.release_chain import ReleaseChainError, verify_release_chain
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    private_pem, public_pem = generate_signing_keypair()
+    (repo / "releases/anchors/producer-ed25519.pub").write_bytes(public_pem)
+    manifest = manifest_stem(repo)
+    manifest.with_suffix(".producer.sig").write_bytes(
+        sign_payload(private_pem, manifest.read_bytes(), domain=b"")
+    )
+
+    with pytest.raises(
+        ReleaseChainError, match="producer public-key SPKI is not code-pinned"
+    ):
+        verify_release_chain(
+            repo,
+            spec=spec.chain,
+            require_chain=True,
+            verify_state=True,
+            enforce_production_pins=True,
+        )
 
 
 def _git(repo: pathlib.Path, *args: str) -> None:

@@ -201,6 +201,35 @@ TIME_STAMP_RE = re.compile(
     r"(?P<second>[0-9]{2})(?P<fraction>\.[0-9]+)?\s+"
     r"(?P<year>[0-9]{4})\s+GMT\Z"
 )
+#: A dotted-decimal object identifier as OpenSSL prints one. Arcs carry no
+#: leading zeros, because a spec pinning "1.02" would be comparing against a
+#: spelling no RFC 3161 receipt ever reports.
+OID_RE = re.compile(r"(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*))+\Z")
+
+
+def _spec_relative_path(value: Any, label: str) -> pathlib.PurePosixPath:
+    """Require a spec path that can only ever address the tree under audit.
+
+    Every one of these is joined onto the auditor's root. A string joins by
+    a different rule than a path does, a ``PureWindowsPath`` joins by parts
+    that address a different file than its spelling suggests, and an
+    absolute path or one carrying ``..`` leaves the tree altogether — so a
+    spec could name manifests, anchors, or the witnessed journal somewhere
+    the audit never looked. None of that is detectable later: the join
+    simply succeeds against the wrong file.
+    """
+
+    if not isinstance(value, pathlib.PurePosixPath):
+        raise ReleaseChainError(
+            f"{label} must be a pathlib.PurePosixPath, not "
+            f"{type(value).__name__}"
+        )
+    if not value.parts or value.is_absolute() or ".." in value.parts:
+        raise ReleaseChainError(
+            f"{label} must be a relative path naming at least one component, "
+            f"with no '..': {value.as_posix()!r}"
+        )
+    return value
 
 
 @dataclass(frozen=True)
@@ -210,6 +239,34 @@ class AnchorSpec:
     policy_oid: str
     signer_certificate_sha256: str
     signer_spki_sha256: str
+
+    def __post_init__(self) -> None:
+        """Refuse an anchor whose pins cannot pin anything.
+
+        Each field here is compared against a value recomputed from real
+        bytes during verification. A pin that is None, empty, or the wrong
+        shape never matches — but nothing downstream says so, because the
+        comparison runs normally and simply names the computed digest. The
+        consumer reads a refusal about the authority's certificate when the
+        actual fault is a line of their own spec, or (with the comparison
+        never reached, as an unset producer pin once did) reads a PASS. The
+        configuration is checked where it is written instead.
+        """
+
+        _sha256(self.pem_sha256, "AnchorSpec pem_sha256")
+        _sha256(
+            self.signer_certificate_sha256,
+            "AnchorSpec signer_certificate_sha256",
+        )
+        _sha256(self.signer_spki_sha256, "AnchorSpec signer_spki_sha256")
+        if (
+            type(self.policy_oid) is not str
+            or OID_RE.fullmatch(self.policy_oid) is None
+        ):
+            raise ReleaseChainError(
+                "AnchorSpec policy_oid must be a dotted-decimal OID: "
+                f"{self.policy_oid!r}"
+            )
 
 
 @dataclass(frozen=True)
@@ -231,6 +288,48 @@ class ChainSpec:
     producer_public_key_filename: str
     producer_spki_sha256: str
     anchors: Mapping[str, AnchorSpec]
+
+    def __post_init__(self) -> None:
+        """Refuse a spec that cannot pin what it claims to pin.
+
+        The threat is a pin that is absent rather than wrong. An unset
+        ``producer_spki_sha256`` was passed straight through to the signing
+        module, which reads ``None`` as "no pin requested" and skips the
+        comparison entirely — so a chain re-signed under a substituted key
+        verified, and the command failed only downstream, where the verdict
+        text tried to slice a prefix off ``None``. An empty ``anchors``
+        mapping is the same shape of hole: the receipt-set equality check
+        passes vacuously, no witness is ever verified, and the verdict
+        reports "the 0 pinned RFC 3161 authorities". A spec that pins
+        nothing is a configuration error, not a policy, and it refuses here
+        rather than producing a verdict that reads like custody.
+        """
+
+        for name in (
+            "manifest_relative",
+            "state_relative",
+            "prefix_relative",
+            "anchor_relative",
+            "release_root_relative",
+        ):
+            _spec_relative_path(getattr(self, name), f"ChainSpec {name}")
+        _sha256(self.producer_spki_sha256, "ChainSpec producer_spki_sha256")
+        if not isinstance(self.anchors, Mapping) or not self.anchors:
+            raise ReleaseChainError(
+                "ChainSpec anchors must be a non-empty mapping of TSA name to "
+                "AnchorSpec; a chain with no configured witness cannot be "
+                "witnessed"
+            )
+        for tsa, anchor in self.anchors.items():
+            if type(tsa) is not str or not tsa:
+                raise ReleaseChainError(
+                    f"ChainSpec anchor names must be non-empty strings: {tsa!r}"
+                )
+            if not isinstance(anchor, AnchorSpec):
+                raise ReleaseChainError(
+                    f"ChainSpec anchor {tsa!r} must be an AnchorSpec, not "
+                    f"{type(anchor).__name__}"
+                )
 
     @property
     def state_path(self) -> str:
