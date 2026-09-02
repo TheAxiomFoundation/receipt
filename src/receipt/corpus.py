@@ -96,7 +96,7 @@ INDEPENDENTLY_REPRODUCIBLE_TIERS = frozenset({PUBLIC_TIER})
 #: many of them a producer may supply. A gate whose evidence carries two
 #: hundred thousand blameless characters scrolls every line an auditor needed
 #: to read out of the terminal, which defeats the verdict as surely as an
-#: escape sequence would. (Found by cross-family review.)
+#: escape sequence would.
 MAX_EVIDENCE_TEXT = 1024
 
 _ROW_KEYS: dict[str, frozenset[str]] = {
@@ -181,7 +181,7 @@ class CorpusSpec:
         # exists: on a case-insensitive filesystem "rules/x.YAML" and
         # "rules/x.yaml" are one file, so a byte-exact suffix match would let
         # a case-varied spelling be classified as not-content and escape the
-        # sweep. (Found by cross-family review.)
+        # sweep.
         folded = _path_fold(path)
         return any(
             folded.endswith(_path_fold(suffix)) for suffix in self.content_suffixes
@@ -248,8 +248,8 @@ def _reject_control_characters(value: str, label: str) -> str:
     belongs at the schema boundary where the text enters, not only at the
     point where it is printed. (Found by cross-family review.)
 
-    The C0 block is not the only way to do it, so two more classes refuse here
-    (second cross-family round):
+    The C0 block is not the only way to do it, so two more classes refuse
+    here:
 
     - Every code point in Unicode category Cf. These render as nothing while
       changing what the reader sees: U+202E RIGHT-TO-LEFT OVERRIDE reverses
@@ -283,7 +283,7 @@ def _reject_oversized_text(value: str, label: str) -> str:
     Checked before the character screen, deliberately: that screen quotes the
     offending value back, so refusing a two-hundred-thousand-character string
     there would emit the flood it exists to prevent. This message carries the
-    length instead of the text. (Found by cross-family review.)
+    length instead of the text.
     """
 
     if len(value) > MAX_EVIDENCE_TEXT:
@@ -416,9 +416,7 @@ def _validate_gate(row: dict[str, Any], number: int, spec: CorpusSpec) -> GateDe
                 "strings to strings"
             )
         key_label = f"journal row {number} gate {gate_id!r} evidence key"
-        value_label = (
-            f"journal row {number} gate {gate_id!r} evidence value {key!r}"
-        )
+        value_label = f"journal row {number} gate {gate_id!r} evidence value {key!r}"
         _reject_oversized_text(key, key_label)
         _reject_oversized_text(value, value_label)
         _reject_control_characters(key, key_label)
@@ -643,7 +641,7 @@ def _tree_content_paths(root: pathlib.Path, spec: CorpusSpec) -> dict[str, pathl
                 # unwitnessed "smuggled.YAML" is the same file as
                 # "smuggled.yaml" wherever the filesystem is case-insensitive,
                 # and a byte-exact match here would leave it out of the
-                # closed-world set entirely. (Found by cross-family review.)
+                # closed-world set entirely.
                 folded = _path_fold(relative)
                 if not any(
                     folded.endswith(_path_fold(suffix))
@@ -902,7 +900,7 @@ def verify_corpus_binding(
     # outside the content roots, so a retired toolchain pin or apply manifest
     # could sit on disk bound by no row, reported as removed, and be read as
     # current by every consumer. lstat both kinds and refuse what is still
-    # there. (Found by cross-family review.)
+    # there.
     for path in removed:
         try:
             os.lstat(root / path)
