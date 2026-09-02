@@ -31,6 +31,9 @@ Three row kinds, one journal:
     An exact path bound by digest without a sweep — the toolchain pin, the
     pinned validation workflow, an apply manifest. The consumer's spec names
     which paths it *requires*, so a producer cannot quietly drop one.
+    Retiring one is recorded by a ``removed`` row, and the file has to leave
+    the tree with it: a removed path still on disk refuses, whichever kind
+    it was.
 
 ``gate``
     A declaration that some verification gate ran, carrying a reproducibility
@@ -177,15 +180,7 @@ class CorpusSpec:
     def is_content_path(self, path: str) -> bool:
         if self.content_root_of(path) is None:
             return False
-        # Fold both sides before comparing, for the same reason _path_fold
-        # exists: on a case-insensitive filesystem "rules/x.YAML" and
-        # "rules/x.yaml" are one file, so a byte-exact suffix match would let
-        # a case-varied spelling be classified as not-content and escape the
-        # sweep.
-        folded = _path_fold(path)
-        return any(
-            folded.endswith(_path_fold(suffix)) for suffix in self.content_suffixes
-        )
+        return _has_pinned_suffix(path, self.content_suffixes)
 
 
 @dataclass(frozen=True)
@@ -258,17 +253,36 @@ def _reject_control_characters(value: str, label: str) -> str:
     - U+2028 and U+2029, line separators outside the C0 block, which split one
       evidence string into as many verdict lines as the producer wants in any
       renderer that honours them.
+    - Every code point in category Cs, a lone surrogate. JSON spells one as
+      ``\\ud800`` inside otherwise valid UTF-8, so it survives the decode; no
+      filesystem call accepts it (``os.lstat`` raises ``UnicodeEncodeError``,
+      a ``ValueError`` no ``OSError`` handler sees); and no legitimate path or
+      reason carries one.
+
+    Taking the Cf class whole has a cost, accepted deliberately: U+200C and
+    U+200D are required spelling in Persian, Hindi and Sinhala, and U+061C
+    appears in ordinary Arabic text, so a rule file named in those scripts,
+    or a not-run reason written in them, refuses here. The verdict quotes
+    these strings to a reader, and a reader cannot tell apart two spellings
+    that differ only in an invisible code point; a narrower list would have
+    to be maintained against exactly that threat. Refusing is the fail-closed
+    side, and the refusal names the code point so the cause is legible.
     """
 
     for character in value:
         code = ord(character)
+        category = unicodedata.category(character)
         if code < 0x20 or code == 0x7F or 0x80 <= code <= 0x9F:
             raise CorpusError(
                 f"{label} contains a control character ({code:#04x}): {value!r}"
             )
-        if unicodedata.category(character) == "Cf":
+        if category == "Cf":
             raise CorpusError(
                 f"{label} contains a Unicode format control ({code:#04x}): {value!r}"
+            )
+        if category == "Cs":
+            raise CorpusError(
+                f"{label} contains a lone surrogate ({code:#04x}): {value!r}"
             )
         if code in (0x2028, 0x2029):
             raise CorpusError(
@@ -458,7 +472,10 @@ def parse_journal(
 
     Later rows supersede earlier rows for the same path — that is how an
     append-only journal records a corrected encoding without rewriting
-    history. A ``removed`` row drops the path from the present view.
+    history. A ``removed`` row drops the path from the present view, and it
+    is a claim about the tree as well as the journal: verification refuses a
+    tombstoned path that is still on disk. A file that stays in the
+    repository stays bound; the only way to stop binding it is to remove it.
     """
 
     try:
@@ -578,6 +595,20 @@ def _path_fold(relative: str) -> str:
     return unicodedata.normalize("NFC", relative).casefold()
 
 
+def _has_pinned_suffix(relative: str, suffixes: tuple[str, ...]) -> bool:
+    """Whether a path ends in one of the pinned content suffixes, folded.
+
+    Both sides fold, for the reason _path_fold exists: on a case-insensitive
+    filesystem "rules/x.YAML" and "rules/x.yaml" are one file, so a byte-exact
+    suffix match would let a case-varied spelling be classified as not-content
+    and escape the sweep. The journal classifier and the tree sweep share this
+    one predicate; the bug it closes was the two of them disagreeing.
+    """
+
+    folded = _path_fold(relative)
+    return any(folded.endswith(_path_fold(suffix)) for suffix in suffixes)
+
+
 def _reject_aliasing_paths(relatives: list[str]) -> None:
     seen: dict[str, str] = {}
     for relative in relatives:
@@ -637,16 +668,9 @@ def _tree_content_paths(root: pathlib.Path, spec: CorpusSpec) -> dict[str, pathl
                     raise CorpusError(
                         f"content root contains a non-regular file: {relative}"
                     )
-                # Suffix-scoped after folding, matching is_content_path: an
-                # unwitnessed "smuggled.YAML" is the same file as
-                # "smuggled.yaml" wherever the filesystem is case-insensitive,
-                # and a byte-exact match here would leave it out of the
-                # closed-world set entirely.
-                folded = _path_fold(relative)
-                if not any(
-                    folded.endswith(_path_fold(suffix))
-                    for suffix in spec.content_suffixes
-                ):
+                # The same predicate the journal classifier uses, so the sweep
+                # and the classifier cannot disagree about what is content.
+                if not _has_pinned_suffix(relative, spec.content_suffixes):
                     continue
                 found[relative] = candidate
     return found
@@ -902,6 +926,15 @@ def verify_corpus_binding(
     # current by every consumer. lstat both kinds and refuse what is still
     # there.
     for path in removed:
+        # lstat follows every component but the last, deliberately; this is
+        # the one filesystem touch in the module without the component walk.
+        # A tombstone asks whether anything answers to this name in the tree
+        # a consumer would read, and a consumer resolves the same links; a
+        # dangling final-component link still lstats, and still refuses. Do
+        # not add _assert_no_symlinked_component here: it stats each
+        # component, and on a parent that is readable but not searchable
+        # that raises out of the walk instead of reaching the unverifiable
+        # refusal below.
         try:
             os.lstat(root / path)
         except (FileNotFoundError, NotADirectoryError):
