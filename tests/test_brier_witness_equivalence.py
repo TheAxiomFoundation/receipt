@@ -57,6 +57,14 @@ Deliberately outside the mutation contract:
   material refusals inside a new load-time message.  Every pinned bundle
   agrees with its identities and its roots verify, so no case here reaches
   either;
+- the baseline pins a root PEM by its hash, its certificate hash and its
+  SPKI -- the last two describing the file's first certificate only -- and
+  then hands the whole file to ``openssl ts -verify -CAfile``, which trusts
+  every certificate in it; the port refuses a pinned root PEM that holds more
+  than one certificate.  Both pinned roots
+  (``records/trust/freetsa-root-2016.pem`` and
+  ``records/trust/digicert-trusted-root-g4.pem``) hold exactly one, so this
+  refusal, which precedes the ported PEM-hash refusal, fires on no case here;
 - the baseline ignores bundle-claim fields on an unavailable v1 witness;
   the port resolves and counts a named bundle.  The genesis witness names
   none;

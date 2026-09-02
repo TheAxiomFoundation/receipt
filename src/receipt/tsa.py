@@ -9,14 +9,17 @@ through a frozen :class:`TsaSpec` supplied by consumer code.  This module
 ships no repository-specific trust defaults and performs no chain walk or
 producer signature verification.
 
-The port is stricter than the baseline in seven places, each a refusal the
+The port is stricter than the baseline in eight places, each a refusal the
 pinned tree never presents and so each outside the differential contract: a
 legacy witness over a bundle configuring more than one anchor; a bundle
 configuring an anchor the spec carries no identity for, or one whose
 declared root SPKI or allowed signers differ from that identity, or whose
 referenced root material fails the ported material checks or carries an
 SPKI other than the identity's (all compared at load for every anchor, not
-only the one a witness selects); an
+only the one a witness selects); a pinned root PEM holding more than one
+certificate, which the declared certificate hash and SPKI describe only the
+first of while the ``-CAfile`` verifications trust every certificate in the
+file; an
 unavailable witness of either schema whose reason is not a string, or that
 carries token evidence at the witness level (the v2 per-anchor outcome has
 always refused both); and an unavailable legacy witness that names a bundle
@@ -810,6 +813,8 @@ def _root_material(records: Path, anchor: dict[str, Any]) -> dict[str, str]:
     anchor id, ``_supplemental_candidates`` skips ids already active, and so
     no selection ever validated the new bundle's root before a transition
     activated it (peer review).
+
+    One check is not ported: the file must hold exactly one certificate.
     """
 
     root = anchor.get("rootCertificate")
@@ -818,6 +823,21 @@ def _root_material(records: Path, anchor: dict[str, Any]) -> dict[str, str]:
     root_path = physical_path(records, str(root.get("path", "")))
     if not root_path.is_file() or root_path.is_symlink():
         raise TsaError(f"pinned TSA root is missing or not a regular file: {root_path}")
+    # The certificate hash and SPKI below describe the file's *first*
+    # certificate, which is all _certificate_identity reads, while
+    # verify_timestamp_token passes the whole file to `openssl ts -verify
+    # -CAfile` and `openssl cms -verify -CAfile`, which trust every
+    # certificate in it.  So a PEM holding the pinned root followed by a
+    # second authority satisfies all three pins while a token chaining
+    # through that second authority verifies (peer review).  One certificate
+    # per pinned root makes what the SPKI pin names the whole of what the
+    # file authorizes.  A new refusal, placed before the ported PEM-hash
+    # refusal because the file it describes is not one the pinned tree
+    # presents: both its roots hold exactly one certificate.
+    if root_path.read_bytes().count(b"-----BEGIN CERTIFICATE-----") != 1:
+        raise TsaError(
+            f"pinned TSA root PEM must hold exactly one certificate: {root_path}"
+        )
     if sha256_file(root_path) != root.get("pemSha256"):
         raise TsaError(f"pinned TSA root PEM hash mismatch: {root_path}")
     identity = _certificate_identity(root_path)

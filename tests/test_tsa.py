@@ -1423,3 +1423,63 @@ def test_refuses_at_load_a_bundle_whose_root_material_is_missing_or_tampered(
     )
     with pytest.raises(TsaError, match="fails validation: pinned TSA root PEM hash mismatch"):
         _load_trust_bundle(tree.records, reference, spec=spec)
+
+
+def test_refuses_a_pinned_root_pem_that_carries_a_second_authority(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """A root PEM must hold exactly one certificate (peer review, F1).
+
+    ``_certificate_identity`` reads the file's first certificate, so the
+    bundle's ``certificateSha256`` and ``spkiSha256`` describe that one alone,
+    while ``verify_timestamp_token`` hands the whole file to ``openssl ts
+    -verify -CAfile`` and ``openssl cms -verify -CAfile``, which trust every
+    certificate in it. A PEM holding the pinned root followed by a second
+    authority's root therefore satisfies all three declared hashes -- asserted
+    below -- and the SPKI comparison against the code identity, while a token
+    chaining to that second authority verifies against it. Without the
+    single-certificate rule the bundle loads clean and neither call raises.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    combined = tree.records / "trust" / "alpha-root-and-a-second-authority.pem"
+    combined.write_bytes(
+        alpha.tsa.root_pem.read_bytes() + beta.tsa.root_pem.read_bytes()
+    )
+    # A second authority is genuinely in the file, and what the pins can see
+    # is the first certificate alone, which is alpha's root.
+    assert beta.tsa.root_pem.read_bytes() in combined.read_bytes()
+    assert certificate_pins(combined) == alpha.root_pins
+
+    def point_at_the_two_certificate_pem(entry: dict[str, Any]) -> None:
+        entry["rootCertificate"] = {
+            "path": logical_path(tree.records, combined),
+            "pemSha256": sha256_bytes(combined.read_bytes()),
+            "certificateSha256": alpha.root_pins["certificateSha256"],
+            "spkiSha256": alpha.root_pins["spkiSha256"],
+        }
+
+    reference, spec = add_bundle_version(
+        tree,
+        local_anchors[:1],
+        version=2,
+        mutate_anchor=point_at_the_two_certificate_pem,
+    )
+    with pytest.raises(TsaError) as loading:
+        _load_trust_bundle(tree.records, reference, spec=spec)
+    assert str(loading.value) == (
+        "TSA anchor alpha-root-2026 in bundle tsa-anchors-v2 references root "
+        "material that fails validation: pinned TSA root PEM must hold exactly "
+        f"one certificate: {combined}"
+    )
+    # And through the verifier, on the pending-transition path that reaches
+    # the bundle before anything activates.
+    with pytest.raises(TsaError, match="must hold exactly one certificate"):
+        verify_witness(
+            tree.record,
+            spec=spec,
+            records=tree.records,
+            trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+            transition_bundle_updates=[reference],
+        )
