@@ -27,7 +27,10 @@ The three passes, in the order a skeptic should want them:
 A verdict is fail-closed in the strict sense: it is ``PASS`` only if passes 1
 and 2 both completed without raising and pass 3 found every required
 declaration. Anything else — including an exception this module did not
-anticipate — is ``FAIL``.
+anticipate, and including ``SystemExit``, which is not an ``Exception`` and
+once unwound straight out of the interpreter from inside a consumer's spec —
+is ``FAIL``. Only ``KeyboardInterrupt`` passes through: the operator
+interrupted the run, and that is not a verdict about the corpus.
 """
 
 from __future__ import annotations
@@ -70,6 +73,20 @@ TIER_MEANING = {
 
 class VerifySpecError(ValueError):
     """The consumer's committed spec is missing, malformed, or not a spec."""
+
+
+def _exception_detail(exc: BaseException) -> str:
+    """Quote a failure, naming anything that is not an ordinary exception.
+
+    ``str(SystemExit(0))`` is the bare string ``"0"``, which inside a refusal
+    reads as a stray token rather than as a spec that tried to exit the
+    interpreter. Ordinary exceptions already carry their own message and are
+    quoted unchanged.
+    """
+
+    if isinstance(exc, Exception):
+        return str(exc)
+    return f"{type(exc).__name__}: {exc}"
 
 
 #: What each completed pass establishes, in the verdict's own words. Keyed by
@@ -218,8 +235,19 @@ def load_spec(spec_path: pathlib.Path) -> tuple[VerificationSpec, str]:
     try:
         code = compile(source, str(spec_path), "exec")
         exec(code, module.__dict__)  # noqa: S102 - the audited repo's own pins
-    except Exception as exc:  # noqa: BLE001 - any failure here is fail-closed
-        raise VerifySpecError(f"spec module raised on load: {spec_path}: {exc}") from exc
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException as exc:  # noqa: BLE001 - any failure here is fail-closed
+        # BaseException deliberately, not Exception. A spec containing
+        # ``raise SystemExit(0)`` unwound straight through an Exception-only
+        # boundary, past every pass below, and out of the interpreter with
+        # status 0 and no verdict printed at all — the producer's own spec
+        # choosing the command's exit code. SystemExit and GeneratorExit are
+        # load failures like any other; only the operator's interrupt is
+        # allowed through, because it is not the spec's to report.
+        raise VerifySpecError(
+            f"spec module raised on load: {spec_path}: {_exception_detail(exc)}"
+        ) from exc
 
     candidate = getattr(module, "SPEC", None)
     if candidate is None:
@@ -312,13 +340,18 @@ def run_verification(
         )
 
     # Every pass — the verification call AND the detail builder that reports
-    # it — runs inside a boundary that converts *any* exception, expected or
-    # not, into a failed pass. The documented contract is that a verification
+    # it — runs inside a boundary that converts *any* raise, expected or not,
+    # into a failed pass. The documented contract is that a verification
     # failure is the return value and never an escaping exception (so a --json
     # consumer always receives a {"verdict": "FAIL"} object); an unforeseen
     # exception here would otherwise leave the CLI to exit 1 with no verdict at
-    # all. Expected domain errors carry their own message; anything else names
-    # its type so the surprise is legible.
+    # all. The boundaries below catch BaseException rather than Exception,
+    # because SystemExit is neither: raised anywhere under a pass it unwound
+    # past an Exception-only boundary and out of the interpreter, choosing the
+    # command's exit status with no verdict printed. KeyboardInterrupt alone is
+    # re-raised — it is the operator's, not the verification's, to report.
+    # Expected domain errors carry their own message; anything else names its
+    # type so the surprise is legible.
     def failed(name: str, exc: BaseException, expected: type[Exception]) -> str:
         if isinstance(exc, expected):
             return str(exc)
@@ -333,7 +366,9 @@ def run_verification(
                 f"every release object present at {base_ref} is byte- and "
                 "mode-identical in this tree"
             )
-        except Exception as exc:  # noqa: BLE001 - any failure is a FAIL verdict
+        except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+            raise
+        except BaseException as exc:  # noqa: BLE001 - any raise is a FAIL verdict
             passes.append(
                 PassResult(
                     "history",
@@ -363,7 +398,9 @@ def run_verification(
             compute_anchor_set_digest=True,
         )
         custody_detail = _custody_detail(chain, spec)
-    except Exception as exc:  # noqa: BLE001 - any failure is a FAIL verdict
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException as exc:  # noqa: BLE001 - any raise is a FAIL verdict
         passes.append(
             PassResult("custody", False, "", failed("custody", exc, ReleaseChainError))
         )
@@ -394,7 +431,9 @@ def run_verification(
             )
         corpus = verify_corpus_binding(root, journal_bytes, spec=spec.corpus)
         binding_detail = _binding_detail(corpus)
-    except Exception as exc:  # noqa: BLE001 - any failure is a FAIL verdict
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException as exc:  # noqa: BLE001 - any raise is a FAIL verdict
         passes.append(
             PassResult("binding", False, "", failed("binding", exc, CorpusError))
         )
@@ -408,7 +447,9 @@ def run_verification(
     try:
         verify_declarations(corpus, spec=spec.corpus)
         declaration_detail = _declaration_detail(corpus)
-    except Exception as exc:  # noqa: BLE001 - any failure is a FAIL verdict
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException as exc:  # noqa: BLE001 - any raise is a FAIL verdict
         passes.append(
             PassResult("declaration", False, "", failed("declaration", exc, CorpusError))
         )

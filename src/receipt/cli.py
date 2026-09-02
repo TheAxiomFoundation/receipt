@@ -15,6 +15,10 @@ With ``--json``, every exit path after argument parsing prints exactly one
 JSON object bearing a ``verdict`` key — a refused spec, an unusable root, an
 aborted run, and a result that cannot be rendered all included. A machine
 consumer that keys on ``verdict`` therefore fails closed with the command.
+The boundaries below catch ``BaseException``, because ``SystemExit`` is not an
+``Exception``: a spec or a pass that raised one exited the interpreter with a
+status of its own choosing and printed no verdict at all. ``KeyboardInterrupt``
+is the single deliberate exception — the operator's interrupt is not a verdict.
 """
 
 from __future__ import annotations
@@ -285,7 +289,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         spec, spec_sha256 = load_spec(args.spec)
     except VerifySpecError as exc:
         return _refuse(as_json, "spec", str(exc), EXIT_USAGE)
-    except Exception as exc:  # noqa: BLE001 - reading the spec is fail-closed too
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException as exc:  # noqa: BLE001 - reading the spec is fail-closed
         return _refuse(
             as_json,
             "spec",
@@ -296,7 +302,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         root = args.root if args.root is not None else _default_root(args.spec)
         root_ok = root.is_dir()
-    except Exception as exc:  # noqa: BLE001 - resolving the root is fail-closed too
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException as exc:  # noqa: BLE001 - resolving the root is fail-closed
         return _refuse(
             as_json,
             "root",
@@ -314,7 +322,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             spec_sha256=spec_sha256,
             base_ref=args.base_ref,
         )
-    except Exception as exc:  # noqa: BLE001 - an unhandled error is still a refusal
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException as exc:  # noqa: BLE001 - an unhandled raise is a refusal
         return _refuse(
             as_json,
             "verification",
@@ -328,7 +338,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if as_json:
         try:
             rendered = json.dumps(result_to_dict(result), indent=2, sort_keys=True)
-        except Exception as exc:  # noqa: BLE001 - rendering is inside the contract
+        except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+            raise
+        except BaseException as exc:  # noqa: BLE001 - rendering is in the contract
             return _refuse(
                 as_json,
                 "render",
@@ -340,7 +352,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         try:
             text = _format_text(result)
-        except Exception as exc:  # noqa: BLE001 - rendering is inside the contract
+        except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+            raise
+        except BaseException as exc:  # noqa: BLE001 - rendering is in the contract
             return _refuse(
                 False,
                 "render",
