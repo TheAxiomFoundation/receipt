@@ -1196,3 +1196,41 @@ def test_a_removed_content_path_still_in_the_tree_is_refused_as_unlisted(
     reindex(rows)
     with pytest.raises(CorpusError, match="not bound by the witnessed journal"):
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_refuses_a_removed_path_the_verifier_cannot_look_for(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A tombstone nothing could check is not a tombstone honoured.
+
+    lstat raises EACCES rather than ENOENT when a parent directory is readable
+    but not searchable, so a removed path swallowed by "any error means gone"
+    is reported to the auditor as removed on the strength of a permission
+    error while the file sits on disk. Failure to look is not an absence —
+    the same rule the sweep applies to a directory it cannot enumerate.
+    """
+
+    import os
+
+    body = '{"applied": true}\n'
+    attested = dict(ATTESTED)
+    attested["retired/apply-manifest.json"] = body
+    write_tree(tmp_path, attested=attested)
+    rows = journal_rows(attested=attested)
+    rows.append(
+        {
+            "schemaVersion": JOURNAL_SCHEMA,
+            "kind": "attested",
+            "path": "retired/apply-manifest.json",
+            "sha256": sha256_text(body),
+            "state": "removed",
+        }
+    )
+    reindex(rows)
+    journal = render_journal(rows)
+    os.chmod(tmp_path / "retired", 0o600)
+    try:
+        with pytest.raises(CorpusError, match="tombstone is unverifiable"):
+            verify_corpus_binding(tmp_path, journal, spec=corpus_spec())
+    finally:
+        os.chmod(tmp_path / "retired", 0o755)
