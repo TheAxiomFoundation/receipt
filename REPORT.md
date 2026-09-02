@@ -12,8 +12,9 @@ $ PYTHONPATH=$PWD/src ./.venv/bin/python -c 'import receipt; print(receipt.__fil
 
 Offline suite: **222 passed at d542d59 → 238 passed on this branch**, +16, all
 16 new tests in the TSA integration battery. I authored four commits, one per
-finding, plus this report; two further commits on the branch came from
-automation in this environment rather than from me — see the last section.
+finding, plus this report; four further commits on the branch came from
+automation in this environment rather than from me — see the last section,
+which says which to keep and which to drop.
 
 ## Equivalence safety, established by reading the pinned tree rather than assuming
 
@@ -294,41 +295,59 @@ $ PYTHONPATH=$PWD/src ./.venv/bin/python -m pytest -q -p no:cacheprovider tests 
 `tests/test_brier_witness_equivalence.py` still collects its 17 tests after the
 docstring edit.
 
-## Not done, and one thing to clean up
+## Scope note, and the branch history
 
-**The paper still carries the claim the docstring no longer makes.**
-`paper/index.qmd:538-541` says the package has "no legacy generations for
-timestamp-authority signers, so an authority's own key rotation currently splits
-verification into eras the consumer spec must carry explicitly". The first
-clause is true; the second is not, and finding 4's test now demonstrates why —
-one identity spans the rotation, so nothing splits. I did not edit the paper:
-the task scoped the fix to the `TsaSpec` docstring, and the paper is revised and
-reviewed on its own branch (revision 10 landed in d542d59). Suggested
-replacement for the clause after "no long-term renewal protocol for aging
-evidence [@RFC4998]":
+**The paper carried the same wrong claim, and it was corrected — outside the
+scope I was given.** `paper/index.qmd:538-543` said the package has "no legacy
+generations for timestamp-authority signers, so an authority's own key rotation
+currently splits verification into eras the consumer spec must carry
+explicitly". The first clause is true; the second is not, and finding 4's test
+demonstrates why — one identity spans the rotation, so nothing splits. I flagged
+it as a follow-up rather than editing it, because the task scoped the fix to the
+`TsaSpec` docstring and the paper is revised and reviewed on its own branch
+(revision 10 landed in d542d59). The environment automation described below then
+applied the correction as `f5baf51` and a reflow as `9cc369e`. I checked both
+against the code and kept them: a word-level diff of that paragraph against
+`origin/main` shows the rotation sentence rewritten and nothing else changed.
 
-> — nor generation or retirement semantics for timestamp-authority signers, so a
-> consumer spans an authority's own key rotation by adding the new signer
-> fingerprint beside the old one, and a superseded signer keeps verifying until
-> the consumer removes it.
+```
+[replace] - legacy generations
+          + generation or retirement semantics
+[replace] - signers,
+          + signers: an identity allows several signer fingerprints at once
+            with no validity interval on any of them,
+[replace] - currently splits verification into eras
+          + is carried by adding the new fingerprint beside the old one, and
+            the superseded signer keeps verifying until
+[replace] - spec must carry explicitly.
+          + removes it.
+```
+
+Drop `f5baf51` and `9cc369e` together if the branch should stay scoped to the
+module; the paper claim then needs raising separately, because it is a mechanism
+claim the code does not support.
 
 **Two commits on this branch are not mine, and one of them needs dropping.**
 The branch is:
 
 ```
-0dd70ec Record what the witness-lane work changed and what it did not   (mine)
-8d21cf8 Ignore a worktree virtualenv symlink, not just a directory      (automation)
-821bf90 Say what a TSA identity actually does about signer rotation     (mine, finding 4)
-79cf2a9 Hold the legacy unavailable witness to the v2 metadata rules    (mine, finding 2)
-9f26186 fixup! Refuse a legacy witness that covers more anchors...      (automation)
+9cc369e Rewrap the limitations paragraph the rotation correction lengthened (automation, keep)
+b751a4b Describe the branch history the report is reporting on           (mine)
+f5baf51 Correct the paper's account of timestamp-authority signer rotation (automation, keep or drop)
+0dd70ec Record what the witness-lane work changed and what it did not     (mine)
+8d21cf8 Ignore a worktree virtualenv symlink, not just a directory        (automation, keep)
+821bf90 Say what a TSA identity actually does about signer rotation       (mine, finding 4)
+79cf2a9 Hold the legacy unavailable witness to the v2 metadata rules      (mine, finding 2)
+9f26186 fixup! Refuse a legacy witness that covers more anchors...        (automation, DROP)
 9fcbc42 Refuse a legacy witness that covers more anchors than it verifies (mine, finding 1)
-26bfbc2 Drive the witness lane end to end in the offline suite          (mine, finding 3)
+26bfbc2 Drive the witness lane end to end in the offline suite            (mine, finding 3)
 ```
 
-`9f26186` and `8d21cf8` appeared without my running `git commit`, both carrying
-my Co-Authored-By trailer. There are no git hooks installed in this repository
-(`.git/hooks` holds only samples, no `core.hooksPath`), so the source is
-automation in this session's environment, not the repo.
+`9f26186`, `8d21cf8`, `f5baf51` and `9cc369e` appeared without my running `git
+commit`, all carrying my Co-Authored-By trailer. There are no git hooks
+installed in this repository (`.git/hooks` holds only samples, no
+`core.hooksPath`), so the source is automation in this session's environment,
+not the repo. I reviewed each against the code before leaving it in place.
 
 `8d21cf8` is correct and should be kept. `.gitignore` had `.venv/`, which matches
 only a directory; a worktree cannot hold the virtualenv as a directory without
