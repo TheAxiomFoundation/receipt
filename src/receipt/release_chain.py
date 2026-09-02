@@ -19,9 +19,13 @@ codex/thesis-ledger-facts); see receipts/ledger-pin-source-hashes.txt. The only
 intended change is parameterization: every repo-specific constant moved into
 ChainSpec, supplied by the consumer's committed code. Behavior is gated by the
 differential harness in tests/test_ledger_equivalence.py. Additions since the
-extraction (the base-ref history pass, the anchor-set digest in the result) run
-beside the extracted checks without altering any of their refusals, and carry
-their own tests.
+extraction (the base-ref history pass with its checkout and index guards, the
+anchor-set digest in the result) run beside the extracted checks without
+altering any of their refusals, and carry their own tests. Every git
+subprocess here runs with ``refs/replace`` disabled (``_git_environment``);
+those additions are its only callers, and a replacement object would otherwise
+change what a base commit, tree, or blob reads as behind the OID a verdict
+names.
 """
 
 from __future__ import annotations
