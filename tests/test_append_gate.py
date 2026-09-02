@@ -503,20 +503,6 @@ def moving_base_repository(
     return Candidate(root=first.root, base="moving"), first.base, later
 
 
-def test_the_later_commit_would_refuse_through_every_base_consumer(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Control for the moving-base fixture: against the later commit the same
-    working tree is refused, and by a consumer other than the append count,
-    so the mid-run test below proves each consumer read the first commit."""
-
-    moving, _first, later = moving_base_repository(tmp_path)
-
-    with pytest.raises(AppendError) as refusal:
-        run_gate(moving, base_ref=later)
-    assert "appended" not in str(refusal.value)
-
-
 def test_the_success_text_names_the_commit_a_symbolic_base_resolved_to(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -547,15 +533,18 @@ def test_a_base_named_by_its_own_commit_keeps_the_baseline_text(
 def test_the_moved_branch_alone_would_change_the_verdict(
     tmp_path: pathlib.Path,
 ) -> None:
-    """The control: the two commits really do disagree about this worktree."""
+    """The control: the two commits really do disagree about this worktree,
+    and not only in the append count. Against the later commit the same tree
+    is refused by the prefix anchor or the release history, so the mid-run
+    test below proves every base consumer read the first commit (peer
+    review, round three)."""
 
     moving, _first, later = moving_base_repository(tmp_path)
     git(moving.root, "branch", "-f", "moving", later)
 
-    assert run_gate(moving) == (
-        "thesis-facts append check OK: 4 rows, immutable prefix 1, "
-        f"+1 appended vs base moving ({later})"
-    )
+    with pytest.raises(AppendError) as refusal:
+        run_gate(moving)
+    assert "appended" not in str(refusal.value)
 
 
 def test_a_branch_that_moves_mid_verdict_is_still_read_at_one_commit(
