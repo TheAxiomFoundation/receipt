@@ -236,9 +236,15 @@ def load_spec(spec_path: pathlib.Path) -> tuple[VerificationSpec, str]:
     a future inert, schema-validated spec format would remove even the need to
     execute it, and is tracked as follow-up work.
 
-    The path is required to be a regular file, not a symlink to one, checked
-    as supplied rather than after resolution: a link can be repointed at other
-    bytes without the path the auditor pinned changing at all.
+    The path's final component is required to be a regular file, not a
+    symlink to one, checked as supplied rather than after resolution: a link
+    can be repointed at other bytes without the path the auditor pinned
+    changing at all. Parent components are not walked. An absolute path
+    legitimately crosses ambient links (``/tmp`` on macOS), and the
+    component walk the anchor check does runs under a resolved root, which a
+    spec path does not have; a symlinked parent of the spec is therefore not
+    caught here, and the same final-component rule governs every other read
+    in the package.
 
     The source is read once and compiled from those exact bytes, deliberately
     bypassing the import system. Going through ``importlib`` would consult
@@ -253,7 +259,8 @@ def load_spec(spec_path: pathlib.Path) -> tuple[VerificationSpec, str]:
     import types
 
     # Before resolving, deliberately. Every other read in this package refuses
-    # a symlink — manifests, receipts, anchors, the witnessed journal — and the
+    # a symlink in the final component — manifests, receipts, anchors, the
+    # witnessed journal — and the
     # spec is the trust configuration itself, so it gets the same treatment.
     # The check ran after ``resolve()``, which follows every link on the way,
     # so nothing was ever left for it to catch. A symlink also breaks the one

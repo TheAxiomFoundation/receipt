@@ -122,5 +122,6 @@ def test_an_unreadable_base_file_says_why_and_prints_nothing(
     message = str(raised.value)
     assert message.startswith(f"cannot read {relative} at base HEAD: ")
     # git's own words, carried into the refusal rather than lost beside it.
-    assert "fatal" in message
+    # The diagnostic names the path; its leading word is git's and is
+    # translated under a non-C locale, so it is not pinned.
     assert relative in message.split(": ", 1)[1]
