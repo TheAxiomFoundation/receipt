@@ -1293,6 +1293,46 @@ def test_verify_result_accessors_before_custody() -> None:
     )
     assert result.anchor_set_sha256 is None
     assert result.anchor_file_sha256s == {}
+    # And it is not a PASS. "No pass failed" is not "the verdict's passes
+    # ran": all() over an empty tuple is true, and this result rendered as
+    # "ESTABLISHED OFFLINE, FROM THIS CLONE ALONE" with exit status 0.
+    assert result.ok is False
+
+
+def test_a_verdict_needs_all_three_of_its_passes() -> None:
+    """Custody, binding, and declaration each carry part of the claim, so a
+    result holding only some of them — every one of them ok — is still not a
+    verdict. The one holding all three is."""
+
+    import dataclasses
+
+    from receipt.verify import REQUIRED_PASSES, PassResult, VerifyResult
+
+    def built(*names: str) -> VerifyResult:
+        return VerifyResult(
+            spec_name="x",
+            spec_path=pathlib.Path("spec.py"),
+            spec_sha256="ab" * 32,
+            root=pathlib.Path("."),
+            receipt_version="0.0.0",
+            producer_spki_sha256="cd" * 32,
+            passes=tuple(PassResult(name, True, "detail") for name in names),
+            chain=None,
+            corpus=None,
+        )
+
+    assert REQUIRED_PASSES == ("custody", "binding", "declaration")
+    for missing in REQUIRED_PASSES:
+        partial = [name for name in REQUIRED_PASSES if name != missing]
+        assert built(*partial).ok is False, missing
+    assert built(*REQUIRED_PASSES).ok is True
+    # A recorded failure still overrides a complete set.
+    complete = built(*REQUIRED_PASSES)
+    failed = dataclasses.replace(
+        complete,
+        passes=complete.passes + (PassResult("history", False, "", "no"),),
+    )
+    assert failed.ok is False
 
 
 def test_module_version_matches_project_metadata() -> None:
