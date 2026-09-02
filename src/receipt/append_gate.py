@@ -58,6 +58,7 @@ from receipt.release_chain import (
     ChainSpec,
     MANIFEST_RE,
     ReleaseChainError,
+    assert_no_symlinked_state_component,
     git_blob_bytes,
     git_file_entry,
     verify_base_release_chain,
@@ -236,6 +237,26 @@ def check_gate_only_confinement(
     return set(unclassified)
 
 
+def _confine_state_path(
+    relative: pathlib.PurePosixPath, candidate: _CandidateTree
+) -> None:
+    """Require a candidate state path to live inside the candidate tree.
+
+    ``_set_root`` joins the state and prefix paths lexically, and every reader
+    downstream follows whatever the join lands on. A symlinked ``ledger/`` —
+    pointed outside the checkout, or at an in-tree directory the surface
+    patterns never name — therefore supplied the accepted bytes while the
+    prefix hash, the append-only diff, and the row bindings all reported on
+    them as though they were the tree's own. Walk every component before the
+    read instead.
+    """
+
+    try:
+        assert_no_symlinked_state_component(candidate.root, relative)
+    except ReleaseChainError as exc:
+        raise AppendError(str(exc)) from exc
+
+
 def _lines(text: str) -> list[str]:
     return [line for line in text.split("\n") if line.strip()]
 
@@ -336,6 +357,7 @@ def effective_current_rows(
 
 
 def check_prefix(lines: list[str], candidate: _CandidateTree) -> dict[str, Any]:
+    _confine_state_path(candidate.spec.chain.prefix_relative, candidate)
     prefix = json.loads(candidate.prefix_path.read_text())
     if prefix.get("schemaVersion") != candidate.spec.prefix_schema_version:
         raise AppendError(
@@ -810,6 +832,7 @@ def verify_append_gate(
                 f"{sorted(gate_changes)}{unclassified_suffix}"
             )
 
+    _confine_state_path(spec.chain.state_relative, candidate)
     text = candidate.ledger_path.read_text(encoding="utf-8")
     reject_non_append_bytes(text)
     lines = _lines(text)

@@ -6,7 +6,8 @@ never presents: proposals that stay inside the classified surfaces the gate
 speaks for, state paths that stay inside the candidate tree, and one base
 commit for the whole verdict. Every case here is a NEW refusal (or a
 previously silent acceptance made explicit), so the differential gate is
-untouched.
+untouched. The state-path cases reach the shared reader in
+receipt.release_chain, so they are exercised here directly as well.
 
 The fixture is a local git repository built from scratch — no network, no
 witnesses, no signatures. Its release tree holds a README and no manifests, so
@@ -20,6 +21,7 @@ import hashlib
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 from dataclasses import dataclass
 from typing import Any
@@ -32,7 +34,12 @@ from receipt.append_gate import (
     expected_assertion_version_id,
     verify_append_gate,
 )
-from receipt.release_chain import AnchorSpec, ChainSpec
+from receipt.release_chain import (
+    AnchorSpec,
+    ChainSpec,
+    ReleaseChainError,
+    _regular_file_bytes,
+)
 
 # The fixture repository carries no release manifests, so no anchor identity
 # below is ever consumed: these tests exercise the gate's path up to and
@@ -315,3 +322,147 @@ def test_a_clean_gate_only_proposal_keeps_its_baseline_verdict(
         "thesis-facts append check OK: gate-only proposal; DATA_SURFACE "
         f"unchanged; GATE_SURFACE changes=['{GATE_FILE}']"
     )
+
+
+def relink_ledger_directory(candidate: Candidate, target: pathlib.Path) -> None:
+    """Move ``ledger/`` to ``target`` and leave a symlink where it stood.
+
+    The candidate keeps a name that still resolves to a regular JSONL file,
+    still hashes to the frozen prefix, and still diffs clean against the base
+    blob — while the bytes under audit live wherever the link points.
+    """
+
+    ledger = candidate.root / "ledger"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(ledger), str(target))
+    ledger.symlink_to(target, target_is_directory=True)
+
+
+def test_a_symlinked_ledger_parent_cannot_serve_state_from_outside_the_tree(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The gap: only the final component was ever checked for a link.
+
+    With ``ledger/`` pointed at an ambient directory the whole append check
+    returned OK on bytes that are no part of the candidate checkout.
+    """
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    relink_ledger_directory(candidate, tmp_path / "outside" / "ledger")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "state path traverses a symlink at 'ledger': "
+        "ledger/official_observations.jsonl"
+    )
+
+
+def test_an_in_tree_symlinked_ledger_parent_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """An in-tree target is the same hole: the accepted bytes then live in a
+    directory no surface pattern names and no release check covers."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    relink_ledger_directory(candidate, candidate.root / "shadow")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "state path traverses a symlink at 'ledger': "
+        "ledger/official_observations.jsonl"
+    )
+
+
+def test_a_symlinked_state_file_itself_is_refused(tmp_path: pathlib.Path) -> None:
+    """The final component too: the gate followed a linked JSONL without
+    comment, because nothing between _set_root and read_text looked."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    ledger = candidate.root / CHAIN_SPEC.state_relative
+    outside = tmp_path / "outside.jsonl"
+    shutil.move(str(ledger), str(outside))
+    ledger.symlink_to(outside)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "state path traverses a symlink at 'ledger/official_observations.jsonl': "
+        "ledger/official_observations.jsonl"
+    )
+
+
+def test_a_symlinked_prefix_parent_is_refused(tmp_path: pathlib.Path) -> None:
+    """The immutable prefix is a state path too, and check_prefix reads it by
+    the same lexical join. Here the ledger stays put so the prefix walk is the
+    one that fires."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    prefix = candidate.root / CHAIN_SPEC.prefix_relative
+    outside = tmp_path / "outside" / "immutable_prefix.json"
+    outside.parent.mkdir(parents=True)
+    shutil.move(str(prefix), str(outside))
+    prefix.symlink_to(outside)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "state path traverses a symlink at 'ledger/immutable_prefix.json': "
+        "ledger/immutable_prefix.json"
+    )
+
+
+def test_the_state_reader_refuses_a_symlinked_parent(tmp_path: pathlib.Path) -> None:
+    """The same walk in the release-chain reader, which _verify_state_history
+    uses for both the ledger and the immutable prefix."""
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "official_observations.jsonl").write_text("{}\n", encoding="utf-8")
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "ledger").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ReleaseChainError) as refusal:
+        _regular_file_bytes(root, CHAIN_SPEC.state_relative)
+    assert str(refusal.value) == (
+        "state path traverses a symlink at 'ledger': "
+        "ledger/official_observations.jsonl"
+    )
+
+
+def test_the_state_reader_keeps_its_message_for_a_symlinked_state_file(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The final-component refusal predates the walk and is differential-gated:
+    a linked state file must still refuse with exactly its own message."""
+
+    root = tmp_path / "repo"
+    (root / "ledger").mkdir(parents=True)
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text("{}\n", encoding="utf-8")
+    linked = root / CHAIN_SPEC.state_relative
+    linked.symlink_to(outside)
+
+    with pytest.raises(ReleaseChainError) as refusal:
+        _regular_file_bytes(root, CHAIN_SPEC.state_relative)
+    assert str(refusal.value) == (
+        f"required state file is missing or non-regular: {linked}"
+    )
+
+
+def test_the_state_reader_accepts_an_ordinary_regular_file(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The walk costs the ordinary tree nothing."""
+
+    root = tmp_path / "repo"
+    (root / "ledger").mkdir(parents=True)
+    (root / CHAIN_SPEC.state_relative).write_text("{}\n", encoding="utf-8")
+
+    assert _regular_file_bytes(root, CHAIN_SPEC.state_relative) == b"{}\n"

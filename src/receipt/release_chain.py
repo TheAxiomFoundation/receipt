@@ -990,12 +990,51 @@ def jsonl_line_offsets(payload: bytes, label: str) -> list[int]:
     return offsets
 
 
+def assert_no_symlinked_state_component(
+    root: pathlib.Path, relative: pathlib.PurePosixPath
+) -> None:
+    """Walk every component of a state path, refusing a symlink at any of them.
+
+    Checking only the final component lets an intermediate directory symlink
+    serve the accepted state from outside the candidate tree entirely: replace
+    ``ledger/`` with a link to an ambient directory and the JSONL beneath it is
+    still a regular file, still hashes, and still satisfies every manifest —
+    while being no part of what the auditor cloned, and no part of what the
+    base commit can be diffed against. An in-tree link is the same hole: the
+    bytes under audit are then a directory the surface patterns never name.
+    The anchor path is walked this way at the top of ``verify_release_chain``;
+    this is the same walk for the two state paths. (Mirrors
+    ``corpus._assert_no_symlinked_component``.)
+    """
+
+    current = root
+    for segment in relative.parts:
+        current = current / segment
+        # is_symlink() catches POSIX symlinks; on Windows a junction is not a
+        # symlink but is reported by st_reparse_tag, so refuse any reparse
+        # point as well. A dangling link does not exist() but still refuses.
+        reparse = (
+            getattr(current.lstat(), "st_reparse_tag", 0) if current.exists() else 0
+        )
+        if current.is_symlink() or reparse:
+            raise ReleaseChainError(
+                "state path traverses a symlink at "
+                f"{current.relative_to(root).as_posix()!r}: {relative.as_posix()}"
+            )
+
+
 def _regular_file_bytes(root: pathlib.Path, relative: pathlib.PurePosixPath) -> bytes:
+    # The final-component check keeps its own refusal and runs first, so every
+    # input it already rejected is rejected identically; the component walk
+    # below only ever fires for a path this reader used to accept. Both state
+    # reads in _verify_state_history come through here, so the walk covers the
+    # ledger and the immutable prefix alike.
     path = root / relative
     if path.is_symlink() or not path.is_file():
         raise ReleaseChainError(
             f"required state file is missing or non-regular: {path}"
         )
+    assert_no_symlinked_state_component(root, relative)
     return path.read_bytes()
 
 
