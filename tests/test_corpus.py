@@ -1234,3 +1234,41 @@ def test_refuses_a_removed_path_the_verifier_cannot_look_for(
             verify_corpus_binding(tmp_path, journal, spec=corpus_spec())
     finally:
         os.chmod(tmp_path / "retired", 0o755)
+
+
+def test_refuses_a_lone_surrogate_in_gate_evidence(tmp_path: pathlib.Path) -> None:
+    """JSON can spell a lone surrogate inside otherwise valid UTF-8.
+
+    ``\\ud800`` decodes to a code point in category Cs that neither the C0 nor
+    the Cf screen covers, and nothing downstream can render or stat it. It is
+    refused at the schema boundary like the other invisible classes.
+    """
+
+    write_tree(tmp_path)
+    rows = journal_rows(
+        gates=[
+            {
+                "gateId": "rulespec/compile",
+                "tier": "public",
+                "outcome": "not-run",
+                "evidence": {"reason": "gate disabled \ud800"},
+            }
+        ]
+    )
+    with pytest.raises(CorpusError, match="lone surrogate"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_refuses_a_lone_surrogate_in_a_journal_path(tmp_path: pathlib.Path) -> None:
+    """A path carrying a lone surrogate cannot be looked for at all.
+
+    ``os.lstat`` raises ``UnicodeEncodeError`` on it, a ``ValueError`` that no
+    ``OSError`` handler in this module sees, so without the screen the row
+    escaped as an unclassified exception instead of a refusal that names it.
+    """
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+    rows[0]["path"] = "rules/benefit/amo\ud800unt.yaml"
+    with pytest.raises(CorpusError, match="lone surrogate"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
