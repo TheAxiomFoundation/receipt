@@ -889,6 +889,21 @@ def verify_corpus_binding(
                 "verdict is refused"
             )
 
+    # A tombstone is a claim about the tree, not only about the journal, and
+    # the verdict repeats it as removedPaths. For a content path the sweep
+    # above already catches a file that outlived its removal row — it is
+    # unlisted. For an attested path nothing else looks: attested paths sit
+    # outside the content roots, so a retired toolchain pin or apply manifest
+    # could sit on disk bound by no row, reported as removed, and be read as
+    # current by every consumer. lstat both kinds and refuse what is still
+    # there. (Found by cross-family review.)
+    for path in removed:
+        try:
+            os.lstat(root / path)
+        except OSError:
+            continue
+        raise CorpusError(f"removed path is still present in the tree: {path}")
+
     return CorpusVerification(
         content=tuple(content[path] for path in sorted(content)),
         attested=tuple(attested[path] for path in sorted(attested)),
