@@ -60,6 +60,7 @@ from typing import Any
 
 from receipt.canonical import canonical_sha256
 from receipt.release_chain import (
+    assert_file_modes_authoritative,
     ChainSpec,
     MANIFEST_RE,
     ReleaseChainError,
@@ -440,10 +441,13 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
     The binding values were checked for presence alone, so a response digest
     of ``"x"``, a ``ledgerRepoSha`` of ``"HEAD"``, and a ``retrievedAt`` of
     ``"yesterday"`` each satisfied a contract the row's custody claim rests
-    on. Their shapes are validated here; what any of them MEANS is untouched.
-    In particular the ``assertionVersion`` projection stays exactly as it is —
-    it must remain byte-identical to the Brier writer's, so changing it is a
-    coordinated schema migration on both sides, not a gate fix.
+    on. Their shapes are validated by check_binding_shapes, which the gate
+    runs after every check that existed before it; this function is the
+    ported row validation, unchanged. What any of the values MEANS is
+    untouched either way. In particular the ``assertionVersion`` projection
+    stays exactly as it is — it must remain byte-identical to the Brier
+    writer's, so changing it is a coordinated schema migration on both
+    sides, not a gate fix.
     """
 
     versions: dict[str, int] = {}
@@ -572,38 +576,6 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
             )
         active_by_record_id[str(record_id)] = (number, effective_id)
 
-        if number > prefix_count:
-            # Presence alone was the whole check on these three. The digest
-            # is what binds the row to an archived response, the repo sha is
-            # what binds it to the code that produced it, and retrievedAt is
-            # what any chronology claim about the row is measured from — a
-            # placeholder in any of them satisfied the contract while binding
-            # nothing. They run last in the row, after every refusal that
-            # existed before them — presence, projection, and supersession —
-            # so no existing refusal is preempted. (Peer review found them
-            # ahead of the projection and supersession checks.)
-            archive = row["responseArchive"]
-            digest = archive["sha256"]
-            if not isinstance(digest, str) or not re.fullmatch(
-                r"[0-9a-f]{64}", digest
-            ):
-                raise AppendError(
-                    f"appended line {number} ({record_id}) "
-                    "responseArchive.sha256 is not a SHA-256 hex digest"
-                )
-            repo_sha = row["ledgerRepoSha"]
-            if not isinstance(repo_sha, str) or not re.fullmatch(
-                r"[0-9a-f]{40}", repo_sha
-            ):
-                raise AppendError(
-                    f"appended line {number} ({record_id}) ledgerRepoSha is "
-                    "not a full 40-character commit id"
-                )
-            if not _is_rfc3339_with_zone(row["retrievedAt"]):
-                raise AppendError(
-                    f"appended line {number} ({record_id}) retrievedAt is not "
-                    "an RFC 3339 timestamp with a time zone"
-                )
 
 
 def check_append_only(
@@ -675,6 +647,47 @@ def check_prefix_anchored_to_base(
     return int(base_prefix["prefixLineCount"])
 
 
+def check_binding_shapes(lines: list[str], prefix_count: int) -> None:
+    """Require the post-cutover binding values to have the shape they claim.
+
+    Presence alone was the whole check on these three. The digest is what
+    binds the row to an archived response, the repo sha is what binds it to
+    the code that produced it, and retrievedAt is what any chronology claim
+    about the row is measured from — a placeholder in any of them satisfied
+    the contract while binding nothing.
+
+    Runs after every check that existed before it — row validation, the
+    release proposal, the release history — so no pre-existing refusal is
+    pre-empted for an input that violates both. Two review rounds moved it
+    here: first from ahead of the projection and supersession checks, then
+    from ahead of the release checks. The rows were parsed and validated by
+    check_rows already, so the loads below cannot fail.
+    """
+
+    for number, line in enumerate(lines, start=1):
+        if number <= prefix_count:
+            continue
+        row = json.loads(line)
+        record_id = row.get("source_record_id")
+        digest = row["responseArchive"]["sha256"]
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise AppendError(
+                f"appended line {number} ({record_id}) "
+                "responseArchive.sha256 is not a SHA-256 hex digest"
+            )
+        repo_sha = row["ledgerRepoSha"]
+        if not isinstance(repo_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", repo_sha):
+            raise AppendError(
+                f"appended line {number} ({record_id}) ledgerRepoSha is "
+                "not a full 40-character commit id"
+            )
+        if not _is_rfc3339_with_zone(row["retrievedAt"]):
+            raise AppendError(
+                f"appended line {number} ({record_id}) retrievedAt is not "
+                "an RFC 3339 timestamp with a time zone"
+            )
+
+
 def check_state_modes(base: _BaseCommit, candidate: _CandidateTree) -> None:
     """Require the ledger and the frozen prefix to keep the base's file mode.
 
@@ -689,6 +702,10 @@ def check_state_modes(base: _BaseCommit, candidate: _CandidateTree) -> None:
     gitlink entry is a category change too, and refuses here.
     """
 
+    try:
+        assert_file_modes_authoritative(candidate.root)
+    except ReleaseChainError as exc:
+        raise AppendError(str(exc)) from exc
     for relative in (
         candidate.spec.chain.state_relative,
         candidate.spec.chain.prefix_relative,
@@ -703,8 +720,9 @@ def check_state_modes(base: _BaseCommit, candidate: _CandidateTree) -> None:
         # other but not owner is 100644 to git. Testing any execute bit
         # called that 100755 and missed a 100755 -> 100644 change (peer
         # review). On a checkout with core.fileMode=false the bit is not
-        # materialised and this comparison is not meaningful; that is the
-        # same caveat the release-file check carries.
+        # materialised and this comparison would be fail-open, so such a
+        # checkout is refused above rather than compared (peer review, round
+        # two); the release-file check does the same.
         executable = bool((candidate.root / relative).stat().st_mode & 0o100)
         if ("100755" if executable else "100644") != entry.mode:
             raise AppendError(f"state file mode changed relative to base: {path}")
@@ -1023,11 +1041,11 @@ def verify_append_gate(
             enforce_production_pins=production_pins,
         )
     )
+    # Both of these are new since the extraction, so they run after every
+    # check that existed before them: the row checks, the release proposal,
+    # and the release history. Peer review caught each earlier placement.
+    check_binding_shapes(lines, binding_boundary)
     if base is not None:
-        # Last, after the row checks and the release proposal as well as the
-        # byte comparisons, so every refusal that existed before this check
-        # still fires first and in its own words. Peer review caught the
-        # earlier placement, which sat ahead of two of them.
         check_state_modes(base, candidate)
     # Name the commit the verdict was measured against whenever the caller
     # named something that could move. A base given as its own OID already

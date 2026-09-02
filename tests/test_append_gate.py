@@ -866,3 +866,84 @@ def test_an_existing_row_refusal_wins_over_the_mode_check(
     assert str(refusal.value) == (
         "appended line 3 (fixture.series.observation_3) lacks retrievedAt"
     )
+
+
+def test_a_release_file_with_a_group_execute_bit_alone_keeps_its_category(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The release-file comparison keys on the owner bit like the state check:
+    0655 is 100644 to git, so a 100644 base accepts it."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    readme = candidate.root / CHAIN_SPEC.release_root_relative / "README.md"
+    readme.chmod(0o655)
+
+    assert run_gate(candidate) == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 1, "
+        "+1 appended vs base"
+    )
+
+
+def test_dropping_a_release_files_owner_execute_bit_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """100755 at the base, 0655 in the candidate: a mode change the any-bit
+    test in the release-file comparison missed (peer review, round two)."""
+
+    candidate = base_repository(tmp_path)
+    readme = candidate.root / CHAIN_SPEC.release_root_relative / "README.md"
+    readme.chmod(readme.stat().st_mode | 0o111)
+    git(candidate.root, "add", "-A")
+    git(candidate.root, "commit", "--quiet", "-m", "executable readme")
+    executable_base = Candidate(
+        root=candidate.root, base=git(candidate.root, "rev-parse", "HEAD")
+    )
+    append_one_row(executable_base)
+    readme.chmod(0o655)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(executable_base)
+    assert str(refusal.value) == (
+        f"existing release file mode changed relative to {executable_base.base}: "
+        "releases/README.md (100755 -> 100644)"
+    )
+
+
+def test_a_checkout_whose_modes_are_not_authoritative_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """With core.fileMode false the working tree says nothing about the mode
+    git records, so comparing it would be fail-open; the gate refuses instead
+    (peer review, round two)."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    git(candidate.root, "config", "core.fileMode", "false")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "file modes cannot be verified: core.fileMode is false in this "
+        "checkout, so the working tree does not carry the executable bit git "
+        "records"
+    )
+
+
+def test_a_pre_existing_release_refusal_wins_over_a_binding_shape_refusal(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A proposal that both rewrites a base release file and carries a
+    symbolic ledgerRepoSha gets the release-history refusal, which existed
+    before the shape checks did: they run after the release checks (peer
+    review, round two)."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate, ledgerRepoSha="HEAD")
+    readme = candidate.root / CHAIN_SPEC.release_root_relative / "README.md"
+    readme.write_text("rewritten\n", encoding="utf-8")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert "ledgerRepoSha" not in str(refusal.value)
+    assert "releases/README.md" in str(refusal.value)

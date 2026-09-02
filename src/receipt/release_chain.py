@@ -1581,12 +1581,44 @@ def _working_release_files(
     return files
 
 
+def assert_file_modes_authoritative(root: pathlib.Path) -> None:
+    """Refuse to compare file modes on a checkout that does not carry them.
+
+    The mode comparisons read the candidate's executable bit from ``stat``.
+    With ``core.fileMode`` false — set by git itself on a filesystem that
+    cannot materialise the bit, or by hand — the working tree says nothing
+    about the mode git records, so a comparison would accept any index-side
+    change while the verdict claimed mode identity (peer review). Unset means
+    git's default, which is true.
+    """
+
+    result = subprocess.run(
+        ["git", "-C", str(root), "config", "--bool", "core.fileMode"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 1 and not result.stdout.strip():
+        return
+    if result.returncode != 0:
+        raise ReleaseChainError(
+            f"cannot read core.fileMode for {root}: {result.stderr.strip()[-500:]}"
+        )
+    if result.stdout.strip() == "false":
+        raise ReleaseChainError(
+            "file modes cannot be verified: core.fileMode is false in this "
+            "checkout, so the working tree does not carry the executable bit "
+            "git records"
+        )
+
+
 def verify_release_history_immutable(
     root: pathlib.Path, base_ref: str, spec: ChainSpec
 ) -> tuple[str, set[str], dict[str, GitEntry]]:
     """Compare every base ``releases/`` file byte and mode to the candidate."""
 
     root = root.resolve()
+    assert_file_modes_authoritative(root)
     commit = resolve_base_commit(root, base_ref)
     base_entries = git_tree_entries(root, commit, str(spec.release_root_relative))
     current_files = _working_release_files(root, spec)
