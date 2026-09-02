@@ -540,17 +540,18 @@ generation or retirement semantics for timestamp-authority signers: an
 identity allows several signer fingerprints at once with no validity
 interval on any of them, so an authority's own key rotation is carried
 by adding the new fingerprint beside the old one, and the superseded
-signer keeps verifying until the consumer removes it. The release-chain lane requires the exact
-configured receipt set, so a single configured authority's outage
-blocks release publication until the consumer revises policy — the
-witness lane's declared-unavailable escape (@sec-guarantees) does not
-exist there. The differential harnesses cover finite fixture and
-mutation batteries — each test file documents its commands, source
-pins, and exclusions, which is also the rerun recipe — not all
-possible inputs, and the package inherits the standard assumptions of
-its primitives: signature schemes and hash functions unbroken,
-timestamp authorities honest about time. Key compromise before
-rotation defeats the signature layer for the compromised generation.
+signer keeps verifying until the consumer removes it. The
+release-chain lane requires the exact configured receipt set, so a
+single configured authority's outage blocks release publication until
+the consumer revises policy — the witness lane's declared-unavailable
+escape (@sec-guarantees) does not exist there. The differential
+harnesses cover finite fixture and mutation batteries — each test file
+documents its commands, source pins, and exclusions, which is also the
+rerun recipe — not all possible inputs, and the package inherits the
+standard assumptions of its primitives: signature schemes and hash
+functions unbroken, timestamp authorities honest about time. Key
+compromise before rotation defeats the signature layer for the
+compromised generation.
 The package verifies; it does not yet produce — manifests, witnesses,
 and journals come from the producers' own tooling, and a
 producer-side reference implementation plus an inert specification
