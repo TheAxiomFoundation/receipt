@@ -1626,3 +1626,42 @@ def test_requires_a_supplemental_outcome_for_a_reused_id_under_a_new_root(
     )
     assert evidence.status == "available"
     assert evidence.supplemental_tokens == ()
+
+
+@pytest.mark.parametrize(
+    "label", ["TRUSTED CERTIFICATE", "X509 CERTIFICATE"], ids=["trusted", "x509"]
+)
+def test_refuses_a_root_pem_whose_second_authority_wears_another_pem_label(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...], label: str
+) -> None:
+    """OpenSSL's -CAfile loads more PEM labels than CERTIFICATE.
+
+    Counting only ``-----BEGIN CERTIFICATE-----`` blocks let the pinned root
+    be followed by a second authority spelled as a ``TRUSTED CERTIFICATE`` or
+    a legacy ``X509 CERTIFICATE`` object, which the count did not see and the
+    ``-CAfile`` verifications trust (peer review, fresh gate round four). Every
+    PEM object is counted, whatever its label, and the one object must be a
+    plain certificate.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    relabelled = (
+        beta.tsa.root_pem.read_bytes()
+        .replace(b"BEGIN CERTIFICATE", f"BEGIN {label}".encode())
+        .replace(b"END CERTIFICATE", f"END {label}".encode())
+    )
+    combined = alpha.tsa.root_pem.read_bytes() + relabelled
+    assert combined.count(b"-----BEGIN CERTIFICATE-----") == 1
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    root_name = f"combined-{label.split()[0].lower()}.pem"
+    (tree.records / "trust" / root_name).write_bytes(combined)
+
+    def point_at_the_combined_root(entry: dict[str, Any]) -> None:
+        entry["rootCertificate"]["path"] = f"records/trust/{root_name}"
+        entry["rootCertificate"]["pemSha256"] = sha256_bytes(combined)
+
+    reference, spec = add_bundle_version(
+        tree, local_anchors[:1], version=2, mutate_anchor=point_at_the_combined_root
+    )
+    with pytest.raises(TsaError, match="must hold exactly one certificate"):
+        _load_trust_bundle(tree.records, reference, spec=spec)

@@ -831,6 +831,10 @@ def preferred_active_trust_bundle(
     return dict(max(candidates, key=lambda item: item[0])[1])
 
 
+#: Every PEM object boundary OpenSSL recognises, whatever its label.
+_PEM_LABEL_RE = re.compile(rb"-----BEGIN ([A-Z0-9 ]+)-----")
+
+
 def _root_material(records: Path, anchor: dict[str, Any]) -> dict[str, str]:
     """Validate an anchor's referenced root and return its certificate identity.
 
@@ -862,7 +866,15 @@ def _root_material(records: Path, anchor: dict[str, Any]) -> dict[str, str]:
     # file authorizes.  A new refusal, placed before the ported PEM-hash
     # refusal because the file it describes is not one the pinned tree
     # presents: both its roots hold exactly one certificate.
-    if root_path.read_bytes().count(b"-----BEGIN CERTIFICATE-----") != 1:
+    #
+    # Counted as PEM objects of any label, not as CERTIFICATE blocks: OpenSSL's
+    # -CAfile also loads "TRUSTED CERTIFICATE" and the legacy "X509
+    # CERTIFICATE" objects, so a file holding the pinned certificate followed
+    # by a second authority under either label counted as one (peer review,
+    # fresh gate round four). Exactly one object, and it must be a plain
+    # CERTIFICATE, which is the only form the identity pins describe.
+    labels = _PEM_LABEL_RE.findall(root_path.read_bytes())
+    if len(labels) != 1 or labels[0] != b"CERTIFICATE":
         raise TsaError(
             f"pinned TSA root PEM must hold exactly one certificate: {root_path}"
         )
