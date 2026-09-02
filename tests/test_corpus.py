@@ -933,3 +933,49 @@ def test_refuses_an_attested_file_removed_after_hashing(
         verify_corpus_binding(
             tmp_path, render_journal(journal_rows()), spec=corpus_spec()
         )
+
+
+# --- third cross-family round: the sweep's own blind spots -------------------
+
+
+def test_refuses_an_unlisted_content_file_whose_suffix_differs_only_by_case(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Regression for a demonstrated false PASS (cross-family review).
+
+    The sweep matched pinned suffixes byte-for-byte, so ``smuggled.YAML`` was
+    not content and never entered the closed-world set. On the
+    case-insensitive filesystems this module already defends against it is
+    the same file as ``smuggled.yaml`` — an unwitnessed rule that every
+    consumer reads, under a verdict claiming the world was closed over three
+    files while four were present.
+    """
+
+    write_tree(tmp_path)
+    (tmp_path / "rules/tax/smuggled.YAML").write_text("name: smuggled\n")
+    with pytest.raises(CorpusError, match="not bound by the witnessed journal"):
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+
+
+def test_refuses_an_unlisted_content_file_whose_suffix_differs_only_by_normalization(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The same escape spelled in Unicode rather than in case.
+
+    A pinned suffix carrying a composed character has a decomposed spelling
+    that is byte-different and, on a normalizing filesystem, the same name.
+    The sweep folds both before comparing, so neither spelling sits outside
+    the closed world.
+    """
+
+    import unicodedata
+
+    write_tree(tmp_path)
+    spec = corpus_spec(content_suffixes=(".yaml", ".café"))
+    decomposed = unicodedata.normalize("NFD", "rules/tax/smuggled.café")
+    assert decomposed != "rules/tax/smuggled.café"
+    (tmp_path / decomposed).write_text("name: smuggled\n")
+    with pytest.raises(CorpusError, match="not bound by the witnessed journal"):
+        verify_corpus_binding(tmp_path, render_journal(journal_rows()), spec=spec)

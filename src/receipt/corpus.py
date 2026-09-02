@@ -15,7 +15,11 @@ Three row kinds, one journal:
 ``content``
     A file inside a consumer-declared content root, with a consumer-declared
     suffix. These are swept closed-world: the effective present set must equal
-    the tree's set exactly, in both membership and digest.
+    the tree's set exactly, in both membership and digest. The sweep is
+    suffix-scoped after folding — path and suffix are compared under Unicode
+    NFC plus case folding — so a case- or normalization-varied spelling of a
+    pinned suffix cannot sit outside the closed world on a filesystem that
+    treats it as the same file.
 
 ``attested``
     An exact path bound by digest without a sweep — the toolchain pin, the
@@ -159,7 +163,15 @@ class CorpusSpec:
     def is_content_path(self, path: str) -> bool:
         if self.content_root_of(path) is None:
             return False
-        return any(path.endswith(suffix) for suffix in self.content_suffixes)
+        # Fold both sides before comparing, for the same reason _path_fold
+        # exists: on a case-insensitive filesystem "rules/x.YAML" and
+        # "rules/x.yaml" are one file, so a byte-exact suffix match would let
+        # a case-varied spelling be classified as not-content and escape the
+        # sweep. (Found by cross-family review.)
+        folded = _path_fold(path)
+        return any(
+            folded.endswith(_path_fold(suffix)) for suffix in self.content_suffixes
+        )
 
 
 @dataclass(frozen=True)
@@ -575,8 +587,15 @@ def _tree_content_paths(root: pathlib.Path, spec: CorpusSpec) -> dict[str, pathl
                     raise CorpusError(
                         f"content root contains a non-regular file: {relative}"
                     )
+                # Suffix-scoped after folding, matching is_content_path: an
+                # unwitnessed "smuggled.YAML" is the same file as
+                # "smuggled.yaml" wherever the filesystem is case-insensitive,
+                # and a byte-exact match here would leave it out of the
+                # closed-world set entirely. (Found by cross-family review.)
+                folded = _path_fold(relative)
                 if not any(
-                    relative.endswith(suffix) for suffix in spec.content_suffixes
+                    folded.endswith(_path_fold(suffix))
+                    for suffix in spec.content_suffixes
                 ):
                     continue
                 found[relative] = candidate
