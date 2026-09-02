@@ -202,9 +202,22 @@ class CorpusSpec:
                 raise CorpusError(f"CorpusSpec required gate id is malformed: {_quoted(gate_id)}")
 
     def content_root_of(self, path: str) -> pathlib.PurePosixPath | None:
+        """The pinned root this path sits under, compared by fold key.
+
+        Byte-exact membership contradicted the rest of the module. The suffix
+        predicate folds, the alias guard folds, and the tombstone search
+        folds — but a path's *root* was matched byte for byte, so on a
+        case-sensitive host "RULES/evil.yaml" sat outside the pinned "rules/"
+        root, was not content, and was never swept; on a case-insensitive
+        host the same bytes are inside it. Which host the auditor cloned onto
+        decided whether the closed world contained the file (peer review,
+        round three). Folded, both hosts agree it is content, and the tree
+        walk below refuses the aliasing spelling outright.
+        """
+
+        folded = _path_fold(path)
         for root in self.content_roots:
-            prefix = root.as_posix() + "/"
-            if path.startswith(prefix):
+            if folded.startswith(_path_fold(root.as_posix()) + "/"):
                 return root
         return None
 
@@ -981,6 +994,7 @@ def _tree_content_paths(root: pathlib.Path, spec: CorpusSpec) -> dict[str, pathl
         base = _assert_no_symlinked_component(
             root, base_relative, what="pinned content root"
         )
+        _assert_no_aliasing_root_component(root, base_relative)
         if not base.exists():
             raise CorpusError(
                 f"pinned content root is absent from the tree: {base_relative}"
@@ -1023,6 +1037,45 @@ def _tree_content_paths(root: pathlib.Path, spec: CorpusSpec) -> dict[str, pathl
                     continue
                 found[relative] = candidate
     return found
+
+
+def _assert_no_aliasing_root_component(root: pathlib.Path, relative: str) -> None:
+    """Refuse a tree entry that aliases a component of a pinned content root.
+
+    :meth:`CorpusSpec.content_root_of` folds, so a path under "RULES/" is
+    classified as content wherever it is spelled. Classification is only half
+    of it: the *walk* still descends the pinned spelling, so on a
+    case-sensitive host "RULES/evil.yaml" is content the walk never visits,
+    and it would be reported missing from the tree rather than named for what
+    it is. Worse, an auditor on a case-insensitive host holds one merged
+    directory and an auditor on a case-sensitive host holds two, from the
+    same bytes.
+
+    So each component of each pinned root is checked against a listing of its
+    parent: an entry whose fold key matches the component but whose spelling
+    does not is refused by name. A parent that is not there is left to the
+    absent/not-a-directory refusals below, which say something more useful,
+    and a symlinked parent has already been refused by
+    :func:`_assert_no_symlinked_component`.
+    """
+
+    current = root
+    walked: list[str] = []
+    for component in relative.split("/"):
+        if current.is_symlink() or not current.is_dir():
+            return
+        for entry in _list_directory(current, "/".join(walked)):
+            _assert_assigned(entry.name, f"tree entry beside {_quoted(relative)}")
+            if entry.name != component and _path_fold(entry.name) == _path_fold(
+                component
+            ):
+                raise CorpusError(
+                    f"tree entry {_quoted(entry.name)} aliases the pinned content "
+                    f"root component {_quoted(component)} on a case- or "
+                    "normalization-insensitive filesystem"
+                )
+        current = current / component
+        walked.append(component)
 
 
 def _assert_no_symlinked_component(
