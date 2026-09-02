@@ -1615,3 +1615,27 @@ def test_a_conflicted_index_entry_is_refused(tmp_path: pathlib.Path) -> None:
         "candidate index holds an unmerged entry at "
         "ledger/official_observations.jsonl"
     )
+
+
+def test_the_index_refusal_precedes_file_level_release_refusals(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The second half of the stated precedence exception, pinned like the
+    first: a base release file whose index and working tree disagree is
+    refused before the byte comparison that would otherwise fire, because
+    that file's mode comparison is evidence only while the tree carries what
+    git recorded. Without F2 this proposal got the byte refusal, having
+    compared a mode nothing established."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    readme = candidate.root / CHAIN_SPEC.release_root_relative / "README.md"
+    readme.write_text("rewritten\n", encoding="utf-8")
+    git(candidate.root, "update-index", "--chmod=+x", "--", "releases/README.md")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "candidate working tree mode for releases/README.md disagrees with "
+        "its index entry (100755 vs 100644)"
+    )

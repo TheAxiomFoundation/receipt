@@ -46,12 +46,15 @@ re-checks the file at the end, the two state files keep the base's file mode,
 and the post-cutover binding values are validated for shape rather than
 presence alone. They run beside the extracted checks without altering any of
 their refusals, and every new refusal runs after every pre-existing file-level
-refusal — with one stated exception: the checkout-level guard
-(``release_chain.assert_file_modes_authoritative``) runs before the
-release-history file checks, and after the base ref is resolved, because a
-checkout whose modes and types are not authoritative cannot be verified at
-all and says so before any verdict about its files. All of it carries its own
-tests in tests/test_append_gate.py.
+refusal — with one stated exception, the two guards that say a comparison
+cannot be made here rather than making it: the checkout-level
+``release_chain.assert_file_modes_authoritative`` (which runs after the base
+ref is resolved, so a false setting cannot mask a base that names nothing) and
+the per-file ``release_chain.assert_index_agrees_with_tree``. Both run ahead
+of the release-history file checks, deliberately: a mode read from a working
+tree that does not carry what git recorded is not evidence, so the reason it
+cannot be read is given rather than a verdict drawn from it. Both are pinned
+by tests. All of it carries its own tests in tests/test_append_gate.py.
 """
 
 from __future__ import annotations
@@ -803,11 +806,12 @@ def check_binding_shapes(lines: list[str], prefix_count: int) -> None:
     release proposal, the release history — so no pre-existing file-level
     refusal is pre-empted for an input that violates both. Two review rounds
     moved it here: first from ahead of the projection and supersession
-    checks, then from ahead of the release checks. The one refusal that does
-    run ahead of the pre-existing release checks is the checkout-level one
-    in release_chain.assert_file_modes_authoritative, deliberately: a
-    checkout that cannot be verified says so before any verdict about its
-    files. The rows were parsed and validated by check_rows already, so the
+    checks, then from ahead of the release checks. The only refusals that do
+    run ahead of the pre-existing release checks are the two in release_chain
+    that say a comparison cannot be made — assert_file_modes_authoritative
+    for the checkout, assert_index_agrees_with_tree for one file —
+    deliberately: what cannot be verified says so before any verdict drawn
+    from it. The rows were parsed and validated by check_rows already, so the
     loads below cannot fail.
     """
 
