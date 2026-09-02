@@ -11,7 +11,9 @@ $ PYTHONPATH=$PWD/src ./.venv/bin/python -c 'import receipt; print(receipt.__fil
 ```
 
 Offline suite: **222 passed at d542d59 → 238 passed on this branch**, +16, all
-16 new tests in the TSA integration battery. Four commits, one per finding.
+16 new tests in the TSA integration battery. I authored four commits, one per
+finding, plus this report; two further commits on the branch came from
+automation in this environment rather than from me — see the last section.
 
 ## Equivalence safety, established by reading the pinned tree rather than assuming
 
@@ -310,17 +312,40 @@ evidence [@RFC4998]":
 > fingerprint beside the old one, and a superseded signer keeps verifying until
 > the consumer removes it.
 
-**A stray commit sits mid-branch: `9f26186 fixup! Refuse a legacy witness that
-covers more anchors than it verifies`.** I did not author it and there are no
-git hooks installed in this repository (`.git/hooks` is empty, no
-`core.hooksPath`); it appeared between my finding-1 and finding-2 commits,
-carrying finding 2's content plus a tracked `.venv` symlink. Its content is
-fully superseded by `79cf2a9`, and `.venv` is not tracked at HEAD — the final
-tree is correct and `git ls-files` shows no stray paths. It should be **dropped,
-not autosquashed**: `git rebase --autosquash` would fold it into `9fcbc42` and
-then conflict with `79cf2a9`, which applies the same hunks. A squash merge makes
-it moot. I left it in place because rebase and reset are outside my ground
-rules.
+**Two commits on this branch are not mine, and one of them needs dropping.**
+The branch is:
+
+```
+0dd70ec Record what the witness-lane work changed and what it did not   (mine)
+8d21cf8 Ignore a worktree virtualenv symlink, not just a directory      (automation)
+821bf90 Say what a TSA identity actually does about signer rotation     (mine, finding 4)
+79cf2a9 Hold the legacy unavailable witness to the v2 metadata rules    (mine, finding 2)
+9f26186 fixup! Refuse a legacy witness that covers more anchors...      (automation)
+9fcbc42 Refuse a legacy witness that covers more anchors than it verifies (mine, finding 1)
+26bfbc2 Drive the witness lane end to end in the offline suite          (mine, finding 3)
+```
+
+`9f26186` and `8d21cf8` appeared without my running `git commit`, both carrying
+my Co-Authored-By trailer. There are no git hooks installed in this repository
+(`.git/hooks` holds only samples, no `core.hooksPath`), so the source is
+automation in this session's environment, not the repo.
+
+`8d21cf8` is correct and should be kept. `.gitignore` had `.venv/`, which matches
+only a directory; a worktree cannot hold the virtualenv as a directory without
+rebuilding it, so it is a symlink to the primary clone's, which left it
+untracked-but-not-ignored. Dropping the trailing slash ignores both shapes.
+
+`9f26186` should be **dropped, not autosquashed**. It swept up finding 2's
+in-progress edits plus that unignored `.venv` symlink, which is why my finding-2
+commit `79cf2a9` shows only the equivalence-harness docstring in its diffstat:
+the code and tests it describes had already been committed one commit earlier.
+`git rebase --autosquash` would fold `9f26186` into `9fcbc42` and mis-attribute
+finding 2's code to finding 1. A squash merge makes the whole question moot. The
+net tree is correct either way — `git diff origin/main..HEAD` touches exactly
+`.gitignore`, `REPORT.md`, `src/receipt/tsa.py`, `tests/corpus_fixture.py`,
+`tests/test_brier_witness_equivalence.py` and `tests/test_tsa.py`, `.venv` is not
+tracked at HEAD, and `canonical.py` is untouched. I left the history alone
+because rebase and reset are outside my ground rules.
 
 Related: I reached for `git stash` once to capture finding 2's before-state. A
 `[stash-shared]` guard hook blocked the follow-up, correctly — the stash stack
