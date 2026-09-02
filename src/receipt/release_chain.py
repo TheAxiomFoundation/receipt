@@ -1695,11 +1695,12 @@ def assert_index_agrees_with_tree(
     A path with no index entry is a new, untracked file with nothing to
     compare against, and returns.
 
-    Like the checkout guard, this runs ahead of the comparison it qualifies,
-    which at the release-file call site means ahead of two refusals that
-    predate it. That is deliberate and stated in append_gate's module
-    docstring: a tree that does not carry what git recorded should be told
-    so, not told that its proposal changed a mode.
+    Unlike the checkout guard, this runs after the comparisons it qualifies:
+    an unstaged chmod is both a mode change and an index disagreement, and
+    the upstream verifier's mode-change refusal is what the differential
+    harness pins for it. A comparison that passed while the working tree
+    was not carrying what git recorded is caught here, afterwards; nothing
+    pre-existing is pre-empted.
     """
 
     path = (
@@ -1778,10 +1779,6 @@ def verify_release_history_immutable(
             raise ReleaseChainError(
                 f"existing release file was deleted relative to {commit}: {relative}"
             )
-        # The mode read below is only evidence if the working tree carries
-        # what git recorded for this path, which the config settings alone do
-        # not establish.
-        assert_index_agrees_with_tree(root, relative)
         # Git keys the executable category on the owner bit alone; see
         # append_gate.check_state_modes for the reasoning.
         candidate_mode = "100755" if current.stat().st_mode & 0o100 else "100644"
@@ -1794,6 +1791,14 @@ def verify_release_history_immutable(
             raise ReleaseChainError(
                 f"existing release file bytes changed relative to {commit}: {relative}"
             )
+        # After the two comparisons it qualifies, deliberately. The mode read
+        # above is only evidence if the working tree carries what git
+        # recorded, which the config settings alone do not establish; but a
+        # file whose mode or bytes already differ from the base gets the
+        # refusal the upstream verifier gives, which the differential harness
+        # pins (an unstaged chmod is both a mode change and an index
+        # disagreement). A comparison that passed fail-open is caught here.
+        assert_index_agrees_with_tree(root, relative)
     return commit, set(current_files) - set(base_entries), base_entries
 
 

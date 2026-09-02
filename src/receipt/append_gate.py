@@ -46,15 +46,17 @@ re-checks the file at the end, the two state files keep the base's file mode,
 and the post-cutover binding values are validated for shape rather than
 presence alone. They run beside the extracted checks without altering any of
 their refusals, and every new refusal runs after every pre-existing file-level
-refusal — with one stated exception, the two guards that say a comparison
-cannot be made here rather than making it: the checkout-level
-``release_chain.assert_file_modes_authoritative`` (which runs after the base
-ref is resolved, so a false setting cannot mask a base that names nothing) and
-the per-file ``release_chain.assert_index_agrees_with_tree``. Both run ahead
-of the release-history file checks, deliberately: a mode read from a working
-tree that does not carry what git recorded is not evidence, so the reason it
-cannot be read is given rather than a verdict drawn from it. Both are pinned
-by tests. All of it carries its own tests in tests/test_append_gate.py.
+refusal — with one stated exception: the checkout-level
+``release_chain.assert_file_modes_authoritative``, which says a comparison
+cannot be made here rather than making it, runs ahead of the release-history
+file checks (and after the base ref is resolved, so a false setting cannot
+mask a base that names nothing). The per-file
+``release_chain.assert_index_agrees_with_tree`` runs after the comparisons it
+qualifies, so a comparison that passed while the working tree was not
+carrying what git recorded is caught afterwards and nothing pre-existing is
+pre-empted; the differential harness pins the upstream's mode-change refusal
+for an unstaged chmod, which is both. Both orders are pinned by tests. All of
+it carries its own tests in tests/test_append_gate.py.
 """
 
 from __future__ import annotations
@@ -806,12 +808,11 @@ def check_binding_shapes(lines: list[str], prefix_count: int) -> None:
     release proposal, the release history — so no pre-existing file-level
     refusal is pre-empted for an input that violates both. Two review rounds
     moved it here: first from ahead of the projection and supersession
-    checks, then from ahead of the release checks. The only refusals that do
-    run ahead of the pre-existing release checks are the two in release_chain
-    that say a comparison cannot be made — assert_file_modes_authoritative
-    for the checkout, assert_index_agrees_with_tree for one file —
-    deliberately: what cannot be verified says so before any verdict drawn
-    from it. The rows were parsed and validated by check_rows already, so the
+    checks, then from ahead of the release checks. The one refusal that does
+    run ahead of the pre-existing release checks is the checkout-level one
+    in release_chain.assert_file_modes_authoritative, deliberately: a
+    checkout that cannot be verified says so before any verdict about its
+    files. The rows were parsed and validated by check_rows already, so the
     loads below cannot fail.
     """
 
@@ -871,10 +872,6 @@ def check_state_modes(base: _BaseCommit, candidate: _CandidateTree) -> None:
     ):
         path = relative.as_posix()
         try:
-            # The candidate's own index is what says the working tree carries
-            # the mode and type git recorded for this path; the config
-            # settings above say only what the checkout claims.
-            assert_index_agrees_with_tree(candidate.root, relative)
             entry = git_file_entry(candidate.root, base.commit, path)
         except ReleaseChainError as exc:
             raise AppendError(str(exc)) from exc
@@ -889,6 +886,15 @@ def check_state_modes(base: _BaseCommit, candidate: _CandidateTree) -> None:
         executable = bool((candidate.root / relative).stat().st_mode & 0o100)
         if ("100755" if executable else "100644") != entry.mode:
             raise AppendError(f"state file mode changed relative to base: {path}")
+        # After the comparison it qualifies, as in the release-history pass:
+        # the candidate's own index is what says the working tree carries
+        # the mode and type git recorded for this path, and a comparison
+        # that passed fail-open is caught here rather than pre-empting the
+        # mode-change refusal that existed before it.
+        try:
+            assert_index_agrees_with_tree(candidate.root, relative)
+        except ReleaseChainError as exc:
+            raise AppendError(str(exc)) from exc
 
 
 def _release_triple(
