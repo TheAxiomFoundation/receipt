@@ -38,10 +38,12 @@ differential harness in tests/test_append_gate_equivalence.py.
 Additions since the extraction close confinement gaps the upstream battery
 never presented: a gate-only proposal is confined to the surfaces its verdict
 speaks for, a state path that traverses a symlinked component is refused before
-it is read, and the base is resolved to a commit once and carried to every
-consumer. They run beside the extracted checks without altering any of their
-refusals or the order in which those refusals fire, and carry their own tests
-in tests/test_append_gate.py.
+it is read, the base is resolved to a commit once and carried to every
+consumer, the two state files keep the base's file mode, and the post-cutover
+binding values are validated for shape rather than presence alone. They run
+beside the extracted checks without altering any of their refusals or the
+order in which those refusals fire, and carry their own tests in
+tests/test_append_gate.py.
 """
 
 from __future__ import annotations
@@ -53,6 +55,7 @@ import pathlib
 import re
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from receipt.canonical import canonical_sha256
@@ -405,7 +408,40 @@ def check_prefix(lines: list[str], candidate: _CandidateTree) -> dict[str, Any]:
     return prefix
 
 
+def _is_rfc3339_with_zone(value: Any) -> bool:
+    """Accept exactly an RFC 3339 date-time that names its own time zone.
+
+    ``datetime.fromisoformat`` alone accepts a wider grammar — a bare date, a
+    space separator, a missing offset — and a naive timestamp cannot be
+    ordered against a witnessed genTime at all. So the shape is pinned by
+    pattern first and the calendar values are then checked by the parser,
+    which is what rejects a February 30th that matches the pattern.
+    """
+
+    if not isinstance(value, str) or not re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+        r"(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})",
+        value,
+    ):
+        return False
+    try:
+        return datetime.fromisoformat(value).tzinfo is not None
+    except ValueError:
+        return False
+
+
 def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> None:
+    """Validate every row, and the post-cutover bindings on appended rows.
+
+    The binding values were checked for presence alone, so a response digest
+    of ``"x"``, a ``ledgerRepoSha`` of ``"HEAD"``, and a ``retrievedAt`` of
+    ``"yesterday"`` each satisfied a contract the row's custody claim rests
+    on. Their shapes are validated here; what any of them MEANS is untouched.
+    In particular the ``assertionVersion`` projection stays exactly as it is —
+    it must remain byte-identical to the Brier writer's, so changing it is a
+    coordinated schema migration on both sides, not a gate fix.
+    """
+
     versions: dict[str, int] = {}
     active_by_record_id: dict[str, tuple[int, str | None]] = {}
     for number, line in enumerate(lines, start=1):
@@ -472,6 +508,34 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
             if not isinstance(archive, dict) or not archive.get("sha256"):
                 raise AppendError(
                     f"appended line {number} responseArchive lacks a digest"
+                )
+            # Presence alone was the whole check on these three. The digest
+            # is what binds the row to an archived response, the repo sha is
+            # what binds it to the code that produced it, and retrievedAt is
+            # what any chronology claim about the row is measured from — a
+            # placeholder in any of them satisfied the contract while binding
+            # nothing. These run after every presence refusal above, so no
+            # existing refusal is preempted.
+            digest = archive["sha256"]
+            if not isinstance(digest, str) or not re.fullmatch(
+                r"[0-9a-f]{64}", digest
+            ):
+                raise AppendError(
+                    f"appended line {number} ({record_id}) "
+                    "responseArchive.sha256 is not a SHA-256 hex digest"
+                )
+            repo_sha = row["ledgerRepoSha"]
+            if not isinstance(repo_sha, str) or not re.fullmatch(
+                r"[0-9a-f]{40}", repo_sha
+            ):
+                raise AppendError(
+                    f"appended line {number} ({record_id}) ledgerRepoSha is "
+                    "not a full 40-character commit id"
+                )
+            if not _is_rfc3339_with_zone(row["retrievedAt"]):
+                raise AppendError(
+                    f"appended line {number} ({record_id}) retrievedAt is not "
+                    "an RFC 3339 timestamp with a time zone"
                 )
             # Key PRESENCE pairs the binding, and present values must be
             # shape-valid: truthiness accepted targetContentHash "" with a
