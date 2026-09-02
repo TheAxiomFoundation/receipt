@@ -879,6 +879,53 @@ def test_refuses_a_tampered_token_whose_hash_the_witness_was_updated_to_match(
         verify_tree(tree)
 
 
+def test_refuses_a_token_whose_imprint_is_over_other_bytes(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """Only ``-data`` ties a token to the record it witnesses (peer review, F2).
+
+    The witness's digest claim is checked against the record and the token's
+    bytes against the witness, but the message imprint inside the token is
+    only length-checked in Python; whether it is an imprint *of this record*
+    is settled by handing ``openssl ts -verify`` the record itself with
+    ``-data``. A genuinely signed, correctly pinned, in-date token over some
+    other payload is the input that check exists for, and no test presented
+    one -- every token refusal here was a tampered or missing token, which
+    the signature or the digest catches first. This one is intact: the
+    pinned authority signs it, the witness carries its hash, every other
+    claim still holds, and OpenSSL accepts it against the payload it is
+    actually about, asserted below. Remove ``-data`` and nothing refuses it.
+    """
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    token = tree.tokens[alpha.anchor_id]
+    other = tmp_path / "the-payload-this-token-is-about.json"
+    other.write_bytes(canonical_bytes({"observation": "a different record"}) + b"\n")
+    assert sha256_bytes(other.read_bytes()) != sha256_bytes(tree.record.read_bytes())
+    alpha.tsa.stamp(sha256_bytes(other.read_bytes()), token)
+    rewrite_witness(
+        tree,
+        lambda payload: payload["anchorOutcomes"][0].__setitem__(
+            "tokenSha256", sha256_bytes(token.read_bytes())
+        ),
+    )
+    assert openssl_ts_verifies(other, token, alpha.tsa.root_pem)
+    assert not openssl_ts_verifies(tree.record, token, alpha.tsa.root_pem)
+
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    message = str(caught.value)
+    # Pinned to where the message stops being reproducible: the ported
+    # wrapper and the command up to the ``-CAfile`` argument, which is a
+    # temporary re-encoding made per run, then OpenSSL's own reason.
+    assert message.startswith(
+        "OpenSSL command failed (openssl ts -verify -config /dev/null "
+        f"-data {tree.record} -in {token} -CAfile "
+    )
+    assert "ts_check_imprints:message imprint mismatch" in message
+
+
 def test_refuses_a_token_that_postdates_the_verification_time(
     tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
 ) -> None:
