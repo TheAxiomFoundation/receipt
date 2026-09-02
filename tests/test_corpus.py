@@ -13,7 +13,11 @@ import pathlib
 import pytest
 
 from receipt.corpus import (
+    EVIDENCE_RENDER_OVERHEAD,
+    GATE_RENDER_OVERHEAD,
     MAX_EVIDENCE_TEXT,
+    MAX_GATE_DECLARATIONS,
+    MAX_GATE_TEXT,
     CorpusError,
     verify_corpus_binding,
     verify_declarations,
@@ -1462,6 +1466,95 @@ def test_refuses_gate_declarations_over_the_verdict_budget(
     )
     with pytest.raises(CorpusError, match="over the verdict budget"):
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_refuses_more_gate_declarations_than_the_verdict_budget(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds F3 (round five): characters were bounded, gates never were.
+
+    ``MAX_GATE_TEXT`` charged gate-id and evidence payload characters and
+    nothing else, so a producer that kept every string short could declare as
+    many gates as it liked. Thirty thousand short ids with two characters of
+    evidence each charge about two hundred and thirty thousand and passed,
+    while the verdict they render is four hundred thousand characters of text
+    and four million of JSON — the flood the budget exists to stop, built out
+    of strings none of which is long.
+
+    Cardinality is bounded for its own sake now, and checked before the text
+    budget because the count is what is wrong with this journal. Without the
+    fix it verifies.
+    """
+
+    write_tree(tmp_path)
+    gates = [
+        {
+            "gateId": f"g{index}",
+            "tier": "public",
+            "outcome": "pass",
+            "evidence": {"c": "1"},
+        }
+        for index in range(30000)
+    ]
+    # What the old charge came to, which is why this journal used to pass.
+    assert sum(len(gate["gateId"]) + 2 for gate in gates) < MAX_GATE_TEXT
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows(gates=gates)), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        f"journal declares {len(gates)} gates, over the verdict budget of "
+        f"{MAX_GATE_DECLARATIONS} declarations"
+    )
+
+
+def test_refuses_gates_whose_rendering_cost_alone_floods_the_verdict(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds F3 (round five): a gate was free apart from what it declared.
+
+    The other half of the same hole, and the half a declaration count cannot
+    close: two thousand gates is inside the declaration budget, and two
+    thousand forty-eight-character ids with two characters of evidence
+    charged a hundred thousand — comfortably inside the text budget — while
+    the JSON they render is a quarter of a million characters before one
+    declared character is counted.
+
+    Each gate is now charged the fixed cost of the lines it produces, and
+    each evidence entry the cost of the member JSON puts around it, so this
+    journal is refused on the text budget. Without the fix it verifies.
+    """
+
+    write_tree(tmp_path)
+    gates = [
+        {
+            "gateId": f"overhead/{index:04d}".ljust(48, "x"),
+            "tier": "public",
+            "outcome": "pass",
+            "evidence": {"c": "1"},
+        }
+        for index in range(2000)
+    ]
+    assert len(gates) <= MAX_GATE_DECLARATIONS
+    # What the old charge came to, which is why this journal used to pass.
+    assert sum(len(gate["gateId"]) + 2 for gate in gates) < MAX_GATE_TEXT
+    charged = sum(
+        GATE_RENDER_OVERHEAD
+        + len(gate["gateId"])
+        + EVIDENCE_RENDER_OVERHEAD
+        + len("c")
+        + len("1")
+        for gate in gates
+    )
+    assert charged > MAX_GATE_TEXT
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows(gates=gates)), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        f"journal gate declarations cost {charged} characters of verdict "
+        f"text, over the verdict budget of {MAX_GATE_TEXT}"
+    )
 
 
 def test_refuses_a_gate_evidence_key_longer_than_the_bound(
