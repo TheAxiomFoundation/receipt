@@ -12,6 +12,7 @@ import pathlib
 import pytest
 
 from receipt.corpus import (
+    MAX_EVIDENCE_TEXT,
     CorpusError,
     verify_corpus_binding,
     verify_declarations,
@@ -979,3 +980,88 @@ def test_refuses_an_unlisted_content_file_whose_suffix_differs_only_by_normaliza
     (tmp_path / decomposed).write_text("name: smuggled\n")
     with pytest.raises(CorpusError, match="not bound by the witnessed journal"):
         verify_corpus_binding(tmp_path, render_journal(journal_rows()), spec=spec)
+
+
+def test_refuses_a_bidi_override_in_gate_evidence(tmp_path: pathlib.Path) -> None:
+    """Control characters are not the only way to redraw a verdict line.
+
+    U+202E RIGHT-TO-LEFT OVERRIDE is invisible and reverses everything after
+    it, so a producer can spell a not-run reason that renders as the opposite
+    of what the journal says. The sanitiser has to cover the whole format
+    class, not the C0 block it started with.
+    """
+
+    write_tree(tmp_path)
+    rows = journal_rows(
+        gates=[
+            {
+                "gateId": "rulespec/compile",
+                "tier": "public",
+                "outcome": "not-run",
+                "evidence": {"reason": "gate disabled \u202edeifirev setag lla"},
+            }
+        ]
+    )
+    with pytest.raises(CorpusError, match="Unicode format control"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_refuses_a_line_separator_in_gate_evidence(tmp_path: pathlib.Path) -> None:
+    """U+2028 breaks a line in any renderer that honours it, and it is outside
+    the C0 block the control-character screen covers. One evidence string
+    becomes as many verdict lines as the producer wants."""
+
+    write_tree(tmp_path)
+    rows = journal_rows(
+        gates=[
+            {
+                "gateId": "rulespec/compile",
+                "tier": "public",
+                "outcome": "not-run",
+                "evidence": {"reason": "skipped\u2028  VERDICT: PASS"},
+            }
+        ]
+    )
+    with pytest.raises(CorpusError, match="Unicode line separator"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_refuses_gate_evidence_longer_than_the_bound(tmp_path: pathlib.Path) -> None:
+    """Sanitising bounds what a character does, not how many there are. Two
+    hundred thousand blameless characters scroll every line the auditor
+    needed to read out of the terminal."""
+
+    write_tree(tmp_path)
+    rows = journal_rows(
+        gates=[
+            {
+                "gateId": "rulespec/compile",
+                "tier": "public",
+                "outcome": "not-run",
+                "evidence": {"reason": "x" * 200_000},
+            }
+        ]
+    )
+    with pytest.raises(CorpusError, match="longer than 1024 characters"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_accepts_gate_evidence_exactly_at_the_bound(tmp_path: pathlib.Path) -> None:
+    """The bound is a limit, not an off-by-one: MAX_EVIDENCE_TEXT characters
+    is still a reason a producer may state."""
+
+    write_tree(tmp_path)
+    rows = journal_rows(
+        gates=[
+            {
+                "gateId": "rulespec/compile",
+                "tier": "public",
+                "outcome": "not-run",
+                "evidence": {"reason": "x" * MAX_EVIDENCE_TEXT},
+            }
+        ]
+    )
+    verification = verify_corpus_binding(
+        tmp_path, render_journal(rows), spec=corpus_spec()
+    )
+    assert len(verification.gates[0].evidence["reason"]) == MAX_EVIDENCE_TEXT
