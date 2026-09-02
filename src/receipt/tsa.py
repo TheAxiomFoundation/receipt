@@ -831,8 +831,12 @@ def preferred_active_trust_bundle(
     return dict(max(candidates, key=lambda item: item[0])[1])
 
 
-#: Every PEM object boundary OpenSSL recognises, whatever its label.
-_PEM_LABEL_RE = re.compile(rb"-----BEGIN ([A-Z0-9 ]+)-----")
+#: Every PEM object boundary OpenSSL recognises, whatever its label: a BEGIN
+#: line on its own, anchored to line boundaries, because OpenSSL's PEM reader
+#: only honours a marker that starts a line and a preamble mentioning one
+#: mid-line ("# Example: -----BEGIN PRIVATE KEY-----") is text it ignores
+#: (peer review, third gate).
+_PEM_LABEL_RE = re.compile(rb"^-----BEGIN ([A-Z0-9 ]+)-----[ \t]*\r?$", re.M)
 
 
 def _root_material(records: Path, anchor: dict[str, Any]) -> dict[str, str]:

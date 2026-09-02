@@ -1665,3 +1665,67 @@ def test_refuses_a_root_pem_whose_second_authority_wears_another_pem_label(
     )
     with pytest.raises(TsaError, match="must hold exactly one certificate"):
         _load_trust_bundle(tree.records, reference, spec=spec)
+
+
+def test_accepts_a_root_pem_whose_preamble_mentions_a_marker_mid_line(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """A marker inside a preamble line is text OpenSSL ignores, and so do we.
+
+    An unanchored pattern counted "# Example: -----BEGIN PRIVATE KEY-----"
+    as a second object and refused a valid single-certificate file (peer
+    review, third gate). Detection is anchored to real boundary lines.
+    """
+
+    alpha = local_anchors[0]
+    with_preamble = (
+        b"# Example: -----BEGIN PRIVATE KEY----- is not an object here\n"
+        + alpha.tsa.root_pem.read_bytes()
+    )
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    root_name = "preamble-root.pem"
+    (tree.records / "trust" / root_name).write_bytes(with_preamble)
+
+    def point_at_the_preambled_root(entry: dict[str, Any]) -> None:
+        entry["rootCertificate"]["path"] = f"records/trust/{root_name}"
+        entry["rootCertificate"]["pemSha256"] = sha256_bytes(with_preamble)
+
+    reference, spec = add_bundle_version(
+        tree, local_anchors[:1], version=2, mutate_anchor=point_at_the_preambled_root
+    )
+    _path, payload = _load_trust_bundle(tree.records, reference, spec=spec)
+    assert payload["bundleId"] == "tsa-anchors-v2"
+
+
+@pytest.mark.parametrize(
+    "label", ["TRUSTED CERTIFICATE", "X509 CERTIFICATE"], ids=["trusted", "x509"]
+)
+def test_refuses_a_root_pem_whose_only_object_is_not_a_plain_certificate(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...], label: str
+) -> None:
+    """The one object must be a plain certificate, the form the pins describe.
+
+    Binds the label clause on its own: a file holding a single object under
+    another label counts as one, so only the label check refuses it (peer
+    review, third gate).
+    """
+
+    alpha = local_anchors[0]
+    relabelled = (
+        alpha.tsa.root_pem.read_bytes()
+        .replace(b"BEGIN CERTIFICATE", f"BEGIN {label}".encode())
+        .replace(b"END CERTIFICATE", f"END {label}".encode())
+    )
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    root_name = f"single-{label.split()[0].lower()}.pem"
+    (tree.records / "trust" / root_name).write_bytes(relabelled)
+
+    def point_at_the_relabelled_root(entry: dict[str, Any]) -> None:
+        entry["rootCertificate"]["path"] = f"records/trust/{root_name}"
+        entry["rootCertificate"]["pemSha256"] = sha256_bytes(relabelled)
+
+    reference, spec = add_bundle_version(
+        tree, local_anchors[:1], version=2, mutate_anchor=point_at_the_relabelled_root
+    )
+    with pytest.raises(TsaError, match="must hold exactly one certificate"):
+        _load_trust_bundle(tree.records, reference, spec=spec)
