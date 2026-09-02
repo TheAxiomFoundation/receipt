@@ -68,6 +68,7 @@ from receipt.canonical import canonical_sha256
 from receipt.release_chain import (
     _git_environment,
     assert_file_modes_authoritative,
+    assert_index_agrees_with_tree,
     ChainSpec,
     MANIFEST_RE,
     ReleaseChainError,
@@ -721,7 +722,10 @@ def check_state_modes(base: _BaseCommit, candidate: _CandidateTree) -> None:
     Base release files are already mode-immutable; this is the same invariant
     for the two files the append path itself reads. Git records only the
     executable category, so that is what is compared — a base symlink or
-    gitlink entry is a category change too, and refuses here.
+    gitlink entry is a category change too, and refuses here. The comparison
+    reads the candidate's stat, so it is only evidence while the working tree
+    carries what git recorded: assert_index_agrees_with_tree establishes that
+    per file, and the checkout settings are checked as well.
     """
 
     # verify_append_gate already refused a non-authoritative checkout at
@@ -738,6 +742,10 @@ def check_state_modes(base: _BaseCommit, candidate: _CandidateTree) -> None:
     ):
         path = relative.as_posix()
         try:
+            # The candidate's own index is what says the working tree carries
+            # the mode and type git recorded for this path; the config
+            # settings above say only what the checkout claims.
+            assert_index_agrees_with_tree(candidate.root, relative)
             entry = git_file_entry(candidate.root, base.commit, path)
         except ReleaseChainError as exc:
             raise AppendError(str(exc)) from exc
