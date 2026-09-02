@@ -2016,6 +2016,62 @@ def assert_index_agrees_with_tree(
         )
 
 
+def assert_release_root_index_regular(root: pathlib.Path, spec: ChainSpec) -> None:
+    """Refuse an index entry under the release root that is not a regular file.
+
+    ``_working_release_files`` derives the release files from a filesystem
+    walk and skips directories, so a gitlink under ``releases/`` that is
+    empty or uninitialised — the ordinary state of a submodule in a fresh
+    checkout — appears in neither the enumerated files nor the new-file set
+    that the release-proposal rules are applied to. Nothing named it, nothing
+    classified it, and no refusal spoke for it: the release root was asserted
+    to hold exactly the files the walk found while the index recorded a
+    boundary into another repository inside it. The base-tree scan refuses a
+    non-regular mode only once the entry is in the base; this refuses it in
+    the candidate.
+
+    So the index is read directly. Any entry under the release root whose
+    mode is not 100644 or 100755 refuses, as does an unmerged one; and so
+    does a directory the walk does find that the index holds an entry for —
+    a gitlink already populated, or a blob entry standing where a directory
+    is, which the mode scan alone would call supported.
+
+    Both callers run this after every comparison that existed before it, for
+    the reason the per-file index check does: an entry that is also a mode or
+    byte change against the base gets the refusal the upstream verifier
+    gives, and a comparison that passed fail-open is caught afterwards.
+    """
+
+    release_root = spec.release_root_relative.as_posix()
+    modes: dict[str, str] = {}
+    for mode, stage, listed in sorted(
+        _index_entries(root, release_root), key=lambda record: (record[2], record[1])
+    ):
+        if stage != "0":
+            raise ReleaseChainError(
+                f"candidate index holds an unmerged entry at {listed}"
+            )
+        if mode not in {"100644", "100755"}:
+            raise ReleaseChainError(
+                f"release root carries an unsupported index entry: {listed} ({mode})"
+            )
+        modes[listed] = mode
+    directory = root / spec.release_root_relative
+    if directory.is_symlink() or not directory.is_dir():
+        return
+    # rglob does not descend through symlinked directories, and a symlink the
+    # walk does reach is the enumeration's own refusal, not this one's.
+    for path in sorted(directory.rglob("*")):
+        if path.is_symlink() or not path.is_dir():
+            continue
+        listed = path.relative_to(root).as_posix()
+        if listed in modes:
+            raise ReleaseChainError(
+                f"release path is a directory with an index entry: "
+                f"{listed} ({modes[listed]})"
+            )
+
+
 def verify_release_history_immutable(
     root: pathlib.Path, base_ref: str, spec: ChainSpec
 ) -> tuple[str, set[str], dict[str, GitEntry]]:
@@ -2060,6 +2116,11 @@ def verify_release_history_immutable(
         # pins (an unstaged chmod is both a mode change and an index
         # disagreement). A comparison that passed fail-open is caught here.
         assert_index_agrees_with_tree(root, relative)
+    # After every per-file comparison, and for the same reason: the release
+    # root's own index entries, which the working-tree enumeration above
+    # cannot see when they are directories it skips or gitlinks nothing
+    # checked out.
+    assert_release_root_index_regular(root, spec)
     return commit, set(current_files) - set(base_entries), base_entries
 
 

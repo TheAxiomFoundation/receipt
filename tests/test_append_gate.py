@@ -2013,3 +2013,97 @@ def test_the_tracked_state_refusal_precedes_pre_existing_row_refusals(
     assert "responseArchive.sha256 is not a SHA-256 hex digest" in str(
         pre_existing.value
     )
+
+
+def stage_release_gitlink(candidate: Candidate) -> None:
+    """Record a gitlink under ``releases/`` that nothing has checked out.
+
+    An empty or uninitialised submodule directory is the ordinary state of a
+    fresh checkout, and it is the case the filesystem walk cannot see at all:
+    there is no directory on disk to skip, and no file to enumerate.
+    """
+
+    git(
+        candidate.root,
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        f"160000,{candidate.base},releases/vendor",
+    )
+
+
+def test_a_gitlink_under_the_release_root_is_refused_against_a_base(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds R5-F4: the release root's content was taken from a walk.
+
+    ``_working_release_files`` enumerates the release tree from the
+    filesystem and skips directories, so an uninitialised gitlink under
+    ``releases/`` is in neither the current files nor the new files. The
+    release-proposal rules assert the release root holds exactly what that
+    walk found, while the index records a boundary into another repository
+    inside it — and on the data path no refusal spoke for the difference.
+    The base-tree scan refuses a non-regular mode only once such an entry is
+    in the base; this is the same entry, in the candidate.
+    """
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    stage_release_gitlink(candidate)
+    # The walk really is blind to it: nothing exists at that path on disk.
+    assert not (candidate.root / "releases" / "vendor").exists()
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "release root carries an unsupported index entry: "
+        "releases/vendor (160000)"
+    )
+
+
+def test_a_gitlink_under_the_release_root_is_refused_on_the_push_path(
+    tmp_path: pathlib.Path,
+) -> None:
+    """R5-F4 on the push path, which runs none of the base-tree comparisons
+    and, with no chain to verify, returned before looking at the release root
+    at all. The scan runs there ahead of that early return."""
+
+    candidate = base_repository(tmp_path)
+    stage_release_gitlink(candidate)
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate)
+    assert str(refusal.value) == (
+        "release root carries an unsupported index entry: "
+        "releases/vendor (160000)"
+    )
+
+
+def test_a_release_directory_the_index_holds_an_entry_for_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """R5-F4's other half: a directory the walk does find, standing where the
+    index records a file. The mode scan calls that entry supported, because
+    100644 is supported; what is wrong is that the working tree does not hold
+    a file there, and the walk skipped it in silence. A populated gitlink is
+    the same shape with an unsupported mode, and the scan above catches
+    that."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    blob = git(candidate.root, "hash-object", "-w", "releases/README.md")
+    git(
+        candidate.root,
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        f"100644,{blob},releases/vendor",
+    )
+    (candidate.root / "releases" / "vendor").mkdir()
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "release path is a directory with an index entry: "
+        "releases/vendor (100644)"
+    )

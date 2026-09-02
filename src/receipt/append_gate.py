@@ -82,6 +82,7 @@ from receipt.release_chain import (
     MANIFEST_RE,
     ReleaseChainError,
     assert_no_symlinked_state_component,
+    assert_release_root_index_regular,
     assert_state_path_tracked,
     confined_state_descriptor,
     git_blob_bytes,
@@ -1137,26 +1138,43 @@ def check_release_chain_without_base(
 
     The push path re-opened the two state files here exactly as the base-ref
     path did, so it is fed the same snapshots for the same reason: one read
-    of each state file per verdict.
+    of each state file per verdict. It also runs the release root's index
+    scan, which the base-ref path runs in the release-history pass; a tree
+    with no chain returns here without one otherwise.
     """
 
     manifest_directory = candidate.root / candidate.spec.chain.manifest_relative
-    if not manifest_directory.is_dir() or not any(manifest_directory.iterdir()):
-        return None
-    if enforce_production_pins is None:
-        enforce_production_pins = anchor_dir is None
+    initialized = manifest_directory.is_dir() and any(manifest_directory.iterdir())
+    verification = None
+    if initialized:
+        if enforce_production_pins is None:
+            enforce_production_pins = anchor_dir is None
+        try:
+            verification = verify_release_chain(
+                candidate.root,
+                spec=candidate.spec.chain,
+                anchor_dir=anchor_dir,
+                require_chain=True,
+                verify_state=True,
+                enforce_production_pins=enforce_production_pins,
+                state_bytes=_state_snapshot_bytes(
+                    candidate, ledger_bytes, prefix_bytes
+                ),
+            )
+        except ReleaseChainError as exc:
+            raise AppendError(str(exc)) from exc
+    # The release root's index entries, which no enumeration on this path can
+    # see: an empty or uninitialised gitlink under releases/ is in no
+    # filesystem walk, and the push path runs none of the base-tree
+    # comparisons that would meet it. It runs after the chain verification,
+    # so every refusal that path already gave still comes first, and before
+    # the early return, so a tree with no chain at all is covered too.
     try:
-        verification = verify_release_chain(
-            candidate.root,
-            spec=candidate.spec.chain,
-            anchor_dir=anchor_dir,
-            require_chain=True,
-            verify_state=True,
-            enforce_production_pins=enforce_production_pins,
-            state_bytes=_state_snapshot_bytes(candidate, ledger_bytes, prefix_bytes),
-        )
+        assert_release_root_index_regular(candidate.root, candidate.spec.chain)
     except ReleaseChainError as exc:
         raise AppendError(str(exc)) from exc
+    if verification is None:
+        return None
     assert verification.head is not None
     return verification.head.release_index
 
