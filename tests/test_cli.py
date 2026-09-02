@@ -698,6 +698,30 @@ def test_pass_verdict_derives_the_witness_clause(
     assert "newest release" in out  # staleness is named, not implied away
 
 
+def test_a_verdict_with_no_witnesses_states_no_timing_claim(
+    repo: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defensive, and belt-and-braces with the ChainSpec refusal.
+
+    A spec can no longer configure an empty anchor set, so a verified chain
+    always carries witnesses. Were one to reach the renderer without them,
+    "the 0 pinned RFC 3161 authorities ()" would read as a timing claim built
+    from no witness at all — the shape of over-claim this verdict exists to
+    avoid, so the clause is dropped and the absence is stated.
+    """
+
+    from receipt.verify import VerifyResult
+
+    monkeypatch.setattr(VerifyResult, "witness_times", lambda self: {})
+    assert run(repo) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "VERDICT: PASS" in out
+    assert "RFC 3161" not in out
+    assert "This verdict makes no witnessed timing claim." in out
+
+
 def test_refuses_an_edited_attested_file(repo: pathlib.Path) -> None:
     """The toolchain pin is bound too: swapping the corpus release must refuse."""
 

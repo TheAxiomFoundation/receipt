@@ -663,7 +663,6 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
         # admits no exceptions: nothing reaches a line unescaped.
         witnesses = [rendered(name) for name in sorted(result.witness_times())]
         count = len(witnesses)
-        noun = "authorities" if count != 1 else "authority"
         # Whether a trusted base reference was verified changes what the
         # timing clause may claim: without one, the witnessed times bound
         # only when each recorded prefix existed, not that the history was
@@ -677,15 +676,27 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
             "  This proves the published rule files are exactly the bytes a "
             "code-pinned"
         )
-        lines.append(
-            f"  producer key signed, and the {count} pinned RFC 3161 {noun} "
-            f"({', '.join(witnesses)})"
-        )
-        if history is not None:
+        if count:
+            noun = "authorities" if count != 1 else "authority"
             lines.append(
-                "  witnessed that each recorded prefix existed no later than "
-                "those times,"
+                f"  producer key signed, and the {count} pinned RFC 3161 {noun} "
+                f"({', '.join(witnesses)})"
             )
+            timing = (
+                "  witnessed that each recorded prefix existed no later than "
+                "those times"
+            )
+        else:
+            # Defensive. ChainSpec refuses an empty anchor set, so a verified
+            # chain always carries witnesses. Were one to reach here without
+            # them, "the 0 pinned RFC 3161 authorities ()" would state a
+            # timing claim assembled from no witness at all — so the sentence
+            # closes on what the signature alone proves, and the absence is
+            # said out loud rather than rendered as a count of zero.
+            lines.append("  producer key signed.")
+            timing = "  This verdict makes no witnessed timing claim"
+        if history is not None:
+            lines.append(f"{timing},")
             # Scoped to what verify_release_history_immutable compares: release
             # objects present at the base ref, byte and mode. Objects added
             # after the base, and any state between then and now, are outside
@@ -696,10 +707,7 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
             )
             lines.append("  byte- and mode-identical in this tree. It does")
         else:
-            lines.append(
-                "  witnessed that each recorded prefix existed no later than "
-                "those times."
-            )
+            lines.append(f"{timing}.")
             lines.append(
                 "  It does NOT prove the history was never rewritten — a "
                 "producer holding"
