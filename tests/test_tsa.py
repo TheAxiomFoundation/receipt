@@ -5552,6 +5552,125 @@ def test_a_rotation_may_not_import_another_classs_historical_signer(
     )
 
 
+def test_a_rotation_may_not_adopt_another_active_classs_signer(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+) -> None:
+    """S6-R3-R1: the class test asks the anchors it used to exempt.
+
+    The residual round two's verification left behind. Active A/S1 and B/S2
+    are separate classes. A pending bundle keeps A under its own ID and root
+    and allows B's key beside A's own, and drops B's anchor slot altogether.
+    Every rule looked away: A's ``(ID, root SPKI)`` is already active, so the
+    split-or-merge test skipped it while ``history.add`` still ran and joined
+    the two classes, and the per-bundle collision guard needs two slots in one
+    bundle to see anything, so with B's slot gone there was nothing to pair A
+    with. The merge the ``_supplemental_candidates`` docstring says is refused
+    -- one anchor allowing both keys, which either authority can then stamp
+    for -- was therefore accepted.
+
+    Being already active settles what an anchor must prove, not whose keys it
+    may hold, so the test now runs for it too, and both merged authorities
+    have names the history can give.
+
+    The premise asserted first is that the bundle really does let A's anchor
+    answer with B's key and that B's own anchor is gone from it. Run with the
+    ``already_known`` branch reduced to the bare ``continue`` it replaced, the
+    call below returns candidates instead of refusing.
+    """
+
+    alpha, beta = local_anchors[:2]
+    tree = build_witness_tree(tmp_path, [alpha, beta])
+    pending, spec = add_bundle_version(
+        tree,
+        [alpha],
+        version=2,
+        extra_signers={alpha.anchor_id: [beta.signer_pins]},
+    )
+    # The premise: alpha's anchor may answer with beta's key, and beta's own
+    # anchor is not in this bundle for the collision guard to pair it with.
+    written = json.loads(
+        (tree.records / "trust" / "tsa-anchors-v2.json").read_text()
+    )["anchors"]
+    assert [entry["id"] for entry in written] == [alpha.anchor_id]
+    assert {
+        signer["spkiSha256"] for signer in written[0]["allowedSigners"]
+    } == {
+        alpha.signer_pins["spkiSha256"],
+        beta.signer_pins["spkiSha256"],
+    }
+
+    with pytest.raises(TsaError) as caught:
+        tsa_module._supplemental_candidates(
+            tree.records,
+            {BUNDLE_LOGICAL: tree.reference},
+            [pending],
+            spec=spec,
+        )
+    assert str(caught.value) == (
+        f"pending TSA anchor {pending['path']}/{alpha.anchor_id} merges "
+        f"authority {alpha.anchor_id}/{alpha.root_pins['spkiSha256']} with "
+        f"{beta.anchor_id}/{beta.root_pins['spkiSha256']}; an anchor whose "
+        "(ID, root SPKI) the history already holds may rotate its own "
+        "class's keys, but may not adopt another authority's signer"
+    )
+
+
+def test_a_rotation_may_not_take_another_active_classs_signer_outright(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+) -> None:
+    """S6-R3-R1: the same merge, with the adopted key the only one allowed.
+
+    The shape above leaves A's own key in place, so the merged anchor can be
+    read as A with an extra key. Here A's anchor allows B's key and not its
+    own, which is the same union of two classes reached by substitution
+    rather than addition -- and it is not a rename, because a rename carries
+    a new ID, while this keeps A's own ``(ID, root SPKI)``. Both went through
+    the one door that did not ask.
+
+    The premise asserted first is that the bundle's only anchor is A's, that
+    it allows B's key alone, and that A's identity is the active one -- so it
+    is the exempted door and not the rename path that is under test.
+    """
+
+    alpha, beta = local_anchors[:2]
+    tree = build_witness_tree(tmp_path, [alpha, beta])
+    pending, spec = add_bundle_version(
+        tree,
+        [alpha],
+        version=2,
+        signers={alpha.anchor_id: beta.signer_pins},
+    )
+    # The premise: one anchor, filed under alpha's active identity, allowing
+    # beta's key and nothing else.
+    written = json.loads(
+        (tree.records / "trust" / "tsa-anchors-v2.json").read_text()
+    )["anchors"]
+    assert [entry["id"] for entry in written] == [alpha.anchor_id]
+    assert written[0]["rootCertificate"]["spkiSha256"] == (
+        alpha.root_pins["spkiSha256"]
+    )
+    assert {
+        signer["spkiSha256"] for signer in written[0]["allowedSigners"]
+    } == {beta.signer_pins["spkiSha256"]}
+
+    with pytest.raises(TsaError) as caught:
+        tsa_module._supplemental_candidates(
+            tree.records,
+            {BUNDLE_LOGICAL: tree.reference},
+            [pending],
+            spec=spec,
+        )
+    assert str(caught.value) == (
+        f"pending TSA anchor {pending['path']}/{alpha.anchor_id} merges "
+        f"authority {alpha.anchor_id}/{alpha.root_pins['spkiSha256']} with "
+        f"{beta.anchor_id}/{beta.root_pins['spkiSha256']}; an anchor whose "
+        "(ID, root SPKI) the history already holds may rotate its own "
+        "class's keys, but may not adopt another authority's signer"
+    )
+
+
 def test_succession_keeps_the_predecessors_signer_in_pending_history(
     tmp_path: pathlib.Path,
     local_anchors: tuple[LocalAnchor, ...],
