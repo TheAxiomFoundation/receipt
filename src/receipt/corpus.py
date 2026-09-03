@@ -74,6 +74,21 @@ Three row kinds, one journal:
     misreporting; :func:`verify_corpus_binding` returns the tiers separated so
     the distinction survives into the verdict.
 
+Two of those lists are producer-controlled and rendered verbatim — the gate
+declarations and the removed paths — so both are budgeted, and the budget is
+the renderer's own arithmetic rather than a proxy for it. What one gate or
+one removed path costs the verdict is derived from the object
+``receipt.verify.result_to_dict`` builds and the
+``json.dumps(..., indent=2, sort_keys=True)`` ``receipt.cli`` renders it
+with: the escaped strings, and every brace, key, separator, indent and
+newline JSON puts around them at that nesting depth. Charging a *floor* for
+the structure instead let a journal filled to just under a cap render well
+past it (peer review, round seven), so the constants are exact and a test
+asserts equality between what is charged and the length of the section that
+is rendered. Each is charged one item at a time and refused at the first
+item that carries the running total over, so no journal makes the parser
+account for more than the cap plus one item.
+
 The order of the passes is itself load-bearing. Membership is swept, the
 tombstones are looked for, the bound bytes are hashed, membership and per-file
 identity are checked a second time, and the tombstones are looked for once
@@ -258,18 +273,52 @@ MAX_EVIDENCE_TEXT = 1024
 #: evidence keys with 1024 of them per value is one legal gate charging
 #: 262,013 and rendering 3,065,876 (peer review, round six). See
 #: :func:`_rendered_length`.
+#:
+#: What is charged is now exactly what the JSON renderer emits for the
+#: gates — every brace, key, separator, indent and newline of the section,
+#: derived from the shape and pinned by a test — so this number is the size
+#: of that section and not a proxy for it (peer review, round seven).
 MAX_GATE_TEXT = 262144
-#: What one gate declaration is charged beyond the characters of its id: the
-#: outcome, the labels, and the punctuation and indentation of the verdict's
-#: text line and of its JSON object. Measured against the two renderers, one
-#: more gate adds about 130 characters of ``indent=2`` JSON beyond its id and
-#: evidence and six or more of text, so this is a floor on that cost rather
-#: than a model of it — enough that a gate can never be free, and not so
-#: exact that it has to be re-derived every time a verdict line is reworded.
-GATE_RENDER_OVERHEAD = 64
-#: The same for one evidence entry beyond its key and value: about twenty
-#: characters of quoting, separators and indentation, charged as 24.
-EVIDENCE_RENDER_OVERHEAD = 24
+#: The exact JSON structure one gate declaration costs the verdict, beyond
+#: the escaped characters of its id and outcome and of its evidence.
+#:
+#: Derived from the shape ``receipt.verify.result_to_dict`` builds and the
+#: ``json.dumps(..., indent=2, sort_keys=True)`` that ``receipt.cli`` renders
+#: it with, not estimated: a gate is an object inside
+#: ``gateDeclarations.byTier.<tier>``, so its members are indented ten spaces
+#: and its evidence entries twelve. Counting from the newline that precedes
+#: the object to the separator that follows it —
+#:
+#: * ``\n`` + eight spaces + ``{``                              = 10
+#: * ``\n`` + ten spaces + ``"evidence": {``                    = 24
+#: * ten spaces + ``}`` + ``,``                                 = 12
+#: * ``\n`` + ten spaces + ``"gateId": `` + ``,``               = 22
+#: * ``\n`` + ten spaces + ``"outcome": ``                      = 22
+#: * ``\n`` + eight spaces + ``}`` + separator                  = 11
+#:
+#: — comes to 101. The last item of a list carries the newline before the
+#: closing bracket where the others carry a comma, so the per-item cost is
+#: the same wherever the gate sits.
+#:
+#: Charging a *floor* instead was the round-five decision, and it was wrong
+#: in the direction that matters: 64 per gate and 24 per evidence entry
+#: under-counted the structure by about half, so a journal filled to just
+#: under the cap rendered well past it, and the test that was supposed to
+#: hold the budget to the renderer permitted a ratio of four (peer review,
+#: round seven). These constants are the renderer's own numbers now, and a
+#: test asserts equality between what is charged and what is rendered, so a
+#: change to either renderer fails a test rather than loosening a budget.
+GATE_RENDER_STRUCTURE = 101
+#: The same for one evidence entry, beyond its escaped key and value:
+#: ``\n`` + twelve spaces + ``: `` + separator = 16. The schema requires a
+#: non-empty evidence object, which is what makes this exact — an empty one
+#: would render as ``{}`` and cost nothing per entry.
+EVIDENCE_RENDER_STRUCTURE = 16
+#: And one removed path, beyond its escaped string: ``\n`` + six spaces +
+#: separator = 8. ``binding.removedPaths`` is a list of strings two levels
+#: down, so its items are indented six. Charged before this round as the
+#: escaped string alone, with the indentation, comma and newline free.
+REMOVED_PATH_RENDER_STRUCTURE = 8
 #: The most gate declarations one journal may carry. The text budget bounds
 #: what a verdict renders; nothing bounded how many gates a producer could
 #: put in front of an auditor, and cardinality is worth bounding for its own
@@ -289,7 +338,10 @@ MAX_PATH_TEXT = 1024
 #: verdict renders verbatim (peer review, round two). Counted the same way
 #: as the gate budget and for the same reason: a path of non-BMP characters
 #: renders twelve times its length, so a set of them charged an eighth of
-#: what the verdict would carry (peer review, round six).
+#: what the verdict would carry (peer review, round six). And with the same
+#: correction: the eight characters of indentation, comma and newline the
+#: renderer puts around each path are charged too, so this bounds the
+#: section rather than the strings inside it (peer review, round seven).
 MAX_REMOVED_TEXT = 262144
 #: The most directory entries the whole tombstone pass may touch before it is
 #: refused as unverifiable rather than allowed to run on. Counted in entries
@@ -1103,28 +1155,48 @@ def parse_journal(
             f"journal declares {len(gates)} gates, over the verdict budget of "
             f"{MAX_GATE_DECLARATIONS} declarations"
         )
-    rendered = sum(
-        GATE_RENDER_OVERHEAD
-        + _rendered_length(gate.gate_id)
-        + sum(
-            EVIDENCE_RENDER_OVERHEAD + _rendered_length(key) + _rendered_length(value)
-            for key, value in gate.evidence.items()
+    # Charged one declaration at a time and refused at the first one that
+    # carries the running total past the cap, rather than summed and then
+    # compared: a journal can now make this loop account for the cap plus one
+    # gate and no more. The gate's own evidence is summed whole, because the
+    # row it came from was materialised by ``json.loads`` before this point —
+    # stopping part-way through one gate's evidence would bound nothing that
+    # is not already bounded.
+    charged = 0
+    for number, gate in enumerate(gates, start=1):
+        charged += (
+            GATE_RENDER_STRUCTURE
+            + _rendered_length(gate.gate_id)
+            + _rendered_length(gate.outcome)
+            + sum(
+                EVIDENCE_RENDER_STRUCTURE
+                + _rendered_length(key)
+                + _rendered_length(value)
+                for key, value in gate.evidence.items()
+            )
         )
-        for gate in gates
-    )
-    if rendered > MAX_GATE_TEXT:
-        raise CorpusError(
-            f"journal gate declarations cost {rendered} characters of verdict "
-            f"text, over the verdict budget of {MAX_GATE_TEXT}"
-        )
-    removed_text = sum(_rendered_length(path) for path in removed)
-    if removed_text > MAX_REMOVED_TEXT:
-        raise CorpusError(
-            f"journal removed paths total {removed_text} characters, over the "
-            f"verdict budget of {MAX_REMOVED_TEXT}"
-        )
+        if charged > MAX_GATE_TEXT:
+            raise CorpusError(
+                "journal gate declarations cost more than the verdict budget "
+                f"of {MAX_GATE_TEXT} characters: {charged} charged at "
+                f"declaration {number} of {len(gates)}"
+            )
 
-    return content, attested, tuple(gates), tuple(sorted(removed))
+    # Sorted first, so which path the refusal names is a property of the
+    # journal and not of set iteration order, and so that it is the same
+    # order the verdict renders them in.
+    removed_paths = tuple(sorted(removed))
+    charged = 0
+    for number, path in enumerate(removed_paths, start=1):
+        charged += REMOVED_PATH_RENDER_STRUCTURE + _rendered_length(path)
+        if charged > MAX_REMOVED_TEXT:
+            raise CorpusError(
+                "journal removed paths total more than the verdict budget of "
+                f"{MAX_REMOVED_TEXT} characters: {charged} charged at path "
+                f"{number} of {len(removed_paths)}"
+            )
+
+    return content, attested, tuple(gates), removed_paths
 
 
 def _list_directory(

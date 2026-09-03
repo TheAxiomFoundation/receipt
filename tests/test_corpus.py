@@ -14,12 +14,13 @@ import pathlib
 import pytest
 
 from receipt.corpus import (
-    EVIDENCE_RENDER_OVERHEAD,
-    GATE_RENDER_OVERHEAD,
+    EVIDENCE_RENDER_STRUCTURE,
+    GATE_RENDER_STRUCTURE,
     MAX_EVIDENCE_TEXT,
     MAX_GATE_DECLARATIONS,
     MAX_GATE_TEXT,
     MAX_REMOVED_TEXT,
+    REMOVED_PATH_RENDER_STRUCTURE,
     CorpusError,
     verify_corpus_binding,
     verify_declarations,
@@ -51,6 +52,43 @@ def reindex(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     for index, row in enumerate(rows):
         row["entryIndex"] = index
     return rows
+
+
+def charged_gate(gate: dict[str, object]) -> int:
+    """What the module charges one gate declaration against ``MAX_GATE_TEXT``.
+
+    Spelled out from the shipped constants and ``json.dumps`` rather than
+    imported from the module, so the arithmetic under every budget test is
+    the renderer's and not a copy of the code being tested.
+    """
+
+    evidence: dict[str, str] = gate["evidence"]  # type: ignore[assignment]
+    return (
+        GATE_RENDER_STRUCTURE
+        + len(json.dumps(gate["gateId"]))
+        + len(json.dumps(gate["outcome"]))
+        + sum(
+            EVIDENCE_RENDER_STRUCTURE + len(json.dumps(key)) + len(json.dumps(value))
+            for key, value in evidence.items()
+        )
+    )
+
+
+def charged_removed(path: str) -> int:
+    """What the module charges one removed path against ``MAX_REMOVED_TEXT``."""
+
+    return REMOVED_PATH_RENDER_STRUCTURE + len(json.dumps(path))
+
+
+def first_over(cost: int, budget: int) -> tuple[int, int]:
+    """Which identically-priced item first carries the total over ``budget``.
+
+    Returns its one-based position and the running total at that point,
+    which is what the refusal names.
+    """
+
+    number = budget // cost + 1
+    return number, number * cost
 
 
 def test_binding_accepts_a_journal_that_describes_the_tree(tmp_path: pathlib.Path) -> None:
@@ -1469,7 +1507,11 @@ def test_refuses_gate_declarations_over_the_verdict_budget(
             for index in range(300)
         ]
     )
-    with pytest.raises(CorpusError, match="over the verdict budget"):
+    # Matched loosely on purpose: what this test is about is that three
+    # hundred bounded strings together exceed the text budget, not which
+    # declaration the running total first crosses at (S4-F6 made the refusal
+    # name that, and it is pinned by the tests that are about it).
+    with pytest.raises(CorpusError, match="the verdict budget of"):
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
 
 
@@ -1543,26 +1585,21 @@ def test_refuses_gates_whose_rendering_cost_alone_floods_the_verdict(
     assert len(gates) <= MAX_GATE_DECLARATIONS
     # What the old charge came to, which is why this journal used to pass.
     assert sum(len(gate["gateId"]) + 2 for gate in gates) < MAX_GATE_TEXT
-    # Every producer string is charged as the verdict renders it (R6-F3), so
-    # the arithmetic here goes through json.dumps rather than len — and
-    # through the stdlib call the CLI makes, not through the module's own
-    # helper, so this stays a measurement of the renderer.
-    charged = sum(
-        GATE_RENDER_OVERHEAD
-        + len(json.dumps(gate["gateId"]))
-        + EVIDENCE_RENDER_OVERHEAD
-        + len(json.dumps("c"))
-        + len(json.dumps("1"))
-        for gate in gates
-    )
-    assert charged > MAX_GATE_TEXT
+    # Every producer string is charged as the verdict renders it (R6-F3) and
+    # every character of JSON structure around it exactly (S4-F6), so the
+    # arithmetic here goes through json.dumps and the shipped constants.
+    # The charge stops at the first declaration that carries the total over,
+    # which is what the refusal names.
+    number, charged = first_over(charged_gate(gates[0]), MAX_GATE_TEXT)
+    assert number < len(gates)
     with pytest.raises(CorpusError) as caught:
         verify_corpus_binding(
             tmp_path, render_journal(journal_rows(gates=gates)), spec=corpus_spec()
         )
     assert str(caught.value) == (
-        f"journal gate declarations cost {charged} characters of verdict "
-        f"text, over the verdict budget of {MAX_GATE_TEXT}"
+        f"journal gate declarations cost more than the verdict budget of "
+        f"{MAX_GATE_TEXT} characters: {charged} charged at declaration "
+        f"{number} of {len(gates)}"
     )
 
 
@@ -3575,32 +3612,24 @@ def test_refuses_a_gate_whose_escaped_evidence_floods_the_verdict(
     gates = [
         {"gateId": "g", "tier": "public", "outcome": "pass", "evidence": evidence}
     ]
-    # What the old charge came to, which is why this journal used to pass.
+    # What round five's charge came to, which is why this journal used to
+    # pass: 64 per gate, 24 per evidence entry, and Python characters for
+    # every string.
     old_charge = (
-        GATE_RENDER_OVERHEAD
+        64
         + len("g")
-        + sum(
-            EVIDENCE_RENDER_OVERHEAD + len(key) + len(value)
-            for key, value in evidence.items()
-        )
+        + sum(24 + len(key) + len(value) for key, value in evidence.items())
     )
     assert old_charge == 262013
     assert old_charge <= MAX_GATE_TEXT
-    charged = (
-        GATE_RENDER_OVERHEAD
-        + len(json.dumps("g"))
-        + sum(
-            EVIDENCE_RENDER_OVERHEAD + len(json.dumps(key)) + len(json.dumps(value))
-            for key, value in evidence.items()
-        )
-    )
+    charged = charged_gate(gates[0])
     with pytest.raises(CorpusError) as caught:
         verify_corpus_binding(
             tmp_path, render_journal(journal_rows(gates=gates)), spec=corpus_spec()
         )
     assert str(caught.value) == (
-        f"journal gate declarations cost {charged} characters of verdict "
-        f"text, over the verdict budget of {MAX_GATE_TEXT}"
+        f"journal gate declarations cost more than the verdict budget of "
+        f"{MAX_GATE_TEXT} characters: {charged} charged at declaration 1 of 1"
     )
 
 
@@ -3647,94 +3676,78 @@ def test_refuses_removed_paths_whose_escaped_spelling_floods_the_verdict(
     write_tree(tmp_path)
     # What the old charge came to, which is why this journal used to pass.
     assert sum(len(path) for path in retired) <= MAX_REMOVED_TEXT
-    charged = sum(len(json.dumps(path)) for path in retired)
+    # Every path costs the same here, so which one first carries the running
+    # total over is arithmetic; the module charges them in sorted order,
+    # which is the order the verdict renders them in.
+    number, charged = first_over(charged_removed(retired[0]), MAX_REMOVED_TEXT)
+    assert number <= len(retired)
     with pytest.raises(CorpusError) as caught:
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
     assert str(caught.value) == (
-        f"journal removed paths total {charged} characters, over the verdict "
-        f"budget of {MAX_REMOVED_TEXT}"
+        f"journal removed paths total more than the verdict budget of "
+        f"{MAX_REMOVED_TEXT} characters: {charged} charged at path {number} "
+        f"of {len(retired)}"
     )
 
 
-def test_a_journal_just_under_both_budgets_renders_within_them(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Binds R6-F3: the budgets are measured against the renderer, not modelled.
+def _gate_id(index: int, width: int) -> str:
+    """A distinct gate id of exactly ``width`` characters.
 
-    The two budgets above are refusals; this is the other half of the claim
-    they make — that a journal they *admit* renders a verdict of about the
-    size they charged. Both are filled to just under their caps here, the
-    verdict is rendered exactly as ``receipt.cli`` renders it (the same
-    ``result_to_dict`` and the same ``json.dumps(..., indent=2,
-    sort_keys=True)``), and its size is held against what the budgets
-    charged.
-
-    Measured rather than asserted: this journal charges 519,096 and renders
-    599,972 characters, a ratio of 1.16. The shape that renders most per unit
-    charged *at* the budget — the largest number of gates the declaration cap
-    allows, each with the shortest distinct id and the smallest evidence, so
-    that the structural overhead the budget under-charges dominates the
-    strings it charges exactly — measures 1.36. Below the budget the ratio
-    says nothing: about 1.2 kB of the verdict is fixed text no producer
-    controls, which is thirteen times the charge of a journal declaring one
-    gate and negligible for one at the cap. A factor of four is the bound
-    pinned here, far enough above the ratio at the budget that rewording a
-    verdict line does not fail the test and close enough that a renderer
-    growing multiples per gate would.
-
-    Without the R6-F3 fix this test still passes: it is not a refusal test.
-    It exists so that the two refusal tests above cannot be satisfied by a
-    budget that has drifted away from what the verdict actually costs.
-
-    The chain half of the verdict is left out — the result is built with
-    ``chain=None`` — because it is a fixed handful of digests and timestamps
-    with no producer-controlled string in it, so it cannot scale with either
-    budget. What is measured is exactly what the budgets bound.
+    Base 36 over ``[0-9a-z]``, padded with ``x`` when the width is wider
+    than the counter needs — so three characters really is three characters
+    and still gives 46,656 distinct ids, which is more than the declaration
+    cap. Round six measured its worst ratio over a two-character alphabet
+    that ran out at 1,296 and had to correct the figure; a base wide enough
+    to spell every id at the declared width is what stops that recurring.
     """
 
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    text = ""
+    value = index
+    for _ in range(min(width, 6)):
+        text = digits[value % 36] + text
+        value //= 36
+    assert value == 0, "index does not fit the requested id width"
+    return text.ljust(width, "x")
+
+
+def _json_list_body(rendered: str, key: str, depth: int) -> str:
+    """The characters of one rendered JSON list between its brackets.
+
+    Everything after the ``[`` up to, and including, the newline that
+    precedes the closing ``]`` — which is exactly the region the per-item
+    charges add up to, because each item contributes the newline before it,
+    its indentation, its escaped text, and one separator: a comma, or for
+    the last item the newline the closing bracket sits after.
+
+    The search is safe on any content: ``json.dumps`` with ``ensure_ascii``
+    emits no raw newline inside a string, so a line beginning with exactly
+    ``depth`` spaces and a bracket can only be the list's own closing one.
+    """
+
+    opening = f'{" " * depth}"{key}": [\n'
+    start = rendered.index(opening) + len(opening) - 1
+    closing = "\n" + " " * depth + "]"
+    return rendered[start : rendered.index(closing, start) + 1]
+
+
+def _verdict_of(
+    tmp_path: pathlib.Path, rows: list[dict[str, object]]
+) -> tuple[str, str]:
+    """Verify a journal and render its verdict both ways, as the CLI does.
+
+    Returns the JSON and the text, from the same ``VerifyResult`` and through
+    the same two renderers ``receipt.cli`` calls — ``result_to_dict`` with
+    ``json.dumps(..., indent=2, sort_keys=True)``, and ``_format_text``.
+
+    The chain half is left out — ``chain=None`` — because it is a fixed
+    handful of digests and timestamps with no producer-controlled string in
+    it, so it cannot scale with either budget. What is measured is exactly
+    what the budgets bound.
+    """
+
+    from receipt.cli import _format_text
     from receipt.verify import VerifyResult, result_to_dict
-
-    body = '{"applied": true}\n'
-    write_tree(tmp_path)
-    gates = [
-        {
-            "gateId": f"g/{index:04d}".ljust(31, "x"),
-            "tier": "public",
-            "outcome": "pass",
-            "evidence": {"c": "1"},
-        }
-        for index in range(MAX_GATE_DECLARATIONS)
-    ]
-    # Each component stays inside the 255-byte name limit every filesystem
-    # this runs on enforces, since these paths are looked for on disk.
-    retired = [".axiom/" + "r" * 240 + f"-{index:04d}.json" for index in range(1000)]
-    attested = dict(ATTESTED)
-    for path in retired:
-        attested[path] = body
-    rows = journal_rows(attested=attested, gates=gates)
-    for path in retired:
-        rows.append(
-            {
-                "schemaVersion": JOURNAL_SCHEMA,
-                "kind": "attested",
-                "path": path,
-                "sha256": sha256_text(body),
-                "state": "removed",
-            }
-        )
-    reindex(rows)
-
-    charged_gates = sum(
-        GATE_RENDER_OVERHEAD
-        + len(json.dumps(gate["gateId"]))
-        + EVIDENCE_RENDER_OVERHEAD
-        + len(json.dumps("c"))
-        + len(json.dumps("1"))
-        for gate in gates
-    )
-    charged_removed = sum(len(json.dumps(path)) for path in retired)
-    assert charged_gates <= MAX_GATE_TEXT
-    assert charged_removed <= MAX_REMOVED_TEXT
 
     verification = verify_corpus_binding(
         tmp_path, render_journal(rows), spec=corpus_spec()
@@ -3750,9 +3763,137 @@ def test_a_journal_just_under_both_budgets_renders_within_them(
         chain=None,
         corpus=verification,
     )
-    rendered = json.dumps(result_to_dict(result), indent=2, sort_keys=True)
-    assert len(rendered) < 4 * (charged_gates + charged_removed)
+    return json.dumps(result_to_dict(result), indent=2, sort_keys=True), _format_text(
+        result
+    )
 
+
+def _near_cap_rows(
+    tmp_path: pathlib.Path, gate_id_width: int
+) -> tuple[list[dict[str, object]], list[dict[str, object]], list[str]]:
+    """A journal filling both budgets to just under their caps.
+
+    ``gate_id_width`` chooses the shape: a wide id makes the charge mostly
+    producer text, and the narrowest distinct id makes it mostly the JSON
+    structure the budget used to under-count.
+    """
+
+    body = '{"applied": true}\n'
+    write_tree(tmp_path)
+
+    def gate(index: int) -> dict[str, object]:
+        return {
+            "gateId": _gate_id(index, gate_id_width),
+            "tier": "public",
+            "outcome": "pass",
+            "evidence": {"c": "1"},
+        }
+
+    count = min(MAX_GATE_TEXT // charged_gate(gate(0)), MAX_GATE_DECLARATIONS)
+    gates = [gate(index) for index in range(count)]
+    # Each component stays inside the 255-byte name limit every filesystem
+    # this runs on enforces, since these paths are looked for on disk.
+    path_template = ".axiom/" + "r" * 240 + f"-{0:04d}.json"
+    retired = [
+        ".axiom/" + "r" * 240 + f"-{index:04d}.json"
+        for index in range(MAX_REMOVED_TEXT // charged_removed(path_template))
+    ]
+    attested = dict(ATTESTED)
+    for path in retired:
+        attested[path] = body
+    rows = journal_rows(attested=attested, gates=gates)
+    for path in retired:
+        rows.append(
+            {
+                "schemaVersion": JOURNAL_SCHEMA,
+                "kind": "attested",
+                "path": path,
+                "sha256": sha256_text(body),
+                "state": "removed",
+            }
+        )
+    reindex(rows)
+    return rows, gates, retired
+
+
+def _assert_budgets_equal_what_is_rendered(
+    tmp_path: pathlib.Path, gate_id_width: int
+) -> None:
+    """Charge a near-cap journal and hold the charge against the rendering."""
+
+    rows, gates, retired = _near_cap_rows(tmp_path, gate_id_width)
+    charged_gates = sum(charged_gate(gate) for gate in gates)
+    charged_paths = sum(charged_removed(path) for path in retired)
+    assert charged_gates <= MAX_GATE_TEXT
+    assert charged_paths <= MAX_REMOVED_TEXT
+
+    rendered, text = _verdict_of(tmp_path, rows)
+    # Every gate here is public, so the section is one list; the removed
+    # paths are one list at their own depth.
+    assert len(_json_list_body(rendered, "public", 6)) == charged_gates
+    assert len(_json_list_body(rendered, "removedPaths", 4)) == charged_paths
+    # The other renderer, measured on the same journal: the text verdict
+    # prints one short line per gate and no removed paths at all, so the JSON
+    # section is the larger of the two and charging it charges both. If that
+    # ever inverts, the text is what has to be charged.
+    assert len(text) <= charged_gates + charged_paths
+
+
+def test_the_gate_and_removed_budgets_equal_what_the_verdict_renders(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S4-F6: the budgets under-counted the structure they bound.
+
+    A removed path was charged its escaped string with the six spaces of
+    indentation, the comma and the newline around it free, and a gate was
+    charged a flat 64 for a JSON object that really costs 101 plus its
+    outcome — ``GATE_RENDER_OVERHEAD`` was documented as a floor, and a
+    journal filled to just under the cap therefore rendered well past it.
+    The test that was supposed to hold the budgets to the renderer permitted
+    a ratio of four, so it could not see the gap.
+
+    The constants are derived from the renderer's own shape now, and this is
+    the assertion that keeps them honest: the total charged equals ``len()``
+    of the section rendered, exactly, for both budgets. Any change to
+    ``result_to_dict``'s shape or to the CLI's ``json.dumps`` call fails here
+    and forces the constants to be re-derived rather than quietly loosening
+    what the budget admits.
+
+    This shape is the wide-id one: a 31-character gate id, so most of what is
+    charged is producer text — 1,618 gates and 981 removed paths, charging
+    262,116 and 261,927 and rendering exactly that much. Without the fix the
+    charge is short of the rendering by about a fifth and the equality fails.
+    """
+
+    _assert_budgets_equal_what_is_rendered(tmp_path, gate_id_width=31)
+
+
+def test_the_budgets_still_equal_the_rendering_at_the_worst_ratio(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S4-F6: the shape that maximised the old ratio, held exactly.
+
+    Round six measured 1.36 as the most a journal could render per unit
+    charged *at* the budget, and the shape that did it was the largest number
+    of gates with the shortest distinct id and the smallest evidence — the
+    shape where the structural overhead the budget under-charged dominates
+    the strings it charged exactly.
+
+    That shape is charged exactly now, so its ratio is 1.00 for the sections
+    the budgets bound: 1,956 three-character ids charging 262,104 and
+    rendering 262,104. Pinned separately from the wide-id case because a
+    constant that happened to be right for long ids and wrong for short ones
+    would satisfy that test and not this one. Without the fix the charge is
+    short by roughly a quarter here.
+
+    What the two together say about the whole verdict: the JSON the CLI
+    prints for either journal is 1.002 times the two charges, the remainder
+    being fixed text no producer controls, and the text renderer is a tenth
+    of it or less — it prints one short line per gate and no removed paths
+    at all. So charging the JSON sections charges both renderers.
+    """
+
+    _assert_budgets_equal_what_is_rendered(tmp_path, gate_id_width=3)
 
 def test_the_rendered_charge_equals_what_json_dumps_would_cost() -> None:
     """Binds R6-F3: the charge must be the renderer's escaping, not a model of it.
