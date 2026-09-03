@@ -264,9 +264,17 @@ filesystem a consumer will resolve the tree on. Two real filesystems
 disagree with it in ways that open the closed world: HFS+ ignores
 default-ignorable code points when it compares names, so ``evil.y\u200dml``
 escapes a ``.yml`` sweep and a tombstone's fold bucket here while opening
-``evil.yml`` there; and NTFS's upcase table maps the Turkic dotted and
-dotless i onto ``I``, so ``evıl.yml`` and ``evil.yml`` are one name there
-and two under ``casefold`` (peer review, round eight). Neither is modelled,
+``evil.yml`` there; and an upcase table built from Unicode's simple
+uppercase mappings folds U+0131 DOTLESS SMALL I onto ``I``, so ``evıl.yml``
+and ``evil.yml`` are one name under it and two under ``casefold`` (peer
+review, round eight). Which table a given NTFS volume carries in
+``$UpCase`` is not something a clone reports, and the two that can be read
+disagree: Unicode 14.0 gives U+0131 the uppercase mapping U+0049, while
+ntfs-3g's reconstruction of the Windows XP through 7 tables maps it to
+itself. The dotted U+0130 is a different case and is no longer refused —
+it is already uppercase, has no simple uppercase mapping, and neither
+table maps it, so every source available agrees with the fold key about it
+(peer review, Sol round 2). Neither of the two that remain is modelled,
 because the module cannot know which filesystem is coming. Both are
 refused, along with an unassigned code point and a Unicode format control,
 by one screen run everywhere a name is folded — declared paths, the spec's
@@ -1007,12 +1015,25 @@ def _win32_device_basename(component: str) -> str:
     return _ascii_upper(head.rstrip(" "))
 
 
-#: The Turkic dotted capital I and dotless small i. NTFS's upcase table maps
-#: both onto ASCII ``I``, so ``evıl.yml`` and ``evil.yml`` are one name on an
-#: NTFS volume; ``str.casefold`` keeps them apart, and so does this module's
-#: fold key. The pair is refused by :func:`_assert_foldable` rather than
-#: modelled, for the reason stated there.
-TURKIC_DOTTED_AND_DOTLESS_I = ("\u0130", "\u0131")
+#: The Turkic dotless small i. Unicode gives it the simple uppercase mapping
+#: U+0049 — ``0131;LATIN SMALL LETTER DOTLESS I;Ll;0;L;;;;;N;;;0049;;0049``
+#: in Unicode 14.0's ``UnicodeData.txt`` — so an upcase table built from
+#: those mappings folds ``evıl.yml`` and ``evil.yml`` together, while
+#: ``str.casefold`` and this module's fold key keep them apart. Refused by
+#: :func:`_assert_foldable` rather than modelled, for the reason stated
+#: there.
+#:
+#: Its dotted counterpart U+0130 was here and is not any more. It is already
+#: uppercase, it has *no* simple uppercase mapping —
+#: ``0130;LATIN CAPITAL LETTER I WITH DOT ABOVE;Lu;0;L;0049 0307;;;;N;LATIN
+#: CAPITAL LETTER I DOT;;;0069;``, an empty field 12 — and no upcase table
+#: this module could read maps it onto ``I``. It was refused on the premise
+#: that NTFS folds it there, which the sources do not support (peer review,
+#: Sol round 2). What ``casefold`` does to it — the two-character key
+#: ``i\u0307`` — merges it with a sequence a real table keeps apart, which
+#: is over-refusal rather than under-refusal, and
+#: :func:`_reject_aliasing_paths` already answers that.
+TURKIC_DOTLESS_I = "\u0131"
 
 
 def _assert_foldable(value: str, label: str) -> str:
@@ -1057,13 +1078,19 @@ def _assert_foldable(value: str, label: str) -> str:
       first escapes a ``.yml`` sweep and a tombstone's fold bucket here
       while opening the second one there. The table is Unicode 14.0's, in
       :mod:`receipt._unicode_repertoire`;
-    - U+0130 or U+0131. NTFS case-folds the Turkic dotted and dotless i onto
-      ``I``, so ``evıl.yml`` and ``evil.yml`` are one name there and two
-      under ``casefold``. Refusing the pair is the only answer that does not
-      require choosing whose case-folding this module implements: adopting
-      NTFS's would break every POSIX host that holds the two names apart,
-      and keeping ``casefold`` leaves the NTFS consumer with a name outside
-      the closed world.
+    - U+0131, the Turkic dotless small i. Unicode gives it the simple
+      uppercase mapping U+0049, so an upcase table built from those
+      mappings — which is what ``str.upper`` implements, and what an NTFS
+      volume's ``$UpCase`` may carry — folds ``evıl.yml`` and
+      ``evil.yml`` together, while ``casefold`` and this fold key keep them
+      apart. That is the unsafe direction: two names this module calls
+      distinct are one file there. Refusing it is the only answer that does
+      not require choosing whose case-folding this module implements,
+      because adopting the mapping would break every POSIX host that holds
+      the two names apart. Its dotted counterpart U+0130 is *not* refused:
+      it is already uppercase, has no simple uppercase mapping at all, and
+      no readable upcase table maps it onto ``I``, so the premise it was
+      refused on was wrong (peer review, Sol round 2).
 
     The fifth is about a whole component rather than a character in one: a
     Win32 reserved device name. ``CON``, ``PRN``, ``AUX``, ``NUL``, the
@@ -1114,11 +1141,12 @@ def _assert_foldable(value: str, label: str) -> str:
                 f"when comparing names ({ord(character):#06x}): {_quoted(value)}"
             )
     for character in value:
-        if character in TURKIC_DOTTED_AND_DOTLESS_I:
+        if character == TURKIC_DOTLESS_I:
             raise CorpusError(
-                f"{label} contains the Turkic dotted or dotless i "
-                f"({ord(character):#06x}), which NTFS case-folds onto I while "
-                f"this fold key keeps it distinct: {_quoted(value)}"
+                f"{label} contains the Turkic dotless i "
+                f"({ord(character):#06x}), which an upcase table built from "
+                "Unicode's simple uppercase mappings folds onto I while this "
+                f"fold key keeps it distinct: {_quoted(value)}"
             )
     for component in value.split("/"):
         # The basename is what Win32's own matcher compares, which is not

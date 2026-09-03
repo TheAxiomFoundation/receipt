@@ -4251,20 +4251,26 @@ def test_refuses_two_declared_paths_hfs_plus_would_call_one_file(
 def test_refuses_a_dotless_i_beside_the_name_ntfs_folds_it_onto(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds S5-F2: NTFS's upcase table and ``casefold`` disagree about i.
+    """Binds S5-F2, restated by S5R2-F11: an upcase table and ``casefold``.
 
-    NTFS maps U+0131 DOTLESS SMALL I onto ASCII ``I`` in its upcase table,
-    so ``rules/tax/evıl.yaml`` and ``rules/tax/evil.yaml`` are one file on an
-    NTFS volume. ``str.casefold`` keeps them apart, and so does every fold
-    key in this module, so a journal can bind both and a POSIX verifier will
-    find both — while the consumer whose host actually resolves the tree can
-    hold only one of them, and cannot tell which of the two digests the file
-    it has is supposed to match.
+    Unicode gives U+0131 DOTLESS SMALL I the simple uppercase mapping
+    U+0049, so an upcase table built from those mappings folds
+    ``rules/tax/evıl.yaml`` and ``rules/tax/evil.yaml`` into one name.
+    ``str.casefold`` keeps them apart, and so does every fold key in this
+    module, so a journal can bind both and a POSIX verifier will find both
+    — while the consumer whose host merges them can hold only one, and
+    cannot tell which of the two digests the file it has is supposed to
+    match.
 
-    Refusing the pair is the only answer that does not require choosing
-    whose case-folding this module implements. Adopting NTFS's would fold
-    two names together that a POSIX host genuinely keeps apart, which breaks
-    the closed world in the other direction.
+    Refusing it is the only answer that does not require choosing whose
+    case-folding this module implements. Adopting the mapping would fold
+    two names together that a POSIX host genuinely keeps apart, which
+    breaks the closed world in the other direction.
+
+    The wording moved with S5R2-F11: the claim rests on Unicode's own
+    mapping table rather than on "NTFS", because the two upcase tables that
+    can actually be read disagree — see
+    ``test_the_dotless_i_claim_is_checked_against_a_real_upcase_table``.
 
     Both files are real and both are bound, so without the screen this
     verification returns a CorpusVerification over five content files.
@@ -4279,44 +4285,115 @@ def test_refuses_a_dotless_i_beside_the_name_ntfs_folds_it_onto(
             tmp_path, render_journal(journal_rows(content=content)), spec=corpus_spec()
         )
     assert str(caught.value) == (
-        "journal row 3 path contains the Turkic dotted or dotless i "
-        "(0x0131), which NTFS case-folds onto I while this fold key keeps it "
-        f"distinct: 'rules/tax/ev{DOTLESS_SMALL_I}l.yaml'"
+        "journal row 3 path contains the Turkic dotless i (0x0131), which an "
+        "upcase table built from Unicode's simple uppercase mappings folds "
+        "onto I while this fold key keeps it distinct: "
+        f"'rules/tax/ev{DOTLESS_SMALL_I}l.yaml'"
     )
 
 
-def test_refuses_a_declared_path_carrying_the_turkic_dotted_capital_i(
+def test_accepts_a_declared_path_carrying_the_turkic_dotted_capital_i(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds S5-F2: the pair is refused, not only the half that reads as i.
+    """Binds S5R2-F11: U+0130 was refused on a premise the sources deny.
 
-    U+0130 LATIN CAPITAL LETTER I WITH DOT ABOVE is the other half of the
-    Turkic pair. NTFS's upcase table maps it onto ASCII ``I`` too, so
-    ``rules/tax/İ.yaml`` and ``rules/tax/i.yaml`` are one file there while
-    ``casefold`` gives U+0130 the two-character key ``i̇`` and keeps them
-    distinct.
+    The pair was refused together, on the claim that NTFS's upcase table
+    maps both onto ASCII ``I``. Half of that is wrong, and it is the half
+    that costs a corpus a legal name. U+0130 LATIN CAPITAL LETTER I WITH
+    DOT ABOVE is already uppercase: Unicode 14.0 gives it *no* simple
+    uppercase mapping, and the one real upcase table that can be read maps
+    it to itself. Nothing merges it with ``i``, so the fold key and the
+    filesystem agree about it, and refusing it refused a spelling a
+    Turkish-locale producer is far more likely to write than its dotless
+    sibling.
 
-    Pinned separately from its sibling because a screen that refused only
-    U+0131 would satisfy that test and leave this spelling — the one a
-    Turkish-locale producer is far more likely to write — going through.
-    The file is real, so the name is screened as a tree entry as well as a
-    journal path; the journal path is reached first. Without the screen this
-    verification passes over a corpus whose closed world an NTFS consumer
-    cannot reproduce.
+    What ``casefold`` does to it — the two-character key ``i\u0307`` —
+    merges it with the *sequence* ``i`` plus U+0307, which a real table
+    keeps apart. That is over-refusal, the safe direction, and
+    ``_reject_aliasing_paths`` already refuses such a pair when both
+    spellings are actually bound. This journal binds one.
+
+    Without the fix this verification raises. The dotless half is still
+    refused, which its own test asserts.
     """
 
     content = dict(CONTENT)
     content[f"rules/tax/{DOTTED_CAPITAL_I}.yaml"] = "name: dotted\nvalue: 1\n"
     write_tree(tmp_path, content=content)
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows(content=content)), spec=corpus_spec()
-        )
-    assert str(caught.value) == (
-        "journal row 4 path contains the Turkic dotted or dotless i "
-        "(0x0130), which NTFS case-folds onto I while this fold key keeps it "
-        f"distinct: 'rules/tax/{DOTTED_CAPITAL_I}.yaml'"
+    verification = verify_corpus_binding(
+        tmp_path, render_journal(journal_rows(content=content)), spec=corpus_spec()
     )
+    assert f"rules/tax/{DOTTED_CAPITAL_I}.yaml" in [
+        entry.path for entry in verification.content
+    ]
+
+
+def test_the_dotless_i_claim_is_checked_against_a_real_upcase_table() -> None:
+    """Binds S5R2-F11: the refusal has to rest on something that was read.
+
+    Two sources were fetched on 2026-09-03 and both are quoted here, because
+    the claim the screen rests on is a claim about tables this module does
+    not ship.
+
+    Unicode 14.0's ``UnicodeData.txt``
+    (https://www.unicode.org/Public/14.0.0/ucd/UnicodeData.txt), the pinned
+    repertoire's own release, lines 305 and 306:
+
+        0130;LATIN CAPITAL LETTER I WITH DOT ABOVE;Lu;0;L;0049 0307;;;;N;
+        LATIN CAPITAL LETTER I DOT;;;0069;
+        0131;LATIN SMALL LETTER DOTLESS I;Ll;0;L;;;;;N;;;0049;;0049
+
+    Field 12 is the simple *uppercase* mapping. U+0131 has one, U+0049. U+0130
+    has none — it is already uppercase, and its field 13 lowercase mapping is
+    U+0069. So an upcase table built from these mappings folds ``ı`` onto
+    ``I`` and leaves ``İ`` alone, which is exactly what ``str.upper`` does on
+    the running interpreter and what the first two assertions below pin.
+
+    ntfs-3g's ``ntfs_upcase_table_build``
+    (https://raw.githubusercontent.com/tuxera/ntfs-3g/edge/libntfs-3g/unistr.c),
+    the default ``$UpCase`` it builds when a volume's own table cannot be
+    read, described in its comment as "the table as defined by Windows XP"
+    with deltas up to Windows 7. It encodes the table as ranges and offsets,
+    and the relevant structure is ``uc_dup_table``, which maps each odd code
+    point onto the even one below it:
+
+        static int uc_dup_table[][2] = { /* Start, End */
+        {0x0100, 0x012F}, {0x01A0, 0x01A6}, ...
+        {0x0132, 0x0137}, {0x01B3, 0x01B7}, ...
+
+    The first range stops at 0x012F and the next begins at 0x0132, so
+    **neither** 0x0130 nor 0x0131 is mapped by it — and no ``uc_run_table``
+    range, no ``uc_byte_table`` offset and no ``newuppercase`` entry covers
+    either. Rebuilding the whole 65,536-entry table from that source gives
+    ``uc[0x130] == 0x130`` and ``uc[0x131] == 0x131``, with U+0049 and
+    U+0069 the only code points mapping onto ``I``.
+
+    That is a real disagreement between the two sources about U+0131, and it
+    is itself the reason to refuse it: the fold key must decide the same
+    question the target filesystem decides, and here two readable candidate
+    tables decide it differently, so no single answer is safe. About U+0130
+    they agree, and they agree with ``casefold``, which is why S5R2-F11 stops
+    refusing it.
+
+    This test is a restatement of the fetched sources plus the checks the
+    running interpreter can make; it cannot re-fetch them offline. It passes
+    with the S5R2-F11 change disabled, which is the point — it is the record
+    of what the decision rests on.
+    """
+
+    # Unicode's simple case mappings, as the interpreter implements them.
+    assert DOTLESS_SMALL_I.upper() == "I"
+    assert DOTTED_CAPITAL_I.upper() == DOTTED_CAPITAL_I
+    # And what this module's fold key does with the same two.
+    assert DOTLESS_SMALL_I.casefold() == DOTLESS_SMALL_I
+    assert DOTTED_CAPITAL_I.casefold() == "i\u0307"
+    # So the dotless i is the one an upcase table merges and the fold key
+    # does not: two names this module calls distinct, one file there.
+    assert DOTLESS_SMALL_I.upper() == "i".upper()
+    assert DOTLESS_SMALL_I.casefold() != "i".casefold()
+    # And the dotted capital is not: distinct under both, either way round.
+    assert DOTTED_CAPITAL_I.upper() != "i".upper()
+    assert DOTTED_CAPITAL_I.casefold() != "i".casefold()
 
 
 def test_the_shipped_ignorable_table_is_what_its_generator_produces() -> None:
