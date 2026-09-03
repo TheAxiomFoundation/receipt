@@ -17,9 +17,11 @@ import pytest
 from receipt.corpus import (
     EVIDENCE_RENDER_STRUCTURE,
     GATE_RENDER_STRUCTURE,
+    MAX_EVIDENCE_ENTRIES,
     MAX_EVIDENCE_TEXT,
     MAX_GATE_DECLARATIONS,
     MAX_GATE_TEXT,
+    MAX_JOURNAL_ROWS,
     MAX_REMOVED_TEXT,
     REMOVED_PATH_RENDER_STRUCTURE,
     CorpusError,
@@ -1562,9 +1564,21 @@ def test_refuses_more_gate_declarations_than_the_verdict_budget(
     and four million of JSON — the flood the budget exists to stop, built out
     of strings none of which is long.
 
-    Cardinality is bounded for its own sake now, and checked before the text
-    budget because the count is what is wrong with this journal. Without the
-    fix it verifies.
+    Two things about this test moved with S5R2-F4, and the second is worth
+    stating because it is a fact about the shipped constants rather than
+    about this journal. The count is the declaration cap plus two rather
+    than thirty thousand, because a thirty-thousand-row journal is now
+    refused a level earlier by ``MAX_JOURNAL_ROWS``, before anything is
+    parsed. And the refusal that speaks is the *text* budget rather than the
+    declaration cap, because both are now enforced in row order and the text
+    budget is reached first: since round seven made ``GATE_RENDER_STRUCTURE``
+    exact, the cheapest gate a journal can declare costs 130 characters of
+    rendered verdict, so 2,048 of them cost more than ``MAX_GATE_TEXT`` and
+    the declaration cap cannot be reached by any journal. It is kept as a
+    backstop against a change to either constant, and its comment says so.
+
+    What this test binds is unchanged: a journal of short gates whose count
+    is the flood is refused, and the refusal names where it stopped.
     """
 
     write_tree(tmp_path)
@@ -1575,17 +1589,33 @@ def test_refuses_more_gate_declarations_than_the_verdict_budget(
             "outcome": "pass",
             "evidence": {"c": "1"},
         }
-        for index in range(30000)
+        for index in range(MAX_GATE_DECLARATIONS + 2)
     ]
     # What the old charge came to, which is why this journal used to pass.
     assert sum(len(gate["gateId"]) + 2 for gate in gates) < MAX_GATE_TEXT
+    # The cheapest gate expressible in this schema, and why the declaration
+    # cap is unreachable: a gate id of one character, the shortest outcome,
+    # and one evidence entry with an empty key and an empty value.
+    cheapest = GATE_RENDER_STRUCTURE + 3 + 6 + EVIDENCE_RENDER_STRUCTURE + 2 + 2
+    assert cheapest == 130
+    assert MAX_GATE_DECLARATIONS * cheapest > MAX_GATE_TEXT
+    # These gate ids differ in length, so the running total is accumulated
+    # here rather than multiplied out: the refusal names the first
+    # declaration that carries it over.
+    charged = 0
+    for number, gate in enumerate(gates, start=1):
+        charged += charged_gate(gate)
+        if charged > MAX_GATE_TEXT:
+            break
+    assert number < MAX_GATE_DECLARATIONS
     with pytest.raises(CorpusError) as caught:
         verify_corpus_binding(
             tmp_path, render_journal(journal_rows(gates=gates)), spec=corpus_spec()
         )
     assert str(caught.value) == (
-        f"journal declares {len(gates)} gates, over the verdict budget of "
-        f"{MAX_GATE_DECLARATIONS} declarations"
+        f"journal gate declarations cost more than the verdict budget of "
+        f"{MAX_GATE_TEXT} characters: {charged} charged at declaration "
+        f"{number} (journal row {len(CONTENT) + len(ATTESTED) + number})"
     )
 
 
@@ -1633,7 +1663,7 @@ def test_refuses_gates_whose_rendering_cost_alone_floods_the_verdict(
     assert str(caught.value) == (
         f"journal gate declarations cost more than the verdict budget of "
         f"{MAX_GATE_TEXT} characters: {charged} charged at declaration "
-        f"{number} of {len(gates)}"
+        f"{number} (journal row {len(CONTENT) + len(ATTESTED) + number})"
     )
 
 
@@ -3644,19 +3674,29 @@ def test_refuses_a_gate_whose_escaped_evidence_floods_the_verdict(
     characters for one outside the BMP, which JSON spells as a surrogate
     pair. Charging what Python holds rather than what the renderer emits left
     a factor of twelve unbudgeted, and it takes exactly one legal gate to
-    spend it: 249 four-character evidence keys with 1024 U+1F600 characters
-    per value, each value inside ``MAX_EVIDENCE_TEXT`` and each key
+    spend it: four-character evidence keys with 1024 U+1F600 characters per
+    value, each value inside ``MAX_EVIDENCE_TEXT`` and each key
     unremarkable.
 
-    That gate charged 262,013 against a budget of 262,144 and passed, while
-    the JSON it renders is over three million characters — the flood the
-    budget exists to stop, assembled out of strings none of which is over the
-    per-string bound. Every producer string is charged its rendered length
-    now. Without the fix this journal verifies.
+    That gate charged well under the budget of 262,144 and passed, while the
+    JSON it renders is a multiple of it — the flood the budget exists to
+    stop, assembled out of strings none of which is over the per-string
+    bound. Every producer string is charged its rendered length now. Without
+    the fix this journal verifies.
+
+    The entry count is ``MAX_EVIDENCE_ENTRIES`` rather than round six's 249:
+    S5R2-F4 bounds how many entries one gate may declare, so the version of
+    this journal with 249 of them is refused for its cardinality before any
+    entry is validated. The demonstration is unchanged — the twelvefold gap
+    between what Python holds and what JSON emits is what carries a legal
+    gate past a budget it was charged against — and the refusal names the
+    row, because the charge is made as the row is validated.
     """
 
     write_tree(tmp_path)
-    evidence = {f"{index:04d}": "\U0001F600" * 1024 for index in range(249)}
+    evidence = {
+        f"{index:04d}": "\U0001F600" * 1024 for index in range(MAX_EVIDENCE_ENTRIES)
+    }
     gates = [
         {"gateId": "g", "tier": "public", "outcome": "pass", "evidence": evidence}
     ]
@@ -3668,16 +3708,20 @@ def test_refuses_a_gate_whose_escaped_evidence_floods_the_verdict(
         + len("g")
         + sum(24 + len(key) + len(value) for key, value in evidence.items())
     )
-    assert old_charge == 262013
     assert old_charge <= MAX_GATE_TEXT
     charged = charged_gate(gates[0])
+    # The gap itself, stated on one value rather than on the whole charge:
+    # 1024 code points outside the BMP leave json.dumps as 12,288 characters.
+    assert len(json.dumps("\U0001F600" * 1024)) == 12 * 1024 + 2
     with pytest.raises(CorpusError) as caught:
         verify_corpus_binding(
             tmp_path, render_journal(journal_rows(gates=gates)), spec=corpus_spec()
         )
+    row = len(CONTENT) + len(ATTESTED) + 1
     assert str(caught.value) == (
         f"journal gate declarations cost more than the verdict budget of "
-        f"{MAX_GATE_TEXT} characters: {charged} charged at declaration 1 of 1"
+        f"{MAX_GATE_TEXT} characters: {charged} charged at declaration 1 "
+        f"(journal row {row})"
     )
 
 
@@ -4953,4 +4997,129 @@ def test_refuses_a_tombstone_listing_entry_carrying_a_colon(
     assert str(caught.value) == (
         "tree entry examined for a tombstone contains a colon, which Win32 "
         "reads as a stream or drive separator: 'gone:stream'"
+    )
+
+
+def test_the_parser_validates_at_most_the_gate_cap_plus_one_declaration(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S5R2-F4: the gate budgets fired only after every row was done.
+
+    Both gate limits were compared once, after the parse loop had finished,
+    so a journal of 2,050 gates was decoded and validated in full — every id
+    matched against its pattern, every tier and outcome checked, every
+    evidence string screened for size and for control characters, twice each
+    — and only then refused for a count that was knowable at row 2,049. The
+    budgets bounded the verdict and nothing about the work of reaching it.
+
+    Both are enforced as the rows arrive now, so the parser validates at most
+    the declaration cap plus one gate. This counts what the per-gate
+    validator actually processed. Without the fix the count is 2,050.
+    """
+
+    import receipt.corpus as corpus_module
+
+    write_tree(tmp_path)
+    gates = [
+        {
+            "gateId": f"g{index}",
+            "tier": "public",
+            "outcome": "pass",
+            "evidence": {"c": "1"},
+        }
+        for index in range(MAX_GATE_DECLARATIONS + 2)
+    ]
+    real = corpus_module._validate_gate
+    processed: list[str] = []
+
+    def recording(row, number, spec):  # type: ignore[no-untyped-def]
+        processed.append(str(row.get("gateId")))
+        return real(row, number, spec)
+
+    monkeypatch.setattr(corpus_module, "_validate_gate", recording)
+    with pytest.raises(CorpusError):
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows(gates=gates)), spec=corpus_spec()
+        )
+    assert len(processed) <= MAX_GATE_DECLARATIONS + 1
+    assert len(processed) < len(gates)
+
+
+def test_refuses_a_gate_declaring_more_evidence_entries_than_the_limit(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5R2-F4: nothing bounded how many evidence entries one gate held.
+
+    ``MAX_EVIDENCE_TEXT`` caps each key and each value. The cardinality of
+    the mapping was capped by nothing at all, so one legal gate row could
+    carry an unbounded number of short pairs and every one of them was
+    validated — screened for size and for control characters, key and value,
+    four passes per entry — before any budget was consulted.
+
+    The limit is checked against ``len(mapping)`` before the first entry is
+    looked at, and this journal proves it: one of its entries carries a
+    value over ``MAX_EVIDENCE_TEXT``, which is the refusal that would speak
+    if any entry were validated first. The cardinality refusal is what comes
+    back, so no entry was. Without the fix the oversize refusal speaks
+    instead, after 64 entries have already been screened.
+    """
+
+    write_tree(tmp_path)
+    evidence = {f"{index:04d}": "x" for index in range(MAX_EVIDENCE_ENTRIES + 1)}
+    evidence["0000"] = "y" * (MAX_EVIDENCE_TEXT + 1)
+    gates = [
+        {"gateId": "g", "tier": "public", "outcome": "pass", "evidence": evidence}
+    ]
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows(gates=gates)), spec=corpus_spec()
+        )
+    row = len(CONTENT) + len(ATTESTED) + 1
+    assert str(caught.value) == (
+        f"journal row {row} gate 'g' declares {len(evidence)} evidence "
+        f"entries, over the limit of {MAX_EVIDENCE_ENTRIES}"
+    )
+
+
+def test_refuses_a_journal_with_more_rows_than_the_parser_budget(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S5R2-F4: every other budget bounds a journal already decoded.
+
+    The gate and removed-path budgets bound what a *valid* journal costs the
+    verdict. What an invalid one could make the parser allocate before any
+    of them was consulted was bounded by nothing: the whole text was split
+    into a list of rows and every row decoded, whatever the count.
+
+    The row count is taken by counting line feeds — which walks the text
+    without building the list — and refused before the split, so the
+    allocation a journal can ask for is a stated function of its stated
+    size. The recorder proves no row was parsed. Without the fix every one
+    of these rows is decoded and validated before anything refuses.
+    """
+
+    import receipt.corpus as corpus_module
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+    filler = dict(rows[0])
+    lines = [json.dumps(row, sort_keys=True) for row in rows]
+    lines += [json.dumps(filler, sort_keys=True)] * (
+        MAX_JOURNAL_ROWS + 1 - len(lines)
+    )
+    journal = ("\n".join(lines) + "\n").encode("utf-8")
+
+    parsed: list[int] = []
+
+    def recording(line, number, spec):  # type: ignore[no-untyped-def]
+        parsed.append(number)
+        raise AssertionError("no row should be parsed")
+
+    monkeypatch.setattr(corpus_module, "_parse_row", recording)
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, journal, spec=corpus_spec())
+    assert parsed == []
+    assert str(caught.value) == (
+        f"corpus journal carries {MAX_JOURNAL_ROWS + 1} rows, over the "
+        f"parser budget of {MAX_JOURNAL_ROWS}"
     )
