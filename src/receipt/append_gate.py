@@ -167,6 +167,24 @@ before this round rather than reasoned about. That is the price of asking the
 question before the read instead of after it, and asking it after the read is
 not available: the read is what the folded name would have answered.
 
+And the release root's walk is a pathname preflight, so it is asked again
+at the end. Everything that reads through that root resolves its whole name
+afresh — ``manifest_directory.is_dir()`` and ``iterdir()`` on the push path,
+the working-tree enumeration and the release-history comparisons against a
+base — so a root replaced after the walk had passed was followed by all of
+them, and the index scan that ends the push path cannot say so because an
+untracked root holds no index entries. The walk therefore opens the directory
+it approved, from the candidate root's own held descriptor and component by
+component with ``O_NOFOLLOW``, and each proposal path holds that descriptor
+across every read it makes through the root and then re-runs the walk and
+compares the path's ``lstat`` against the descriptor's ``fstat``. A link left
+standing anywhere is answered in the walk's own words; a different directory
+in the root's place is ``release root changed during verification``. That
+runs after the reads it guards, so nothing pre-existing is pre-empted by it.
+Like the state files' closing re-reads it is a comparison at two instants
+rather than a lock: a root swapped after the walk and swapped back before the
+re-check is not seen, and closing that is the same follow-up.
+
 Nothing else is an exception: the per-file
 ``release_chain.assert_index_agrees_with_tree``, the check beside it that
 every base release file is still an entry in the candidate index,
@@ -236,10 +254,11 @@ from receipt.release_chain import (
     ChainSpec,
     MANIFEST_RE,
     ReleaseChainError,
-    assert_no_symlinked_release_root,
     assert_no_symlinked_state_component,
+    assert_release_root_unchanged,
     assert_release_root_index_regular,
     ChainVerification,
+    hold_release_root,
     assert_secure_descent_supported,
     assert_state_path_tracked,
     confined_state_descriptor,
@@ -1499,6 +1518,50 @@ def _bind_new_release_files(
             raise AppendError(str(exc)) from exc
 
 
+def _hold_release_root(candidate: _CandidateTree) -> int | None:
+    """Walk the release root's paths, then hold the directory they name open.
+
+    Before anything reads through the release root, on both proposal paths: a
+    root reached through a symlinked component, or under a spelling the
+    candidate tree does not hold, is not this proposal's release root, and
+    every comparison below would be about whatever it points at. The leaf case
+    is the enumeration's own refusal, in its words, so a symlinked ``releases``
+    the enumeration would itself have met is answered here exactly as it always
+    was; the one it would not have met — a dangling link — is pre-empted, which
+    the module docstring names.
+
+    The descriptor is what lets the caller ask again at the end whether the
+    directory it read through is the one the walk approved; see
+    ``release_chain.hold_release_root``.
+    """
+
+    try:
+        return hold_release_root(
+            candidate.root,
+            candidate.spec.chain,
+            root_descriptor=candidate.root_descriptor,
+        )
+    except ReleaseChainError as exc:
+        raise AppendError(str(exc)) from exc
+
+
+def _assert_release_root_unchanged(
+    candidate: _CandidateTree, held: int | None
+) -> None:
+    """Re-walk the release root's paths and re-check the held directory.
+
+    After every read this proposal path makes through that root and before the
+    verdict is returned, for the reason ``_assert_root_unchanged`` runs before
+    the gate-only exit: the walk was a pathname preflight, and everything after
+    it resolved the name again.
+    """
+
+    try:
+        assert_release_root_unchanged(candidate.root, candidate.spec.chain, held)
+    except ReleaseChainError as exc:
+        raise AppendError(str(exc)) from exc
+
+
 def check_release_proposal(
     base: _BaseCommit,
     *,
@@ -1515,20 +1578,42 @@ def check_release_proposal(
     alongside its exact manifest/signature/receipt bundle.  Once genesis exists,
     all base release files are byte- and mode-immutable and a ledger byte
     append must carry exactly one next release bundle.
+
+    The release root is walked and held open around all of it, and re-checked
+    once every read through it has returned. The reads themselves are by
+    pathname, so what that establishes is that the root was the walked
+    directory at those two instants; the residual is stated on
+    ``release_chain.hold_release_root``.
     """
 
-    # Before anything reads through the release root, on this path and the
-    # push path alike: a root reached through a symlinked component, or under
-    # a spelling the candidate tree does not hold, is not this proposal's
-    # release root, and every comparison below would be about whatever it
-    # points at. The leaf case is the enumeration's own refusal, in its
-    # words, so a symlinked ``releases`` the enumeration would itself have met
-    # is answered here exactly as it always was; the one it would not have met
-    # — a dangling link — is pre-empted, which the module docstring names.
+    held = _hold_release_root(candidate)
     try:
-        assert_no_symlinked_release_root(candidate.root, candidate.spec.chain)
-    except ReleaseChainError as exc:
-        raise AppendError(str(exc)) from exc
+        result = _check_release_proposal(
+            base,
+            candidate=candidate,
+            ledger_bytes=ledger_bytes,
+            prefix_bytes=prefix_bytes,
+            anchor_dir=anchor_dir,
+            enforce_production_pins=enforce_production_pins,
+        )
+        _assert_release_root_unchanged(candidate, held)
+        return result
+    finally:
+        if held is not None:
+            os.close(held)
+
+
+def _check_release_proposal(
+    base: _BaseCommit,
+    *,
+    candidate: _CandidateTree,
+    ledger_bytes: bytes,
+    prefix_bytes: bytes,
+    anchor_dir: pathlib.Path | None,
+    enforce_production_pins: bool | None,
+) -> int | None:
+    """One proposal verified through a release root already walked and held."""
+
     try:
         commit, new_files, base_release_entries = verify_release_history_immutable(
             candidate.root,
@@ -1655,17 +1740,41 @@ def check_release_chain_without_base(
     of each state file per verdict. It also runs the release root's index
     scan, which the base-ref path runs in the release-history pass; a tree
     with no chain returns here without one otherwise.
+
+    This is the path the release root's walk was weakest on, because it is the
+    path with no base comparison at all: ``initialized`` is
+    ``manifest_directory.is_dir()``, which resolves the whole name again, and
+    the index scan that follows returns when no entry names the root. So the
+    walked root is held open across the chain verification and that scan, and
+    re-checked before the verdict returns.
     """
 
-    # First, because ``is_dir()`` below follows every component of the path it
-    # is given: an untracked ``releases`` pointing outside the checkout made
-    # the chain in that directory the one this path verified, and the root's
-    # index scan at the end cannot say so — it refuses a symlinked root only
-    # when the index holds entries under it, and an untracked one holds none.
+    held = _hold_release_root(candidate)
     try:
-        assert_no_symlinked_release_root(candidate.root, candidate.spec.chain)
-    except ReleaseChainError as exc:
-        raise AppendError(str(exc)) from exc
+        result = _check_release_chain_without_base(
+            candidate=candidate,
+            ledger_bytes=ledger_bytes,
+            prefix_bytes=prefix_bytes,
+            anchor_dir=anchor_dir,
+            enforce_production_pins=enforce_production_pins,
+        )
+        _assert_release_root_unchanged(candidate, held)
+        return result
+    finally:
+        if held is not None:
+            os.close(held)
+
+
+def _check_release_chain_without_base(
+    *,
+    candidate: _CandidateTree,
+    ledger_bytes: bytes,
+    prefix_bytes: bytes,
+    anchor_dir: pathlib.Path | None,
+    enforce_production_pins: bool | None,
+) -> int | None:
+    """One push-path verdict through a release root already walked and held."""
+
     manifest_directory = candidate.root / candidate.spec.chain.manifest_relative
     initialized = manifest_directory.is_dir() and any(manifest_directory.iterdir())
     verification = None
