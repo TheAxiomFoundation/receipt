@@ -4382,3 +4382,32 @@ def test_a_state_path_component_spelled_differently_on_disk_is_refused(
         "path component ledger is not spelled by its directory: "
         "ledger/official_observations.jsonl"
     )
+
+
+def test_a_dangling_release_root_link_is_named_as_a_link(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S4R2-F1's one pre-emption, pinned rather than left incidental. A link
+    at the release root that points nowhere is the one link
+    ``_working_release_files`` never met: ``exists()`` follows it, finds
+    nothing, and the enumeration returns an empty mapping, so against a base
+    this tree was refused a file later — ``existing release file was deleted
+    relative to <commit>: releases/README.md`` — for the consequence rather
+    than for the link. Verified by running this tree with the walk removed.
+
+    The walk refuses it as the link it is, which changes that refusal. It is
+    the only pre-existing refusal this round pre-empts, it is stated in both
+    module docstrings, and this test is what holds it to the one case: a link
+    the enumeration does reach still gets the enumeration's own sentence,
+    which the test above pins."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    shutil.move(str(candidate.root / "releases"), str(tmp_path / "moved-away"))
+    (candidate.root / "releases").symlink_to(tmp_path / "nothing-is-here")
+    assert not (candidate.root / "releases").exists()
+    assert (candidate.root / "releases").is_symlink()
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == "releases must be a real directory, not a symlink"
