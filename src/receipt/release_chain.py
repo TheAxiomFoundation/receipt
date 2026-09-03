@@ -28,7 +28,8 @@ checkout whose four caching settings — ``core.fsmonitor``,
 ``core.trustctime``, ``core.checkStat``, ``core.untrackedCache`` — make ``git
 diff`` and ``git ls-files --others`` a cache rather than a comparison, since a
 caller that classifies a proposal from those is taking git's word for what
-changed and every one of them lets a rewritten file be reported clean; the release-root guard, which reconciles that
+changed and every one of them lets a rewritten file be reported clean; the
+release-root guard, which reconciles that
 root's index entries with the working tree in both directions, by the spelling
 the traversal returns and after walking an indexed path's parents, because a
 filesystem traversal does not descend a symlinked directory while resolving
