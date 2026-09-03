@@ -150,6 +150,21 @@ spellings a corpus may carry and a consumer may one day resolve; they are
 facts about the names in the tree, not about the host the verifier is
 running on, and screening for them on POSIX is exactly the point.
 
+Every name this module folds is screened first against a *pinned* Unicode
+repertoire, not the running interpreter's. Folding is only stable for
+characters the standard has already encoded, so text carrying an unassigned
+code point is refused — but asking the running table which those are made
+the refusal itself version-dependent, and in the direction that matters:
+U+A7CB is unassigned on Python 3.11 through 3.13 and assigned on 3.14, so
+the same bytes were refused by one supported interpreter and accepted by the
+next. The repertoire is therefore Unicode 14.0, the table the oldest
+supported interpreter ships, carried as sorted ranges in
+:mod:`receipt._unicode_repertoire`. Unicode never unassigns, so that set is
+a superset of every later table's, and the stability policies fix folding and
+normalization for everything 14.0 encoded: identical text is accepted or
+refused identically on every supported interpreter (peer review, round
+seven).
+
 Every trust anchor arrives from the consumer's committed :class:`CorpusSpec`.
 The module ships no defaults: not a content root, not a required gate, not an
 accepted tier.
@@ -168,6 +183,8 @@ import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, NamedTuple
+
+from receipt._unicode_repertoire import UNICODE_VERSION, is_unassigned
 
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 GATE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._/-]{0,127}\Z")
@@ -622,7 +639,7 @@ def _reject_oversized_text(value: str, label: str) -> str:
 
 
 def _assert_assigned(value: str, label: str) -> str:
-    """Refuse text carrying a code point no Unicode table has assigned yet.
+    """Refuse text carrying a code point outside the pinned Unicode repertoire.
 
     The fold key (see :func:`_path_fold`) is only stable across Unicode tables
     for assigned characters: the standard's stability policies fix case
@@ -636,18 +653,28 @@ def _assert_assigned(value: str, label: str) -> str:
     by the tombstone search — U+A7CB folds to U+0264 on Unicode 16 and to
     itself before it, so which files a closed-world sweep considers the same
     file depended on the verifier's interpreter (peer review, round three).
-    Every name this module folds passes through here first, so the fold key
-    means one thing on every supported table.
+    Every name this module folds passes through here first.
 
-    The refusal names the running table, since that is what decided it.
+    Which table decides that is now pinned rather than inherited. Asking the
+    *running* interpreter left the screen with the defect it exists to close,
+    facing the other way: U+A7CB is ``Cn`` on 3.11 through 3.13 and assigned
+    on 3.14, so the same bytes were refused by one supported interpreter and
+    accepted by the next, and the acceptance the screen promises to make
+    stable was itself version-dependent (peer review, round seven). The
+    repertoire is Unicode 14.0, the table the oldest supported interpreter
+    ships; :mod:`receipt._unicode_repertoire` carries it and says why that
+    direction is the safe one — Unicode never unassigns, so the pinned set is
+    a superset of every later table's, and the stability policies fix folding
+    and normalization for everything 14.0 assigned. Identical text is
+    therefore accepted or refused identically from 3.11 onward.
     """
 
     for character in value:
-        if unicodedata.category(character) == "Cn":
+        code = ord(character)
+        if is_unassigned(code):
             raise CorpusError(
-                f"{label} contains a code point unassigned in Unicode "
-                f"{unicodedata.unidata_version} ({ord(character):#06x}): "
-                f"{_quoted(value)}"
+                f"{label} contains a code point outside the pinned Unicode "
+                f"{UNICODE_VERSION} repertoire ({code:#06x}): {_quoted(value)}"
             )
     return value
 
@@ -1565,8 +1592,9 @@ def _path_fold(relative: str) -> str:
 
     # Stable across interpreters only for assigned characters: the Unicode
     # stability policies fix case folding and normalization once a character
-    # is encoded, so _validate_relative_path refuses unassigned code points
-    # and this key means the same thing under every supported table.
+    # is encoded, so _validate_relative_path refuses code points outside the
+    # pinned Unicode 14.0 repertoire and this key means the same thing under
+    # every supported table.
     # Normalized again after folding, deliberately: casefold itself can
     # produce decomposed text (U+00DF followed by U+0301 folds to s, s,
     # U+0301, whose composed form is s, U+015B), so a variant that differs
