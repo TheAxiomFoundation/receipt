@@ -168,8 +168,13 @@ refusal existed for: what stopped one new authority being counted twice was
 never the refusal itself but the count, and one class now demands exactly one
 supplemental outcome however many names it has been filed under.  It also
 makes the classification independent of anchor-array order, which the rolling
-set was not (peer review, sixth gate round two).  What it costs is the
-diagnosis, and that cost is real: a producer that files one authority under
+set was not (peer review, sixth gate round two).  Both of the class's names do
+activate, and neither can be credited beside the other: a v2 witness must name
+the newest active bundle, and an outcome may only select an anchor that bundle
+configures, so the other name is refused as an anchor the named bundle does
+not pin.  One bundle carrying both names at once is the one shape that could
+hold them together, and that is what the class guard above refuses.  What the
+withdrawal costs is the diagnosis, and that cost is real: a producer that files one authority under
 two names by mistake is no longer told so, and sees instead the ported
 refusal for a supplemental outcome no pending transition introduces, which
 names the anchor slot that lost the election rather than the collision that
@@ -2876,14 +2881,50 @@ class _AuthorityHistory:
             if fingerprint in self.signer_owner
         }
 
-    def pending_era_sets(self, authority: _Authority) -> set[frozenset[str]]:
+    def holds_an_active_anchor(self, authority: _Authority) -> bool:
+        """Whether any occurrence in this authority's class is active.
+
+        A class with an active member is one the chain already trusts, and a
+        pending anchor joining it is a rename, a split or a merge of something
+        already trusted -- which is what the alias test below decides.  A class
+        with no active member is an authority nothing trusts yet: every one of
+        its occurrences is pending, exactly one of them will be the candidate,
+        and that candidate has to answer with a supplemental outcome whichever
+        of its names is elected.  There is nothing for the alias test to
+        protect there, and applying it would refuse a later pending version
+        that carries a name the class has already used (peer review, sixth
+        gate round two).
+        """
+
         root = self.find(authority)
-        return {
-            occurrence.signers
+        return any(
+            occurrence.active
             for occurrence in self.occurrences
-            if not occurrence.active
-            and self.find(occurrence.authority) == root
-        }
+            if self.find(occurrence.authority) == root
+        )
+
+    def newest_pending_era(self, authority: _Authority) -> frozenset[str] | None:
+        """The signers of the class's latest pending occurrence, if it has one.
+
+        A pending anchor whose signers are exactly what one occurrence of the
+        class carries is that occurrence renamed, and the occurrence that
+        matters is the newest: a rotation the walk skips extends the class, so
+        the name the class currently answers under is the one a later rename
+        may carry.  Asking whether the signers match *any* era the class ever
+        had is more permissive than the rule this replaced -- an authority
+        rotated twice could then be renamed under the era it left two versions
+        ago, activating a slot whose key nothing demonstrated, where the older
+        rule made it a candidate and demanded evidence (peer review, sixth
+        gate round two).  Occurrences are appended in version order, so the
+        last match is the newest.
+        """
+
+        root = self.find(authority)
+        newest: frozenset[str] | None = None
+        for occurrence in self.occurrences:
+            if not occurrence.active and self.find(occurrence.authority) == root:
+                newest = occurrence.signers
+        return newest
 
     def class_signers(self, authority: _Authority) -> set[str]:
         root = self.find(authority)
@@ -2938,6 +2979,26 @@ def _split_or_merge_message(occurrence: _AnchorOccurrence) -> str:
         "authorities' signers; a pending anchor must carry one active "
         "anchor's signers exactly, or none of them"
     )
+
+
+def _first_class_collision(
+    history: _AuthorityHistory,
+    batch: tuple[_AnchorOccurrence, ...],
+) -> tuple[_AnchorOccurrence, _AnchorOccurrence] | None:
+    """The first two anchors of one bundle that ``history`` puts in one class.
+
+    The slot that came first in the bundle's deterministic order is returned
+    beside the slot that repeats its class, which is the pair the refusal
+    names.  ``None`` when every anchor of the bundle stands for a class of its
+    own.
+    """
+
+    first_by_class: dict[_Authority, _AnchorOccurrence] = {}
+    for occurrence in batch:
+        first = first_by_class.setdefault(history.find(occurrence.authority), occurrence)
+        if first is not occurrence:
+            return first, occurrence
+    return None
 
 
 def _pending_class_collision_message(
@@ -3024,8 +3085,12 @@ def _build_authority_history(
             valid_alias = False
             if len(roots) == 1 and not unknown:
                 root = next(iter(roots))
+                # A class nothing trusts yet contributes one candidate however
+                # many names it is filed under, so the election below decides
+                # it and this test has nothing to protect.
                 valid_alias = (
-                    occurrence.signers in history.pending_era_sets(root)
+                    not history.holds_an_active_anchor(root)
+                    or occurrence.signers == history.newest_pending_era(root)
                     or set(occurrence.signers) == history.class_signers(root)
                 )
             if not valid_alias:
@@ -3036,24 +3101,29 @@ def _build_authority_history(
         # what makes the answer independent of anchor-array order.
         for occurrence in batch:
             history.add(occurrence)
+        # The bundle-local signer rule sees only the signer sets this version
+        # declares, so two historical aliases can rotate to disjoint current
+        # signers and pass it while still naming one authority twice.  A class
+        # may occupy at most one anchor slot in a pending bundle, and the
+        # question is asked first of the graph this bundle completes, so that
+        # the bundle a merge arrives in is the bundle the verdict names (peer
+        # review, sixth gate round two).
+        collision = _first_class_collision(history, batch)
+        if collision is not None:
+            raise TsaError(_pending_class_collision_message(history, *collision))
 
-    # The bundle-local signer rule sees only the signer sets this version
-    # declares.  Historical aliases can therefore arrive as two anchors whose
-    # current signers are disjoint even though every earlier rename and
-    # rotation puts them in one class.  Once the complete graph is known, one
-    # class may occupy at most one anchor slot in each pending bundle.  Check
-    # this before the prefix-time split/merge errors above so the more precise
-    # two-anchor diagnosis wins when both describe the same transition (peer
-    # review, sixth gate round two).
+    # And asked again of the finished graph, because a bundle can merge two
+    # classes an earlier bundle held apart without presenting both of their
+    # slots itself: the pass above sees nothing at either bundle, while the
+    # complete history puts the earlier bundle's two anchors in one class.
+    # The prefix pass runs first so it takes every collision it can see and
+    # this one names the earlier slots only where nothing better is available;
+    # both run before the split-or-merge errors gathered above, so the more
+    # precise two-anchor diagnosis wins when both describe one transition.
     for batch in pending_batches:
-        first_by_class: dict[_Authority, _AnchorOccurrence] = {}
-        for occurrence in batch:
-            class_root = history.find(occurrence.authority)
-            first = first_by_class.setdefault(class_root, occurrence)
-            if first is not occurrence:
-                raise TsaError(
-                    _pending_class_collision_message(history, first, occurrence)
-                )
+        collision = _first_class_collision(history, batch)
+        if collision is not None:
+            raise TsaError(_pending_class_collision_message(history, *collision))
 
     if errors:
         raise TsaError(min(errors)[1])

@@ -5762,6 +5762,291 @@ def test_two_pending_bundles_contribute_one_candidate_for_one_class(
     ) == 1
 
 
+def test_a_rename_may_carry_the_classs_newest_era_and_not_a_superseded_one(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_alpha: LocalTsa,
+) -> None:
+    """S6-R2-F3: an era the class has left behind is not a name it may take.
+
+    Keeping every historical edge is what lets a rename follow a rotation the
+    walk skipped: A is active with S1, a pending bundle rotates it to S2, and
+    a further pending bundle filing S2 under a new name is that authority
+    renamed rather than a new one. The graph has to answer for the second
+    bundle with the first bundle's skipped rotation in it, which is the whole
+    of S6-R2-F3.
+
+    But "some occurrence of this class once carried exactly these signers" is
+    a weaker question than the rule it replaced, and the difference shows when
+    a class rotates twice. Below, A rotates to S2 and then to S3, both skipped,
+    and a new-id anchor then carries S2 -- an era the class left a version ago.
+    Asked of every era, that anchor is a rename and activates a new anchor slot
+    with no supplemental outcome at all, on the strength of a key the class no
+    longer answers under; asked of the newest era, it is the split it is. The
+    control is the same tree with the same anchor carrying S3, which is what
+    the class currently answers under and is skipped.
+
+    Reverted to ``occurrence.signers in {every era}``, the refusal below does
+    not fire and the superseded name becomes a silent skip.
+    """
+
+    alpha = local_anchors[0]
+    second = certificate_pins(rotated_alpha.signer_pem)
+    third = certificate_pins(
+        rotate_tsa_signer(alpha.tsa, tmp_path / "alpha-third").signer_pem
+    )
+    assert second["spkiSha256"] != third["spkiSha256"]
+    tree = build_witness_tree(tmp_path / "tree", [alpha])
+    to_second, spec = add_bundle_version(
+        tree, [alpha], version=2, signers={alpha.anchor_id: second}
+    )
+    to_third, spec = add_bundle_version(
+        tree, [alpha], version=3, signers={alpha.anchor_id: third}, base=spec
+    )
+    superseded = alias_of(alpha, anchor_id="alpha-superseded-2026")
+    stale, spec = add_bundle_version(
+        tree, [superseded], version=4, signers={superseded.anchor_id: second},
+        base=spec,
+    )
+    current = alias_of(alpha, anchor_id="alpha-current-2026")
+    fresh, spec = add_bundle_version(
+        tree, [current], version=5, signers={current.anchor_id: third}, base=spec
+    )
+    # The premise: one active key, and two pending rotations of it, the second
+    # of which is what the class now answers under.
+    assert {
+        signer["spkiSha256"]
+        for signer in json.loads(tree.bundle.read_text())["anchors"][0][
+            "allowedSigners"
+        ]
+    } == {alpha.signer_pins["spkiSha256"]}
+
+    def candidates_for(*pending: dict[str, Any]) -> set[tuple[str, str]]:
+        return set(
+            tsa_module._supplemental_candidates(
+                tree.records,
+                {BUNDLE_LOGICAL: tree.reference},
+                list(pending),
+                spec=spec,
+            )
+        )
+
+    # The name the class currently answers under is the rename it is.
+    assert candidates_for(to_second, to_third, fresh) == set()
+    # The name it answered under one rotation ago is not.
+    with pytest.raises(TsaError) as caught:
+        candidates_for(to_second, to_third, stale)
+    assert str(caught.value) == (
+        f"pending TSA anchor {superseded.anchor_id} splits or merges active "
+        "authorities' signers; a pending anchor must carry one active "
+        "anchor's signers exactly, or none of them"
+    )
+
+
+def test_a_later_bundles_merge_does_not_convict_an_earlier_bundle(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_beta: LocalTsa,
+) -> None:
+    """S6-R2-F2: the class guard asks the graph as of the bundle it judges.
+
+    The guard refuses two anchors of one pending bundle that resolve to one
+    historical class. Asked of the *finished* graph it can convict the wrong
+    bundle: two genuinely distinct new authorities in one bundle become one
+    class the moment a later bundle merges them, and the earlier bundle -- the
+    honest one -- is then refused for the later one's defect, naming its two
+    anchor slots for a collision it did not commit.
+
+    The graph is therefore asked as of each bundle: the collision check runs
+    inside the walk, immediately after that bundle's own edges are added and
+    before any later bundle's are. The merge below is still refused, and the
+    refusal names the anchor that merges rather than the two it merged.
+
+    Run with the check moved back after the walk, the verdict below becomes
+    the collision message naming the two anchors of the earlier bundle.
+    """
+
+    beta = local_anchors[1]
+    rotated = certificate_pins(rotated_beta.signer_pem)
+    tree = build_witness_tree(tmp_path / "tree", local_anchors[:1])
+    (tree.records / "trust" / beta.tsa.root_pem.name).write_bytes(
+        beta.tsa.root_pem.read_bytes()
+    )
+    first = alias_of(beta, anchor_id="beta-first-2026")
+    second = alias_of(beta, anchor_id="beta-second-2026")
+    distinct, spec = add_bundle_version(
+        tree,
+        [first, second],
+        version=2,
+        signers={second.anchor_id: rotated},
+    )
+    merger = alias_of(beta, anchor_id="beta-merger-2026")
+    merging, spec = add_bundle_version(
+        tree,
+        [merger],
+        version=3,
+        extra_signers={merger.anchor_id: [rotated]},
+        base=spec,
+    )
+    # The premise: two pending authorities with a key each, and a third anchor
+    # in a later bundle carrying both keys.
+    written = json.loads(
+        (tree.records / "trust" / "tsa-anchors-v2.json").read_text()
+    )["anchors"]
+    assert [
+        {signer["spkiSha256"] for signer in anchor["allowedSigners"]}
+        for anchor in written
+    ] == [{beta.signer_pins["spkiSha256"]}, {rotated["spkiSha256"]}]
+
+    def candidates_for(*pending: dict[str, Any]) -> set[tuple[str, str]]:
+        return set(
+            tsa_module._supplemental_candidates(
+                tree.records,
+                {BUNDLE_LOGICAL: tree.reference},
+                list(pending),
+                spec=spec,
+            )
+        )
+
+    # The earlier bundle alone is two authorities, and is not refused.
+    assert candidates_for(distinct) == {
+        (distinct["path"], first.anchor_id),
+        (distinct["path"], second.anchor_id),
+    }
+    # Walked with the merger, the refusal names the merger.
+    with pytest.raises(TsaError) as caught:
+        candidates_for(distinct, merging)
+    assert str(caught.value) == (
+        f"pending TSA anchor {merger.anchor_id} splits or merges active "
+        "authorities' signers; a pending anchor must carry one active "
+        "anchor's signers exactly, or none of them"
+    )
+
+
+def test_an_elected_class_survivor_cannot_be_credited_twice_once_active(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+) -> None:
+    """S6-R2-F3: what the withdrawn refusal guarded, guarded by the count.
+
+    Round two withdrew the refusal for two pending bundles introducing one
+    authority under two anchors: one class now contributes one candidate, its
+    newest occurrence, and the other name is simply not a candidate. The
+    refusal existed so that one new authority could not demand and receive two
+    supplemental outcomes and be counted twice, and this is the assertion that
+    the count does that work on its own -- both pending bundles activate, so
+    the class ends up with two anchor slots the chain trusts, proven once. The
+    transition is carried in through the step API, because this record carries
+    no updates of its own and S6-R2-F4 refuses a supplied entry the one read
+    did not derive.
+
+    Two rules leave no witness that credits both. A v2 witness must name the
+    newest active bundle, so a witness naming the older of the two is refused
+    for that alone; and an outcome may only select an anchor that bundle
+    configures, so an outcome for the other name is refused as an anchor the
+    named bundle does not pin -- one version of the class per bundle is what
+    makes that true. The only
+    shape that could hold both names at once is one bundle carrying both, and
+    that is what the class guard added by S6-R2-F2 refuses. So the withdrawal
+    costs the producer a diagnosis and costs the verification nothing.
+    """
+
+    beta = local_anchors[1]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    pending_first, first, pending_second, second, spec = two_pending_authorities(
+        tree, beta
+    )
+    # The premise: two names, one class, one candidate -- the newest.
+    assert set(
+        tsa_module._supplemental_candidates(
+            tree.records,
+            {BUNDLE_LOGICAL: tree.reference},
+            [pending_first, pending_second],
+            spec=spec,
+        )
+    ) == {(pending_second["path"], second.anchor_id)}
+
+    digest = sha256_bytes(tree.record.read_bytes())
+    proof = tree.records / RECORD_DAY / f"record-0001.{second.anchor_id}.tsr"
+    beta.tsa.stamp(digest, proof)
+    rewrite_witness(
+        tree,
+        lambda payload: payload.__setitem__(
+            "supplementalOutcomes",
+            [supplemental_outcome(tree, pending_second, second, proof)],
+        ),
+    )
+    evidence = verify_step(
+        tree.record,
+        spec=spec,
+        records=tree.records,
+        trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+        prior_pending_updates=[pending_first, pending_second],
+    )
+    assert evidence.status == "available"
+    assert [token.anchor_id for token in evidence.supplemental_tokens] == [
+        second.anchor_id
+    ]
+
+    # Both bundles activate, so the class holds two anchor slots the chain
+    # trusts. Neither can be credited beside the other.
+    active = {
+        BUNDLE_LOGICAL: tree.reference,
+        str(pending_first["path"]): pending_first,
+        str(pending_second["path"]): pending_second,
+    }
+
+    def outcome(anchor: LocalAnchor, token: pathlib.Path) -> dict[str, Any]:
+        return {
+            "tsaAnchorId": anchor.anchor_id,
+            "tsa": anchor.endpoint,
+            "status": "available",
+            "tokenPath": logical_path(tree.records, token),
+            "tokenSha256": sha256_bytes(token.read_bytes()),
+            "tsaPolicyOid": anchor.tsa.policy_oid,
+            "tsaImprintAlgorithmOid": SHA256_IMPRINT_OID,
+            "tsaSignerCertificateSha256": anchor.signer_pins["certificateSha256"],
+            "tsaSignerSpkiSha256": anchor.signer_pins["spkiSha256"],
+        }
+
+    other = tree.records / RECORD_DAY / f"record-0001.{first.anchor_id}.tsr"
+    beta.tsa.stamp(digest, other)
+    # The premise for the pair: two genuine, distinct issuances by the one
+    # authority, so nothing but the rules below separates them.
+    assert sha256_bytes(other.read_bytes()) != sha256_bytes(proof.read_bytes())
+
+    def against(bundle: dict[str, Any], outcomes: list[dict[str, Any]]) -> None:
+        rewrite_witness(
+            tree,
+            lambda payload: payload.update(
+                {
+                    "trustBundleId": str(bundle["bundleId"]),
+                    "trustBundlePath": str(bundle["path"]),
+                    "trustBundleSha256": str(bundle["sha256"]),
+                    "anchorOutcomes": outcomes,
+                    "supplementalOutcomes": [],
+                }
+            ),
+        )
+        verify_witness(
+            tree.record, spec=spec, records=tree.records, trusted_bundles=active
+        )
+
+    # Both names at once, against the newest bundle: the older name is extra.
+    with pytest.raises(TsaError) as both:
+        against(pending_second, [outcome(second, proof), outcome(first, other)])
+    assert str(both.value) == (
+        "witness does not select exactly one pinned TSA anchor: "
+        f"id={first.anchor_id!r}, endpoint={first.endpoint!r}"
+    )
+    # The older name alone, against its own bundle: not the newest active one.
+    with pytest.raises(TsaError) as older:
+        against(pending_first, [outcome(first, other)])
+    assert str(older.value) == (
+        "multi-token witness does not use the newest active TSA trust bundle"
+    )
+
+
 def test_two_pending_bundles_may_introduce_two_authorities(
     tmp_path: pathlib.Path,
     local_anchors: tuple[LocalAnchor, ...],
