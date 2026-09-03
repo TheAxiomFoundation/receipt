@@ -793,13 +793,37 @@ def test_verify_timestamp_token_binds_one_token_to_the_bundle_it_names(
 def test_verifies_two_anchors_and_reports_the_earliest_token(
     tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
 ) -> None:
+    """S5R2-F6: the witness-level fields are the earliest token's, chosen.
+
+    A witness carrying several tokens reports one token's genTime, anchor and
+    signer at the witness level, and which one is the guarantee: the earliest,
+    because that is the moment the record is proved to have existed by. The
+    tree builder writes the outcomes in bundle order and the builder stamps in
+    that order too, so the earliest token was also the first one in the list
+    and a summary that returned ``tokens[0]`` passed unremarked. Here the
+    outcomes are reversed before verification, so the earliest is last and
+    only a summary that actually compares the times can report it.
+
+    The comparison is by ``(genTime, anchor id)``: two stamps taken a moment
+    apart can land in one second, and the tie-break has to be something, so
+    it is the same key the module uses.
+    """
+
     tree = build_witness_tree(tmp_path, local_anchors)
+    rewrite_witness(
+        tree,
+        lambda payload: payload["anchorOutcomes"].reverse(),
+    )
     evidence = verify_tree(tree)
     assert evidence.status == "available"
     assert {token.anchor_id for token in evidence.tokens} == {
         anchor.anchor_id for anchor in local_anchors
     }
     earliest = min(evidence.tokens, key=lambda token: (token_time(token), token.anchor_id))
+    # The earliest is genuinely not the one a summary reading tokens[0] would
+    # report: the builder stamped it first and the witness now lists it last.
+    assert earliest.anchor_id == local_anchors[0].anchor_id
+    assert evidence.tokens[0].anchor_id == local_anchors[1].anchor_id
     assert evidence.anchor_id == earliest.anchor_id
     assert evidence.gen_time == earliest.gen_time
 
@@ -1991,6 +2015,73 @@ def load_refusal(tree: WitnessTree, anchor: LocalAnchor, detail: str) -> str:
     )
 
 
+def substitute_the_storeutl_listing(
+    monkeypatch: pytest.MonkeyPatch, listing: str
+) -> None:
+    """Answer every ``openssl storeutl`` with ``listing`` and pass the rest on.
+
+    The version gate runs ``openssl version`` through the same function, and
+    every other OpenSSL call in a verification runs through it too, so only
+    the listing is substituted.
+    """
+
+    original = tsa_module._run_openssl
+
+    def counting(arguments: list[str], **keywords: Any) -> Any:
+        if arguments[:1] == ["storeutl"]:
+            return listing
+        return original(arguments, **keywords)
+
+    monkeypatch.setattr(tsa_module, "_run_openssl", counting)
+
+
+def test_a_listing_with_no_total_is_refused_rather_than_counted_as_zero(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S5R2-F6: no total is not a count, and must not become a count of zero.
+
+    ``_certificate_count`` reads the total off the end of ``openssl storeutl
+    -noout -certs`` and refuses when there is none, rather than substituting a
+    number of its own. Which OpenSSL prints a total for which file is a
+    version difference -- 3.0 prints ``Total found: 0`` for a file holding no
+    PEM object and 3.6 prints nothing -- so on any one machine the branch is
+    reachable for some files and not others, and the case above can only
+    assert whichever its own OpenSSL takes. Nothing bound the branch itself,
+    and a helper that returned zero where there is no total would pass every
+    test in the suite: the pinned roots would still count one, and an
+    uncountable file would be refused by the one-certificate rule instead --
+    the wrong rule, and the right answer by accident.
+
+    Here the listing is substituted, so the branch is reached whatever OpenSSL
+    is on the path. The refusal has to be the counting one, on a bundle whose
+    root is genuinely a single valid certificate: with a zero fallback the
+    load refuses too, but for holding no certificate, which is a false
+    statement about the file.
+    """
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    root_path = tree.records / "trust" / alpha.tsa.root_pem.name
+    assert _certificate_count(root_path) == 1
+    substitute_the_storeutl_listing(monkeypatch, "0: Certificate\n")
+    uncounted = (
+        f"pinned TSA root PEM certificates could not be counted: {root_path}: "
+        "openssl storeutl reported no total"
+    )
+    with pytest.raises(TsaError) as counting:
+        _certificate_count(root_path)
+    assert str(counting.value) == uncounted
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == (
+        f"TSA anchor {alpha.anchor_id} in bundle {BUNDLE_ID} references root "
+        f"material that fails validation: {uncounted}"
+    )
+    assert "must hold exactly one certificate" not in str(caught.value)
+
+
 @pytest.mark.parametrize(
     "label", ["TRUSTED CERTIFICATE", "X509 CERTIFICATE"], ids=["trusted", "x509"]
 )
@@ -2131,6 +2222,13 @@ def test_refuses_a_root_pem_whose_certificates_openssl_cannot_count(
     on the one-certificate message, so a ``_certificate_count`` that fell
     back to zero -- refusing these two by the wrong rule, and trusting
     whatever the next uncountable file turned out to hold -- fails here.
+
+    S5R2-F6: the ``no-object`` half of that is only true where OpenSSL prints
+    no total, which is 3.6 here and not 3.0 on CI, so the branch each version
+    takes is decided by asking the count what it did rather than by accepting
+    either message from the load. The version-independent statement -- no
+    total is not a count of zero -- is bound separately, on a substituted
+    listing, in the test below.
     """
 
     alpha = local_anchors[0]
@@ -2151,18 +2249,18 @@ def test_refuses_a_root_pem_whose_certificates_openssl_cannot_count(
         # one-certificate rule; OpenSSL 3.6 prints no total at all, so the
         # count refuses. Both refuse the file; which message depends on the
         # OpenSSL the verifier runs, and the test accepts either.
+        one = f"pinned TSA root PEM must hold exactly one certificate: {root_path}"
         try:
             counted = _certificate_count(root_path)
         except TsaError as exc:
             assert str(exc).startswith(uncounted)
+            expected = load_refusal(tree, alpha, uncounted)
         else:
             assert counted == 0
+            expected = load_refusal(tree, alpha, one)
         with pytest.raises(TsaError) as caught:
             _load_trust_bundle(tree.records, reference, spec=spec)
-        one = f"pinned TSA root PEM must hold exactly one certificate: {root_path}"
-        assert str(caught.value).startswith(load_refusal(tree, alpha, uncounted)) or str(
-            caught.value
-        ).startswith(load_refusal(tree, alpha, one))
+        assert str(caught.value).startswith(expected)
         return
     with pytest.raises(TsaError) as counting:
         _certificate_count(root_path)
@@ -3345,6 +3443,47 @@ def test_refuses_one_token_supplied_under_two_anchor_outcomes(
         f"duplicate TSA response file across anchor outcomes: {reused}"
     )
     assert [claim["tsaAnchorId"] for claim in verified] == [alpha.anchor_id]
+
+
+def test_a_claim_declaring_a_non_string_digest_reaches_the_ported_refusal(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """S5R2-F6: the duplicate rules read a claim, and a claim can be anything.
+
+    A witness is a document a producer writes, so a field the rules read may
+    hold anything JSON can express. The response-file rule tests its argument
+    for ``str`` before looking it up, which is not decoration: the seen
+    responses are a ``set``, and looking a list up in one raises ``TypeError``
+    -- an unhandled exception out of a verifier whose whole contract is to
+    raise ``TsaError`` for anything it will not accept, and out of the rules
+    the branch is *newest* in. Nothing supplied a non-string, so nothing bound
+    it.
+
+    What a non-string ``tokenSha256`` should get is the refusal the port
+    inherited for a claim whose declared digest is not the digest of the file:
+    the rule declines to remember it, and ``verify_timestamp_token`` compares
+    it with the bytes it read and refuses in the baseline's words. Without the
+    type test this raises ``TypeError: unhashable type: 'list'`` instead.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    tree = build_witness_tree(tmp_path, local_anchors[:2])
+    assert verify_tree(tree).status == "available"
+
+    def declare_a_list_of_digests(payload: dict[str, Any]) -> None:
+        first, second = payload["anchorOutcomes"]
+        assert (first["tsaAnchorId"], second["tsaAnchorId"]) == (
+            alpha.anchor_id,
+            beta.anchor_id,
+        )
+        # A list holding the first outcome's digest: the value the rule would
+        # have to remember, wrapped in the one type that cannot be remembered.
+        second["tokenSha256"] = [first["tokenSha256"]]
+
+    rewrite_witness(tree, declare_a_list_of_digests)
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == f"witness token hash mismatch for {tree.record}"
 
 
 def file_identity(path: pathlib.Path) -> tuple[int, int]:
