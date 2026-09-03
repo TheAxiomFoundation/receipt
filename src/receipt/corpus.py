@@ -2155,6 +2155,37 @@ def _has_pinned_suffix(relative: str, suffixes: tuple[str, ...]) -> bool:
 
 
 def _reject_aliasing_paths(relatives: list[str]) -> None:
+    """Refuse two declared paths a real filesystem would treat as one.
+
+    Two passes, because a path can alias another in two places and the
+    second one was missed.
+
+    The first compares whole paths, which is what "the closed-world set is
+    ambiguous" is about: a journal binding both ``rules/x.yaml`` and
+    ``rules/X.yaml`` says two different digests about one file on APFS, and
+    an auditor cannot say which one they have.
+
+    The second compares every *prefix* of every path — each ancestor
+    directory and the path itself — at the depth it sits. Comparing whole
+    paths alone missed the case where the collision is a directory:
+    ``rules/A/x.yaml`` and ``rules/a/y.yaml`` are two distinct paths whose
+    fold keys differ, so the first pass passes them, while an insensitive
+    clone merges ``A`` and ``a`` into one directory holding both files —
+    and the closed-world sweep, which descends the spellings the journal
+    named, walks two directories on the auditor's host and one on the
+    consumer's (peer review, Sol round 3). The path itself is included at
+    its own depth as well, so a directory in one path colliding with a file
+    in another is caught too.
+
+    Under the portable-name policy the fold key over a declared path is
+    ASCII case-insensitivity, so what both passes are asking is whether two
+    spellings differ only in case. The folded prefix carries its own depth —
+    it holds one separator per level — so the depth needs no key of its own.
+
+    The whole-path pass runs first and completely, so a journal with both
+    kinds of collision keeps the message that names the more specific one.
+    """
+
     seen: dict[str, str] = {}
     for relative in relatives:
         key = _path_fold(relative)
@@ -2165,6 +2196,19 @@ def _reject_aliasing_paths(relatives: list[str]) -> None:
                 f"is ambiguous: {_quoted(seen[key])} and {_quoted(relative)}"
             )
         seen[key] = relative
+    directories: dict[str, str] = {}
+    for relative in relatives:
+        components = relative.split("/")
+        for depth in range(1, len(components) + 1):
+            prefix = "/".join(components[:depth])
+            key = _path_fold(prefix)
+            previous = directories.get(key)
+            if previous is not None and previous != prefix:
+                raise CorpusError(
+                    "two declared paths would alias at a directory: "
+                    f"{_quoted(previous)} and {_quoted(prefix)}"
+                )
+            directories[key] = prefix
 
 
 def _tree_content_paths(
@@ -2683,7 +2727,10 @@ def verify_corpus_binding(
     # case-sensitive filesystem can hold two genuinely distinct files whose
     # names collide only after folding, and such a corpus is refused by design,
     # because its closed-world claim would depend on which filesystem the
-    # auditor cloned onto.
+    # auditor cloned onto. Compared at every component prefix and not only
+    # whole, because the collision can be a directory: "rules/A/x.yaml" and
+    # "rules/a/y.yaml" are two distinct paths that an insensitive clone holds
+    # in one merged directory (peer review, Sol round 3).
     _reject_aliasing_paths(list(content) + list(attested))
 
     tree = _tree_content_paths(root, spec)

@@ -790,6 +790,83 @@ def test_refuses_paths_that_alias_under_case_or_normalization(
 # --- second cross-family round: races the first round's guards left open -----
 
 
+def test_refuses_two_declared_paths_that_would_alias_at_a_directory(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5R3-F9: the aliasing guard compared whole paths only.
+
+    ``rules/A/x.yaml`` and ``rules/a/y.yaml`` are two distinct paths and
+    their fold keys differ, so the whole-path comparison passed them. An
+    insensitive clone merges ``A`` and ``a`` into one directory holding both
+    files, and the closed-world sweep descends the spellings the journal
+    named — two directories on the auditor's host, one on the consumer's. A
+    closed world whose shape depends on which filesystem resolved it is not
+    closed, which is exactly what the whole-path comparison exists to say.
+
+    Every component prefix is compared now, at the depth it sits, so the
+    collision is caught where it is: at the directory.
+
+    The guard runs on the parsed journal, before the sweep, so no files are
+    written for the aliasing pair and what is asserted is the guard itself.
+    With the prefix comparison disabled in place the pair passes it, and
+    what the verifier says next is decided by whichever tree the auditor's
+    filesystem produced — which is the finding, and which is why the
+    assertion here is on the refusal that does not depend on the host.
+    """
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+    for path, digest_source in (
+        ("rules/A/x.yaml", "name: a\n"),
+        ("rules/a/y.yaml", "name: b\n"),
+    ):
+        rows.append(
+            {
+                "schemaVersion": JOURNAL_SCHEMA,
+                "kind": "content",
+                "path": path,
+                "sha256": sha256_text(digest_source),
+                "state": "present",
+            }
+        )
+    reindex(rows)
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+    assert str(caught.value) == (
+        "two declared paths would alias at a directory: 'rules/A' and "
+        "'rules/a'"
+    )
+
+
+def test_two_declared_paths_under_distinct_ancestors_still_verify(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5R3-F9, the control: the prefix pass must not refuse a corpus.
+
+    Every content path in an ordinary corpus shares its leading components
+    with every other one — the fixture's three files sit under ``rules``,
+    ``rules/tax`` and ``rules/benefit`` — so a prefix comparison that
+    mistook a repeated spelling for a collision would refuse every corpus
+    there is. What refuses is two *distinct* spellings folding equal at the
+    same depth, and identical prefixes are not that.
+
+    A second content directory beside the first is added here so the
+    control has a sibling pair to be right about, and the whole corpus is
+    verified rather than merely parsed.
+
+    This test passes with the S5R3-F9 change disabled, which is the point.
+    """
+
+    content = dict(CONTENT)
+    content["rules/A/x.yaml"] = "name: a\n"
+    content["rules/b/y.yaml"] = "name: b\n"
+    write_tree(tmp_path, content=content)
+    verification = verify_corpus_binding(
+        tmp_path, render_journal(journal_rows(content=content)), spec=corpus_spec()
+    )
+    assert [entry.path for entry in verification.content] == sorted(content)
+
+
 def test_refuses_a_fifo_at_an_attested_path_without_blocking(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
