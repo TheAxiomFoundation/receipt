@@ -1077,12 +1077,15 @@ def test_the_alias_index_refuses_more_prefixes_than_its_ceiling(
 def test_maximum_rows_at_maximum_portable_depth_share_their_counted_prefixes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Binds S7-F1: cumulative prefix strings made depth times rows allocations.
+    """Binds S7-F1 and S7-R3-F1: prefix text was materialised per visit.
 
     These 4,096 paths are each 1,023 characters and 511 components, the
     review's maximum-depth fixture. They make 2,093,056 prefix visits, but
     share their first 510 components, so exactly 4,606 distinct folded
-    prefixes are counted. The old slice/join/fold loop instead materialised
+    prefixes are counted. That shared layout is the *best* case for
+    cardinality, which is what makes it the one that isolates the per-visit
+    text cost; the root-divergent worst case is the neighbouring memory
+    regression's. The old slice/join/fold loop instead materialised
     and re-folded one cumulative string per visit, and had no allocation
     count or budget for the test to assert; paths with distinct prefixes
     retained that same 2.1-million cardinality in its dictionary.
@@ -1090,9 +1093,11 @@ def test_maximum_rows_at_maximum_portable_depth_share_their_counted_prefixes(
     What the folded-character recorder measures is the finding's own number.
     Every prefix reaches ``_path_fold`` exactly once per visit either way, so
     the total characters folded is the total prefix text the check
-    materialises. The trie folds one component per visit — 2,101,248
-    characters over these paths, plus the 4,190,208 the whole-path pass folds
-    and always did. The cumulative loop folded a joined prefix per visit
+    materialises. The prefix pass folds one component per visit —
+    2,101,248 characters over these paths, plus the 4,190,208 the whole-path
+    pass folds and always did; it did so into a trie under S7-F1 and does so
+    building each path's sorted key under S7-R3-F1, which is the same fold
+    count either way. The cumulative loop folded a joined prefix per visit
     instead: 1,069,559,808 characters for the prefix pass alone, so
     1,073,750,016 in total — a gibibyte of prefix strings for one within-cap
     journal, which is what the finding measured as about two gibibytes held
