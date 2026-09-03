@@ -4708,9 +4708,11 @@ def test_refuses_a_device_name_padded_with_spaces_before_its_extension(
     one keystroke walked a bound path straight past the device refusal
     (found by adversarial review of the round-eight fix).
 
-    The composition is ``ntdll``'s own ``RtlIsDosDeviceName_U``, whose
-    conformance table — ``"c:nul . . :"`` and ``"c:NUL  ....  "`` among
-    them — is run against real Windows.
+    The composition is ``ntdll``'s own ``RtlIsDosDeviceName_U``. Wine's
+    conformance table for it — ``dlls/ntdll/tests/path.c``, run against
+    real Windows, not the implementation file beside it — carries
+    ``{ "c:nul . . :", 4, 6 }`` and ``{ "c:NUL  ....  ", 4, 6 }``, both of
+    which need the truncation and the space-strip in that order.
 
     Without the composition this journal verifies: the file is a regular
     file, its digest matches, and the sweep calls the world closed, while a
@@ -5529,3 +5531,40 @@ def test_the_device_table_is_exactly_what_its_two_sources_say() -> None:
     assert WIN32_RESERVED_DEVICE_NAMES == documented | matcher_only
     assert "COM0" not in WIN32_RESERVED_DEVICE_NAMES
     assert "LPT0" not in WIN32_RESERVED_DEVICE_NAMES
+
+
+def test_alias_capability_is_measured_on_the_fold_key_not_the_written_pin(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5R2-F5, adversarially: the two halves must measure the same thing.
+
+    S5R2-F5 filters the pins an alias could carry before deriving anything,
+    and asks the ASCII rule only of that set. Measuring the set by the
+    *written* length of the pin while every comparison in this module uses
+    the fold key put the two halves out of step: the NFD spelling of
+    ``.éml`` is five characters written and four folded, so it was called
+    incapable, escaped the ASCII rule that refuses it at construction, and
+    was then skipped by the alias comparison as well — while
+    ``_has_pinned_suffix`` folds and happily calls a file ending ``.éml``
+    content. That reopens exactly the hole round eight closed: on a code
+    page 850 volume the alias of ``smuggled.émlx`` ends ``.ÉML``, which
+    folds onto that pin, and the sweep skipped the file as non-content.
+
+    Capability is measured on the fold key now, in one predicate both halves
+    call. Without it the spec below constructs and the file below verifies.
+    """
+
+    from receipt.corpus import _alias_capable_suffix
+
+    nfd = unicodedata.normalize("NFD", ".éml")
+    assert len(nfd) == 5 and len(unicodedata.normalize("NFC", nfd)) == 4
+    assert _alias_capable_suffix(nfd)
+    assert not _alias_capable_suffix(".éyaml")
+    with pytest.raises(CorpusError) as caught:
+        corpus_spec(content_suffixes=(".yaml", nfd))
+    # Quoted as written, so the refusal names the spelling the spec carries
+    # rather than the composed form the fold key derived from it.
+    assert str(caught.value) == (
+        "CorpusSpec content suffix must be ASCII, because an 8.3 alias "
+        f"extension cannot be derived against a non-ASCII one: {nfd!r}"
+    )

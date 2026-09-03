@@ -498,10 +498,16 @@ MAX_GATE_DECLARATIONS = 2048
 #:
 #: Derived rather than picked: the gate cap above is 2,048 declarations, and
 #: the other three row kinds — content, attested and removed — get an equal
-#: margin of 2,048 between them, which is 4,096. That margin is the number a
-#: corpus with more bound files than it will have to raise, and it is stated
-#: here rather than left implicit precisely so that raising it is a visible
-#: change to a consumer-facing bound rather than a silent one.
+#: margin of 2,048 between them, which is 4,096.
+#:
+#: That margin bounds the whole *journal*, not the tree it describes, and
+#: the journal is append-only: a corpus of five hundred rule files that has
+#: cut four releases has written more than two thousand content rows,
+#: whatever its tree holds today. So what a consumer has to watch is bound
+#: paths times revisions plus tombstones, and a corpus that outgrows it
+#: raises this constant. The number is stated here rather than left
+#: implicit precisely so that raising it is a visible change to a
+#: consumer-facing bound rather than a silent one.
 MAX_JOURNAL_ROWS = 4096
 #: The most characters one journal path may carry. Paths are quoted in
 #: refusals and, for removed paths, rendered in the verdict; the bound is
@@ -626,8 +632,13 @@ class CorpusSpec:
             # the screen nothing and refusing it refused a legal
             # configuration over a question that is never put (peer review,
             # Sol round 2). ".éml" is still refused, because that one is a
-            # pin an alias could carry and the derivation cannot be made.
-            if len(suffix) <= 4 and any(ord(character) > 0x7F for character in suffix):
+            # pin an alias could carry and the derivation cannot be made —
+            # and so is its NFD spelling, because _alias_capable_suffix
+            # measures the fold key that every comparison here uses rather
+            # than the written pin.
+            if _alias_capable_suffix(suffix) and any(
+                ord(character) > 0x7F for character in suffix
+            ):
                 raise CorpusError(
                     "CorpusSpec content suffix must be ASCII, because an 8.3 "
                     "alias extension cannot be derived against a non-ASCII "
@@ -946,17 +957,20 @@ def _assert_assigned(value: str, label: str) -> str:
 #:
 #: CONIN$ and CONOUT$ rest on ``ntdll``'s own matcher instead:
 #: ``RtlIsDosDeviceName_U`` resolves both, and Microsoft's page does not
-#: list them. What was read is Wine's implementation of that function
-#: (dlls/ntdll/path.c, fetched 2026-09-03), which carries a conformance
-#: table run against real Windows.
+#: list them. Two Wine files were read for that, both fetched 2026-09-03:
+#: the implementation, ``dlls/ntdll/path.c``, and the conformance table in
+#: ``dlls/ntdll/tests/path.c``, which is run against real Windows and
+#: records ``{ "CONIN$", 0, 12, TRUE }`` — a device name, and the ``TRUE``
+#: is the comment's note that it fails on Windows 7.
 #:
 #: COM0 and LPT0 were in this table and are not any more, because neither
-#: source supports them. The sentence above lists COM1 through COM9, and
-#: that matcher's digit test is ``if (*end <= '0' || *end > '9') break;``,
-#: so a zero is not a device there either. The entry was kept as the
-#: fail-closed side of a disagreement that does not exist, and its cost is
-#: real: a corpus holding an ordinary ``COM0.yaml`` was refused outright
-#: (peer review, Sol round 2).
+#: source supports them. The sentence above lists COM1 through COM9; the
+#: matcher's digit test is ``if (*end <= '0' || *end > '9') break;``, so a
+#: zero is not a device there either; and the conformance table asserts it
+#: directly, with ``{ "c:\\lpt0.txt", 0, 0 }`` among its cases. The entry
+#: was kept as the fail-closed side of a disagreement that does not exist,
+#: and its cost is real: a corpus holding an ordinary ``COM0.yaml`` was
+#: refused outright (peer review, Sol round 2).
 WIN32_RESERVED_DEVICE_NAMES = frozenset(
     {"CON", "PRN", "AUX", "NUL"}
     | {f"COM{digit}" for digit in range(1, 10)}
@@ -1186,6 +1200,28 @@ def _strips_to_another_name(segment: str) -> bool:
     return segment != segment.rstrip(". ")
 
 
+def _alias_capable_suffix(suffix: str) -> bool:
+    """Whether an 8.3 alias extension could ever be this pinned suffix.
+
+    An alias extension is at most three characters, so a pin whose own
+    extension is longer can be carried by no alias at all. What is measured
+    is the *fold key*, not the written pin, because the fold key is what
+    every comparison in this module uses: the NFD spelling of ``.éml`` is
+    five characters written and four folded, so a raw-length test called it
+    incapable, skipped the ASCII rule that would have refused it at
+    construction, and then skipped the alias comparison too — leaving
+    ``smuggled.émlx`` non-content here while its alias ends ``.ÉML`` on a
+    code page 850 volume and folds onto that very pin (adversarial review
+    of the Sol round 2 fix).
+
+    Folding can only lengthen a pin, never shorten it below what an ASCII
+    alias extension folds to, so measuring the fold is also the answer that
+    cannot admit a pin the comparison would then miss.
+    """
+
+    return len(_path_fold(suffix)) <= 4
+
+
 def _short_name_extension(name: str) -> str | None:
     """The extension 8.3 generation gives this name, or None if it gives none.
 
@@ -1290,7 +1326,9 @@ def _short_name_carries_pinned_suffix(name: str, suffixes: tuple[str, ...]) -> b
     Only a pin an alias can carry is compared, and it is compared exactly.
     An 8.3 extension is at most three characters, so a pin whose own
     extension is longer than three cannot be the extension of any alias, and
-    such a pin is ignored here entirely. Truncating the pin instead and
+    such a pin is ignored here entirely; :func:`_alias_capable_suffix`
+    decides that on the fold key rather than on the written pin, for the
+    reason given there. Truncating the pin instead and
     comparing the first three characters was unsound the other way: with
     ``.yaml`` pinned, an ordinary ``notes.yam`` was refused as though its
     alias carried the pin, although no alias of anything can end ``.yaml``
@@ -1321,7 +1359,7 @@ def _short_name_carries_pinned_suffix(name: str, suffixes: tuple[str, ...]) -> b
     # asks nothing of this name; deriving first meant a configuration with
     # only such pins still refused ``notes.é`` as underivable, over a
     # question no pin could have asked (peer review, Sol round 2).
-    capable = [suffix for suffix in suffixes if len(suffix) <= 4]
+    capable = [suffix for suffix in suffixes if _alias_capable_suffix(suffix)]
     if not capable:
         return False
     extension = _short_name_extension(name)
