@@ -61,7 +61,10 @@ every release file the base carries is still an entry in the candidate index,
 the release root's index and working tree agree in both directions — no index
 entry the walk cannot see, no entry the walk cannot find, and no entry
 answered for through a symlinked component or under another entry's
-spelling — and the post-cutover binding values are validated for shape rather
+spelling — the index holds no entry spelled as another spelling of a
+protected path, which every one of those reconciliations is blind to because
+each is a comparison by exact spelling, and the post-cutover binding values
+are validated for shape rather
 than presence alone. Every one of those
 index reads asks about the exact path, as a literal pathspec, rather than
 handing git a name to interpret as a pattern, as does the base tree's
@@ -100,7 +103,14 @@ setting cannot mask a base that names nothing). The per-state-path
 ``release_chain.assert_state_path_tracked`` runs ahead of everything that
 reads either state file, because an untracked state path, or one under a
 gitlink, is not this commit's content and nothing downstream can be a verdict
-about it. And ``_assert_root_unchanged`` runs ahead of the surface
+about it. ``release_chain.assert_index_carries_no_protected_alias`` runs
+beside it and shares that exception rather than adding a fourth: it is the
+same fact from the other side. An index entry spelled as another spelling of
+a protected path is a second object every reconciliation below is blind to,
+because each compares by exact spelling; which of the two the one file on a
+name-folding filesystem answers for is not decidable from the index or the
+tree, so this too says a comparison cannot be made rather than making one.
+And ``_assert_root_unchanged`` runs ahead of the surface
 classification, which is a pre-existing check and the one that decides which
 path the whole run takes, because a root exchanged since ``_set_root``
 recorded it means the tree being classified is not the tree this verdict was
@@ -170,6 +180,7 @@ from receipt.release_chain import (
     _git_environment,
     assert_file_modes_authoritative,
     assert_index_agrees_with_tree,
+    assert_index_carries_no_protected_alias,
     ChainSpec,
     MANIFEST_RE,
     ReleaseChainError,
@@ -1637,6 +1648,21 @@ def _verify_selected_tree(
             assert_state_path_tracked(candidate.root, relative)
         except ReleaseChainError as exc:
             raise AppendError(str(exc)) from exc
+    # And beside it, saying the same kind of thing: every reconciliation
+    # between the index and the working tree below is by exact spelling, which
+    # is what makes it a comparison, and each is blind to an entry spelled as
+    # another spelling of the path it is about. On a filesystem that folds
+    # names, such an entry is a second committed object resolving to the same
+    # file — under no protected path by name, so nothing reads it, while the
+    # commit carries it. Which of the two the one file answers for is not
+    # decidable from the index or the tree, so this refuses rather than
+    # comparing, and runs here for that reason: it shares the tracked-state
+    # exception rather than adding a fourth. It reads the whole index, which
+    # is the only read here that no pathspec can express.
+    try:
+        assert_index_carries_no_protected_alias(candidate.root, spec.chain)
+    except ReleaseChainError as exc:
+        raise AppendError(str(exc)) from exc
     if base is not None:
         # Before the classification that decides which path this run takes,
         # and again before a gate-only verdict is returned: everything above

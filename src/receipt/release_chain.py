@@ -28,7 +28,10 @@ directions, by the spelling the traversal returns and after walking an
 indexed path's parents, because a filesystem traversal does not descend a
 symlinked directory while resolving the whole name does — and because a
 case- or normalisation-insensitive filesystem answers one entry's question
-with another entry's file; the state-path guards ``append_gate`` calls;
+with another entry's file; the whole-index read that refuses an entry spelled
+as another spelling of a protected path, which every one of those
+reconciliations is blind to because each compares by exact spelling; the
+state-path guards ``append_gate`` calls;
 the anchor-set digest in the result) run beside the extracted checks without
 altering any of their refusals, and carry their own tests. Every one of those
 index reads names its path as a literal pathspec, so git is asked about the
@@ -92,6 +95,7 @@ import re
 import stat
 import subprocess
 import tempfile
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -2169,7 +2173,7 @@ INDEX_DEBUG_LINES = 5
 _INDEX_DEBUG_FLAGS_RE = re.compile(rb"  size: [0-9]+\tflags: ([0-9a-fA-F]+)\n\Z")
 
 
-def _split_index_debug(chunk: bytes, pathspec: str) -> tuple[bytes, bytes]:
+def _split_index_debug(chunk: bytes, unparseable: str) -> tuple[bytes, bytes]:
     """Take one ``--debug`` block off the front of a chunk, and return the rest.
 
     With ``-z`` the record's path is NUL-terminated and its debug block is
@@ -2184,9 +2188,44 @@ def _split_index_debug(chunk: bytes, pathspec: str) -> tuple[bytes, bytes]:
     for _ in range(INDEX_DEBUG_LINES):
         newline = chunk.find(b"\n", position)
         if newline < 0:
-            raise ReleaseChainError(f"cannot parse the index entry for {pathspec}")
+            raise ReleaseChainError(unparseable)
         position = newline + 1
     return chunk[:position], chunk[position:]
+
+
+def _parse_index_records(
+    stdout: bytes, unparseable: str
+) -> list[tuple[str, str, str, bool]]:
+    """Parse ``git ls-files -s --debug -z`` output into its records.
+
+    Split from ``_index_entries`` so the read of one path and the read of the
+    whole index are the same parse, reporting an index this cannot read in the
+    same words; only the sentence naming what was being read differs.
+    """
+
+    entries: list[tuple[str, str, str, bool]] = []
+    chunks = stdout.split(b"\0")
+    record = chunks[0]
+    for chunk in chunks[1:]:
+        debug, next_record = _split_index_debug(chunk, unparseable)
+        flags = _INDEX_DEBUG_FLAGS_RE.search(debug)
+        try:
+            if flags is None:
+                raise ValueError("no flag word")
+            metadata, raw_path = record.split(b"\t", 1)
+            mode, _object_id, stage = metadata.decode("ascii").split(" ")
+            listed = raw_path.decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ReleaseChainError(unparseable) from exc
+        intent = bool(int(flags.group(1), 16) & CE_INTENT_TO_ADD)
+        entries.append((mode, stage, listed, intent))
+        record = next_record
+    # Every record is followed by its own block, so what is left after the
+    # last one is nothing. Anything else is output this parse does not
+    # understand, and an index this cannot read is not one to compare against.
+    if record:
+        raise ReleaseChainError(unparseable)
+    return entries
 
 
 def _index_entries(
@@ -2243,31 +2282,108 @@ def _index_entries(
         raise ReleaseChainError(
             f"cannot read the index entry for {pathspec}: {diagnostic}"
         )
-    entries: list[tuple[str, str, str, bool]] = []
-    chunks = completed.stdout.split(b"\0")
-    record = chunks[0]
-    for chunk in chunks[1:]:
-        debug, next_record = _split_index_debug(chunk, pathspec)
-        flags = _INDEX_DEBUG_FLAGS_RE.search(debug)
-        try:
-            if flags is None:
-                raise ValueError("no flag word")
-            metadata, raw_path = record.split(b"\t", 1)
-            mode, _object_id, stage = metadata.decode("ascii").split(" ")
-            listed = raw_path.decode("utf-8")
-        except (ValueError, UnicodeDecodeError) as exc:
+    return _parse_index_records(
+        completed.stdout, f"cannot parse the index entry for {pathspec}"
+    )
+
+
+def _all_index_entries(root: pathlib.Path) -> list[tuple[str, str, str, bool]]:
+    """Every record in the candidate index, with no pathspec at all.
+
+    The reads above ask about one configured path, which is the right question
+    for every check that compares that path against something. It is the wrong
+    question for asking what *else* the index holds: a pathspec answers with
+    the entries matching it, and an entry that is not the path asked about
+    never appears however close to it it is spelled. This is the whole index,
+    parsed exactly as those reads are.
+    """
+
+    completed = _git_run(root, ["ls-files", "-s", "--debug", "-z"])
+    if completed.returncode != 0:
+        diagnostic = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise ReleaseChainError(f"cannot read the candidate index: {diagnostic}")
+    return _parse_index_records(completed.stdout, "cannot parse the candidate index")
+
+
+def _fold_component(component: str) -> str:
+    """One path component as a name-folding filesystem may compare it.
+
+    NFKC and then ``casefold``, normalized again because casefolding can leave
+    a string unnormalized. This is deliberately wider than any one filesystem:
+    APFS and HFS+ compare case-insensitively and normalization-insensitively,
+    other mounts compare case-insensitively alone, and compatibility
+    equivalence is wider than either. The comparison below is only ever used
+    to refuse, and refusing a spelling no filesystem would actually conflate
+    costs a proposal nothing it can legitimately want — a path that folds onto
+    a protected path and is not that path has no reason to be in this index.
+    """
+
+    return unicodedata.normalize(
+        "NFC", unicodedata.normalize("NFKC", component).casefold()
+    )
+
+
+def _folded_parts(path: str) -> tuple[str, ...]:
+    return tuple(_fold_component(component) for component in path.split("/"))
+
+
+def assert_index_carries_no_protected_alias(
+    root: pathlib.Path, spec: ChainSpec
+) -> None:
+    """Refuse an index entry spelled as another spelling of a protected path.
+
+    Every reconciliation this package makes between the index and the working
+    tree is by exact spelling, which is what makes it a comparison at all: the
+    release root's scan matches index entries against the traversal's own
+    names, and the two state paths are looked up in the index by the name the
+    spec pins. Both are correct about the path they name and blind to the rest
+    of the index. On a filesystem that compares names case- or
+    normalization-insensitively — APFS and HFS+ by default, and any
+    case-insensitive mount — an entry spelled ``Releases/README.md`` is a
+    second committed object resolving to the same directory as
+    ``releases/README.md``: it is under no protected path by name, so the
+    release root's scan never reads it and no check reconciles it, while the
+    commit under review carries it and a checkout materializes it over the
+    same file. ``Ledger/official_observations.jsonl`` is the same fact for a
+    state path, where the leaf's own spelling can differ too.
+
+    Refusing is the only answer available, and it is why this runs at entry
+    beside ``assert_state_path_tracked`` rather than after the comparisons:
+    like that check it says a comparison cannot be made here rather than
+    making one. Reconciling an alias would mean deciding which of two entries
+    the one file on disk answers for, and there is nothing in the index or the
+    tree that decides it. It shares that check's exception in
+    ``append_gate``'s stated precedence rather than adding another.
+
+    Fold-equality is ``_fold_component``'s, applied per component, and it is
+    the protected path's own components that are compared: an entry is an
+    alias when it is fold-equal to a protected path, or lies under a fold-
+    equal prefix of one, while not being spelled identically there. An entry
+    genuinely under a protected path keeps its own refusals — a second cased
+    spelling of a release *file* is the release root's scan to answer, in the
+    words it already uses, because the root itself is spelled correctly.
+    """
+
+    protected = (
+        spec.release_root_relative.as_posix(),
+        spec.state_relative.as_posix(),
+        spec.prefix_relative.as_posix(),
+    )
+    folded = {path: _folded_parts(path) for path in protected}
+    for _mode, _stage, listed, _intent in sorted(
+        _all_index_entries(root), key=lambda record: (record[2], record[1])
+    ):
+        parts = listed.split("/")
+        listed_folded = _folded_parts(listed)
+        for path in protected:
+            depth = len(folded[path])
+            if len(parts) < depth or listed_folded[:depth] != folded[path]:
+                continue
+            if "/".join(parts[:depth]) == path:
+                continue
             raise ReleaseChainError(
-                f"cannot parse the index entry for {pathspec}"
-            ) from exc
-        intent = bool(int(flags.group(1), 16) & CE_INTENT_TO_ADD)
-        entries.append((mode, stage, listed, intent))
-        record = next_record
-    # Every record is followed by its own block, so what is left after the
-    # last one is nothing. Anything else is output this parse does not
-    # understand, and an index this cannot read is not one to compare against.
-    if record:
-        raise ReleaseChainError(f"cannot parse the index entry for {pathspec}")
-    return entries
+                f"index carries an alias of a protected path: {listed} (for {path})"
+            )
 
 
 def _exact_relative(relative: pathlib.PurePosixPath | str) -> str:
