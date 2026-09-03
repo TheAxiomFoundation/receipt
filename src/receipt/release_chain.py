@@ -48,7 +48,13 @@ That descent returns the identity of every directory it opened, so a caller
 can ask afterwards whether the file is still reached through the same ones,
 optionally pins the root against an identity the caller recorded earlier, and
 refuses outright rather than falling back to a pathname open where ``os.open``
-takes no ``dir_fd``. ``assert_index_agrees_with_tree`` likewise accepts a
+takes no ``dir_fd``. It opens each directory component with search rights
+alone where the platform offers them (``O_PATH`` on Linux, ``O_SEARCH``
+elsewhere), which is all it uses them for, so a POSIX search-only directory
+above a readable state file is descended as the pathname open used to descend
+it; where the platform offers neither, the read permission the descent then
+needs is stated in the refusal rather than escaping as a bare
+``PermissionError``. ``assert_index_agrees_with_tree`` likewise accepts a
 category the caller has already observed, so a caller holding the file open
 need not resolve its name again.
 ``verify_release_chain`` takes an optional ``state_bytes`` mapping that stands
@@ -62,6 +68,7 @@ reads as behind the OID a verdict names.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -1093,6 +1100,21 @@ STATE_OPEN_FLAGS = (
     | getattr(os, "O_BINARY", 0)
 )
 
+# The descent below needs a directory descriptor it can ``openat`` and
+# ``fstat`` through, and nothing else. ``O_PATH`` (Linux) and ``O_SEARCH``
+# (POSIX 2008; Darwin defines it and CPython exposes it from 3.14) both give
+# exactly that without asking for read permission on the directory. Where
+# neither exists the open has to ask for read, and a POSIX search-only
+# directory — mode 0o111, traversable but not listable — above a perfectly
+# readable state file then fails with EACCES; see confined_state_descriptor.
+SEARCH_ONLY_DIRECTORY_FLAG = getattr(os, "O_PATH", 0) or getattr(os, "O_SEARCH", 0)
+DIRECTORY_OPEN_FLAGS = (
+    (SEARCH_ONLY_DIRECTORY_FLAG or os.O_RDONLY)
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+)
+DESCENT_REQUIRES_DIRECTORY_READ = not SEARCH_ONLY_DIRECTORY_FLAG
+
 
 def _is_symlink_at(name: str, parent: int) -> bool:
     """Whether one directory entry is a symlink, asked of the open parent.
@@ -1153,6 +1175,23 @@ def confined_state_descriptor(
     would have given: ``ENOTDIR`` for a component that is a file rather than
     a directory, ``ENOENT`` for one that is gone.
 
+    The directories are opened with search rights alone where the platform
+    offers them. All this walk does with a directory descriptor is ``openat``
+    and ``fstat`` through it, and ``O_PATH`` (Linux) and ``O_SEARCH`` (POSIX
+    2008; Darwin defines it and CPython exposes it from 3.14) both give
+    exactly that without asking for read permission on the directory.
+    ``O_RDONLY | O_DIRECTORY`` asks for read, which the pathname open this
+    replaced never needed: a POSIX search-only directory — mode 0o111,
+    traversable but not listable, which is how a directory above a published
+    state file is often locked down — was read from happily before and fails
+    with ``EACCES`` here. Where neither flag exists the requirement is stated
+    rather than raised as a bare ``PermissionError``: the component is named,
+    and the refusal says that secure descent needs read permission on every
+    directory above a state file on this platform. The root keeps the
+    answer described above for a caller that recorded an identity, because a
+    root that was openable when it was recorded and is not now is a root that
+    changed, whatever the errno.
+
     Where ``dir_fd`` is unsupported — Windows, where ``os.open`` is not in
     ``os.supports_dir_fd`` — this refuses rather than falling back to the
     pathname open. The fallback silently returned the reader to exactly the
@@ -1184,9 +1223,7 @@ def confined_state_descriptor(
             "state files cannot be read with secure descent on this platform "
             "(os.open lacks dir_fd support)"
         )
-    directory_flags = (
-        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    )
+    directory_flags = DIRECTORY_OPEN_FLAGS
     try:
         parent = os.open(root, directory_flags)
     except OSError as exc:
@@ -1214,6 +1251,16 @@ def confined_state_descriptor(
             except OSError as exc:
                 if _is_symlink_at(segment, parent):
                     raise _symlinked_component_error(relative, walked) from exc
+                if (
+                    DESCENT_REQUIRES_DIRECTORY_READ
+                    and exc.errno == errno.EACCES
+                ):
+                    raise ReleaseChainError(
+                        f"state path component {'/'.join(walked)} is not "
+                        "readable by this verifier; secure descent requires "
+                        "read permission on every directory above a state "
+                        f"file on this platform: {relative.as_posix()}"
+                    ) from exc
                 raise
             os.close(parent)
             parent = child
@@ -1221,6 +1268,13 @@ def confined_state_descriptor(
             # directory this open actually reached, not the one its name
             # resolves to afterwards.
             opened = os.fstat(parent)
+            if not stat.S_ISDIR(opened.st_mode):
+                # ``O_PATH`` with ``O_NOFOLLOW`` opens a symlink itself rather
+                # than failing, and it is ``O_DIRECTORY`` that turns that back
+                # into ENOTDIR. Assert what the flag is relied on for instead
+                # of trusting it: a descriptor that is not a directory here
+                # can only be the link this walk refuses.
+                raise _symlinked_component_error(relative, walked)
             ancestors.append((opened.st_dev, opened.st_ino))
         walked = (*walked, leaf)
         try:
