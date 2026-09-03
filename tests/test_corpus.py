@@ -1046,26 +1046,34 @@ def test_refuses_an_unlisted_content_file_whose_suffix_differs_only_by_case(
         )
 
 
-def test_refuses_an_unlisted_content_file_whose_suffix_differs_only_by_normalization(
-    tmp_path: pathlib.Path,
-) -> None:
+def test_the_suffix_predicate_folds_a_decomposed_spelling_onto_its_pin() -> None:
     """The same escape spelled in Unicode rather than in case.
 
-    A pinned suffix carrying a composed character has a decomposed spelling
-    that is byte-different and, on a normalizing filesystem, the same name.
-    The sweep folds both before comparing, so neither spelling sits outside
+    A suffix carrying a composed character has a decomposed spelling that is
+    byte-different and, on a normalizing filesystem, the same name. The
+    predicate folds both before comparing, so neither spelling sits outside
     the closed world.
+
+    Written against ``_has_pinned_suffix`` rather than through a
+    verification, because S5-F3 made a non-ASCII *pinned* suffix illegal at
+    construction — an 8.3 alias extension cannot be derived against one, and
+    a pin the screen cannot judge is a pin that cannot answer the question
+    it exists to ask. The fold itself is unchanged and is still reached with
+    non-ASCII text everywhere else this module compares names: content-root
+    membership, declared-path aliasing (held end to end by
+    ``test_refuses_paths_that_alias_under_unicode_normalization_alone``),
+    the entry names the sweep judges, and the tombstone search's buckets.
     """
 
     import unicodedata
 
-    write_tree(tmp_path)
-    spec = corpus_spec(content_suffixes=(".yaml", ".café"))
+    from receipt.corpus import _has_pinned_suffix
+
     decomposed = unicodedata.normalize("NFD", "rules/tax/smuggled.café")
     assert decomposed != "rules/tax/smuggled.café"
-    (tmp_path / decomposed).write_text("name: smuggled\n")
-    with pytest.raises(CorpusError, match="not bound by the witnessed journal"):
-        verify_corpus_binding(tmp_path, render_journal(journal_rows()), spec=spec)
+    assert _has_pinned_suffix(decomposed, (".yaml", ".café"))
+    assert _has_pinned_suffix("rules/tax/smuggled.café", (".yaml", ".café"))
+    assert not _has_pinned_suffix(decomposed, (".yaml",))
 
 
 def test_refuses_a_bidi_override_in_gate_evidence(tmp_path: pathlib.Path) -> None:
@@ -1425,24 +1433,45 @@ def test_refuses_a_removed_path_that_survives_under_an_aliasing_spelling(
         assert "retired/APPLY-MANIFEST.JSON" in str(caught.value)
 
 
-def test_refuses_an_unlisted_content_file_varied_in_case_and_normalization_at_once(
+def test_two_paths_varied_in_case_and_normalization_at_once_still_alias(
     tmp_path: pathlib.Path,
 ) -> None:
     """Casefold can itself produce decomposed text.
 
     U+00DF followed by U+0301 folds to s, s, U+0301, whose composed form is
-    s, U+015B; a pinned suffix spelled with U+015B folded to the composed
-    form. One NFC pass before folding left those keys unequal, so a file
-    varied in case and normalization at once was not content and escaped
-    the sweep. Found by peer review; the fold now normalizes again after
+    s, U+015B. One NFC pass before folding left those keys unequal, so text
+    varied in case and normalization at once escaped every comparison built
+    on the fold. Found by peer review; the fold normalizes again after
     folding.
+
+    Exercised through a pinned non-ASCII suffix before S5-F3 made one
+    illegal at construction. The same fold decides which declared paths
+    would alias on a case- or normalization-insensitive filesystem, so the
+    property is held there instead — end to end, and on a site where a
+    non-ASCII name is still legal — with the predicate checked directly
+    beside it.
     """
 
+    from receipt.corpus import _has_pinned_suffix, _path_fold
+
+    assert _path_fold("x\u00df\u0301") == _path_fold("xs\u015b")
+    assert _has_pinned_suffix("rules/tax/smuggled.\u00df\u0301", (".s\u015b",))
+
     write_tree(tmp_path)
-    spec = corpus_spec(content_suffixes=(".yaml", ".s\u015b"))
-    (tmp_path / "rules/tax/smuggled.\u00df\u0301").write_text("name: smuggled\n")
-    with pytest.raises(CorpusError, match="not bound by the witnessed journal"):
-        verify_corpus_binding(tmp_path, render_journal(journal_rows()), spec=spec)
+    rows = journal_rows()
+    for path in ("rules/tax/x\u00df\u0301.yaml", "rules/tax/xs\u015b.yaml"):
+        rows.append(
+            {
+                "schemaVersion": JOURNAL_SCHEMA,
+                "kind": "content",
+                "path": path,
+                "sha256": sha256_text("name: smuggled\n"),
+                "state": "present",
+            }
+        )
+    reindex(rows)
+    with pytest.raises(CorpusError, match="would alias"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
 
 
 def test_refuses_a_format_control_whatever_unicode_table_the_interpreter_carries(
@@ -3149,33 +3178,40 @@ def test_refuses_a_short_name_alias_whose_space_precedes_the_dot(
     _refuses_short_name_alias(tmp_path, "smuggled . yml")
 
 
-def test_a_short_name_extension_mapping_a_non_ascii_character_still_verifies(
+def test_a_short_name_extension_carrying_a_non_ascii_character_is_refused(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds S4-F1, the other side: the character mapping is pinned, not guessed.
+    """Binds S5-F3: the underscore model was unsound, so the name is refused.
 
-    8.3 generation cannot hold a character outside its own small set, and
-    substitutes an underscore for one. So ``smuggled.ÿml`` is handed the
-    extension ``_ML`` — or ``Y_M`` where the host stores the name
-    decomposed, since the combining mark maps to the underscore instead —
-    and neither is ``.YML``. The file is not content under either name and
-    the verification stands.
+    Round seven pinned this name as an *acceptance*, on the model that 8.3
+    generation substitutes an underscore for every character its namespace
+    cannot hold, so ``smuggled.ÿml`` would be handed ``._ML`` or ``.Y_M``
+    and neither is ``.YML``. The model was wrong: the 8.3 namespace is an
+    OEM code page and not ASCII, so a character the volume's code page can
+    represent survives into the short name and is uppercased there. With
+    ``.éml`` pinned, ``smuggled.émlx`` gets an alias ending ``.ÉML`` on a
+    code page 850 volume while the underscore model answered ``._ML`` and
+    let the file be skipped as non-content (peer review, round eight).
 
-    Pinned as an acceptance rather than left to chance: a screen that mapped
-    every unrepresentable character to *nothing* rather than to an
-    underscore would read this name as ``.YML`` and refuse a corpus that is
-    exactly what it claims to be, and every refusal test above would still
-    pass. This test passes on the head as well, which is the point — the
-    mapping must not over-refuse either.
+    Which code page a volume uses is not something an auditor's clone
+    reports, and guessing it wrong in either direction is a wrong answer
+    about closed-world membership. So the expectation moves from acceptance
+    to refusal: the verifier says it cannot derive the alias rather than
+    deriving one it cannot stand behind. Without the fix this name is
+    silently skipped as non-content under a model of a mapping the volume
+    had not agreed to.
     """
 
     write_tree(tmp_path)
     (tmp_path / "rules" / "smuggled.ÿml").write_text("name: smuggled\n")
     spec = corpus_spec(content_suffixes=(".yaml", ".yml"))
-    verification = verify_corpus_binding(
-        tmp_path, render_journal(journal_rows()), spec=spec
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, render_journal(journal_rows()), spec=spec)
+    assert str(caught.value) == (
+        "8.3 alias extension cannot be derived for a name whose extension "
+        "carries non-ASCII characters (the volume's OEM code page decides "
+        "it): 'smuggled.ÿml'"
     )
-    assert len(verification.content) == len(CONTENT)
 
 
 def test_refuses_a_tree_entry_whose_name_windows_would_strip(
@@ -4302,3 +4338,107 @@ def test_the_shipped_ignorable_table_is_sorted_disjoint_and_in_range() -> None:
     assert is_default_ignorable(0x200D) and is_default_ignorable(0x034F)
     assert not is_default_ignorable(ord("a"))
     assert not is_default_ignorable(0x0131)
+
+
+def test_an_ordinary_neighbour_is_not_refused_against_a_four_character_pin(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5-F3: a pin longer than three characters cannot be aliased at all.
+
+    An 8.3 extension is at most three characters, so no alias of anything
+    ends ``.yaml``. Comparing the first three characters of the pin instead
+    made the screen refuse a name whose alias carries a suffix that is not
+    pinned and cannot be: with ``.yaml`` pinned, ``rules/notes.yam`` is an
+    ordinary non-content file whose alias reads ``.YAM``, which is nothing
+    the spec asked about, and the sweep refused the corpus over it.
+
+    The comparison is exact now, and only against pins short enough for an
+    alias to carry. Without the fix this verification refuses a corpus that
+    is exactly what it claims to be.
+    """
+
+    write_tree(tmp_path)
+    (tmp_path / "rules/notes.yam").write_text("scratch\n")
+    verification = verify_corpus_binding(
+        tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+    )
+    assert len(verification.content) == len(CONTENT)
+
+
+def test_a_longer_name_over_a_four_character_pin_is_not_refused_either(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5-F3: the same over-refusal from the direction round seven named.
+
+    Round seven wrote the truncating comparison down as a deliberate trade —
+    "with ``.yaml`` pinned, a file named ``x.yamlx`` refuses too, though its
+    alias would read ``.YAM``" — on the reasoning that refusing a name no
+    real corpus carries is cheap. It is not a trade at all: the alias reads
+    ``.YAM``, the pin is ``.yaml``, and on the volume the screen models
+    those are two different extensions. The name is simply not content, and
+    the closed world it sat outside was closed correctly.
+
+    Pinned separately from its sibling because a fix that only ignored pins
+    longer than three characters when the *name* was shorter would satisfy
+    that test and not this one. Without the fix this verification refuses.
+    """
+
+    write_tree(tmp_path)
+    (tmp_path / "rules/x.yamlx").write_text("scratch\n")
+    verification = verify_corpus_binding(
+        tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+    )
+    assert len(verification.content) == len(CONTENT)
+
+
+def test_refuses_a_name_whose_alias_extension_the_code_page_would_decide(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5-F3: the é of the finding's own example, against a short pin.
+
+    With ``.eml`` pinned — three characters, so an alias can carry it — a
+    file named ``smuggled.émlx`` has an extension whose 8.3 spelling the
+    volume's OEM code page decides. On code page 850 the é survives and
+    uppercases, so the alias ends ``.ÉML``; under the round-seven underscore
+    model it read ``._ML``, matched no pin, and the file was skipped as
+    non-content while its alias opened a content name.
+
+    Refused rather than modelled, because the clone does not report the code
+    page. Without the fix this verification passes with the file in the tree
+    and no row binding it.
+    """
+
+    write_tree(tmp_path)
+    (tmp_path / "rules/smuggled.émlx").write_text("name: smuggled\n")
+    spec = corpus_spec(content_suffixes=(".yaml", ".eml"))
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, render_journal(journal_rows()), spec=spec)
+    assert str(caught.value) == (
+        "8.3 alias extension cannot be derived for a name whose extension "
+        "carries non-ASCII characters (the volume's OEM code page decides "
+        "it): 'smuggled.émlx'"
+    )
+
+
+def test_the_spec_refuses_a_non_ascii_content_suffix_at_construction() -> None:
+    """Binds S5-F3: a pin the 8.3 screen cannot judge against is refused.
+
+    The screen refuses to derive an alias extension for a name whose
+    extension carries a non-ASCII character, because the volume's OEM code
+    page decides it. A *pin* carrying one has the same problem from the
+    other side: nothing the screen can derive could ever be compared
+    against ``.éml`` with confidence, so the pin cannot answer the question
+    it exists to ask.
+
+    Refused at construction, where the committed spec that carries the fault
+    is what a refusal names. Without the rule the spec is accepted and every
+    ASCII-extension name is silently judged against a pin no alias can be
+    compared to.
+    """
+
+    with pytest.raises(CorpusError) as caught:
+        corpus_spec(content_suffixes=(".yaml", ".éml"))
+    assert str(caught.value) == (
+        "CorpusSpec content suffix must be ASCII, because an 8.3 alias "
+        "extension cannot be derived against a non-ASCII one: '.éml'"
+    )
