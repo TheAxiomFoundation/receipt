@@ -5257,3 +5257,126 @@ def test_the_spec_accepts_a_non_ascii_suffix_no_alias_could_carry() -> None:
         "CorpusSpec content suffix must be ASCII, because an 8.3 alias "
         "extension cannot be derived against a non-ASCII one: '.éml'"
     )
+
+
+@pytest.mark.parametrize("name", ["A~1B.TXT", "~1foo.txt", "a ~1.txt"])
+def test_an_ordinary_name_carrying_a_tilde_digit_is_not_a_short_name(
+    tmp_path: pathlib.Path, name: str
+) -> None:
+    """Binds S5R2-F9: the recognizer was much wider than 8.3 generation.
+
+    A tilde-digit anywhere inside any run of non-period characters was
+    enough, so three ordinary names were refused at the schema boundary for
+    resembling an alias none of them could be. ``A~1B.TXT`` has no numeric
+    tail, so no collision counter produced it; ``~1foo.txt`` has nothing
+    before the tilde to have been shortened from; ``a ~1.txt`` carries a
+    space, which generation replaces with an underscore rather than
+    emitting. Each is a path a real corpus may hold, and the module refused
+    the whole journal over it.
+
+    The grammar is what generation produces now. Without the fix this
+    verification raises "has a component Windows would alias".
+    """
+
+    body = "# note\n"
+    attested = {**ATTESTED, name: body}
+    write_tree(tmp_path, attested=attested)
+    verification = verify_corpus_binding(
+        tmp_path, render_journal(journal_rows(attested=attested)), spec=corpus_spec()
+    )
+    assert name in [entry.path for entry in verification.attested]
+
+
+@pytest.mark.parametrize("name", ["RULESF~1.YAM", "SMUGG~12.YML"])
+def test_a_real_short_name_shape_is_still_refused(
+    tmp_path: pathlib.Path, name: str
+) -> None:
+    """Binds S5R2-F9, the control: the shapes generation does produce.
+
+    ``RULESF~1.YAM`` is the six-character basis with a one-digit counter;
+    ``SMUGG~12.YML`` is the five-character basis with a two-digit one, which
+    is how generation makes room as the counter grows. Both are eight-
+    character stems, both are spellings NTFS hands out, and neither is
+    emitted by any listing — so a declared path spelled either way aliases a
+    file this module cannot enumerate and is refused.
+
+    Both of these pass with the S5R2-F9 change disabled, which is the point:
+    they are here to stop the tightened grammar from being tightened past
+    the spellings that matter.
+    """
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+    rows[0]["path"] = f"rules/{name}"
+    with pytest.raises(CorpusError, match="component Windows would alias"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_a_stem_longer_than_eight_characters_is_not_a_short_name(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5R2-F9: the 8 of 8.3 is a definition, so it bounds the grammar.
+
+    ``SMUGGL~12.YML`` has a nine-character stem. The 8.3 namespace holds
+    eight, which is what Microsoft's "Naming Files, Paths, and Namespaces"
+    means by "the short MS-DOS (also called *8.3*) style naming
+    convention", and it is why generation shortens the basis as the
+    collision counter grows — ``SMUGG~12`` rather than ``SMUGGL~12``. No
+    volume hands out the nine-character spelling, so a declared path
+    carrying it aliases nothing and is an ordinary name.
+
+    Pinned beside its eight-character sibling so the boundary is stated
+    rather than implied. This test passes with the S5R2-F9 change disabled
+    as well — the old recognizer's ``[^.]{1,8}`` stem already bounded this
+    — and it is here because the round-2 brief named ``SMUGGL~12.YML`` as a
+    spelling that should stay refused. It does not, under either grammar,
+    and the nine characters are why.
+    """
+
+    body = "# note\n"
+    attested = {**ATTESTED, "SMUGGL~12.YML": body}
+    write_tree(tmp_path, attested=attested)
+    verification = verify_corpus_binding(
+        tmp_path, render_journal(journal_rows(attested=attested)), spec=corpus_spec()
+    )
+    assert "SMUGGL~12.YML" in [entry.path for entry in verification.attested]
+
+
+def test_the_short_name_grammar_is_the_one_generation_produces() -> None:
+    """Binds S5R2-F9: the grammar itself, at its every boundary.
+
+    Each accepted spelling below is one 8.3 generation can hand out and each
+    refused one is not, and every clause of the grammar has a pair that
+    turns on it: the repertoire, the one-to-six basis, the one-to-six
+    digits, the eight-character stem, the three-character extension, and
+    the tail being taken from the *last* tilde rather than the first —
+    ``A~1FOO~1.TXT`` is what generation gives a long name beginning
+    ``A~1foo``, and a first-tilde split would not recognise it.
+    """
+
+    from receipt.corpus import _is_short_name
+
+    for name in (
+        "RULESF~1.YAM",
+        "RULESF~1",
+        "SMUGG~12.YML",
+        "A~1",
+        "A~123456",
+        "A~1FOO~1.TXT",
+        "$~1.Y_L",
+    ):
+        assert _is_short_name(name), name
+    for name in (
+        "A~1B.TXT",  # no numeric tail
+        "~1foo.txt",  # nothing before the tilde
+        "a ~1.txt",  # a space is not in the repertoire
+        "SMUGGL~12.YML",  # a nine-character stem
+        "A~1234567",  # seven digits
+        "ABCDEFG~1",  # a seven-character basis, and a nine-character stem
+        "RULESF~1.YAML",  # a four-character extension
+        "RULESF~1.Y.M",  # a period inside the extension
+        "rules.yaml",  # no tilde at all
+        ".yml",  # an empty stem
+        "long~1name.yaml",
+    ):
+        assert not _is_short_name(name), name

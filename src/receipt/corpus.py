@@ -233,6 +233,15 @@ spellings a corpus may carry and a consumer may one day resolve; they are
 facts about the names in the tree, not about the host the verifier is
 running on, and screening for them on POSIX is exactly the point.
 
+A *declared* path spelled like a short name is refused outright, and what
+counts as that spelling is the grammar 8.3 generation produces: one to six
+characters from the short-name repertoire, a tilde, one to six digits, the
+stem at most eight characters in all, then at most a three-character
+extension. Accepting a tilde-digit anywhere in any run of non-period
+characters was much wider, and it refused ``A~1B.TXT``, ``~1foo.txt`` and
+``a ~1.txt`` — names no collision counter produces and a corpus may
+legitimately hold (peer review, Sol round 2).
+
 Every name this module folds is screened first against a *pinned* Unicode
 repertoire, not the running interpreter's. Folding is only stable for
 characters the standard has already encoded, so text carrying an unassigned
@@ -310,17 +319,24 @@ from receipt._unicode_repertoire import (
 
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 GATE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._/-]{0,127}\Z")
-#: The 8.3 shape an NTFS short name has: a stem of at most eight characters
-#: and an optional extension of at most three. A component of this shape that
-#: also carries a tilde-digit is the spelling Win32 hands out as an alias for
-#: a long name, and it opens the long name's file.
-SHORT_NAME_SHAPE_RE = re.compile(r"[^.]{1,8}(\.[^.]{1,3})?\Z")
-SHORT_NAME_TILDE_RE = re.compile(r"~[0-9]")
 #: The punctuation an 8.3 short name may carry unchanged. Everything outside
 #: this set, the ASCII letters and the ASCII digits is replaced by an
 #: underscore when Win32 derives a short name, which is what
 #: :func:`_short_name_extension` models.
 SHORT_NAME_PUNCTUATION = frozenset("$%'-_@~`!(){}^#&")
+#: Every character an 8.3 short name may carry, which is that punctuation
+#: plus the ASCII letters and digits. A character outside this set is one
+#: 8.3 generation would have replaced, so a name carrying one is not a
+#: generated short name.
+SHORT_NAME_CHARACTERS = (
+    frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+    | SHORT_NAME_PUNCTUATION
+)
+#: The most characters an 8.3 short name's stem may carry, tilde and numeric
+#: tail included. It is the ``8`` of 8.3, so it is a definition rather than a
+#: choice: Microsoft's "Naming Files, Paths, and Namespaces" calls the alias
+#: "the short MS-DOS (also called *8.3*) style naming convention".
+SHORT_NAME_STEM_LIMIT = 8
 
 CONTENT_KIND = "content"
 ATTESTED_KIND = "attested"
@@ -1268,6 +1284,49 @@ def _short_name_carries_pinned_suffix(name: str, suffixes: tuple[str, ...]) -> b
     return any(_path_fold(alias) == _path_fold(suffix) for suffix in capable)
 
 
+def _is_short_name(segment: str) -> bool:
+    """Whether this component is shaped like a name 8.3 generation hands out.
+
+    The grammar is what generation produces, not everything that resembles
+    it: one to six characters from the short-name repertoire, a tilde, one
+    to six digits, the whole stem at most eight characters, then optionally
+    a period and one to three more repertoire characters.
+
+    Accepting a tilde-digit *anywhere* inside any run of non-period
+    characters was much wider than that, and it refused ordinary names for
+    no benefit: ``A~1B.TXT`` has a tilde-digit but no numeric tail, so no
+    collision counter produced it; ``~1foo.txt`` has nothing before the
+    tilde to have been shortened; ``a ~1.txt`` carries a space, which
+    generation replaces with an underscore rather than emitting (peer
+    review, Sol round 2). Each was a declared path a real corpus may hold
+    and this module refused outright.
+
+    The tail is taken from the *last* tilde, because the collision counter
+    is a suffix and the shortened prefix may itself contain one:
+    ``A~1FOO~1.TXT`` is what generation gives a long name beginning
+    ``A~1foo``, and splitting at the first tilde would not recognise it.
+    """
+
+    stem, dot, extension = segment.partition(".")
+    if dot:
+        if not 1 <= len(extension) <= 3:
+            return False
+        if any(character not in SHORT_NAME_CHARACTERS for character in extension):
+            return False
+    if not 1 <= len(stem) <= SHORT_NAME_STEM_LIMIT:
+        return False
+    prefix, tilde, digits = stem.rpartition("~")
+    if not tilde:
+        return False
+    if not 1 <= len(prefix) <= 6:
+        return False
+    if any(character not in SHORT_NAME_CHARACTERS for character in prefix):
+        return False
+    if not 1 <= len(digits) <= 6:
+        return False
+    return all("0" <= character <= "9" for character in digits)
+
+
 def _aliases_natively(segment: str) -> bool:
     """Whether Win32 resolves this component under a spelling nothing emits.
 
@@ -1277,6 +1336,13 @@ def _aliases_natively(segment: str) -> bool:
     and an NTFS volume with 8.3 generation on hands out a short name such as
     ``"RULESF~1.YAM"`` that opens the long name's file. Neither spelling is
     ever emitted by a directory listing, so no fold key can catch it.
+
+    Which components count as the second shape is :func:`_is_short_name`,
+    and it is the grammar generation produces rather than everything that
+    resembles it — ``A~1B.TXT``, ``~1foo.txt`` and ``a ~1.txt`` are
+    ordinary names no collision counter could have produced, and refusing
+    them cost a corpus paths it may legitimately hold (peer review, Sol
+    round 2).
 
     This is the *declared* side. A path a journal names is refused outright
     if it is spelled either way. What a tree entry may be named is a separate
@@ -1295,10 +1361,7 @@ def _aliases_natively(segment: str) -> bool:
 
     if _strips_to_another_name(segment):
         return True
-    return (
-        SHORT_NAME_TILDE_RE.search(segment) is not None
-        and SHORT_NAME_SHAPE_RE.fullmatch(segment) is not None
-    )
+    return _is_short_name(segment)
 
 
 def _validate_relative_path(value: Any, label: str) -> str:
