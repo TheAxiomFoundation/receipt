@@ -81,6 +81,16 @@ Deliberately outside the mutation contract:
   changes, and no compared message quotes it: every mutation here that reaches
   OpenSSL either succeeds or is caught by the deterministic token-hash refusal
   first, and none mutates a root PEM;
+- the baseline opens the record under witness four times -- to hash it for the
+  digest claim, to read the trust-bundle updates it carries, to read its
+  creation claims, and once more through ``openssl ts -verify -data`` -- and
+  the port reads it once and hands ``-data`` a private byte-for-byte copy of
+  those bytes.  OpenSSL computes the same imprint over the same content, so no
+  case's outcome moves; only the ``-data`` argument's spelling changes, and by
+  the paragraph above no compared message quotes an OpenSSL command line.  The
+  port also refuses a record that is not a readable regular file, where the
+  baseline let the hash raise ``OSError``; the chain walk enumerates the
+  records it goes on to verify, so no case here presents one;
 - the baseline compares a bundle's anchors with the code identities in one
   direction only, so an identity scoped to a bundle whose anchors do not
   include it is ignored; the port requires the two sets to be equal at load.

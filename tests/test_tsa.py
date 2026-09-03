@@ -621,6 +621,21 @@ def openssl_ts_verifies(
     return completed.returncode == 0
 
 
+#: The ``openssl ts -verify`` invocation up to its first path argument.
+#:
+#: Everything after it is a private snapshot -- the record read once, the
+#: token read once, the pinned root read once -- so no assertion here may
+#: quote a path OpenSSL was given, and none of them is a file in the records
+#: tree.
+TS_VERIFY_COMMAND = "openssl ts -verify -config /dev/null -data"
+
+
+def openssl_command(message: str) -> str:
+    """The command text out of a ported ``OpenSSL command failed`` message."""
+
+    return message.split("(", 1)[1].split("): ", 1)[0]
+
+
 def rewrite_witness(
     tree: WitnessTree, mutate: Callable[[dict[str, Any]], None]
 ) -> None:
@@ -918,12 +933,12 @@ def test_refuses_a_token_whose_imprint_is_over_other_bytes(
         verify_tree(tree)
     message = str(caught.value)
     # Pinned to where the message stops being reproducible: the ported
-    # wrapper and the command up to the ``-CAfile`` argument (the pinned
-    # root's path, then a temporary ``-CApath``), then OpenSSL's own reason.
-    assert message.startswith(
-        "OpenSSL command failed (openssl ts -verify -config /dev/null "
-        f"-data {tree.record} -in {token} -CAfile "
-    )
+    # wrapper and the command up to its first path argument, then OpenSSL's
+    # own reason. Every path in the command is a private snapshot -- the
+    # record, the token, the pinned root -- so none of them is stable across
+    # runs and none of them is a file in the records tree.
+    assert message.startswith(f"OpenSSL command failed ({TS_VERIFY_COMMAND} ")
+    assert str(tree.record) not in openssl_command(message)
     assert "ts_check_imprints:message imprint mismatch" in message
 
 
@@ -2306,12 +2321,10 @@ def test_a_root_swapped_after_validation_is_not_what_gets_trusted(
     # The writer really did run, and really did change the pinned file.
     assert swapped_commands == ["ts"]
     assert root_path.read_bytes() == plain
-    prefix = (
-        "OpenSSL command failed (openssl ts -verify -config /dev/null -data "
-        f"{tree.record} -in {token} -CAfile "
-    )
+    prefix = f"OpenSSL command failed ({TS_VERIFY_COMMAND} "
     assert str(unswapped.value).startswith(prefix)
     assert str(swapped.value).startswith(prefix)
+    assert str(tree.record) not in openssl_command(str(swapped.value))
     assert openssl_failure_detail(str(swapped.value)) == openssl_failure_detail(
         str(unswapped.value)
     )
@@ -2387,14 +2400,153 @@ def test_a_second_authority_appended_after_the_count_is_not_trusted(
         )
     assert swapped_commands == ["ts"]
     assert _certificate_count(root_path) == 2
-    prefix = (
-        "OpenSSL command failed (openssl ts -verify -config /dev/null -data "
-        f"{tree.record} -in {beta_token} -CAfile "
-    )
+    prefix = f"OpenSSL command failed ({TS_VERIFY_COMMAND} "
     assert str(unswapped.value).startswith(prefix)
     assert str(swapped.value).startswith(prefix)
+    assert str(tree.record) not in openssl_command(str(swapped.value))
     assert openssl_failure_detail(str(swapped.value)) == openssl_failure_detail(
         str(unswapped.value)
+    )
+
+
+def swap_the_record_at_the_data_read(
+    monkeypatch: pytest.MonkeyPatch, target: pathlib.Path, content: bytes
+) -> list[bytes]:
+    """Substitute ``content`` for ``target`` across ``openssl ts -verify``.
+
+    The writer the record regression models: the witnessed record is left
+    alone while its digest is taken, its creation claims are read and its
+    sidecar is checked, replaced for exactly the read that decides whether
+    the token covers it -- ``-data`` -- and restored the moment that read is
+    over, so an auditor looking afterwards sees the record the evidence
+    names. Returns what was put back, so a test can show the writer ran.
+    """
+
+    original = tsa_module._run_openssl
+    restored: list[bytes] = []
+
+    def swapping(arguments: list[str], **keywords: Any) -> Any:
+        if arguments[:2] != ["ts", "-verify"]:
+            return original(arguments, **keywords)
+        kept = target.read_bytes()
+        target.write_bytes(content)
+        try:
+            return original(arguments, **keywords)
+        finally:
+            target.write_bytes(kept)
+            restored.append(kept)
+
+    monkeypatch.setattr(tsa_module, "_run_openssl", swapping)
+    return restored
+
+
+def test_a_record_swapped_at_the_data_read_is_not_what_the_token_covered(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S4-F1: the imprint is recomputed over the bytes the witness digests.
+
+    The witnessed record was consumed through four separate opens of one
+    pathname -- hashed for the digest claim, parsed for the trust-bundle
+    updates, parsed again for the creation claims, and finally read by
+    ``openssl ts -verify -data`` to recompute the imprint the token signs.
+    Only that last read decides whether the token is about the record at all,
+    and it was the only one a writer had to catch. Here the token is a
+    genuine stamp by the pinned authority over a *different* record, and the
+    substitution lasts exactly as long as the ``-data`` read: everything the
+    module checked before it saw the real record, and an auditor looking
+    afterwards sees the real record too.
+
+    Asserted from OpenSSL directly below: the token verifies over the
+    substitute and not over the witnessed record. Without the one read the
+    ``-data`` argument is the pathname, so OpenSSL is handed the substitute,
+    every check passes and ``verify_timestamp_token`` returns ``TokenEvidence``
+    for the record it was called about -- evidence that a record was
+    timestamped, from a verification of some other bytes. With it the
+    ``-data`` argument is the read the digest was taken from, the imprint
+    disagrees, and no evidence is returned at all.
+    """
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    witnessed = tree.record.read_bytes()
+    substitute = (
+        canonical_bytes(
+            {
+                "schemaVersion": "receipt_test_record_v1",
+                "recordedAt": (datetime.now(UTC) - timedelta(seconds=90)).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                ),
+                "observation": "the record this token is really about",
+            }
+        )
+        + b"\n"
+    )
+    assert substitute != witnessed
+    elsewhere = tmp_path / "the-substituted-record.json"
+    elsewhere.write_bytes(substitute)
+    token = tree.records / RECORD_DAY / "record-0001.substitute.tsr"
+    alpha.tsa.stamp(sha256_bytes(substitute), token)
+    # The premise, from OpenSSL directly: this token covers one of the two
+    # records and it is not the witnessed one.
+    assert openssl_ts_verifies(elsewhere, token, alpha.tsa.root_pem)
+    assert not openssl_ts_verifies(tree.record, token, alpha.tsa.root_pem)
+
+    claim = claim_against(tree, tree.reference, alpha, token)
+    restored = swap_the_record_at_the_data_read(monkeypatch, tree.record, substitute)
+    with pytest.raises(TsaError) as caught:
+        verify_timestamp_token(
+            tree.record, claim, tree.reference, spec=tree.spec, records=tree.records
+        )
+    # The writer really did run, and really did put the record back.
+    assert restored == [witnessed]
+    assert tree.record.read_bytes() == witnessed
+    message = str(caught.value)
+    assert message.startswith(f"OpenSSL command failed ({TS_VERIFY_COMMAND} ")
+    assert str(tree.record) not in openssl_command(message)
+    assert "ts_check_imprints:message imprint mismatch" in message
+
+
+def test_a_direct_token_caller_takes_the_one_read_itself(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """S4-F1: ``record=`` is the witness path's read, not a new requirement.
+
+    ``verify_witness`` reads the record once and hands the bytes down, so the
+    digest it publishes and the imprint OpenSSL recomputes are the same read.
+    A caller that verifies one token on its own has no such read to pass, and
+    gets exactly the same evidence: the keyword is where the one read comes
+    from, never a second contract. Without it there would be nothing for a
+    direct caller to verify against at all.
+    """
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    claim = token_claim(tree, alpha)
+    evidence = verify_timestamp_token(
+        tree.record, claim, tree.reference, spec=tree.spec, records=tree.records
+    )
+    assert evidence.anchor_id == alpha.anchor_id
+    assert evidence.token_sha256 == sha256_bytes(
+        tree.tokens[alpha.anchor_id].read_bytes()
+    )
+    assert evidence == verify_timestamp_token(
+        tree.record,
+        claim,
+        tree.reference,
+        spec=tree.spec,
+        records=tree.records,
+        record=tree.record.read_bytes(),
+    )
+    # And the read is a read: a record that is not there is refused by name.
+    absent = tree.records / RECORD_DAY / "record-9999.json"
+    with pytest.raises(TsaError) as caught:
+        verify_timestamp_token(
+            absent, claim, tree.reference, spec=tree.spec, records=tree.records
+        )
+    assert str(caught.value) == (
+        f"witnessed record is missing or not a regular file: {absent}"
     )
 
 

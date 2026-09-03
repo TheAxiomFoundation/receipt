@@ -9,9 +9,11 @@ through a frozen :class:`TsaSpec` supplied by consumer code.  This module
 ships no repository-specific trust defaults and performs no chain walk or
 producer signature verification.
 
-The port is stricter than the baseline in twelve places, each refusing an
+The port is stricter than the baseline in thirteen places, each refusing an
 input the pinned tree never presents and so each outside the differential
-contract: a legacy witness over a bundle configuring more than one anchor; a
+contract: a record under witness that is not a readable regular file, which
+the baseline let raise out of the hash; a legacy witness over a bundle
+configuring more than one anchor; a
 bundle configuring an anchor the spec carries no identity for, or one whose
 declared root SPKI or allowed signers differ from that identity, or whose
 referenced root material fails the ported material checks or carries an SPKI
@@ -58,6 +60,20 @@ authority appended after the count -- changes what is on disk and not what is
 trusted; and because nothing is re-encoded, a pinned root's auxiliary trust
 settings apply exactly as pinned.  This module's own refusals go on naming
 the repository path.
+
+The record under witness is read exactly once as well, and those same bytes
+answer every question asked about it: the digest its sidecar has to match,
+the trust-bundle updates it carries, the creation claims a token's genTime is
+measured against, and -- through a private copy handed to ``-data`` -- the
+imprint ``openssl ts -verify`` recomputes.  Four opens of one pathname
+described four instants of a mutable file, and only the last of them decided
+whether a token covered the record at all: a writer could leave the witnessed
+record in place for the digest and the time checks, substitute another for
+that read with a token genuinely stamped over the substitute, and put the
+first back, and the evidence then named a record OpenSSL had never seen.
+Because OpenSSL is given the copies, the command text quoted in a failure
+names temporary files; every refusal of this module's own still names the
+record, the token and the root as the repository spells them.
 
 The port also corrects one baseline defect: ``_decode_oid`` read only the
 first octet of a policy OID as its combined first two arcs, so a first
@@ -382,6 +398,31 @@ def load_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text())
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TsaError(f"cannot read JSON {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise TsaError(f"record must be a JSON object: {path}")
+    return value
+
+
+def _record_payload(data: bytes, path: Path) -> dict[str, Any]:
+    """``load_json``'s parse and its two refusals, over bytes already read.
+
+    The record under witness is read once and then asked several questions --
+    its digest, its creation claims, the trust-bundle updates it carries -- so
+    the parse has to happen over that one read rather than through a fresh
+    open each time.  Both refusals are ``load_json``'s own, word for word, and
+    ``path`` is still the repository file every one of them names.
+
+    The decode is UTF-8 where ``load_json`` leaves the encoding to the locale.
+    That can only tell the two apart for a record which is not valid UTF-8 on
+    a machine whose locale is not UTF-8 either; the pinned tree's records are
+    canonical JSON, which is ASCII-escaped, and no mutation in the
+    differential harness writes a record that is not.
+    """
+
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise TsaError(f"cannot read JSON {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise TsaError(f"record must be a JSON object: {path}")
@@ -1035,11 +1076,78 @@ def _certificate_count(path: Path, *, pinned_path: Path | None = None) -> int:
     return int(match.group(1))
 
 
-#: Flags for the one read of a pinned root: no descriptor inherited across an
-#: exec, and no symlink followed at open time where the platform has the flag.
-_ROOT_OPEN_FLAGS = (
+#: Flags for the one read of a file this module goes on to judge and trust: no
+#: descriptor inherited across an exec, and no symlink followed at open time
+#: where the platform has the flag.
+_ONE_READ_FLAGS = (
     os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
 )
+
+
+def _read_file_once(path: Path, missing: str) -> bytes:
+    """Read every byte of ``path`` through one descriptor, or refuse.
+
+    The three files this module both checks and then acts on -- a pinned root,
+    the record under witness, and a claimed RFC 3161 response -- are each read
+    exactly once through this, so that the bytes an auditor is told about are
+    the bytes that were judged.  Reading a pathname twice tells an auditor what
+    it held at two separate instants and no more.
+
+    ``missing`` is the caller's own refusal for a path that is not a readable
+    regular file, so this adds no message of its own and no caller's wording
+    moves.  The descriptor is opened with ``O_NOFOLLOW`` where the platform
+    defines it and ``fstat``ed rather than ``stat``ed, so the regular-file rule
+    is decided about the same object the bytes come from; each caller keeps its
+    path-level check in front, which means a race can change which of the two
+    identical refusals fires but never the message.
+    """
+
+    try:
+        descriptor = os.open(path, _ONE_READ_FLAGS)
+    except OSError as exc:
+        raise TsaError(missing) from exc
+    chunks: list[bytes] = []
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise TsaError(missing)
+        while True:
+            chunk = os.read(descriptor, 1 << 20)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except OSError as exc:
+        raise TsaError(missing) from exc
+    finally:
+        os.close(descriptor)
+    return b"".join(chunks)
+
+
+def _read_witnessed_record(path: Path) -> bytes:
+    """Read the record under witness once, and return what the token is about.
+
+    The witnessed record was consumed through four separate opens of one
+    pathname: ``verify_witness`` hashed it for the digest the sidecar has to
+    match and parsed it for the trust-bundle updates it carries,
+    ``verify_timestamp_token`` parsed it again for its creation claims, and
+    ``openssl ts -verify -data`` then read it a fourth time to recompute the
+    imprint the token signs.  Only that last read decides whether the token
+    covers the record; a writer who left the witnessed record in place for the
+    digest and the time checks and substituted another for the ``-data`` read
+    -- with a token genuinely stamped over the substitute -- got evidence
+    naming the first record for a timestamp OpenSSL took over the second
+    (peer review, fourth gate round four).  One read closes the gap: these
+    bytes are hashed, parsed, and handed to OpenSSL, and nothing re-reads the
+    path.
+
+    The refusal is new: the baseline let a missing record raise ``OSError``
+    out of the hash, and the pinned tree presents no such record because the
+    chain walk enumerates the files it then verifies.
+    """
+
+    missing = f"witnessed record is missing or not a regular file: {path}"
+    if not path.is_file() or path.is_symlink():
+        raise TsaError(missing)
+    return _read_file_once(path, missing)
 
 
 def _read_pinned_root(path: Path) -> bytes:
@@ -1059,33 +1167,13 @@ def _read_pinned_root(path: Path) -> bytes:
     here are what gets hashed, counted, described and trusted, and nothing
     re-reads the path.
 
-    The descriptor is opened with ``O_NOFOLLOW`` where the platform defines
-    it and ``fstat``ed rather than ``stat``ed, so the regular-file rule is
-    decided about the same object the bytes come from.  The path-level check
-    in ``_root_material`` stays in front of this and keeps its wording; this
-    repeats it for the descriptor, so a race can change which check refuses
-    but never the message.
+    The path-level check in ``_root_material`` stays in front of this and
+    keeps its wording, which ``_read_file_once`` repeats for the descriptor.
     """
 
-    missing = f"pinned TSA root is missing or not a regular file: {path}"
-    try:
-        descriptor = os.open(path, _ROOT_OPEN_FLAGS)
-    except OSError as exc:
-        raise TsaError(missing) from exc
-    chunks: list[bytes] = []
-    try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise TsaError(missing)
-        while True:
-            chunk = os.read(descriptor, 1 << 20)
-            if not chunk:
-                break
-            chunks.append(chunk)
-    except OSError as exc:
-        raise TsaError(missing) from exc
-    finally:
-        os.close(descriptor)
-    return b"".join(chunks)
+    return _read_file_once(
+        path, f"pinned TSA root is missing or not a regular file: {path}"
+    )
 
 
 def _write_root_snapshot(directory: Path, pem: bytes) -> Path:
@@ -1323,9 +1411,20 @@ def verify_timestamp_token(
     spec: TsaSpec,
     records: Path,
     now: datetime | None = None,
+    record: bytes | None = None,
 ) -> TokenEvidence:
-    """Verify one claimed RFC 3161 token against one consumer-pinned anchor."""
+    """Verify one claimed RFC 3161 token against one consumer-pinned anchor.
 
+    ``record`` is the one read of ``path`` the caller has already taken and
+    judged -- ``verify_witness`` derives the witness digest from it and passes
+    it down here, so that the bytes the sidecar's ``digestSha256`` describes
+    are the bytes OpenSSL recomputes the token's imprint over.  A direct
+    caller may leave it out, in which case this takes that one read itself;
+    either way ``path`` is read at most once and never again.
+    """
+
+    if record is None:
+        record = _read_witnessed_record(path)
     bundle_path = str(bundle_reference["path"])
     expected_bundle_claims = {
         "trustBundleId": bundle_reference["bundleId"],
@@ -1393,6 +1492,13 @@ def verify_timestamp_token(
         policy_oid, imprint_algorithm_oid, hashed_message, gen_time = _parse_tst_info(
             tst_info.read_bytes()
         )
+        # The bytes `openssl ts -verify -data` recomputes the imprint over are
+        # the caller's one read of the record, written where only this process
+        # can reach it.  -data is still -data: OpenSSL hashes the file it is
+        # given exactly as it did the repository path, and this is a
+        # byte-for-byte copy of the read the witness digest was taken from.
+        record_snapshot = temp / "record.bin"
+        record_snapshot.write_bytes(record)
 
         allowed_policies = anchor.get("allowedPolicyOids")
         if not isinstance(allowed_policies, list) or policy_oid not in allowed_policies:
@@ -1411,7 +1517,7 @@ def verify_timestamp_token(
             )
         if imprint_algorithm_oid != SHA256_OID or len(hashed_message) != 32:
             raise TsaError("RFC 3161 witness must use a 32-byte SHA-256 message imprint")
-        payload = load_json(path)
+        payload = _record_payload(record, path)
         identity_spec = spec.identity(str(trust.get("bundleId")), str(anchor.get("id")))
         assert identity_spec is not None
         validate_token_time(
@@ -1443,6 +1549,14 @@ def verify_timestamp_token(
         # substitute that plain form, or a second authority appended after
         # the count, between validation and use (fourth gate round three).
         # Diagnostics still name the pinned path; only OpenSSL sees the copy.
+        #
+        # -data is the record snapshot for the same reason: it is the one read
+        # the witness digest was taken from, so the imprint OpenSSL recomputes
+        # is over the bytes the sidecar claims and not over whatever the record
+        # path holds at this instant (fourth gate round four).  The command
+        # text quoted in a failure therefore names temporary files; the
+        # module's own refusals go on naming the record and the token as the
+        # repository spells them.
         _run_openssl(
             [
                 "ts",
@@ -1450,7 +1564,7 @@ def verify_timestamp_token(
                 "-config",
                 "/dev/null",
                 "-data",
-                str(path),
+                str(record_snapshot),
                 "-in",
                 str(token_path),
                 "-CAfile",
@@ -1609,6 +1723,7 @@ def _v1_witness_evidence(
     *,
     spec: TsaSpec,
     records: Path,
+    record: bytes,
     digest_sha256: str,
     trusted_bundles: Mapping[str, dict[str, Any]],
     now: datetime | None,
@@ -1666,6 +1781,7 @@ def _v1_witness_evidence(
         spec=spec,
         records=records,
         now=now,
+        record=record,
     )
     return _summarize_witness(
         status=status,
@@ -1740,6 +1856,7 @@ def _v2_witness_evidence(
     *,
     spec: TsaSpec,
     records: Path,
+    record: bytes,
     digest_sha256: str,
     trusted_bundles: Mapping[str, dict[str, Any]],
     transition_bundle_updates: list[dict[str, Any]],
@@ -1808,6 +1925,7 @@ def _v2_witness_evidence(
                 spec=spec,
                 records=records,
                 now=now,
+                record=record,
             )
             seen_token_digests.add(evidence.token_sha256)
             tokens.append(evidence)
@@ -1876,6 +1994,7 @@ def _v2_witness_evidence(
                 spec=spec,
                 records=records,
                 now=now,
+                record=record,
             )
             seen_token_digests.add(evidence.token_sha256)
             supplemental_tokens.append(evidence)
@@ -1932,7 +2051,14 @@ def verify_witness(
     transition_bundle_updates: list[dict[str, Any]] | None = None,
 ) -> WitnessEvidence:
     records = (records or path.parents[1]).resolve()
-    digest_sha = sha256_file(path)
+    # One read of the record, and every question about it is asked of these
+    # bytes: the digest the sidecar has to match, the trust-bundle updates it
+    # carries, the creation claims the token's genTime is measured against,
+    # and the imprint `openssl ts -verify -data` recomputes.  Reading the
+    # pathname once per question described four instants of a mutable file
+    # (peer review, fourth gate round four).
+    record = _read_witnessed_record(path)
+    digest_sha = hashlib.sha256(record).hexdigest()
     witness_path = path.with_suffix(".witness.json")
     if not witness_path.is_file():
         raise TsaError(f"missing explicit witness marker for {path}")
@@ -1949,7 +2075,7 @@ def verify_witness(
         )
     if transition_bundle_updates is None:
         transition_bundle_updates = trust_bundle_updates(
-            records, load_json(path), spec=spec
+            records, _record_payload(record, path), spec=spec
         )
     schema = witness.get("schemaVersion")
     if schema == "thesis_rfc3161_witness_v1":
@@ -1984,6 +2110,7 @@ def verify_witness(
             witness,
             spec=spec,
             records=records,
+            record=record,
             digest_sha256=digest_sha,
             trusted_bundles=trusted_bundles,
             now=now,
@@ -1994,6 +2121,7 @@ def verify_witness(
             witness,
             spec=spec,
             records=records,
+            record=record,
             digest_sha256=digest_sha,
             trusted_bundles=trusted_bundles,
             transition_bundle_updates=transition_bundle_updates,
