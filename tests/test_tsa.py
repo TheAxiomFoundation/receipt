@@ -1804,6 +1804,16 @@ def test_requires_a_supplemental_outcome_for_a_reused_id_under_a_new_root(
 #: so the tests below can state exactly which files it used to accept.
 SUPERSEDED_PEM_BEGIN_RE = re.compile(rb"^-----BEGIN ([A-Z0-9 ]+)-----[ \t]*\r?$", re.M)
 
+#: Everything a witness outcome says about the response it stands behind.
+_TOKEN_FIELDS = (
+    "tokenPath",
+    "tokenSha256",
+    "tsaPolicyOid",
+    "tsaImprintAlgorithmOid",
+    "tsaSignerCertificateSha256",
+    "tsaSignerSpkiSha256",
+)
+
 
 def relabel(pem: bytes, label: str) -> bytes:
     """The same certificate under another PEM label ``-CAfile`` also loads."""
@@ -2378,3 +2388,296 @@ def test_a_second_authority_appended_after_the_count_is_not_trusted(
     assert openssl_failure_detail(str(swapped.value)) == openssl_failure_detail(
         str(unswapped.value)
     )
+
+
+def alias_of(anchor: LocalAnchor, *, anchor_id: str) -> LocalAnchor:
+    """The same authority under a second anchor id and endpoint.
+
+    Everything a bundle declares about the two is identical -- root path, root
+    hashes, allowed signer -- which is exactly the shape a bundle uses to look
+    like two authorities while being one.
+    """
+
+    return dataclasses.replace(
+        anchor,
+        anchor_id=anchor_id,
+        endpoint=f"https://{anchor_id}.timestamp.invalid/tsr",
+    )
+
+
+def record_token_verifications(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[dict[str, Any]]:
+    """Watch every token ``_v2_witness_evidence`` actually puts to OpenSSL."""
+
+    original = tsa_module.verify_timestamp_token
+    verified: list[dict[str, Any]] = []
+
+    def recording(
+        path: pathlib.Path,
+        token_claim: dict[str, Any],
+        bundle_reference: dict[str, Any],
+        **keywords: Any,
+    ) -> TokenEvidence:
+        verified.append(dict(token_claim))
+        return original(path, token_claim, bundle_reference, **keywords)
+
+    monkeypatch.setattr(tsa_module, "verify_timestamp_token", recording)
+    return verified
+
+
+def test_refuses_a_bundle_whose_two_anchors_allow_the_same_signer(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S3-F2: two anchor ids over one authority are not two witnesses.
+
+    A v2 witness de-duplicated its outcomes by anchor id alone, so two anchors
+    with distinct ids and endpoints but the same root and the same allowed
+    signer both passed load -- each agrees with the identity scoped to it --
+    and one RFC 3161 response, supplied under both outcomes, verified for
+    both. The replay premise is executed below against a bundle version that
+    configures the alias alone: the token stamped for the first id verifies,
+    unaltered, as the second id's. Without this rule that same token under
+    both outcomes of the two-anchor bundle is verified twice and reported as
+    two independent ``TokenEvidence`` entries, which is precisely the
+    coverage a multi-anchor bundle exists to require.
+
+    Refused at load, before any outcome is read: the recorder below sees no
+    token verification at all. A shared *root* with disjoint signers stays
+    allowed, because the ported allowed-signer check binds a token to the
+    signers of the anchor its outcome selects -- sharing the signer is what
+    lets one token satisfy two anchors, and sharing the root alone does not.
+    """
+
+    alpha = local_anchors[0]
+    alias = alias_of(alpha, anchor_id="alpha-alias-2026")
+    tree = build_witness_tree(tmp_path, (alpha, alias))
+    configured = json.loads(tree.bundle.read_text())["anchors"]
+    assert [entry["id"] for entry in configured] == [alpha.anchor_id, alias.anchor_id]
+    assert {entry["endpoint"] for entry in configured} == {
+        alpha.endpoint,
+        alias.endpoint,
+    }
+    assert configured[0]["rootCertificate"] == configured[1]["rootCertificate"]
+    assert configured[0]["allowedSigners"] == configured[1]["allowedSigners"]
+
+    # The replay itself, executed: one token, verified as the alias anchor's,
+    # against a bundle version that configures the alias and nothing else.
+    alias_only, alias_spec = add_bundle_version(tree, [alias], version=3)
+    replayed = verify_timestamp_token(
+        tree.record,
+        claim_against(tree, alias_only, alias, tree.tokens[alpha.anchor_id]),
+        alias_only,
+        spec=alias_spec,
+        records=tree.records,
+    )
+    assert replayed.anchor_id == alias.anchor_id
+    assert replayed.token_sha256 == sha256_bytes(
+        tree.tokens[alpha.anchor_id].read_bytes()
+    )
+
+    # And the witness that would have banked it twice.
+    def put_one_token_under_both_outcomes(payload: dict[str, Any]) -> None:
+        first, second = payload["anchorOutcomes"]
+        for field in ("tokenPath", "tokenSha256"):
+            second[field] = first[field]
+
+    rewrite_witness(tree, put_one_token_under_both_outcomes)
+    verified = record_token_verifications(monkeypatch)
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == (
+        "TSA anchors share an allowed signer: "
+        f"{alias.anchor_id}, {alpha.anchor_id}: {alpha.signer_pins['spkiSha256']}"
+    )
+    assert verified == []
+
+
+def test_a_shared_root_with_disjoint_signers_is_still_two_anchors(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_alpha: LocalTsa,
+) -> None:
+    """S3-F2: the rule is about the signer, and stops exactly there.
+
+    Two anchors issued under one root, each allowing a signing certificate the
+    other does not, are two authorities for the purpose that matters: the
+    ported allowed-signer check binds a token to the signers of the anchor its
+    outcome selects, so neither anchor's outcome can be satisfied by the
+    other's response. The bundle loads, each anchor verifies its own token,
+    and each refuses the other's. The control that keeps the shared-signer
+    rule from silently becoming a shared-root rule.
+    """
+
+    alpha = local_anchors[0]
+    sibling = alias_of(alpha, anchor_id="alpha-sibling-2026")
+    rotated = certificate_pins(rotated_alpha.signer_pem)
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    reference, spec = add_bundle_version(
+        tree, [alpha, sibling], version=2, signers={sibling.anchor_id: rotated}
+    )
+    configured = json.loads(
+        (tree.records / "trust" / "tsa-anchors-v2.json").read_text()
+    )["anchors"]
+    assert configured[0]["rootCertificate"] == configured[1]["rootCertificate"]
+    assert configured[0]["allowedSigners"] != configured[1]["allowedSigners"]
+    _path, payload = _load_trust_bundle(tree.records, reference, spec=spec)
+    assert [entry["id"] for entry in payload["anchors"]] == [
+        alpha.anchor_id,
+        sibling.anchor_id,
+    ]
+
+    rotated_token = tree.records / RECORD_DAY / "record-0001.alpha-sibling-2026.tsr"
+    rotated_alpha.stamp(sha256_bytes(tree.record.read_bytes()), rotated_token)
+    tokens = {
+        alpha.anchor_id: (alpha, tree.tokens[alpha.anchor_id], alpha.signer_pins),
+        sibling.anchor_id: (sibling, rotated_token, rotated),
+    }
+    for anchor_id, (anchor, token, signer) in tokens.items():
+        evidence = verify_timestamp_token(
+            tree.record,
+            claim_against(tree, reference, anchor, token, signer=signer),
+            reference,
+            spec=spec,
+            records=tree.records,
+        )
+        assert evidence.anchor_id == anchor_id
+    # Neither anchor's outcome can be met by the other's response.
+    for anchor, (_other, token, signer) in zip(
+        (alpha, sibling), reversed(list(tokens.values()))
+    ):
+        with pytest.raises(TsaError, match="RFC 3161 token signer is not pinned"):
+            verify_timestamp_token(
+                tree.record,
+                claim_against(tree, reference, anchor, token, signer=signer),
+                reference,
+                spec=spec,
+                records=tree.records,
+            )
+
+
+def test_refuses_one_token_supplied_under_two_anchor_outcomes(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S3-F2: an outcome is covered by its own response or by none.
+
+    Outcomes were de-duplicated by anchor id and the token was left free, so
+    one response could be offered under every outcome of a bundle. The rule is
+    about coverage, not about cryptography, and that is what this binds: the
+    refusal names the reused digest and fires at the second outcome, before
+    that outcome's token is put to OpenSSL at all -- the recorder sees one
+    verification, the first outcome's. Two authorities with distinct roots is
+    the case where the reuse would have been caught later anyway, though by a
+    check about the token rather than about coverage (with the rule removed
+    this witness refuses on the policy the copied claim declares), and binding
+    the earlier refusal is what says the rule does not depend on that
+    accident; the cases where reuse would otherwise be *accepted* are the
+    shared-signer bundle above and the supplemental outcome below.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    tree = build_witness_tree(tmp_path, local_anchors[:2])
+    assert verify_tree(tree).status == "available"
+    reused = sha256_bytes(tree.tokens[alpha.anchor_id].read_bytes())
+
+    def put_alphas_token_under_betas_outcome(payload: dict[str, Any]) -> None:
+        first, second = payload["anchorOutcomes"]
+        assert (first["tsaAnchorId"], second["tsaAnchorId"]) == (
+            alpha.anchor_id,
+            beta.anchor_id,
+        )
+        for field in _TOKEN_FIELDS:
+            second[field] = first[field]
+
+    rewrite_witness(tree, put_alphas_token_under_betas_outcome)
+    verified = record_token_verifications(monkeypatch)
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == f"duplicate TSA token across anchor outcomes: {reused}"
+    assert [claim["tsaAnchorId"] for claim in verified] == [alpha.anchor_id]
+
+
+def test_refuses_a_token_reused_between_a_primary_and_a_supplemental_outcome(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S3-F2: the rule spans the primary and supplemental outcomes together.
+
+    A supplemental outcome answers for an authority a pending trust transition
+    is about to activate, and the shared-signer rule is per bundle, so a
+    pending bundle may legitimately put the active authority's root and signer
+    behind a new anchor id. One response then satisfies the active anchor's
+    primary outcome and the pending anchor's supplemental outcome at once, and
+    both verify: the control below stamps a second, distinct token for the
+    pending anchor and the same witness verifies with one token and one
+    supplemental token. Reuse the first token instead and, without this rule,
+    the pending authority is admitted on evidence it never produced.
+    """
+
+    alpha = local_anchors[0]
+    mirror = alias_of(alpha, anchor_id="alpha-mirror-2026")
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    pending, spec = add_bundle_version(tree, [mirror], version=2)
+    primary = json.loads(tree.witness.read_text())["anchorOutcomes"][0]
+
+    def supplemental_over(token: pathlib.Path) -> dict[str, Any]:
+        return {
+            **{field: primary[field] for field in _TOKEN_FIELDS},
+            "role": "pending_trust_bundle",
+            "status": "available",
+            "trustBundleId": pending["bundleId"],
+            "trustBundlePath": pending["path"],
+            "trustBundleSha256": pending["sha256"],
+            "tsaAnchorId": mirror.anchor_id,
+            "tsa": mirror.endpoint,
+            "tokenPath": logical_path(tree.records, token),
+            "tokenSha256": sha256_bytes(token.read_bytes()),
+        }
+
+    def transition() -> WitnessEvidence:
+        return verify_witness(
+            tree.record,
+            spec=spec,
+            records=tree.records,
+            trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+            transition_bundle_updates=[pending],
+        )
+
+    # The control: the pending anchor answers with a response of its own, and
+    # the transition verifies. Two stamps of one digest are distinct tokens.
+    own_token = tree.records / RECORD_DAY / "record-0001.alpha-mirror-2026.tsr"
+    alpha.tsa.stamp(sha256_bytes(tree.record.read_bytes()), own_token)
+    assert sha256_bytes(own_token.read_bytes()) != primary["tokenSha256"]
+    rewrite_witness(
+        tree,
+        lambda payload: payload.__setitem__(
+            "supplementalOutcomes", [supplemental_over(own_token)]
+        ),
+    )
+    evidence = transition()
+    assert evidence.status == "available"
+    assert [token.anchor_id for token in evidence.tokens] == [alpha.anchor_id]
+    assert [token.anchor_id for token in evidence.supplemental_tokens] == [
+        mirror.anchor_id
+    ]
+
+    # And the reuse the rule refuses.
+    rewrite_witness(
+        tree,
+        lambda payload: payload.__setitem__(
+            "supplementalOutcomes",
+            [supplemental_over(tree.tokens[alpha.anchor_id])],
+        ),
+    )
+    verified = record_token_verifications(monkeypatch)
+    with pytest.raises(TsaError) as caught:
+        transition()
+    assert str(caught.value) == (
+        f"duplicate TSA token across anchor outcomes: {primary['tokenSha256']}"
+    )
+    assert [claim["tsaAnchorId"] for claim in verified] == [alpha.anchor_id]

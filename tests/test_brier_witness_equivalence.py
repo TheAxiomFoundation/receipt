@@ -88,6 +88,19 @@ Deliberately outside the mutation contract:
   above pins exactly that identity for it, and ``tsa-anchors-v2`` configures
   ``freetsa-root-2016`` and ``digicert-trusted-root-g4`` and the spec pins
   exactly those two, so no case here reaches the refusal;
+- the baseline lets two anchors of one bundle allow the same signer; the port
+  refuses that bundle at load, because one authority under two anchor ids is
+  satisfied twice by one response.  ``tsa-anchors-v1`` configures one anchor,
+  and ``tsa-anchors-v2``'s two anchors declare disjoint allowed signers
+  (``fa02bd55...`` for ``freetsa-root-2016``, ``7abda95e...`` for
+  ``digicert-trusted-root-g4``), so no case here reaches the refusal;
+- the baseline de-duplicates a v2 witness's anchor outcomes by anchor id and
+  leaves the token free; the port additionally requires every verified token's
+  digest to be distinct across the witness's primary and supplemental outcomes
+  together, refusing at the outcome that repeats one and so ahead of the
+  ported refusals inside the token verifier.  The 53 pinned witnesses declare
+  91 tokens between them, at most two per witness and never the same digest
+  twice, so the refusal fires on no case here;
 - the baseline takes an anchor ID alone for the active identity when deciding
   which anchors of a pending bundle need a supplemental outcome, so a pending
   anchor reusing an active ID under a different root is skipped; the port

@@ -9,7 +9,7 @@ through a frozen :class:`TsaSpec` supplied by consumer code.  This module
 ships no repository-specific trust defaults and performs no chain walk or
 producer signature verification.
 
-The port is stricter than the baseline in ten places, each refusing an input
+The port is stricter than the baseline in twelve places, each refusing an input
 the pinned tree never presents and so each outside the differential contract:
 a legacy witness over a bundle configuring more than one anchor; a bundle
 configuring an anchor the spec carries no identity for, or one whose declared
@@ -32,7 +32,14 @@ changes what is on disk and not what is trusted, and because nothing is
 re-encoded a pinned root's auxiliary trust settings apply as pinned.  Next: a
 bundle whose configured anchors are
 not exactly the anchors the spec's identities for that bundle name, so an
-identity the consumer scoped to it cannot be quietly absent from it; a
+identity the consumer scoped to it cannot be quietly absent from it; a bundle
+two of whose anchors allow the same signer, which is one authority under two
+names -- the ported allowed-signer check binds a token to the signers of the
+anchor its outcome selects, so a shared signer is exactly what lets one RFC
+3161 response satisfy two outcomes, while a shared root with disjoint signers
+does not and stays allowed (the same rule covers the identities the spec
+scopes to the bundle, whose signer sets each anchor's has just been required
+to equal); a
 pending bundle anchor reusing an active anchor ID under a different
 code-pinned root, which is a new authority and so must carry a supplemental
 outcome before the transition can activate it -- the ported
@@ -42,7 +49,13 @@ either schema whose reason is not a string, or that carries token evidence at
 the witness level (the v2 per-anchor outcome has always refused both); and an
 unavailable legacy witness that names a bundle by any of its three claim
 fields, whose claim is then resolved and counted where the baseline ignored
-those fields.  The port also corrects one baseline defect: ``_decode_oid``
+those fields; and a v2 witness that offers one token under two of its
+outcomes, counted across the primary and supplemental outcomes together, so
+that one response cannot stand for a bundle that configures more than one
+anchor -- refused at the second outcome, before that outcome's token is
+verified, which places it ahead of the ported refusals inside
+``verify_timestamp_token`` and is admissible because no witness in the pinned
+tree names one token twice.  The port also corrects one baseline defect: ``_decode_oid``
 read only the first octet of a policy OID as its combined first two arcs, so
 a first subidentifier spanning several octets (2.999.3) decoded wrongly.
 ``tests/test_tsa.py`` binds all of these.  Because every bundle anchor is now
@@ -708,6 +721,7 @@ def _check_bundle_anchors(
     """Bind every anchor of one bundle to the verifier code's own pins."""
 
     anchor_ids: set[str] = set()
+    declared_signers_by_anchor: dict[str, set[str]] = {}
     for anchor in anchors:
         anchor_id = str(anchor["id"])
         anchor_ids.add(anchor_id)
@@ -743,6 +757,9 @@ def _check_bundle_anchors(
                 f"TSA anchor {anchor_id} in bundle {bundle_id} declares allowed "
                 "signers that differ from its verifier code identity"
             )
+        declared_signers_by_anchor[anchor_id] = {
+            str(fingerprint) for fingerprint in declared_signers
+        }
         # Declared values agreeing with the identity is not the root material
         # agreeing with either. The material checks lived only in
         # _select_anchor, which a pending rotation's reused anchor id never
@@ -773,6 +790,32 @@ def _check_bundle_anchors(
             f"TSA bundle {bundle_id} configures anchors {sorted(anchor_ids)} "
             f"but verifier code pins identities for {sorted(identity_ids)}"
         )
+    # No two anchors of one bundle may allow the same signer.  The ported
+    # allowed-signer check binds a token to the signers of the anchor its
+    # outcome selects, so a token signed under one anchor's signer cannot
+    # satisfy another whose signers do not include it -- and a shared signer
+    # is exactly what lets it.  Two anchors with distinct ids and endpoints
+    # but the same root and the same allowed signer are one authority under
+    # two names, and one RFC 3161 response, offered under both outcomes,
+    # covered a two-anchor bundle on its own (peer review, fourth gate round
+    # three).  A shared *root* with disjoint signers stays allowed for that
+    # same reason: the signer, not the root, is what a token is bound to.
+    #
+    # Checked on the anchors only.  Each anchor's declared signer set was
+    # just compared with its identity's, and the anchor set and the identity
+    # set were just required to be equal, so the identities the spec scopes
+    # to this bundle carry exactly these signer sets and one check covers
+    # both.
+    signer_owner: dict[str, str] = {}
+    for anchor_id, fingerprints in declared_signers_by_anchor.items():
+        for fingerprint in sorted(fingerprints):
+            other = signer_owner.setdefault(fingerprint, anchor_id)
+            if other != anchor_id:
+                first, second = sorted((other, anchor_id))
+                raise TsaError(
+                    "TSA anchors share an allowed signer: "
+                    f"{first}, {second}: {fingerprint}"
+                )
 
 
 def bootstrap_trust_bundles(
@@ -1635,6 +1678,29 @@ def _v2_witness_evidence(
     expected_anchor_ids = {str(anchor["id"]) for anchor in trust["anchors"]}
     seen_anchor_ids: set[str] = set()
     tokens: list[TokenEvidence] = []
+    # One RFC 3161 response may stand for one anchor outcome and no other.
+    # De-duplicating outcomes by anchor id alone left the token free: the same
+    # tokenPath and tokenSha256 supplied under two outcomes verified twice and
+    # were reported as two independent witnesses, which is the whole of what a
+    # multi-anchor bundle is meant to prevent.  Shared across the primary and
+    # supplemental outcomes together, because a supplemental outcome is
+    # evidence about the same record from a pending authority and a reused
+    # token covers neither (peer review, fourth gate round three).
+    #
+    # A new refusal, and it precedes the ported refusals inside
+    # verify_timestamp_token for the outcome it stops.  Admissible because the
+    # input it refuses is one the pinned tree cannot present: no witness there
+    # carries two outcomes naming one token.  Read from the outcome's declared
+    # tokenSha256, and recorded from TokenEvidence.token_sha256 -- the digest
+    # of the bytes actually verified -- so a declared digest that lies is
+    # caught by the ported witness-token-hash refusal first and this rule only
+    # ever remembers a true one.
+    seen_token_digests: set[str] = set()
+
+    def refuse_a_reused_token(declared: Any) -> None:
+        if declared in seen_token_digests:
+            raise TsaError(f"duplicate TSA token across anchor outcomes: {declared}")
+
     for outcome in outcomes:
         if not isinstance(outcome, dict):
             raise TsaError("multi-token witness outcome is not an object")
@@ -1646,16 +1712,17 @@ def _v2_witness_evidence(
         outcome_status = outcome.get("status")
         if outcome_status == "available":
             claim = {**witness, **outcome}
-            tokens.append(
-                verify_timestamp_token(
-                    path,
-                    claim,
-                    bundle_reference,
-                    spec=spec,
-                    records=records,
-                    now=now,
-                )
+            refuse_a_reused_token(claim.get("tokenSha256"))
+            evidence = verify_timestamp_token(
+                path,
+                claim,
+                bundle_reference,
+                spec=spec,
+                records=records,
+                now=now,
             )
+            seen_token_digests.add(evidence.token_sha256)
+            tokens.append(evidence)
         elif outcome_status == "unavailable":
             _unavailable_outcome(outcome, label=f"TSA anchor {anchor_id}")
         else:
@@ -1713,16 +1780,17 @@ def _v2_witness_evidence(
             raise TsaError(f"supplemental TSA anchor mismatch: {key}")
         outcome_status = outcome.get("status")
         if outcome_status == "available":
-            supplemental_tokens.append(
-                verify_timestamp_token(
-                    path,
-                    outcome,
-                    reference,
-                    spec=spec,
-                    records=records,
-                    now=now,
-                )
+            refuse_a_reused_token(outcome.get("tokenSha256"))
+            evidence = verify_timestamp_token(
+                path,
+                outcome,
+                reference,
+                spec=spec,
+                records=records,
+                now=now,
             )
+            seen_token_digests.add(evidence.token_sha256)
+            supplemental_tokens.append(evidence)
         elif outcome_status == "unavailable":
             _unavailable_outcome(outcome, label=f"supplemental TSA anchor {anchor_id}")
         else:
