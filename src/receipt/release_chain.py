@@ -1322,7 +1322,10 @@ def assert_no_symlinked_release_root(root: pathlib.Path, spec: ChainSpec) -> Non
     Each component's spelling is bound as well, for the reason the state
     walk's is: ``lstat`` resolves a name, and on a name-folding filesystem a
     root the spec spells one way is answered for by a directory spelled
-    another. See ``_assert_component_spelled``.
+    another. See ``_assert_component_spelled``. That holds for a configured
+    path's *leaf* as much as for the components above it — the leaf is where
+    the manifest directory's own name is — so the spelling check runs at every
+    component of all three paths.
 
     The gate reaches this through ``hold_release_root`` at the top of both of
     its release-proposal paths, ahead of the reads, rather than after the
@@ -1358,60 +1361,93 @@ def assert_no_symlinked_release_root(root: pathlib.Path, spec: ChainSpec) -> Non
     race. So every component of both paths is walked here too, with the same
     ``lstat`` and the same spelling check, in the same words.
 
-    Their *leaves* are left to the refusals that already exist for them, which
-    is why the walk of each stops one component short. A symlinked manifest
-    directory is ``_enumerate_manifest_files``'s own refusal (``release
-    manifest path is not a regular directory``), and against a base it is the
-    enumeration's (``release path is a symlink``); a symlinked spec-pinned
-    anchor directory is the walk at the top of ``verify_release_chain``. Both
-    are reached wherever anything is read through those directories at all,
-    and refusing here instead would replace their sentences with this one's
-    and, for an anchor directory a caller has overridden, refuse a tree over a
-    directory this verdict never reads. Nothing above a leaf has an answer
-    like that, which is exactly the gap.
+    What stops one component short for those two is the *type* judgement, not
+    the walk. Their leaves keep the refusals that already exist for them: a
+    symlinked manifest directory is ``assert_manifest_directory_regular``'s
+    and ``_enumerate_manifest_files``'s own refusal (``release manifest path
+    is not a regular directory``), and against a base it is the enumeration's
+    (``release path is a symlink``); a symlinked spec-pinned anchor directory
+    is the walk at the top of ``verify_release_chain``. Both are reached
+    wherever anything is read through those directories at all, and refusing
+    here instead would replace their sentences with this one's and, for an
+    anchor directory a caller has overridden, refuse a tree over a directory
+    this verdict never reads. Nothing above a leaf has an answer like that,
+    which is exactly the gap the walk fills.
+
+    The leaf's *spelling* is a different question and nothing else asks it. A
+    type refusal is about what the resolved name landed on; a spelling refusal
+    is about whether the name resolved to something the directory holds under
+    that name at all, which only the directory's listing can say. So the
+    spelling check runs at the leaf while the type judgement does not, and the
+    two paths below the root are walked whole. Round 9's stopping short bound
+    neither for a leaf, which left ``releases/manifests`` verifying a chain
+    stored at ``releases/Manifests`` wherever names fold and finding no chain
+    there at all wherever they do not — the same commit, two verdicts.
     """
 
-    _walk_release_path(
-        root,
-        spec.release_root_relative,
-        spec.release_root_relative.parts,
-        leaf_is_the_release_root=True,
-    )
-    for relative in (spec.manifest_relative, spec.anchor_relative):
+    for relative, leaf_is_the_release_root in (
+        (spec.release_root_relative, True),
+        (spec.manifest_relative, False),
+        (spec.anchor_relative, False),
+    ):
         _walk_release_path(
-            root, relative, relative.parts[:-1], leaf_is_the_release_root=False
+            root, relative, leaf_is_the_release_root=leaf_is_the_release_root
         )
 
 
 def _walk_release_path(
     root: pathlib.Path,
     relative: pathlib.PurePosixPath,
-    parts: tuple[str, ...],
     *,
     leaf_is_the_release_root: bool,
 ) -> None:
     """One configured path under the release tree, component by component.
 
-    ``parts`` is what to walk rather than ``relative.parts`` because the two
-    paths below the root are walked one component short; ``relative`` still
-    names the whole configured path in the refusal, since that is the path
-    the verdict would have been about.
+    Every component's spelling is bound, the leaf's included. What stands at
+    the end of a configured path is decided by resolving its whole name, and a
+    name-folding filesystem answers the last component as readily as any
+    other: a spec naming ``releases/manifests`` over a directory spelled
+    ``releases/Manifests`` on disk has the chain in *that* directory verified
+    on APFS or any case-insensitive mount, and no chain at all — an
+    acceptance, since an absent manifest directory is legal — on a filesystem
+    that compares names exactly. One commit, two verdicts, and neither of them
+    about the path the spec pins. The walk of each path used to stop one
+    component short, so the leaf was the one component nothing bound.
+
+    What stops one component short now is the *type* judgement, and only for
+    the two paths below the root. A manifest path that is a symlink, or is
+    anything but a directory, is ``assert_manifest_directory_regular``'s and
+    ``_enumerate_manifest_files``'s to refuse, and against a base the base
+    enumeration's; a non-directory anchor path is the walk at the top of
+    ``verify_release_chain``. Refusing either here would replace their
+    sentences with this one's, and for an anchor directory a caller has
+    overridden it would refuse a tree over a directory this verdict never
+    reads. The two questions are separable because they are asked of different
+    things: a component's type comes from ``lstat``-ing it, its spelling from
+    listing the directory that holds it, and the second is available for a leaf
+    whose type is somebody else's business.
+
+    The release root's own leaf keeps both, as it always has: the enumeration's
+    words for a symlinked root are this walk's to give.
     """
 
     current = root
     walked: tuple[str, ...] = ()
+    parts = relative.parts
     for depth, segment in enumerate(parts, start=1):
         child = current / segment
         walked = (*walked, segment)
-        if _is_reparse_point(child):
-            if leaf_is_the_release_root and depth == len(parts):
+        at_the_leaf = depth == len(parts)
+        if leaf_is_the_release_root or not at_the_leaf:
+            if _is_reparse_point(child):
+                if leaf_is_the_release_root and at_the_leaf:
+                    raise ReleaseChainError(
+                        "releases must be a real directory, not a symlink"
+                    )
                 raise ReleaseChainError(
-                    "releases must be a real directory, not a symlink"
+                    "release root path traverses a symlink at "
+                    f"{'/'.join(walked)!r}: {relative.as_posix()}"
                 )
-            raise ReleaseChainError(
-                "release root path traverses a symlink at "
-                f"{'/'.join(walked)!r}: {relative.as_posix()}"
-            )
         _assert_component_spelled(current, segment, walked, relative)
         current = child
 

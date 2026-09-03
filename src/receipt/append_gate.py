@@ -239,9 +239,17 @@ below the root reaches it through components no walk looked at, and an
 untracked link at one of them is invisible to the index reconciliation as
 well, since ``rglob`` yields a symlinked directory without descending it and
 the release root's scan skips it. Each of those two stops one component short
-of its leaf, which already has a refusal of its own — the manifest
-directory's is the enumeration's, the anchor directory's is the walk at the
-top of ``verify_release_chain`` — so no sentence of theirs is replaced.
+of its leaf for the leaf's *type*, which already has a refusal of its own —
+the manifest directory's is ``assert_manifest_directory_regular``'s and the
+enumeration's, the anchor directory's is the walk at the top of
+``verify_release_chain`` — so no sentence of theirs is replaced. Their leaf's
+*spelling* is bound here all the same, because nothing else asks it and the
+two questions are asked of different things: what a component is comes from
+resolving its name, how it is spelled comes from listing the directory that
+holds it. A spec naming ``releases/manifests`` over a ``releases/Manifests``
+on disk had the chain in that directory verified wherever names fold and no
+chain at all wherever they do not — one commit, two verdicts, and neither
+about the path the spec pins.
 
 The manifest directory's own refusal holds only once something has decided to
 enumerate, and on the push path what decides that is the leaf's type:
