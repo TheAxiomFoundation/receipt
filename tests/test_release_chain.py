@@ -5,6 +5,13 @@ the verification read sites themselves (OpenSSL is fed a snapshot of the
 digested bytes), the computation is opt-in so pre-existing callers keep
 byte-identical behavior, and the combined digest is receipt-canonical JSON —
 an injective encoding for any accepted filename strings.
+
+Two tests at the end are labelled S4-F6 and belong to a fourth review gate's
+first round on the append-gate branch: the ``dir_fd`` requirement was
+documented as the append gate's, and this is where it is shown to be the
+package's — ``verify_release_chain`` and ``receipt verify``'s custody pass
+refuse on the same platforms, in the same words, with no append gate in the
+picture.
 """
 
 from __future__ import annotations

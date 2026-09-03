@@ -84,7 +84,7 @@ work and is not done here.
 
 They run beside the extracted checks without altering any of their refusals,
 and every new refusal runs after every pre-existing file-level refusal — with
-two stated exceptions, both at entry and both saying that a comparison cannot
+three stated exceptions, all at entry and all saying that a comparison cannot
 be made here rather than making one. The checkout-level
 ``release_chain.assert_file_modes_authoritative`` runs ahead of the
 release-history file checks (and after the base ref is resolved, so a false
@@ -92,7 +92,13 @@ setting cannot mask a base that names nothing). The per-state-path
 ``release_chain.assert_state_path_tracked`` runs ahead of everything that
 reads either state file, because an untracked state path, or one under a
 gitlink, is not this commit's content and nothing downstream can be a verdict
-about it. Nothing else is an exception: the per-file
+about it. And ``_assert_root_unchanged`` runs ahead of the surface
+classification, which is a pre-existing check and the one that decides which
+path the whole run takes, because a root exchanged since ``_set_root``
+recorded it means the tree being classified is not the tree this verdict was
+asked about; it runs again before the gate-only return, which is the one exit
+reached without a state read and therefore without the descent that would
+otherwise make the comparison. Nothing else is an exception: the per-file
 ``release_chain.assert_index_agrees_with_tree``, the check beside it that
 every base release file is still an entry in the candidate index, and the
 release root's index scan all run after the comparisons they qualify, so a

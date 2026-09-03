@@ -40,6 +40,17 @@ its last re-read — is the stated residual: it wants an immutable snapshot of
 the tree under audit, which this gate does not have, and it is tracked as
 follow-up rather than bound by a test here.
 
+Docstrings labelled S4-F1 onward name a fourth gate's first round, numbering
+from one again: S4-F1 the recorded root identity a gate-only verdict never
+consulted, S4-F2 the release-root reconciliation a case- or
+normalisation-insensitive filesystem answered for the wrong entry, S4-F3 the
+intent-to-add index entry that records no content, S4-F4 the ambient pathspec
+mode that rewrote what every index read asked for, S4-F5 the descent that
+demanded read permission on directories it only ever traversed, S4-F6 the
+platform restriction documented as the gate's when it is the package's. S4-F6
+is bound in tests/test_release_chain.py, where the public custody path and
+``receipt verify`` itself are driven.
+
 The fixture is a local git repository built from scratch — no network, no
 witnesses, no signatures. Its release tree holds a README and no manifests, so
 the gate's chain verification finds nothing to verify and the checks under
