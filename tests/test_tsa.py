@@ -2681,3 +2681,121 @@ def test_refuses_a_token_reused_between_a_primary_and_a_supplemental_outcome(
         f"duplicate TSA token across anchor outcomes: {primary['tokenSha256']}"
     )
     assert [claim["tsaAnchorId"] for claim in verified] == [alpha.anchor_id]
+
+
+@pytest.fixture
+def openssl_preflight_uncached() -> Any:
+    """Run the ``openssl version`` gate afresh, and leave it that way.
+
+    ``_require_supported_openssl`` caches its verdict for the process, so a
+    test that substitutes a version banner has to clear what earlier tests
+    cached, and clear its own substituted answer on the way out.
+    """
+
+    tsa_module._require_supported_openssl.cache_clear()
+    yield
+    tsa_module._require_supported_openssl.cache_clear()
+
+
+def substitute_openssl_version(monkeypatch: pytest.MonkeyPatch, banner: str) -> None:
+    """Answer ``openssl version`` with ``banner`` and pass everything else on."""
+
+    original = tsa_module._run_openssl
+
+    def versioned(arguments: list[str], **keywords: Any) -> Any:
+        if arguments == ["version"]:
+            return banner
+        return original(arguments, **keywords)
+
+    monkeypatch.setattr(tsa_module, "_run_openssl", versioned)
+
+
+@pytest.mark.parametrize(
+    ("banner", "supported"),
+    [
+        ("OpenSSL 1.1.1w  11 Sep 2023", True),
+        ("OpenSSL 3.0.13 30 Jan 2024", True),
+        ("OpenSSL 3.6.3 9 Jun 2026 (Library: OpenSSL 3.6.3 9 Jun 2026)", True),
+        ("OpenSSL 1.1.0h  27 Mar 2018", False),
+        ("OpenSSL 1.0.2u  20 Dec 2019", False),
+        ("LibreSSL 3.3.6", False),
+        ("LibreSSL 4.1.0", False),
+        ("", False),
+        ("openssl 3.0.13", False),
+    ],
+)
+def test_the_openssl_version_gate_reads_the_banner(banner: str, supported: bool) -> None:
+    """S3-F3: what the preflight accepts, stated one banner at a time.
+
+    ``storeutl`` arrived in OpenSSL 1.1.0 and 1.1.1 is the first release with
+    the ``-attime`` and ``ts`` behaviour the differential harness pins, so
+    1.1.1 is the floor. The letter suffix real releases carry (``1.1.1w``) is
+    not part of the comparison, and an implementation that is not OpenSSL is
+    refused on its name however high its own version runs -- LibreSSL 4.1.0
+    still has no ``storeutl``.
+    """
+
+    assert tsa_module._supported_openssl_version(banner) is supported
+
+
+def test_refuses_an_openssl_that_is_not_openssl_before_reading_a_bundle(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+    openssl_preflight_uncached: Any,
+) -> None:
+    """S3-F3: LibreSSL is refused by name, not by a message blaming the file.
+
+    Bundle loading always counts a pinned root's certificates with ``openssl
+    storeutl``, which LibreSSL does not have. On a machine whose ``openssl``
+    is the stock macOS ``/usr/bin/openssl``, that count failed, and the
+    failure surfaced as ``pinned TSA root PEM certificates could not be
+    counted`` -- a valid one-certificate bundle, and an unavailable witness
+    that verifies no token at all, refused with a message about the file. The
+    witness here is exactly that case: genuinely unavailable, no token to
+    check, and nothing wrong with its bundle. The preflight refuses first, and
+    the recorder shows it happens before any root certificate is read.
+    """
+
+    tree = build_witness_tree(tmp_path, local_anchors[:1], available=False)
+    assert verify_tree(tree).status == "unavailable"
+
+    read_roots: list[str] = []
+    original_identity = tsa_module._certificate_identity
+    monkeypatch.setattr(
+        tsa_module,
+        "_certificate_identity",
+        lambda path: (read_roots.append(str(path)), original_identity(path))[1],
+    )
+    tsa_module._require_supported_openssl.cache_clear()
+    substitute_openssl_version(monkeypatch, "LibreSSL 3.3.6\n")
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == (
+        "receipt requires OpenSSL 1.1.1 or newer as `openssl` on the path; "
+        "found: LibreSSL 3.3.6"
+    )
+    assert read_roots == []
+
+
+def test_refuses_an_openssl_older_than_the_storeutl_the_count_needs(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+    openssl_preflight_uncached: Any,
+) -> None:
+    """S3-F3: an OpenSSL too old for the count is refused the same way.
+
+    The gate is a version floor and not a LibreSSL blocklist: an OpenSSL that
+    predates the behaviour the count and the harness depend on is refused by
+    the same message, naming the banner it found.
+    """
+
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    substitute_openssl_version(monkeypatch, "OpenSSL 1.1.0h  27 Mar 2018\n")
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == (
+        "receipt requires OpenSSL 1.1.1 or newer as `openssl` on the path; "
+        "found: OpenSSL 1.1.0h  27 Mar 2018"
+    )

@@ -58,6 +58,14 @@ verified, which places it ahead of the ported refusals inside
 tree names one token twice.  The port also corrects one baseline defect: ``_decode_oid``
 read only the first octet of a policy OID as its combined first two arcs, so
 a first subidentifier spanning several octets (2.999.3) decoded wrongly.
+The port also has a prerequisite the baseline did not: ``openssl`` on the
+path must be OpenSSL 1.1.1 or newer, checked once per process before any
+trust bundle is read, because the certificate count above is OpenSSL's own
+``storeutl`` and LibreSSL -- the stock ``/usr/bin/openssl`` on macOS -- has
+no such subcommand.  A machine that fails the check is refused there rather
+than told that its root PEM cannot be counted; no portable count is offered
+in its place.
+
 ``tests/test_tsa.py`` binds all of these.  Because every bundle anchor is now
 identity-checked at load, ``_select_anchor``'s own identity refusal can no
 longer fire from within this module; its text is kept verbatim, as ported,
@@ -66,6 +74,7 @@ and as defence in depth.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
@@ -404,6 +413,66 @@ def _run_openssl(
     return completed.stdout.decode(errors="strict")
 
 
+#: The first line of ``openssl version`` for a build this module can use.
+_OPENSSL_VERSION_RE = re.compile(r"\AOpenSSL ([0-9]+)\.([0-9]+)\.([0-9]+)")
+
+#: ``storeutl`` arrived in OpenSSL 1.1.0; 1.1.1 is the first release with the
+#: ``-attime`` and ``ts`` behaviour the differential harness pins.
+_MINIMUM_OPENSSL = (1, 1, 1)
+
+
+def _supported_openssl_version(line: str) -> bool:
+    """Whether ``line`` is an ``openssl version`` banner this module can use.
+
+    True only for OpenSSL 1.1.1 or newer.  LibreSSL -- the stock
+    ``/usr/bin/openssl`` on macOS -- announces itself as ``LibreSSL 3.3.6``
+    and never matches whatever its version number, because it is a different
+    implementation and has no ``storeutl`` at any version.
+    """
+
+    match = _OPENSSL_VERSION_RE.match(line)
+    if match is None:
+        return False
+    return tuple(int(part) for part in match.groups()) >= _MINIMUM_OPENSSL
+
+
+@functools.cache
+def _require_supported_openssl() -> None:
+    """Refuse, once per process, an ``openssl`` this module cannot rely on.
+
+    Loading any trust bundle counts a pinned root's certificates with
+    ``openssl storeutl``, which LibreSSL does not have.  Without this a
+    machine whose ``openssl`` is LibreSSL refused a perfectly good
+    one-certificate bundle -- and an unavailable witness that verifies no
+    token at all -- with a message that blamed the file (peer review, fourth
+    gate round three).  Gated on the version line rather than by probing for
+    ``storeutl``, so the refusal names the real problem, and run before any
+    bundle is trusted rather than at the point a count is wanted.
+
+    No portable counting path is offered instead: a pattern of ours miscounted
+    three review rounds running, and the count has to be the same parser
+    ``-CAfile`` loads.
+
+    Cached because it is a property of the machine and not of the input.  Run
+    from ``_certificate_count``, so that no path to a count can skip it, and
+    from the top of ``_load_trust_bundle``, so that the refusal reaches an
+    auditor as itself rather than wrapped in that function's message about an
+    anchor's root material.  A missing ``openssl`` raises the ported
+    "openssl is required to verify RFC 3161 tokens" from ``_run_openssl``,
+    which is left to propagate.
+    """
+
+    banner = _run_openssl(["version"])
+    assert isinstance(banner, str)
+    lines = banner.splitlines()
+    line = lines[0].strip() if lines else ""
+    if not _supported_openssl_version(line):
+        raise TsaError(
+            "receipt requires OpenSSL 1.1.1 or newer as `openssl` on the path; "
+            f"found: {line}"
+        )
+
+
 def _certificate_identity(path: Path) -> dict[str, str]:
     certificate_der = _run_openssl(
         ["x509", "-in", str(path), "-outform", "DER"], binary=True
@@ -650,6 +719,12 @@ def _trust_bundle_reference(
 def _load_trust_bundle(
     records: Path, reference: dict[str, Any], *, spec: TsaSpec
 ) -> tuple[Path, dict[str, Any]]:
+    # Before anything about the bundle is read.  Every anchor's root is
+    # counted by `openssl storeutl` below, so _certificate_count runs this
+    # too and no caller of it can skip the check; running it first here as
+    # well is what keeps the refusal from arriving wrapped in a message about
+    # an anchor's root material, which is the message the finding was about.
+    _require_supported_openssl()
     logical = reference.get("path")
     if not isinstance(logical, str) or not TRUST_BUNDLE_RE.fullmatch(logical):
         raise TsaError(f"TSA trust bundle path is not immutable/versioned: {logical!r}")
@@ -937,6 +1012,7 @@ def _certificate_count(path: Path, *, pinned_path: Path | None = None) -> int:
     snapshot, because that is the file OpenSSL was given.
     """
 
+    _require_supported_openssl()
     blamed = path if pinned_path is None else pinned_path
     try:
         listing = _run_openssl(["storeutl", "-noout", "-certs", str(path)])
