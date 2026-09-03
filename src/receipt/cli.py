@@ -1185,6 +1185,51 @@ def _byte_safe_encoding(
 TEXT_WRITE_CHUNK = 8192
 
 
+def _accepted(written: Any, offered: int) -> int:
+    """The count a ``write`` returned, or raise; ``1`` to ``offered`` and nothing else.
+
+    ``_write_all`` bounded this with ``if not written`` and
+    ``if written < len(piece)``, which validates strictly less than the
+    ``BufferedWriter`` loop it stands in for — CPython's own raises
+    ``OSError("raw write() returned invalid length")`` — and the gap was
+    reachable both ways (peer review, Sol round 8). A count larger than the
+    offer walked the offset past what the writer had delivered, so the loop
+    finished early, ``_write_all`` returned normally, and :func:`main`
+    returned the passing exit code over a truncated verdict — in ``--json``
+    mode, half an object to a machine consumer, which is the one defect that
+    function exists to end. The reachable carrier is a text wrapper over a
+    byte sink returning the *byte* count for a text write, and :func:`_emit`'s
+    bufferless branch hands it a ``str``: any non-ASCII character in the
+    offer makes that count exceed the characters taken. A writer returning
+    ``-1`` passed the truthiness guard, walked the offset backwards and never
+    terminated.
+
+    So the count is checked against the offer rather than trusted. ``bool``
+    is excluded although it is an ``int``: ``True`` is not a length, and a
+    writer returning it has answered a different question. What is out of
+    range is named rather than repeated back — an arbitrary object's
+    ``repr`` is not something to put in a refusal — and the ``OSError`` is
+    the one the render boundary in :func:`main` already turns into a refusal.
+
+    What this cannot see is a count *inside* the offer that the writer did
+    not deliver: a stream offered eight units, taking one and reporting four,
+    is indistinguishable from an honest short write of four, here and in
+    CPython's own loop. Nothing outside the writer can tell those apart. The
+    class that is closed is the count no offer of that size could describe.
+    """
+
+    if isinstance(written, bool) or not isinstance(written, int):
+        detail = f"a {type(written).__name__}"
+    elif written < 1 or written > offered:
+        detail = str(written)
+    else:
+        return written
+    raise OSError(
+        f"the verdict stream reported an invalid write length ({detail}) for "
+        f"{offered} units offered; the verdict cannot be written"
+    )
+
+
 def _write_all(target: Any, payload: Any) -> None:
     """Write the whole payload, or raise; a short write is not a success.
 
@@ -1206,6 +1251,10 @@ def _write_all(target: Any, payload: Any) -> None:
     to carry. The ``OSError`` raised here is what the render boundary in
     :func:`main` turns into the refusal, and what :func:`_refuse` guards
     against separately.
+
+    Every other count is checked against the offer as well, by
+    :func:`_accepted`: a report of more than was offered truncated the
+    verdict silently and a negative one never terminated.
 
     Written over offsets in both layers: ``payload`` is ``bytes`` for the
     buffer and ``str`` for the text fallback, and the counts each ``write``
@@ -1240,7 +1289,7 @@ def _write_all(target: Any, payload: Any) -> None:
                     "the verdict stream accepted none of the bytes offered; "
                     "the verdict cannot be written"
                 )
-            offset += written
+            offset += _accepted(written, len(payload) - offset)
         return
 
     offset = 0
@@ -1253,6 +1302,7 @@ def _write_all(target: Any, payload: Any) -> None:
                 "the verdict stream accepted none of the bytes offered; "
                 "the verdict cannot be written"
             )
+        written = _accepted(written, len(piece))
         if written < len(piece):
             chunk = written
         offset += written

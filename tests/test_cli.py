@@ -2403,6 +2403,204 @@ def test_a_one_unit_text_writer_materialises_only_bounded_chunks() -> None:
     assert target.materialised == sum(target.offered)
 
 
+class _ByteCountingTarget:
+    """A text writer over a byte sink that returns the *byte* count.
+
+    The reachable carrier S8-F3 names: one character of a multi-byte
+    encoding goes in and a larger number comes back, because the wrapper is
+    reporting what its sink took rather than what it was handed. Nothing
+    about that is an error the writer would raise; it is a count in the wrong
+    units, and every non-ASCII character in the offer widens the gap.
+
+    ``take`` is how many characters it actually accepts, so the count it
+    returns can exceed both the characters delivered and the offer itself.
+    """
+
+    def __init__(self, take: int) -> None:
+        self.take = take
+        self.taken: list[str] = []
+
+    def write(self, payload: str) -> int:
+        accepted = payload[: self.take]
+        self.taken.append(accepted)
+        return len(accepted.encode("utf-8"))
+
+    def flush(self) -> None:
+        return None
+
+
+def test_a_writer_reporting_more_than_it_was_offered_refuses() -> None:
+    """Binds S8-F3: an over-count truncated the verdict and returned EXIT_OK.
+
+    ``_write_all`` bounded the count with ``if not written`` and
+    ``if written < len(piece)`` — no upper bound and no type check — so a
+    count larger than the offer advanced the offset past what the writer had
+    delivered. The loop finished early, ``_write_all`` returned normally, and
+    ``main`` returned the passing exit code over a truncated verdict.
+
+    The writer here takes one character of a two-character payload and
+    reports the three bytes its sink took for it, which is what a text
+    wrapper over a byte sink does with an em dash. Without the check
+    ``_write_all`` returns None having delivered one character of two; with
+    it the offer is what the count is measured against, as CPython's own
+    ``BufferedWriter`` loop measures it.
+    """
+
+    from receipt.cli import _write_all
+
+    target = _ByteCountingTarget(1)
+    with pytest.raises(OSError) as caught:
+        _write_all(target, "\u2014a")
+    assert str(caught.value) == (
+        "the verdict stream reported an invalid write length (3) for 2 units "
+        "offered; the verdict cannot be written"
+    )
+    assert target.taken == ["\u2014"]
+
+
+def test_an_over_count_after_a_short_write_refuses() -> None:
+    """Binds S8-F3: the shrunken offer is where four for one unit is caught.
+
+    The first offer is ``TEXT_WRITE_CHUNK`` characters, so a payload shorter
+    than that is offered whole and only a count above its length is out of
+    range. After an honest short write the loop caps the next offer at what
+    the writer demonstrated it can take, and it is there that a writer taking
+    one unit and reporting four is refused rather than believed: offered one
+    character, four cannot be a length.
+
+    Without the check the offset jumps to five over a four-character payload,
+    the loop ends, and two of the four characters were ever delivered.
+    """
+
+    from receipt.cli import _write_all
+
+    class _ShortThenOverReporting:
+        def __init__(self) -> None:
+            self.taken: list[str] = []
+
+        def write(self, payload: str) -> int:
+            self.taken.append(payload[:1])
+            return 1 if len(self.taken) == 1 else 4
+
+        def flush(self) -> None:
+            return None
+
+    target = _ShortThenOverReporting()
+    with pytest.raises(OSError) as caught:
+        _write_all(target, "1234")
+    assert str(caught.value) == (
+        "the verdict stream reported an invalid write length (4) for 1 units "
+        "offered; the verdict cannot be written"
+    )
+    assert target.taken == ["1", "2"]
+
+
+def test_a_writer_reporting_a_negative_count_refuses_rather_than_spinning() -> None:
+    """Binds S8-F3: ``-1`` passed the truthiness guard and never terminated.
+
+    ``if not written`` is false for ``-1``, so the old loop set ``chunk`` to
+    ``-1``, walked ``offset`` backwards, and looped for ever — both branches
+    of the function, measured with a three-second alarm in the round-eight
+    review. A negative count is not a short write; it is a stream that has
+    answered a different question, and this command's answer to that is a
+    refusal the exit code carries.
+
+    Without the check this test does not fail, it hangs, which is why the
+    writer raises once it has been asked more times than the payload is long.
+    Both branches are driven, because both had the hole.
+    """
+
+    from receipt.cli import _write_all
+
+    class _NegativeTarget:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def write(self, payload) -> int:
+            self.calls += 1
+            if self.calls > 16:
+                raise AssertionError("the write loop did not terminate")
+            return -1
+
+        def flush(self) -> None:
+            return None
+
+    for payload in ("12345678", b"12345678"):
+        target = _NegativeTarget()
+        with pytest.raises(OSError) as caught:
+            _write_all(target, payload)
+        assert str(caught.value) == (
+            "the verdict stream reported an invalid write length (-1) for 8 "
+            "units offered; the verdict cannot be written"
+        )
+        assert target.calls == 1
+
+
+def test_a_writer_reporting_true_refuses() -> None:
+    """Binds S8-F3: ``bool`` is an ``int`` and ``True`` is not a length.
+
+    A stream that answers "yes, written" rather than "how much" passes every
+    arithmetic check — ``True`` is ``1`` — and would deliver whatever it
+    liked per call while the loop believed one unit had been accounted for.
+    It is a writer answering a different question, and the type is what says
+    so; the refusal names the type rather than repeating the object back,
+    because an arbitrary object's ``repr`` does not belong in a refusal.
+    """
+
+    from receipt.cli import _write_all
+
+    class _TruthfulTarget:
+        def write(self, payload) -> bool:
+            return True
+
+        def flush(self) -> None:
+            return None
+
+    with pytest.raises(OSError) as caught:
+        _write_all(_TruthfulTarget(), "12345678")
+    assert str(caught.value) == (
+        "the verdict stream reported an invalid write length (a bool) for 8 "
+        "units offered; the verdict cannot be written"
+    )
+
+
+def test_an_over_reporting_stdout_becomes_the_render_refusal(
+    repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Binds S8-F3 end to end: the exit code, not a truncated verdict.
+
+    The unit tests above pin the loop; this pins what a consumer sees. The
+    over-reporting writer is put where a host substitutes a stream — an
+    ``io.StringIO`` subclass, so the sink recognition of S8-F2 admits it and
+    the run reaches the write at all — and the run refuses at the render
+    boundary with the exit code the refusal carries. Without the check the
+    run reports PASS with one character of the verdict on that stream.
+    """
+
+    class _OverReportingStdout(io.StringIO):
+        def __init__(self) -> None:
+            super().__init__()
+            self.taken: list[str] = []
+
+        def write(self, text: str) -> int:  # type: ignore[override]
+            self.taken.append(text[:1])
+            return len(text) + 1
+
+    stream = _OverReportingStdout()
+    monkeypatch.setattr(sys, "stdout", stream)
+    assert run(repo, "--json") == EXIT_FAIL
+    # ``write`` never reaches the buffer underneath, so what a consumer of
+    # this stream would have is what the overriding writer kept: one
+    # character per call, and the loop stopped on the first one.
+    assert stream.getvalue() == ""
+    assert stream.taken and all(len(text) == 1 for text in stream.taken)
+    error = capsys.readouterr().err
+    assert "verdict could not be rendered; treat the run as unverified" in error
+    assert "OSError: the verdict stream reported an invalid write length" in error
+
+
 def test_a_stream_that_takes_no_bytes_becomes_the_render_refusal(
     repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
