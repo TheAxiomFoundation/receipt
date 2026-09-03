@@ -3928,3 +3928,80 @@ def test_the_rendered_charge_equals_what_json_dumps_would_cost() -> None:
         assert _rendered_length(text) == len(json.dumps(text, ensure_ascii=True))
     assert _rendered_length("\U0001F600") == 14
     assert _rendered_length("abc") == 5
+
+
+# --- second fresh gate, round one: what the closing checks still let past ----
+
+
+def test_a_directory_changed_after_its_own_re_read_is_caught_going_back(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S5-F1: one ordered re-read leaves every earlier directory open.
+
+    ``assert_unchanged`` re-stated each stamped directory once, in sorted
+    order. A writer with the clone open could therefore wait for the pass to
+    move past a directory and change it while a later one was still being
+    re-read: that directory is never revisited, and the verdict returned
+    claiming a residual of "one instant" that was really the whole span
+    after each directory's own last re-read.
+
+    Here the change lands during the forward pass's re-read of the *last*
+    stamped directory (``rules/tax``) and creates a file in one the pass has
+    already accepted (``rules``). The sequence of re-reads is asserted, not
+    assumed, so the test says which pass refuses: five directories forwards,
+    then backwards until ``rules``, where the stamp no longer matches.
+
+    Without the backward pass nothing refuses — the forward pass has already
+    passed ``rules``, the identity re-check ran earlier and is unaffected by
+    a new file, and the closed-world sweep that would have named the file
+    ``unlisted`` is over — so the verification returns a PASS over a tree
+    that gained a content file while it was being verified.
+
+    The residual this test cannot reach, and no ordering can: a change that
+    lands after the *backward* pass's own re-read of that directory. Some
+    directory is always read last, and only verifying an immutable snapshot
+    removes the span after it (receipt#44).
+    """
+
+    import receipt.corpus as corpus_mod
+
+    write_tree(tmp_path)
+    real = corpus_mod._directory_generation
+    observed: list[str] = []
+    last = tmp_path / "rules/tax"
+    reads: dict[str, int] = {}
+
+    def watched(directory: pathlib.Path):
+        generation = real(directory)
+        relative = (
+            "" if directory == tmp_path else directory.relative_to(tmp_path).as_posix()
+        )
+        observed.append(relative)
+        reads[relative] = reads.get(relative, 0) + 1
+        # The first read of the last directory is its stamp; the second is
+        # the forward pass reaching it, which is the moment the finding is
+        # about — every other stamped directory has been re-read by then.
+        if directory == last and reads[relative] == 2:
+            (tmp_path / "rules/smuggled.yaml").write_text("name: evil\n")
+        return generation
+
+    monkeypatch.setattr(corpus_mod, "_directory_generation", watched)
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        "the tree changed during verification; the closed-world verdict is refused"
+    )
+    assert observed[-8:] == [
+        # forwards, in sorted order, accepting every one of them
+        "",
+        ".axiom",
+        "rules",
+        "rules/benefit",
+        "rules/tax",
+        # and back, refusing at the directory the forward pass had passed
+        "rules/tax",
+        "rules/benefit",
+        "rules",
+    ]

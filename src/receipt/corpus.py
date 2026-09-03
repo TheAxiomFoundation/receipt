@@ -137,15 +137,25 @@ restores with ``os.utime``; on POSIX the inode change time is not settable
 from userspace at all, so a rewrite in place through the same inode is visible
 even when everything else about the file has been put back.
 
-What remains is one instant: between the last stamp re-read and the return the
-tree can still change, and nothing in this shape of verification removes that
-— only verifying a snapshot the verifier holds open would (tracked as
-follow-up; not done here). Two narrower things sit inside it as well: a
-rewrite in place through the same inode after the identity re-check has
-already run, which moves the file's own stamps and not its parent's and which
-nothing afterwards reads, and a change on a filesystem whose directory
-timestamps are too coarse to distinguish it from the stamp taken an instant
-earlier.
+What that check gives is a contract worth stating exactly, because the
+obvious stronger one is false. The stamps are re-stated twice — forwards in
+sorted order and then backwards — and a mismatch in either pass refuses. A
+directory change is therefore detected if it lands before that directory's
+final re-read. What remains is the span after each directory's last re-read,
+which is not one instant: it is one instant for whichever directory is
+re-read last and a little more for each of the others. Re-reading once, in
+sorted order, made that span much longer than the module admitted — a writer
+could change an already-re-read directory while a later one was still being
+re-read, and nothing revisited it (peer review, round eight) — and no
+re-read choreography removes the span, because some directory is always read
+last. Only verifying an immutable snapshot the verifier holds open does, and
+that is receipt#44 rather than anything shipped here.
+
+Two narrower things sit inside that span as well: a rewrite in place through
+the same inode after the identity re-check has already run, which moves the
+file's own stamps and not its parent's and which nothing afterwards reads,
+and a change on a filesystem whose directory timestamps are too coarse to
+distinguish it from the stamp taken an instant earlier.
 
 All of that rests on one platform property, so the platform is a
 precondition rather than an assumption: ``st_ctime`` must be the inode
@@ -1296,6 +1306,10 @@ class _DirectoryGenerations:
     the re-check. That is the module's standing rule — a failure to look is
     not an absence — and in practice the listing that follows the stamp
     refuses first, with a message that says what could not be read.
+
+    What the re-check can and cannot see is stated on
+    :meth:`assert_unchanged`, which re-reads the stamps in both directions
+    for the reason given there.
     """
 
     def __init__(self) -> None:
@@ -1329,15 +1343,43 @@ class _DirectoryGenerations:
             self.record(directory, "/".join(walked))
 
     def assert_unchanged(self) -> None:
-        """Refuse if any stamped directory is not what it was when it was read."""
+        """Refuse if any stamped directory is not what it was when it was read.
+
+        Every stamped directory is re-stated twice: once in sorted order and
+        once in reverse, refusing on the first mismatch of either pass.
+
+        The contract that gives is weaker than "one instant", and it is
+        stated rather than rounded up. A single ordered pass re-states each
+        directory once, so a writer who changes a directory the pass has
+        already re-read is never looked at again: with the stamps taken in
+        sorted order, changing the *first* while the pass is re-reading the
+        *last* went unnoticed, and the residual the module claimed was one
+        instant was really the span after each directory's own last re-read
+        (peer review, round eight). Reading the list back the other way
+        gives every directory a re-read that is late in the sequence as well
+        as one that is early, so a change landing anywhere before a
+        directory's final re-read is refused.
+
+        What that leaves is the span after each directory's last re-read.
+        No amount of re-read choreography removes it — a third pass and a
+        fourth only move which instant is last — and nothing weaker than
+        verifying an immutable snapshot can: receipt#44 tracks that.
+        """
 
         for relative in sorted(self._seen):
-            directory, generation = self._seen[relative]
-            if generation is None or _directory_generation(directory) != generation:
-                raise CorpusError(
-                    "the tree changed during verification; the closed-world "
-                    "verdict is refused"
-                )
+            self._assert_directory_unchanged(relative)
+        for relative in sorted(self._seen, reverse=True):
+            self._assert_directory_unchanged(relative)
+
+    def _assert_directory_unchanged(self, relative: str) -> None:
+        """Re-state one stamped directory, refusing if it moved."""
+
+        directory, generation = self._seen[relative]
+        if generation is None or _directory_generation(directory) != generation:
+            raise CorpusError(
+                "the tree changed during verification; the closed-world "
+                "verdict is refused"
+            )
 
 
 class _TombstoneIndex:
@@ -2281,10 +2323,12 @@ def verify_corpus_binding(
     # here; one whose generation moved means the tree changed under a pass
     # that had nothing downstream to re-derive its claim.
     #
-    # What is left after this is one instant: between the last stamp read
-    # here and the return, the tree can still change, and no amount of
-    # re-checking removes that — only verifying a snapshot the verifier
-    # holds open does (tracked as follow-up).
+    # Stated exactly, because the check cannot promise what a single ordered
+    # pass was described as promising. Every stamp is re-read forwards and
+    # then backwards, so a change is caught if it lands before that
+    # directory's final re-read; what is left is the span after each
+    # directory's last re-read, and only verifying an immutable snapshot
+    # removes it (receipt#44).
     generations.assert_unchanged()
 
     return CorpusVerification(
