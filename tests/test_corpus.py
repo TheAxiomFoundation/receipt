@@ -25,6 +25,7 @@ from receipt.corpus import (
     MAX_JOURNAL_BYTES,
     MAX_JOURNAL_ROW_BYTES,
     MAX_JOURNAL_ROWS,
+    MAX_JOURNAL_ROWS_CEILING,
     MAX_PATH_COMPONENTS_TOTAL,
     MAX_PATH_TEXT,
     MAX_REMOVED_TEXT,
@@ -656,6 +657,36 @@ def test_spec_refuses_an_unknown_tier_at_construction() -> None:
 def test_spec_refuses_an_empty_content_root() -> None:
     with pytest.raises(CorpusError, match="at least one content root"):
         corpus_spec(content_roots=())
+
+
+def test_spec_refuses_a_journal_capacity_above_the_byte_derived_ceiling() -> None:
+    """Binds S7-F2: a consumer capacity needs a hard byte-derived ceiling.
+
+    The shortest valid compact row is a 115-byte gate plus its required LF,
+    so 64 MiB can hold at most 578,524 rows. A larger consumer pin is refused
+    at construction. Without S7-F2 ``CorpusSpec`` has no such field or, with
+    the upper validation disabled, this construction does not raise the
+    required ``CorpusError``.
+    """
+
+    smallest = {
+        "schemaVersion": "s",
+        "entryIndex": 0,
+        "kind": "gate",
+        "gateId": "g",
+        "tier": "public",
+        "outcome": "pass",
+        "evidence": {"": ""},
+    }
+    compact = json.dumps(smallest, separators=(",", ":")).encode() + b"\n"
+    assert len(compact) == 116
+    assert MAX_JOURNAL_ROWS_CEILING == MAX_JOURNAL_BYTES // 116 == 578524
+
+    with pytest.raises(CorpusError) as caught:
+        corpus_spec(journal_row_capacity=MAX_JOURNAL_ROWS_CEILING + 1)
+    assert str(caught.value) == (
+        "CorpusSpec journal_row_capacity must be an integer from 1 to 578524"
+    )
 
 
 def test_the_spec_pins_a_suffix_by_one_rule_or_refuses_it() -> None:
@@ -5979,8 +6010,8 @@ def test_the_total_byte_budget_speaks_before_the_row_budget(
     )
 
 
-def test_one_journal_budget_is_derived_and_the_other_is_stated() -> None:
-    """Binds S5R3-F8 and S5R4-F4: which of these numbers is arithmetic.
+def test_journal_byte_bounds_and_capacity_ceiling_are_derived_or_stated() -> None:
+    """Binds S5R3-F8, S5R4-F4 and S7-F2: which bounds are arithmetic.
 
     ``MAX_JOURNAL_ROW_BYTES`` is derived from the largest row the schema
     admits — a gate declaration carrying ``MAX_EVIDENCE_ENTRIES`` entries
@@ -5989,14 +6020,13 @@ def test_one_journal_budget_is_derived_and_the_other_is_stated() -> None:
     written out beside the constant, so raising ``MAX_EVIDENCE_TEXT`` or
     ``MAX_EVIDENCE_ENTRIES`` without re-deriving the row cap fails here.
 
-    ``MAX_JOURNAL_BYTES`` is not derived from anything, and nothing derives
-    from it. It used to be the product of the two constants above, which is
-    eight gibibytes — the product of two worst cases no journal reaches at
-    once, and no ceiling at all on the one input this module cannot
-    recognise, which is an input that is not a journal (S5R4-F4). It is a
-    stated ceiling now, asserted here to be far below that product so a
-    later edit cannot quietly restore the derivation, and far above anything
-    a corpus carries: a real journal is kilobytes.
+    ``MAX_JOURNAL_BYTES`` is not derived from anything. It used to be the
+    product of the two constants above, which is eight gibibytes — two worst
+    cases no journal reaches at once, and no ceiling at all on an input that
+    is not a journal (S5R4-F4). It is a stated ceiling now, asserted far below
+    that product. S7-F2 derives the separate consumer-capacity ceiling *from*
+    those 64 MiB and the 116-byte minimum valid row; without that derivation
+    its new assertion fails or the constant is absent.
     """
 
     string = 12 * MAX_EVIDENCE_TEXT + 2
@@ -6007,15 +6037,71 @@ def test_one_journal_budget_is_derived_and_the_other_is_stated() -> None:
     assert MAX_EVIDENCE_ENTRIES * entry <= MAX_JOURNAL_ROW_BYTES
     assert MAX_JOURNAL_BYTES == 64 * 1024 * 1024
     assert MAX_JOURNAL_BYTES < MAX_JOURNAL_ROWS * MAX_JOURNAL_ROW_BYTES
+    assert MAX_JOURNAL_ROWS_CEILING == MAX_JOURNAL_BYTES // 116 == 578524
     # And what a journal actually costs: the package's own fixture, which
     # binds four paths and declares three gates.
     assert len(render_journal(journal_rows())) < 2048
 
 
+def test_a_consumer_can_pin_capacity_for_five_thousand_lifecycle_rows(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S7-F2: the process-global 4,096 cap stranded growing journals.
+
+    One path goes through 1,250 four-row lifecycles: present, revised,
+    removed at the revised digest, then present again. The resulting 5,000
+    append-only rows leave one current binding whose index is 4,999, and a
+    consumer pin of 8,192 admits it. Without S7-F2 ``parse_journal`` still
+    consults the global default and refuses before parsing row 4,097.
+    """
+
+    relative = "rules/current.yaml"
+    original = "value: original\n"
+    revised = "value: revised\n"
+    current = "value: current\n"
+    lifecycle = (
+        ("present", sha256_text(original)),
+        ("present", sha256_text(revised)),
+        ("removed", sha256_text(revised)),
+        ("present", sha256_text(current)),
+    )
+    rows: list[dict[str, object]] = []
+    for _ in range(1250):
+        for state, digest in lifecycle:
+            rows.append(
+                {
+                    "schemaVersion": JOURNAL_SCHEMA,
+                    "entryIndex": len(rows),
+                    "kind": "content",
+                    "path": relative,
+                    "sha256": digest,
+                    "state": state,
+                }
+            )
+    assert len(rows) == 5000
+
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True)
+    target.write_text(current)
+    spec = corpus_spec(
+        required_attested_paths=frozenset(),
+        required_gates=frozenset(),
+        journal_row_capacity=8192,
+    )
+    verification = verify_corpus_binding(
+        tmp_path, render_journal(rows), spec=spec
+    )
+
+    assert len(verification.content) == 1
+    assert verification.content[0].path == relative
+    assert verification.content[0].entry_index == 4999
+    assert verification.removed_paths == ()
+
+
 def test_refuses_a_journal_with_more_rows_than_the_parser_budget(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Binds S5R2-F4: every other budget bounds a journal already decoded.
+    """Binds S5R2-F4 and S7-F2: the default still refuses its 4,097th row.
 
     The gate and removed-path budgets bound what a *valid* journal costs the
     verdict. What an invalid one could make the parser allocate before any
@@ -6032,6 +6118,8 @@ def test_refuses_a_journal_with_more_rows_than_the_parser_budget(
     import receipt.corpus as corpus_module
 
     write_tree(tmp_path)
+    spec = corpus_spec()
+    assert spec.journal_row_capacity == MAX_JOURNAL_ROWS == 4096
     rows = journal_rows()
     filler = dict(rows[0])
     lines = [json.dumps(row, sort_keys=True) for row in rows]
@@ -6048,7 +6136,7 @@ def test_refuses_a_journal_with_more_rows_than_the_parser_budget(
 
     monkeypatch.setattr(corpus_module, "_parse_row", recording)
     with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(tmp_path, journal, spec=corpus_spec())
+        verify_corpus_binding(tmp_path, journal, spec=spec)
     assert parsed == []
     assert str(caught.value) == (
         f"corpus journal carries {MAX_JOURNAL_ROWS + 1} rows, over the "
