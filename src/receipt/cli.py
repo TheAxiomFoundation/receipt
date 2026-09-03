@@ -642,14 +642,22 @@ def _emit(text: str, stream: TextIO) -> None:
     reader sees what was meant, spelled in what the terminal can show.
 
     The text stream is flushed before the buffer is written so the two
-    layers cannot reorder, and a stream with no ``buffer`` — a wrapper some
-    host has substituted — is written through its text API with the same
-    already-encoded text, which by construction it can encode.
+    layers cannot reorder, and a stream with no usable ``buffer`` — a
+    wrapper some host has substituted, or a wrapper whose buffer has been
+    detached, which raises rather than being absent — is written through its
+    text API with the same already-encoded text, which by construction it
+    can encode.
     """
 
     encoding = getattr(stream, "encoding", None) or "utf-8"
     data = (text + "\n").encode(encoding, errors="backslashreplace")
-    buffer = getattr(stream, "buffer", None)
+    try:
+        # Not ``getattr(..., None)``: a detached ``TextIOWrapper`` raises
+        # ValueError from the property rather than being missing it, and a
+        # default only absorbs AttributeError.
+        buffer = stream.buffer
+    except (AttributeError, ValueError):
+        buffer = None
     if buffer is None:
         stream.write(data.decode(encoding, errors="replace"))
         stream.flush()
@@ -694,18 +702,36 @@ def _refuse(as_json: bool, stage: str, message: str, code: int) -> int:
     of an eighty-column terminal and can leave a forged verdict line at
     column one as the last thing on the screen. ``receipt verify: FAIL`` is
     the last line either way.
+
+    Neither write may raise, and each is guarded separately. This function
+    is what the render boundary calls *after* an emission has already
+    failed, so in ``--json`` mode it was handed the very stream that just
+    failed and re-emitted to it — turning the one exit path the JSON
+    contract exists for into a traceback out of :func:`main`, which is the
+    failure this round's guarded writer was added to remove (adversarial
+    review of the Sol round 2 fix). A refusal that cannot be written is
+    still a refusal: the exit code carries it, and there is nothing else
+    this process can do with a stream that will not take bytes. Failing
+    stderr must not suppress the JSON either, which is why the two are
+    guarded apart rather than together.
     """
 
-    _emit(f"receipt verify: {_rendered(message)}\nreceipt verify: FAIL", sys.stderr)
+    try:
+        _emit(f"receipt verify: {_rendered(message)}\nreceipt verify: FAIL", sys.stderr)
+    except Exception:  # noqa: BLE001 - a refusal that cannot print is still a refusal
+        pass
     if as_json:
-        _emit(
-            json.dumps(
-                _bounded_payload(_fail_payload(stage, message)),
-                indent=2,
-                sort_keys=True,
-            ),
-            sys.stdout,
-        )
+        try:
+            _emit(
+                json.dumps(
+                    _bounded_payload(_fail_payload(stage, message)),
+                    indent=2,
+                    sort_keys=True,
+                ),
+                sys.stdout,
+            )
+        except Exception:  # noqa: BLE001 - as above; the exit code carries it
+            pass
     return code
 
 

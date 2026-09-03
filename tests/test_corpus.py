@@ -5568,3 +5568,70 @@ def test_alias_capability_is_measured_on_the_fold_key_not_the_written_pin(
         "CorpusSpec content suffix must be ASCII, because an 8.3 alias "
         f"extension cannot be derived against a non-ASCII one: {nfd!r}"
     )
+
+
+def test_a_short_name_carrying_an_oem_character_is_still_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5R2-F9, adversarially: the repertoire is not ASCII.
+
+    The 8.3 namespace is an OEM code page rather than ASCII — the premise
+    ``_short_name_extension`` refuses on from the other side — so a
+    character the volume's code page can represent survives into a short
+    name and is uppercased there. ``SMUGGL~1.ÉML`` is a spelling NTFS really
+    hands out for a long name with a ``.émlx`` extension on a code page 850
+    volume, and it opens that long name's file.
+
+    Tightening the recognizer to an ASCII-only repertoire accepted it as an
+    ordinary declared path, which is the alias screen failing exactly where
+    the module's own 8.3 paragraph says an alias exists. Every non-ASCII
+    character is allowed in the recognizer now; the ASCII half is unchanged,
+    so ``A~1B.TXT``, ``~1foo.txt`` and ``a ~1.txt`` are still ordinary
+    names. Without the widening this journal verifies.
+    """
+
+    from receipt.corpus import _is_short_name
+
+    assert _is_short_name("SMUGGL~1.ÉML")
+    assert _is_short_name("SMUGGL~1.YÉM")
+    assert not _is_short_name("a ~1.txt")
+    write_tree(tmp_path)
+    rows = journal_rows()
+    rows[0]["path"] = "rules/SMUGGL~1.ÉML"
+    with pytest.raises(CorpusError, match="component Windows would alias"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_a_real_aliasing_root_spelling_keeps_the_root_component_refusal(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5R2-F1, adversarially: the generic refusal must not preempt.
+
+    S5R2-F1 binds every bound path component to the spelling its directory
+    emits, and the pinned content root's own components pass through the
+    same walk. On a case-insensitive host that made the generic "not spelled
+    by its directory" refusal fire for a tree holding ``RULES/`` under a
+    ``rules`` pin — preempting ``_assert_no_aliasing_root_component``, which
+    asks the same question a line later and names the entry that aliases the
+    pinned spelling. The existing test for that wording injects a phantom
+    entry through ``iterdir`` and so never exercised the real case.
+
+    The content-root walk asks the symlink question and not the spelling
+    one, because the check a line later says more. This asserts the refusal
+    an auditor actually gets, following the host: where the pinned spelling
+    resolves to the differently-spelled directory, the aliasing refusal
+    names it; where it does not, the root is simply absent.
+    """
+
+    write_tree(tmp_path)
+    (tmp_path / "rules").rename(tmp_path / "RULES")
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    message = str(caught.value)
+    assert message in (
+        "tree entry 'RULES' aliases the pinned content root component "
+        "'rules' on a case- or normalization-insensitive filesystem",
+        "pinned content root is absent from the tree: rules",
+    ), message

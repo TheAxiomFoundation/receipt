@@ -333,10 +333,12 @@ GATE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._/-]{0,127}\Z")
 #: underscore when Win32 derives a short name, which is what
 #: :func:`_short_name_extension` models.
 SHORT_NAME_PUNCTUATION = frozenset("$%'-_@~`!(){}^#&")
-#: Every character an 8.3 short name may carry, which is that punctuation
-#: plus the ASCII letters and digits. A character outside this set is one
-#: 8.3 generation would have replaced, so a name carrying one is not a
-#: generated short name.
+#: Every *ASCII* character an 8.3 short name may carry, which is that
+#: punctuation plus the ASCII letters and digits. An ASCII character outside
+#: this set is one 8.3 generation removes or replaces, so a name carrying one
+#: is not a generated short name. See :func:`_short_name_character`, which is
+#: the question the recognizer actually asks, and which is wider than this
+#: set in the one direction that matters.
 SHORT_NAME_CHARACTERS = (
     frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
     | SHORT_NAME_PUNCTUATION
@@ -1371,6 +1373,26 @@ def _short_name_carries_pinned_suffix(name: str, suffixes: tuple[str, ...]) -> b
     return any(_path_fold(alias) == _path_fold(suffix) for suffix in capable)
 
 
+def _short_name_character(character: str) -> bool:
+    """Whether 8.3 generation could emit this character into a short name.
+
+    The ASCII half is :data:`SHORT_NAME_CHARACTERS`: the letters, the digits
+    and the punctuation 8.3 keeps. Everything else in ASCII is removed (a
+    space) or replaced by an underscore, so a name carrying one is not a
+    name generation produced.
+
+    Every *non-ASCII* character is allowed, and that is not laxity. The 8.3
+    namespace is an OEM code page rather than ASCII — the premise
+    :func:`_short_name_extension` refuses on from the other side — so a
+    character the volume's code page can represent survives into the short
+    name and is uppercased there. ``SMUGGL~1.ÉML`` is a spelling NTFS really
+    hands out, and an ASCII-only repertoire accepted it as an ordinary
+    declared path (adversarial review of the Sol round 2 fix).
+    """
+
+    return character in SHORT_NAME_CHARACTERS or ord(character) > 0x7F
+
+
 def _is_short_name(segment: str) -> bool:
     """Whether this component is shaped like a name 8.3 generation hands out.
 
@@ -1398,7 +1420,7 @@ def _is_short_name(segment: str) -> bool:
     if dot:
         if not 1 <= len(extension) <= 3:
             return False
-        if any(character not in SHORT_NAME_CHARACTERS for character in extension):
+        if any(not _short_name_character(character) for character in extension):
             return False
     if not 1 <= len(stem) <= SHORT_NAME_STEM_LIMIT:
         return False
@@ -1407,7 +1429,7 @@ def _is_short_name(segment: str) -> bool:
         return False
     if not 1 <= len(prefix) <= 6:
         return False
-    if any(character not in SHORT_NAME_CHARACTERS for character in prefix):
+    if any(not _short_name_character(character) for character in prefix):
         return False
     if not 1 <= len(digits) <= 6:
         return False
@@ -2434,7 +2456,7 @@ def _tree_content_paths(
         # empty or suffix-empty root behind a symlinked parent would enumerate
         # nothing and silently pass. (Cross-family review finding.)
         base = _assert_no_symlinked_component(
-            root, base_relative, what="pinned content root"
+            root, base_relative, what="pinned content root", spelled=False
         )
         _assert_no_aliasing_root_component(root, base_relative, generations=generations)
         if not base.exists():
@@ -2642,7 +2664,7 @@ def _assert_spelled_by_its_directory(
 
 
 def _assert_no_symlinked_component(
-    root: pathlib.Path, relative: str, *, what: str = "bound path"
+    root: pathlib.Path, relative: str, *, what: str = "bound path", spelled: bool = True
 ) -> pathlib.Path:
     """Walk every component, refusing if any of them is a symlink or reparse.
 
@@ -2661,6 +2683,14 @@ def _assert_no_symlinked_component(
     passes through after the symlink question has been answered for it. The
     symlink question comes first because it is the more urgent one and
     because it is the reason the walk exists.
+
+    ``spelled=False`` turns that half off, and exactly one caller passes it:
+    the content-root walk, whose components are checked a line later by
+    :func:`_assert_no_aliasing_root_component`. That check asks the same
+    question and answers it better — it names the entry that aliases the
+    pinned spelling — so letting the generic refusal preempt it would trade
+    a refusal an auditor can act on for one they cannot (adversarial review
+    of the Sol round 2 fix).
     """
 
     current = root
@@ -2676,7 +2706,8 @@ def _assert_no_symlinked_component(
                 f"{what} traverses a symlink or reparse point at "
                 f"{_quoted(current.relative_to(root).as_posix())}: {relative}"
             )
-        _assert_spelled_by_its_directory(parent, segment, relative)
+        if spelled:
+            _assert_spelled_by_its_directory(parent, segment, relative)
     return current
 
 
