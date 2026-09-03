@@ -2504,10 +2504,27 @@ def _active_anchor_identities(
     skipped as a rename, and one authority became two or two became one with
     no supplemental evidence anywhere (peer review, fifth gate round three).
 
-    Keyed by ``(id, root SPKI)``, and the signer sets of anchors sharing that
-    pair are unioned: a rotation leaves both bundle versions active, so one
-    authority is described by two anchors whose keys are both trusted for it,
-    and its equivalence class is both of them together.
+    What each authority maps to is its equivalence *class*: the connected
+    components of the active anchors, joined wherever two of them carry one
+    ``(id, root SPKI)`` or share a signing key, with each class's signer set
+    the union over its members.  Both joins are the same statement, made at
+    two moments.  Two anchors carrying one ``(id, root SPKI)`` are one
+    authority described twice, because a rotation leaves both bundle versions
+    active; two anchors sharing a signer are one authority under two names,
+    which is exactly the rename this walk skips -- so an activated rename
+    leaves behind two active anchors that *are* one authority, and a later
+    rotation under either name extends that one authority's keys.
+
+    Which is why the classes have to be transitive.  Take A allowing S1,
+    renamed to B, and then B rotated to S2: the active anchors are A with
+    {S1} and B with {S1, S2}, one authority spelled two ways with two keys
+    between them.  A further rename of it -- C carrying {S1, S2}, the whole
+    of what that authority now is -- is a rename by the same rule that
+    admitted the first one, but measured against the per-anchor sets it
+    equals neither A's {S1} nor, if the rotation retired S1, B's.  Refusing
+    it makes a chain that renamed an authority once and rotated its key
+    unable to rename it again (peer review, sixth gate round one).  Measured
+    against the class, it is the rename it is.
     """
 
     active: set[tuple[str, str]] = set()
@@ -2520,7 +2537,34 @@ def _active_anchor_identities(
             signers_by_authority.setdefault(authority, set()).update(
                 _anchor_signer_fingerprints(anchor)
             )
-    return active, signers_by_authority
+    # The components, by union-find over the authorities: keying by
+    # `(id, root SPKI)` has already joined the anchors that share that pair,
+    # and a shared signing key joins what is left.
+    representative: dict[tuple[str, str], tuple[str, str]] = {
+        authority: authority for authority in signers_by_authority
+    }
+
+    def owner(authority: tuple[str, str]) -> tuple[str, str]:
+        while representative[authority] != authority:
+            representative[authority] = representative[representative[authority]]
+            authority = representative[authority]
+        return authority
+
+    holder_of_signer: dict[str, tuple[str, str]] = {}
+    for authority, signers in signers_by_authority.items():
+        for fingerprint in sorted(signers):
+            other = holder_of_signer.setdefault(fingerprint, authority)
+            first, second = owner(authority), owner(other)
+            if first != second:
+                representative[second] = first
+    classes: dict[tuple[str, str], set[str]] = {}
+    for authority, signers in signers_by_authority.items():
+        classes.setdefault(owner(authority), set()).update(signers)
+    # One set object per class, shared by every authority in it, because that
+    # sharing is the statement: these anchors are one authority's names.
+    return active, {
+        authority: classes[owner(authority)] for authority in signers_by_authority
+    }
 
 
 def _supplemental_candidates(
@@ -2580,18 +2624,33 @@ def _supplemental_candidates(
     be reachable (fifth gate round three).  A split and a merge are claims
     about who is who, and nothing here can take a producer's word for one.
 
-    So the classes are kept.  ``_active_anchor_identities`` reports each
-    active authority's own signer set; a pending anchor whose signers touch
-    none of them is a candidate; one whose signers are exactly the class of
-    every active anchor it touches is that authority renamed and is skipped;
-    and anything else -- a piece of one class, several classes together, or a
-    class with a key that is nobody's -- is refused.  One message for all
-    three, because all three have one fix: file the authority so that a
-    pending anchor carries one active anchor's signers exactly, or none of
-    them.  ("Exactly the class of every anchor it touches" rather than "of
-    exactly one anchor" because two active anchors can legitimately carry one
-    class -- an activated rename is precisely that -- and a further rename of
-    such an authority is still a rename.)
+    So the classes are kept.  ``_active_anchor_identities`` reports, for each
+    active authority, the signer set of the *class* it belongs to -- the
+    connected component of the active anchors joined by a shared
+    ``(id, root SPKI)`` or a shared signing key.  A pending anchor whose
+    signers touch no class is a candidate; one whose signers are exactly the
+    class of every active anchor it touches is that authority renamed and is
+    skipped; and anything else -- a piece of one class, several classes
+    together, or a class with a key that is nobody's -- is refused.  One
+    message for all three, because all three have one fix: file the authority
+    so that a pending anchor carries one active authority's signers exactly,
+    or none of them.
+
+    The class and not the per-anchor set, because an activated rename made
+    two active anchors one authority and a rotation under either name
+    extended that one authority's keys: A allowing S1, renamed to B, B
+    rotated to S2, and the per-anchor sets are A's {S1} and B's {S1, S2}
+    while the authority is one thing with two keys.  A further rename of it
+    carries the whole class, which equals neither per-anchor set, so it was
+    refused -- and a chain that has renamed an authority once and rotated its
+    key could never rename it again (peer review, sixth gate round one).
+    Against the class it is the rename it is, and a pending anchor carrying a
+    proper subset of a merged class is still the split it is.  ("Exactly the
+    class of every anchor it touches" rather than "of exactly one anchor"
+    because two active anchors legitimately carry one class, and every anchor
+    of one class reports the same set, so this differs from "exactly one"
+    only where two *different* classes are touched -- which is the merge, and
+    is refused either way.)
 
     Nor may an anchor that is partly one thing and partly another simply be
     treated as new: the supplemental outcome is supposed to show that whoever
@@ -2660,7 +2719,7 @@ def _supplemental_candidates(
     view of the pending anchors' signers.
     """
 
-    active_authorities, active_signers_by_authority = _active_anchor_identities(
+    active_authorities, active_class_of = _active_anchor_identities(
         records, trusted_bundles, spec=spec
     )
     candidates: dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any]]] = {}
@@ -2713,15 +2772,18 @@ def _supplemental_candidates(
             if authority in active_authorities:
                 continue
             signers = _anchor_signer_fingerprints(anchor)
-            owners = [
-                owner
-                for owner, active in active_signers_by_authority.items()
-                if active & signers
+            # Every active authority whose *class* this anchor's keys touch.
+            # Two anchors of one class report one set, so this is a rename
+            # exactly when the anchor carries that whole set -- and a merge,
+            # which touches two classes, cannot equal both of them.
+            touched = [
+                active
+                for active, owned in active_class_of.items()
+                if owned & signers
             ]
-            if owners:
+            if touched:
                 if all(
-                    active_signers_by_authority[owner] == signers
-                    for owner in owners
+                    active_class_of[active] == signers for active in touched
                 ):
                     continue
                 raise TsaError(

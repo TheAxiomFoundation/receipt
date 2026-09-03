@@ -4996,6 +4996,182 @@ def test_a_pending_anchor_may_not_merge_two_active_authorities(
     assert str(witness.value) == merges
 
 
+def test_a_rename_and_a_rotation_leave_one_class_a_further_rename_may_carry(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_alpha: LocalTsa,
+) -> None:
+    """S6-F3: an authority is its class, and a class outlives its names.
+
+    The active signer sets were unioned per ``(anchor id, root SPKI)`` and no
+    further, so what a rename joined at one transition was apart again at the
+    next. Rename A to B and the two anchors are one authority, which is the
+    whole reason the rename was skipped; rotate B's key and that one
+    authority has two, one filed under each of its names. The per-anchor maps
+    are then A's ``{S1}`` and B's ``{S1, S2}``, and a further rename -- an
+    anchor carrying ``{S1, S2}``, which is the whole of what that authority
+    now is, and a rename by exactly the rule that admitted the first one --
+    equals neither of them and is refused. A chain that renamed an authority
+    once and rotated its key could never rename it again, and the transition
+    that tried was unwitnessable: no supplemental outcome can satisfy a
+    refusal at the candidate walk.
+
+    So the classes are the connected components of the active anchors, joined
+    by a shared ``(id, root SPKI)`` or a shared signing key, and the rename
+    test compares a pending anchor's signers with the class of every active
+    anchor it touches. Transitive because the two joins say one thing at two
+    moments: an activated rename made two anchors one authority, and a
+    rotation under either name extended that one authority's keys.
+
+    The change is a loosening and only a loosening. Where every touched
+    anchor's own set equalled the pending signers, the class does too -- a
+    component is connected through shared keys, so an anchor holding a key
+    outside the pending set cannot be joined to one holding only keys inside
+    it -- so nothing this used to skip is now refused. What it stops refusing
+    is exactly the anchor that carries a whole class. The guard below is the
+    other direction: an anchor carrying a proper subset of the merged class
+    is the split it always was.
+
+    Both the candidate walk and the whole witness are asserted, and the
+    premises are read back out of the bundles that were written.
+    """
+
+    alpha = local_anchors[0]
+    rotated = certificate_pins(rotated_alpha.signer_pem)
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    assert verify_tree(tree).status == "available"
+
+    # The rename, activated: a second name over the active root and key.
+    renamed = alias_of(alpha, anchor_id="alpha-renamed-2026")
+    rename, spec = add_bundle_version(tree, [renamed], version=2)
+    # The rotation, activated under that new name: the authority's second key.
+    rotation, spec = add_bundle_version(
+        tree,
+        [renamed],
+        version=3,
+        extra_signers={renamed.anchor_id: [rotated]},
+        base=spec,
+    )
+    active = {
+        BUNDLE_LOGICAL: tree.reference,
+        str(rename["path"]): rename,
+        str(rotation["path"]): rotation,
+    }
+    # The further rename, pending: the whole of what that authority now is.
+    again = alias_of(alpha, anchor_id="alpha-renamed-again-2026")
+    whole, spec = add_bundle_version(
+        tree,
+        [again],
+        version=4,
+        extra_signers={again.anchor_id: [rotated]},
+        base=spec,
+    )
+    # And the guard, pending: a proper subset of that same class.
+    part = alias_of(alpha, anchor_id="alpha-halved-2026")
+    subset, spec = add_bundle_version(
+        tree, [part], version=5, signers={part.anchor_id: rotated}, base=spec
+    )
+
+    # The premises, read back out of the bundles that were written: one
+    # authority spelled three ways, with one key under the first name and two
+    # under the second, and a pending anchor carrying both.
+    written = {
+        version: json.loads(
+            (tree.records / "trust" / f"tsa-anchors-v{version}.json").read_text()
+        )["anchors"][0]
+        for version in (1, 2, 3, 4, 5)
+    }
+    keys = {
+        version: {signer["spkiSha256"] for signer in entry["allowedSigners"]}
+        for version, entry in written.items()
+    }
+    assert keys[1] == {alpha.signer_pins["spkiSha256"]}
+    assert keys[2] == {alpha.signer_pins["spkiSha256"]}
+    assert keys[3] == {alpha.signer_pins["spkiSha256"], rotated["spkiSha256"]}
+    assert keys[4] == keys[3]
+    assert keys[5] == {rotated["spkiSha256"]}
+    assert {written[version]["id"] for version in (1, 2, 3, 4, 5)} == {
+        alpha.anchor_id,
+        renamed.anchor_id,
+        renamed.anchor_id,
+        again.anchor_id,
+        part.anchor_id,
+    }
+    assert (
+        written[1]["rootCertificate"]
+        == written[2]["rootCertificate"]
+        == written[3]["rootCertificate"]
+        == written[4]["rootCertificate"]
+    )
+
+    # And the class itself: two active authorities, one class, whose set is
+    # neither of their own -- which is what "transitive" means here.
+    authorities, class_of = tsa_module._active_anchor_identities(
+        tree.records, active, spec=spec
+    )
+    first = (alpha.anchor_id, alpha.root_pins["spkiSha256"])
+    second = (renamed.anchor_id, alpha.root_pins["spkiSha256"])
+    assert authorities == {first, second}
+    assert class_of[first] == class_of[second] == keys[3]
+    assert class_of[first] != keys[1]
+
+    def candidates_for(pending: dict[str, Any]) -> set[tuple[str, str]]:
+        return set(
+            tsa_module._supplemental_candidates(
+                tree.records, active, [pending], spec=spec
+            )
+        )
+
+    # The further rename is a rename: nothing to prove by stamping again.
+    assert candidates_for(whole) == set()
+    # The proper subset is the split it always was.
+    splits = (
+        f"pending TSA anchor {part.anchor_id} splits or merges active "
+        "authorities' signers; a pending anchor must carry one active "
+        "anchor's signers exactly, or none of them"
+    )
+    with pytest.raises(TsaError) as caught:
+        candidates_for(subset)
+    assert str(caught.value) == splits
+
+    # And the whole witness, against the newest active bundle, which is the
+    # one a v2 witness has to name.
+    rewrite_witness(
+        tree,
+        lambda payload: payload.update(
+            {
+                "trustBundleId": str(rotation["bundleId"]),
+                "trustBundlePath": str(rotation["path"]),
+                "trustBundleSha256": str(rotation["sha256"]),
+                "anchorOutcomes": [
+                    {
+                        **payload["anchorOutcomes"][0],
+                        "tsaAnchorId": renamed.anchor_id,
+                        "tsa": renamed.endpoint,
+                    }
+                ],
+            }
+        ),
+    )
+
+    def transition(pending: dict[str, Any]) -> WitnessEvidence:
+        return verify_witness(
+            tree.record,
+            spec=spec,
+            records=tree.records,
+            trusted_bundles=active,
+            transition_bundle_updates=[pending],
+        )
+
+    evidence = transition(whole)
+    assert evidence.status == "available"
+    assert [token.anchor_id for token in evidence.tokens] == [renamed.anchor_id]
+    assert evidence.supplemental_tokens == ()
+    with pytest.raises(TsaError) as witness:
+        transition(subset)
+    assert str(witness.value) == splits
+
+
 def test_two_pending_bundles_may_not_introduce_one_authority_twice(
     tmp_path: pathlib.Path,
     local_anchors: tuple[LocalAnchor, ...],
