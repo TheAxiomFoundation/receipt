@@ -262,6 +262,13 @@ seven). Every ancestor of
 every bound path, from the tree root down to the file's own parent, is
 therefore stamped as well.
 
+Those by-name ancestor walks share a declared-prefix budget with the
+journal's alias index and stop at the first prefix that is absent or not a
+directory. There is no directory listing to protect at that prefix and
+nothing below it can exist, so descending through every remaining component
+only multiplied strings and ``lstat`` calls before the missing bound file
+refused later (peer review, Sol round 7).
+
 *When* each stamp is taken is what decides what the re-check can promise, and
 the answer is: at the run's first read of that directory, by whichever pass
 makes it. One recorder is built before anything looks at the tree and is
@@ -386,6 +393,15 @@ the 8.3 comparison, which is well defined only for a pin that is
 structurally an extension — a single period and one to three characters —
 so that comparison asks :data:`ALIAS_CAPABLE_SUFFIX_RE` which pins it may be
 made of, and every other pin is answered by "ends in this suffix" alone.
+
+The journal-side alias check is bounded and linear in those declared names.
+It used to join and fold a fresh cumulative string for every prefix and keep
+both spellings: 4,096 portable paths at 1,023 characters and 511 components
+made about 2.1 million dictionary entries and about two gibibytes of strings
+before any budget applied (peer review, Sol round 7). A component trie now
+represents each folded prefix once and stores each spelling once. Every
+path-prefix visit and every by-name ancestor visit charges one shared
+:data:`MAX_PATH_COMPONENTS_TOTAL` counter before allocation or ``lstat``.
 
 Two Win32 facts survive the policy rather than being subsumed by it, and both
 are screens rather than models. ``CON``, ``PRN``, ``AUX``, ``NUL`` and the
@@ -716,6 +732,27 @@ MAX_JOURNAL_BYTES = 64 * 1024 * 1024
 #: quotes back, not the JSON a verdict renders, and the total the verdict
 #: renders is bounded by ``MAX_REMOVED_TEXT`` instead.
 MAX_PATH_TEXT = 1024
+#: The most declared path prefixes the alias index and by-name ancestor
+#: recorder may visit together. One counter is shared by both jobs and by
+#: every call in a verification, just as the two closed-world sweeps share
+#: ``MAX_SWEEP_WORK``: repeating a pass cannot buy another budget.
+#:
+#: Derived from the default journal capacity and the path-text bound rather
+#: than picked. A path with ``n`` non-empty components has at least ``2n - 1``
+#: characters: ``n`` one-character names and ``n - 1`` separators. The alias
+#: index visits ``n`` prefixes and the ancestor recorder visits at most the
+#: ``n - 1`` non-root parents, once per effective path, so together they cost
+#: at most the path's text length. A default journal can contribute at most
+#: ``MAX_JOURNAL_ROWS`` effective paths, hence 4,096 × 1,024 = 4,194,304.
+#: A consumer that pins a larger journal capacity still meets this independent
+#: traversal ceiling rather than silently multiplying it.
+#:
+#: The package fixture spends eighteen visits: eleven component prefixes in
+#: its three content paths and one attested path, then seven non-root ancestor
+#: prefixes. The maximum-depth regression spends 2,093,056 visits on 4,096
+#: paths with 511 components each, while their shared-prefix trie holds only
+#: 4,606 nodes rather than one cumulative string per visit.
+MAX_PATH_COMPONENTS_TOTAL = MAX_JOURNAL_ROWS * MAX_PATH_TEXT
 #: The most characters the verdict's removedPaths may carry in total; the
 #: gate budget's counterpart for the other producer-controlled list the
 #: verdict renders verbatim (peer review, round two). Counted the same way
@@ -1841,6 +1878,36 @@ def parse_journal(
     return content, attested, tuple(gates), removed_paths
 
 
+class _PathPrefixWork:
+    """The one budget the alias index and ancestor recorder share.
+
+    Both walks are driven by declared path components, and both used to do
+    work before any existing tree-walk budget applied. Charging the same
+    counter means parsing the path once in each role cannot multiply the
+    hard bound; see :data:`MAX_PATH_COMPONENTS_TOTAL` for the derivation.
+    """
+
+    def __init__(self) -> None:
+        self._work = 0
+
+    @property
+    def work(self) -> int:
+        """Path-prefix visits charged so far."""
+
+        return self._work
+
+    def charge(self) -> None:
+        """Charge one path-prefix visit before it allocates or stats."""
+
+        self._work += 1
+        if self._work > MAX_PATH_COMPONENTS_TOTAL:
+            raise CorpusError(
+                "declared paths visit more than "
+                f"{MAX_PATH_COMPONENTS_TOTAL} prefixes; the corpus cannot be "
+                "bound safely"
+            )
+
+
 class _SweepWork:
     """The one budget both closed-world sweeps charge against.
 
@@ -1976,7 +2043,7 @@ def _under(directory: str, name: str) -> str:
 def _directory_generation(
     directory: pathlib.Path,
 ) -> tuple[int, int, int, int] | None:
-    """Identity and both change stamps of a directory, or None if unreadable.
+    """Identity and change stamps, or None if unreadable or not a directory.
 
     ``st_mtime_ns`` moves when an entry is added, removed or renamed;
     ``st_ctime_ns`` moves for those and for a metadata change as well, and
@@ -1995,6 +2062,8 @@ def _directory_generation(
     try:
         info = os.lstat(directory)
     except OSError:
+        return None
+    if not stat.S_ISDIR(info.st_mode):
         return None
     return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
 
@@ -2057,17 +2126,21 @@ class _DirectoryGenerations:
     for the reason given there.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, prefix_work: _PathPrefixWork) -> None:
         self._seen: dict[
             str, tuple[pathlib.Path, tuple[int, int, int, int] | None]
         ] = {}
+        self._prefix_work = prefix_work
+        self._ancestor_paths: set[str] = set()
 
-    def record(self, directory: pathlib.Path, relative: str) -> None:
-        """Stamp this directory, if the run has not stamped it yet."""
+    def record(self, directory: pathlib.Path, relative: str) -> bool:
+        """Stamp this directory once; return whether it is a directory."""
 
         if relative in self._seen:
-            return
-        self._seen[relative] = (directory, _directory_generation(directory))
+            return self._seen[relative][1] is not None
+        generation = _directory_generation(directory)
+        self._seen[relative] = (directory, generation)
+        return generation is not None
 
     def record_ancestors(self, root: pathlib.Path, relative: str) -> None:
         """Stamp the tree root and every directory down to this path's parent.
@@ -2080,15 +2153,29 @@ class _DirectoryGenerations:
         walked into. Kept even though the spelling walk now stamps the
         parents it drains: what is stamped must not depend on which optional
         pass ran.
+
+        The walk stops at the first absent or non-directory prefix. Such a
+        prefix has no listing to stamp, and no child below it can exist, so
+        continuing would spend one ``lstat`` and build one cumulative path
+        per remaining component only to reach the missing-file refusal. Each
+        non-root prefix is charged against the same budget as the alias
+        index. A path is walked at most once even though callers ask before
+        both identity passes; the earliest stamps remain in ``_seen``.
         """
 
-        self.record(root, "")
+        if relative in self._ancestor_paths:
+            return
+        self._ancestor_paths.add(relative)
+        if not self.record(root, ""):
+            return
         directory = root
         walked: list[str] = []
         for segment in relative.split("/")[:-1]:
+            self._prefix_work.charge()
             directory = directory / segment
             walked.append(segment)
-            self.record(directory, "/".join(walked))
+            if not self.record(directory, "/".join(walked)):
+                break
 
     def assert_unchanged(self) -> None:
         """Refuse if any stamped directory is not what it was when it was read.
@@ -2504,7 +2591,36 @@ def _has_pinned_suffix(relative: str, suffixes: tuple[str, ...]) -> bool:
     return any(folded.endswith(_path_fold(suffix)) for suffix in suffixes)
 
 
-def _reject_aliasing_paths(relatives: list[str]) -> None:
+class _AliasPrefix:
+    """One component in the folded declared-path trie.
+
+    The parent link reconstructs a spelling only for a refusal. Ordinary
+    insertion never builds a cumulative prefix string, and ``children`` is
+    allocated only when a node actually gains a child.
+    """
+
+    __slots__ = ("children", "component", "parent")
+
+    def __init__(self, component: str, parent: "_AliasPrefix | None") -> None:
+        self.component = component
+        self.parent = parent
+        self.children: dict[str, _AliasPrefix] | None = None
+
+    def spelled_path(self) -> str:
+        """Reconstruct this node's declared spelling for a refusal."""
+
+        components: list[str] = []
+        node: _AliasPrefix | None = self
+        while node is not None and node.parent is not None:
+            components.append(node.component)
+            node = node.parent
+        components.reverse()
+        return "/".join(components)
+
+
+def _reject_aliasing_paths(
+    relatives: list[str], *, work: _PathPrefixWork
+) -> int:
     """Refuse two declared paths a real filesystem would treat as one.
 
     Two passes, because a path can alias another in two places and the
@@ -2529,8 +2645,19 @@ def _reject_aliasing_paths(relatives: list[str]) -> None:
 
     Under the portable-name policy the fold key over a declared path is
     ASCII case-insensitivity, so what both passes are asking is whether two
-    spellings differ only in case. The folded prefix carries its own depth —
-    it holds one separator per level — so the depth needs no key of its own.
+    spellings differ only in case.
+
+    Prefixes are represented by a trie, not cumulative strings. Each node's
+    child dictionary is already scoped by the folded parent, so its key is
+    only the folded component; the node stores that component's spelling
+    once and links to its parent. A spelling is joined only when a collision
+    must be quoted. The returned node count exists so the maximum-depth
+    allocation regression can assert the representation rather than time it.
+
+    Every ``(path, prefix)`` visit charges ``work`` before looking in the
+    trie. The same counter is handed to
+    :meth:`_DirectoryGenerations.record_ancestors`; see
+    :data:`MAX_PATH_COMPONENTS_TOTAL` for why both jobs fit its derived bound.
 
     The whole-path pass runs first and completely, so a journal with both
     kinds of collision keeps the message that names the more specific one.
@@ -2546,19 +2673,31 @@ def _reject_aliasing_paths(relatives: list[str]) -> None:
                 f"is ambiguous: {_quoted(seen[key])} and {_quoted(relative)}"
             )
         seen[key] = relative
-    directories: dict[str, str] = {}
+    root = _AliasPrefix("", None)
+    entries = 0
     for relative in relatives:
         components = relative.split("/")
-        for depth in range(1, len(components) + 1):
-            prefix = "/".join(components[:depth])
-            key = _path_fold(prefix)
-            previous = directories.get(key)
-            if previous is not None and previous != prefix:
+        parent = root
+        for depth, component in enumerate(components, start=1):
+            work.charge()
+            key = _path_fold(component)
+            children = parent.children
+            child = children.get(key) if children is not None else None
+            if child is not None and child.component != component:
+                prefix = "/".join(components[:depth])
                 raise CorpusError(
                     "two declared paths would alias at a directory: "
-                    f"{_quoted(previous)} and {_quoted(prefix)}"
+                    f"{_quoted(child.spelled_path())} and {_quoted(prefix)}"
                 )
-            directories[key] = prefix
+            if child is None:
+                if children is None:
+                    children = {}
+                    parent.children = children
+                child = _AliasPrefix(component, parent)
+                children[key] = child
+                entries += 1
+            parent = child
+    return entries
 
 
 def _tree_content_paths(
@@ -3229,7 +3368,13 @@ def verify_corpus_binding(
     # then removed between the two sweeps leaves both snapshots equal, while
     # the directory that carried it was first stamped after the mutation, so
     # its stamp matched too (peer review, Sol round 5).
-    generations = _DirectoryGenerations()
+    # One component-prefix budget for both consumers of declared path depth:
+    # the alias trie and the by-name ancestor stamps. For a path with ``n``
+    # components they visit ``n`` and at most ``n - 1`` prefixes respectively,
+    # which fits the path's own text length and is why the shared bound is
+    # derived from the journal and path-text caps.
+    prefix_work = _PathPrefixWork()
+    generations = _DirectoryGenerations(prefix_work)
     # One sweep budget for the whole verification, charged by both membership
     # sweeps and by every root-component listing beside them. The sweep read
     # a directory of any width into a sorted list and descended into every
@@ -3249,7 +3394,7 @@ def verify_corpus_binding(
     # whole, because the collision can be a directory: "rules/A/x.yaml" and
     # "rules/a/y.yaml" are two distinct paths that an insensitive clone holds
     # in one merged directory (peer review, Sol round 3).
-    _reject_aliasing_paths(list(content) + list(attested))
+    _reject_aliasing_paths(list(content) + list(attested), work=prefix_work)
 
     tree = _tree_content_paths(root, spec, work=sweep, generations=generations)
     journal_paths = set(content)
