@@ -1423,7 +1423,8 @@ def test_the_rendering_bound_truncates_at_its_own_edge_and_not_before() -> None:
     assert _bounded(exact) == exact
     over = "x" * (MAX_RENDERED_FIELD + 1)
     assert _bounded(over) == exact + "…[1 more characters]"
-    assert _bounded("x" * (MAX_RENDERED_FIELD + 500)).endswith("…[500 more characters]")
+    far_over = _bounded("x" * (MAX_RENDERED_FIELD + 500))
+    assert far_over.endswith("…[500 more characters]")
 
 
 def test_the_json_bound_walks_values_and_leaves_keys_alone() -> None:
