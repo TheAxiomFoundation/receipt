@@ -106,14 +106,30 @@ re-stated after the walk has finished. An entry added, removed or renamed
 moves its parent's mtime and ctime, so the change is refused although nothing
 re-derived the set.
 
+Stamping only what those passes read was not enough. Neither walk reaches the
+directory that holds an attested file — attested paths sit outside the content
+roots, and a tombstone walk descends only toward a removed path — so a journal
+with no tombstones left ``.axiom`` unstamped, and replacing
+``.axiom/toolchain.toml`` by rename during the second tombstone pass moved a
+generation nothing had recorded (peer review, round seven). Every ancestor of
+every bound path, from the tree root down to the file's own parent, is
+therefore stamped as well, before the identity re-check re-states the files.
+
+The per-file identity that re-check compares carries the file's own ctime for
+the same reason the directory stamp does. Size and mtime are values a writer
+restores with ``os.utime``; on POSIX the inode change time is not settable
+from userspace at all, so a rewrite in place through the same inode is visible
+even when everything else about the file has been put back.
+
 What remains is one instant: between the last stamp re-read and the return the
 tree can still change, and nothing in this shape of verification removes that
 — only verifying a snapshot the verifier holds open would (tracked as
 follow-up; not done here). Two narrower things sit inside it as well: a
-rewrite in place through the same inode after the identity re-check, which
-moves the file's own stamps and not its parent's, and a change on a filesystem
-whose directory timestamps are too coarse to distinguish it from the stamp
-taken an instant earlier.
+rewrite in place through the same inode after the identity re-check has
+already run, which moves the file's own stamps and not its parent's and which
+nothing afterwards reads, and a change on a filesystem whose directory
+timestamps are too coarse to distinguish it from the stamp taken an instant
+earlier.
 
 Every trust anchor arrives from the consumer's committed :class:`CorpusSpec`.
 The module ships no defaults: not a content root, not a required gate, not an
@@ -1134,6 +1150,17 @@ class _DirectoryGenerations:
     insertion, a removal, a rename over an existing name — each of them moves
     the parent's mtime and ctime, whatever it does to the file itself.
 
+    What is stamped is not only what those passes *read*. Stamping the
+    directories the walks happened to enumerate left every ancestor of an
+    attested file unwatched, because attested paths sit outside the content
+    roots and a tombstone walk only descends toward a removed path: with
+    neither, nothing had ever looked at ``.axiom``, so replacing
+    ``.axiom/toolchain.toml`` by rename during the second tombstone pass
+    moved that directory's stamps and no stamp existed to notice (peer
+    review, round seven). So every ancestor of every bound path — from the
+    tree root down to the file's own parent — is stamped as well, before the
+    identity re-check re-states the files themselves.
+
     The first reading of a directory wins. A directory the uncached tombstone
     pass lists repeatedly is therefore held against what it looked like the
     first time anything in the closing sequence read it, not the last, so the
@@ -1157,6 +1184,24 @@ class _DirectoryGenerations:
         if relative in self._seen:
             return
         self._seen[relative] = (directory, _directory_generation(directory))
+
+    def record_ancestors(self, root: pathlib.Path, relative: str) -> None:
+        """Stamp the tree root and every directory down to this path's parent.
+
+        A bound file's parent is not necessarily a directory either closing
+        pass enumerates — an attested path sits outside the content roots,
+        and the tombstone walk descends only toward a removed path — so the
+        directories that hold the verdict's own subjects are stamped by name
+        rather than by being walked into.
+        """
+
+        self.record(root, "")
+        directory = root
+        walked: list[str] = []
+        for segment in relative.split("/")[:-1]:
+            directory = directory / segment
+            walked.append(segment)
+            self.record(directory, "/".join(walked))
 
     def assert_unchanged(self) -> None:
         """Refuse if any stamped directory is not what it was when it was read."""
@@ -1771,12 +1816,23 @@ def _assert_no_symlinked_component(
 
 
 class _FileIdentity(NamedTuple):
-    """What the descriptor said about a file at the moment it was hashed."""
+    """What the descriptor said about a file at the moment it was hashed.
+
+    ``ctime_ns`` is here for the reason :func:`_directory_generation` gives
+    about directories: ``mtime`` is a value a writer sets with ``os.utime``,
+    and on POSIX the inode change time is not. Without it a bound file could
+    be rewritten in place through the same inode at the same size with its
+    mtime restored afterwards, and the identity re-check — device, inode,
+    size, mtime — saw exactly what it had seen before (peer review, round
+    seven). That the module can rely on this at all is why
+    :func:`verify_corpus_binding` refuses to run off POSIX.
+    """
 
     device: int
     inode: int
     size: int
     mtime_ns: int
+    ctime_ns: int
 
 
 def _regular_file_digest(root: pathlib.Path, relative: str) -> tuple[str, _FileIdentity]:
@@ -1806,9 +1862,12 @@ def _regular_file_digest(root: pathlib.Path, relative: str) -> tuple[str, _FileI
     *during* verification, who can already defeat a local check by other
     means. The post-hash sweeps in :func:`verify_corpus_binding` (membership
     re-enumeration plus per-file identity re-check) catch a resulting set
-    change or file swap after the fact; a same-inode rewrite that also
-    restores size and ``mtime_ns`` is beneath their resolution, which is one
-    reason the verdict speaks of the bytes as they existed when hashed.
+    change or file swap after the fact. A same-inode rewrite is caught there
+    too, by the ``ctime_ns`` this identity carries: restoring size and
+    ``mtime_ns`` afterwards is a writer's prerogative and restoring the inode
+    change time is not. What stays beneath their resolution is a rewrite
+    landing after that re-check has already run, which is one reason the
+    verdict speaks of the bytes as they existed when hashed.
     """
 
     path = _assert_no_symlinked_component(root, relative)
@@ -1847,7 +1906,11 @@ def _regular_file_digest(root: pathlib.Path, relative: str) -> tuple[str, _FileI
                 break
             digest.update(chunk)
         identity = _FileIdentity(
-            info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+            info.st_dev,
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
         )
     finally:
         os.close(fd)
@@ -1979,13 +2042,15 @@ def verify_corpus_binding(
     # bound file deleted after the first walk; the per-file identity re-check
     # catches a hashed file replaced or rewritten in place afterwards — for
     # every bound file, content and attested alike, the path must still be a
-    # regular file with the device, inode, size, and mtime the hashing
-    # descriptor saw. A same-inode rewrite that also restores size and
-    # mtime_ns is beneath this sweep's resolution; re-reading every byte
-    # would double the verifier's IO to move that boundary, not remove it.
-    # They come after every pass that reads the tree except the second
-    # tombstone pass below, deliberately: every earlier pass, the first
-    # tombstone walk included, is inside the window they close.
+    # regular file with the device, inode, size, mtime and ctime the hashing
+    # descriptor saw. The ctime term is what makes a rewrite through the same
+    # inode visible: size and mtime are both values the writer restores, and
+    # on POSIX the inode change time is not (peer review, round seven).
+    # Re-reading every byte would be the only stronger check, and it would
+    # double the verifier's IO to move the last-look boundary rather than
+    # remove it. They come after every pass that reads the tree except the
+    # second tombstone pass below, deliberately: every earlier pass, the
+    # first tombstone walk included, is inside the window they close.
     #
     # What the second tombstone pass then does to the tree is watched by
     # generation instead of by re-derivation. Every directory this sweep
@@ -2001,6 +2066,18 @@ def verify_corpus_binding(
             "the content tree changed during verification; the closed-world "
             "set is not stable and the verdict is refused"
         )
+    # Stamped before the identities are re-stated, not after, so the stamps
+    # predate everything the loop below concludes. Every ancestor of every
+    # bound path is taken, because the two walks stamp only what they read
+    # and neither of them reads the directory holding an attested file: with
+    # ``.axiom`` unstamped, replacing ``.axiom/toolchain.toml`` by rename
+    # during the second tombstone pass moved that directory's mtime and
+    # ctime with nothing recorded to compare them against, and the verdict
+    # returned the digest of bytes the tree no longer held (peer review,
+    # round seven).
+    for path in sorted(hashed):
+        generations.record_ancestors(root, path)
+
     for path in sorted(hashed):
         try:
             after = os.lstat(_assert_no_symlinked_component(root, path))
@@ -2015,7 +2092,8 @@ def verify_corpus_binding(
             after.st_ino,
             after.st_size,
             after.st_mtime_ns,
-        ) != (seen.device, seen.inode, seen.size, seen.mtime_ns):
+            after.st_ctime_ns,
+        ) != (seen.device, seen.inode, seen.size, seen.mtime_ns, seen.ctime_ns):
             raise CorpusError(
                 f"bound file {_quoted(path)} changed during verification; the "
                 "verdict is refused"
