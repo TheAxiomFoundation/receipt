@@ -28,11 +28,28 @@ round seven). The library's own messages are left exactly as they are —
 harness — so the escaping lives here, at the one place the bytes reach a
 terminal.
 
+Escaping only the code points that *are* control characters was not enough,
+in two directions (peer review, round eight). A filename byte no filesystem
+encoding could decode reaches Python as a lone surrogate under POSIX
+``surrogateescape`` — ``os.fsdecode(b"evil\\x9b.py")`` is
+``"evil\\udc9b.py"`` — which carries no control character at all, passed
+through the helper untouched, and was encoded straight back to the byte 0x9B
+by ``sys.stdout``'s own error handler. 0x9B is CSI. That path prints on the
+verdict's *spec* line, which a PASS prints as readily as a FAIL. And a
+Unicode format control such as U+202E RIGHT-TO-LEFT OVERRIDE reverses the
+rest of a line without being a control character in the C0 sense, so
+release-chain failure text carrying one printed as whatever the producer
+arranged. :func:`_terminal_safe` covers both classes now, and its docstring
+lists all four.
+
 The JSON renderer needs nothing of the kind. ``json.dumps`` with
-``ensure_ascii`` at its default already escapes every code point
-:func:`_terminal_safe` covers — the C0 block, DEL, C1, and U+2028/U+2029 —
-into ``\\uXXXX`` sequences inside the quoted string, so a machine consumer
-receives them as data and no terminal ever sees them raw.
+``ensure_ascii`` at its default escapes every non-ASCII code point into a
+``\\uXXXX`` sequence inside the quoted string — lone surrogates and format
+controls included — and every code point below 0x20 with it, so a machine
+consumer receives them as data and no terminal ever sees them raw.
+
+What both renderers do share is a bound on length rather than on content:
+see :data:`MAX_RENDERED_FIELD`.
 """
 
 from __future__ import annotations
@@ -41,9 +58,11 @@ import argparse
 import json
 import pathlib
 import sys
+import unicodedata
 from typing import Sequence
 
 from receipt import __version__
+from receipt._unicode_repertoire import FORMAT_CONTROL_RANGES
 from receipt.corpus import GATE_TIERS
 from receipt.verify import (
     TIER_MEANING,
@@ -132,15 +151,49 @@ _TERMINAL_UNSAFE = (
     0x2028,
     0x2029,
 )
-#: Each of them mapped to the escape Python's own ``repr`` writes for it —
-#: ``\r``, ``\x1b``, ``\u2028``. Using ``repr``'s spelling is not a shortcut:
-#: it is the same escaping ``receipt.corpus._quoted`` applies to the paths it
-#: names, so a tree-derived name reads identically wherever it appears.
-_TERMINAL_ESCAPES = {chr(code): repr(chr(code))[1:-1] for code in _TERMINAL_UNSAFE}
+#: The pinned Unicode 16.0 ``Cf`` set, flattened for a membership test. The
+#: same table ``receipt.corpus`` screens producer text against, imported
+#: rather than copied so the two cannot drift.
+_FORMAT_CONTROL_CODES = frozenset(
+    code for low, high in FORMAT_CONTROL_RANGES for code in range(low, high + 1)
+)
+
+
+#: The three code points ``repr`` spells with a letter rather than with a
+#: hex escape. Matching it exactly is what keeps a tree-derived name reading
+#: the same here as it does through ``receipt.corpus._quoted``.
+_SHORT_ESCAPES = {0x09: "\\t", 0x0A: "\\n", 0x0D: "\\r"}
+
+
+def _python_escape(code: int) -> str:
+    """The escape Python's own ``repr`` writes for a non-printable code point.
+
+    Spelled out rather than taken from ``repr``, because ``repr`` escapes
+    exactly what the *running* interpreter calls non-printable and this
+    boundary must not depend on that: a code point some future table
+    reclassified as printable would come back from ``repr`` as itself, and
+    the escaping would silently do nothing where it matters most. The
+    spelling is identical — ``\\r``, ``\\x1b``, ``\\u202e``, ``\\udc9b`` — so
+    tree-derived name still reads the same here as it does through
+    ``receipt.corpus._quoted``, which is ``repr``.
+    """
+
+    short = _SHORT_ESCAPES.get(code)
+    if short is not None:
+        return short
+    if code <= 0xFF:
+        return f"\\x{code:02x}"
+    if code <= 0xFFFF:
+        return f"\\u{code:04x}"
+    return f"\\U{code:08x}"
+
+
+#: Each terminal-controlling code point mapped to its escape.
+_TERMINAL_ESCAPES = {chr(code): _python_escape(code) for code in _TERMINAL_UNSAFE}
 
 
 def _terminal_safe(text: str) -> str:
-    """Replace every terminal-controlling code point with its Python escape.
+    """Replace every code point that must not reach a terminal with its escape.
 
     Applied to every string the text verdict takes from the result — pass
     names, details and failures, the spec's name and path, the root, gate
@@ -148,13 +201,55 @@ def _terminal_safe(text: str) -> str:
     and to nothing else. The fixed lines of the verdict are literals in this
     module and carry none of these characters, so they are left alone.
 
+    Four classes:
+
+    - the C0 block, DEL and the C1 block, which move a cursor, clear a line
+      or begin an escape sequence;
+    - U+2028 and U+2029, which split one verdict line into two in any
+      renderer that honours them;
+    - every lone surrogate, U+D800 through U+DFFF. A filename byte the
+      filesystem encoding could not decode arrives as one under POSIX
+      ``surrogateescape``: ``os.fsdecode(b"evil\\x9b.py")`` is
+      ``"evil\\udc9b.py"``, which carries no character from the first class
+      at all, so the helper passed it through — and ``sys.stdout``'s own
+      error handler encodes it straight back to the byte 0x9B, which is CSI.
+      A path like that reaches the verdict on the *spec* line, which a PASS
+      prints as readily as a FAIL, so this one did not even need the run to
+      fail (peer review, round eight);
+    - every Unicode format control: the pinned Unicode 16.0 ``Cf`` set, or
+      whatever the running interpreter calls ``Cf``, which is the rule
+      ``receipt.corpus`` applies at the schema boundary. U+202E
+      RIGHT-TO-LEFT OVERRIDE reverses the remainder of a line, so a
+      release-chain failure quoting a filename that carries one prints as
+      something the producer chose rather than as what the library said.
+      The corpus screen refuses these on the way in; ``release_chain``'s
+      text has no such screen and its wording is pinned by a differential
+      harness, so the renderer is where they are handled.
+
     The replacement is one code point for its escape, so the escaped text is
     longer but nothing else about it changes: no truncation, no reordering,
     no substitution of anything printable. What an auditor reads is still the
     filename the producer chose, in a spelling that cannot move the cursor.
+    Bounding the length is a separate policy — see :func:`_bounded` — applied
+    after this one, so an escape sequence counts as the characters it prints.
     """
 
-    return "".join(_TERMINAL_ESCAPES.get(character, character) for character in text)
+    escaped: list[str] = []
+    for character in text:
+        replacement = _TERMINAL_ESCAPES.get(character)
+        if replacement is not None:
+            escaped.append(replacement)
+            continue
+        code = ord(character)
+        if (
+            0xD800 <= code <= 0xDFFF
+            or code in _FORMAT_CONTROL_CODES
+            or unicodedata.category(character) == "Cf"
+        ):
+            escaped.append(_python_escape(code))
+            continue
+        escaped.append(character)
+    return "".join(escaped)
 
 
 def _format_text(result: VerifyResult) -> str:
