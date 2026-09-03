@@ -56,6 +56,20 @@ and leave a forged ``VERDICT: PASS`` at column one as the last thing on it,
 without a single escape sequence (peer review, Sol round 2). The passing
 branch already ended with fixed text.
 
+Writing the verdict out is inside the same fail-closed boundary as
+rendering it, and it goes through :func:`_emit` rather than ``print``.
+``print`` hands text to the stream's own codec with the stream's own error
+handler, and a strict one raises: with an ASCII ``sys.stdout`` — a
+``PYTHONIOENCODING=ascii`` run, or a pipe under a POSIX locale — the em
+dash in this module's *own* fixed lines raised ``UnicodeEncodeError`` out
+of :func:`main`, and the command printed a traceback where it promises a
+verdict (peer review, Sol round 2). :func:`_emit` encodes with
+``backslashreplace`` and writes the bytes to the stream's binary buffer, so
+an unrepresentable character arrives as ``\\u2014`` instead of as an
+exception; both emissions sit inside the render boundary, so anything else
+about the write becomes the render refusal, and :func:`_refuse` emits the
+same way so the refusal itself cannot raise.
+
 The JSON renderer needs nothing of the kind. ``json.dumps`` with
 ``ensure_ascii`` at its default escapes every non-ASCII code point into a
 ``\\uXXXX`` sequence inside the quoted string — lone surrogates and format
@@ -96,7 +110,7 @@ import json.encoder
 import pathlib
 import sys
 import unicodedata
-from typing import Sequence
+from typing import Sequence, TextIO
 
 from receipt import __version__
 from receipt._unicode_repertoire import FORMAT_CONTROL_RANGES
@@ -608,6 +622,43 @@ def _format_text(result: VerifyResult) -> str:
     return "\n".join(lines)
 
 
+def _emit(text: str, stream: TextIO) -> None:
+    """Write one rendered verdict to a stream that may not accept every character.
+
+    ``print`` hands text to the stream's own codec with the stream's own
+    error handler, and a strict one raises. The verdict's fixed lines carry
+    an em dash — a literal in this module, not producer text — so
+    ``receipt verify`` run with ``PYTHONIOENCODING=ascii``, or into a
+    subprocess pipe on a POSIX locale, raised ``UnicodeEncodeError`` out of
+    :func:`main` and printed a traceback instead of the fail-closed verdict
+    it promises on every exit path (peer review, Sol round 2). Escaping the
+    result-derived strings could not have helped: the character that raised
+    is one of this module's own.
+
+    So the encoding happens here, with ``backslashreplace``, and the bytes
+    go to the stream's underlying binary buffer. A character the stream's
+    encoding cannot carry arrives as ``\\u2014`` rather than as an
+    exception, which is the same bargain :func:`_terminal_safe` makes: the
+    reader sees what was meant, spelled in what the terminal can show.
+
+    The text stream is flushed before the buffer is written so the two
+    layers cannot reorder, and a stream with no ``buffer`` — a wrapper some
+    host has substituted — is written through its text API with the same
+    already-encoded text, which by construction it can encode.
+    """
+
+    encoding = getattr(stream, "encoding", None) or "utf-8"
+    data = (text + "\n").encode(encoding, errors="backslashreplace")
+    buffer = getattr(stream, "buffer", None)
+    if buffer is None:
+        stream.write(data.decode(encoding, errors="replace"))
+        stream.flush()
+        return
+    stream.flush()
+    buffer.write(data)
+    buffer.flush()
+
+
 def _fail_payload(stage: str, message: str) -> dict[str, object]:
     """A minimal machine verdict for aborts outside a completed verification.
 
@@ -645,15 +696,15 @@ def _refuse(as_json: bool, stage: str, message: str, code: int) -> int:
     the last line either way.
     """
 
-    print(f"receipt verify: {_rendered(message)}", file=sys.stderr)
-    print("receipt verify: FAIL", file=sys.stderr)
+    _emit(f"receipt verify: {_rendered(message)}\nreceipt verify: FAIL", sys.stderr)
     if as_json:
-        print(
+        _emit(
             json.dumps(
                 _bounded_payload(_fail_payload(stage, message)),
                 indent=2,
                 sort_keys=True,
-            )
+            ),
+            sys.stdout,
         )
     return code
 
@@ -715,11 +766,21 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # A verdict that cannot be rendered is not a deliverable PASS: refuse,
     # even when the passes themselves succeeded.
+    #
+    # The emission is inside the boundary too. Printing sat outside it, so a
+    # stream whose codec cannot carry the verdict's own em dash raised out
+    # of this function and printed a traceback in place of the fail-closed
+    # verdict promised on every exit path (peer review, Sol round 2).
+    # :func:`_emit` encodes with ``backslashreplace`` so that cannot happen,
+    # and the boundary now covers it so that anything else about the write
+    # — a closed stream, a full disk — becomes the render refusal rather
+    # than an escape.
     if as_json:
         try:
             rendered = json.dumps(
                 _bounded_payload(result_to_dict(result)), indent=2, sort_keys=True
             )
+            _emit(rendered, sys.stdout)
         except Exception as exc:  # noqa: BLE001 - rendering is inside the contract
             return _refuse(
                 as_json,
@@ -728,10 +789,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"{type(exc).__name__}: {exc}",
                 EXIT_FAIL,
             )
-        print(rendered)
     else:
         try:
             text = _format_text(result)
+            _emit(text, sys.stdout if result.ok else sys.stderr)
         except Exception as exc:  # noqa: BLE001 - rendering is inside the contract
             return _refuse(
                 False,
@@ -740,8 +801,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"{type(exc).__name__}: {exc}",
                 EXIT_FAIL,
             )
-        stream = sys.stdout if result.ok else sys.stderr
-        print(text, file=stream)
     return EXIT_OK if result.ok else EXIT_FAIL
 
 
