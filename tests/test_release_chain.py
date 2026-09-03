@@ -1454,12 +1454,17 @@ def test_the_alias_scan_protects_only_what_its_caller_names(
     ``thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs
     base`` without the fix.
 
-    Widening it stays the caller's decision, because a ``ChainSpec`` names no
-    surfaces and ``verify_release_chain``'s callers configure none: the
-    package-level contract is unchanged, and this pins that as much as the
-    refusal. Same index, same spec, refused when the surface is named and
-    untouched when it is not. Without the ``surfaces`` argument the second
-    call is the first, and neither refuses."""
+    Widening it stays the caller's decision, and the default is what pins
+    that. ``append_gate`` is this function's only caller in the package —
+    ``verify_release_chain`` and ``receipt verify`` never reach it, so the
+    public verifier's own confinement is the release tree's component walk
+    and the release root's index scan rather than this — which is why the
+    widening travels no further than the argument, and why a later change
+    giving ``surfaces`` a non-empty default would silently change what every
+    direct caller of this function is refused for. Same index, same spec,
+    refused when the surface is named and untouched when it is not. Without
+    the ``surfaces`` argument the second call is the first, and neither
+    refuses."""
 
     spec, _ = load_spec(repo / "verification/spec.py")
     root = a_repository_holding(tmp_path, "Tools/helper.py")
