@@ -80,7 +80,10 @@ Deliberately outside the mutation contract:
   byte, and no case's outcome moves.  Only the ``-CAfile`` argument's spelling
   changes, and no compared message quotes it: every mutation here that reaches
   OpenSSL either succeeds or is caught by the deterministic token-hash refusal
-  first, and none mutates a root PEM;
+  first, and none mutates a root PEM.  The port also walks the root's path
+  from the records root down and refuses a symlinked component (sixth gate
+  round one); both pinned roots sit directly in ``records/trust`` and neither
+  ``trust`` nor either file is a link, so no case here reaches it;
 - the baseline opens the record under witness four times -- to hash it for the
   digest claim, to read the trust-bundle updates it carries, to read its
   creation claims, and once more through ``openssl ts -verify -data`` -- and
@@ -89,8 +92,11 @@ Deliberately outside the mutation contract:
   case's outcome moves; only the ``-data`` argument's spelling changes, and by
   the paragraph above no compared message quotes an OpenSSL command line.  The
   port also refuses a record that is not a readable regular file, where the
-  baseline let the hash raise ``OSError``; the chain walk enumerates the
-  records it goes on to verify, so no case here presents one.  The parse of
+  baseline let the hash raise ``OSError``, and refuses one whose path reaches
+  it through a symlinked component below the records root (sixth gate round
+  one); the chain walk enumerates the records it goes on to verify, and the
+  53 record paths in this tree pass through no link, so no case here presents
+  either.  The parse of
   those bytes goes through the same ``TextIOWrapper`` ``Path.read_text``
   builds -- same locale encoding, same universal-newline translation -- so
   ``load_json``'s two refusals render byte for byte as the baseline renders
@@ -102,7 +108,11 @@ Deliberately outside the mutation contract:
   is unchanged; only the ``-in`` argument's spelling changes, and again no
   compared message quotes an OpenSSL command line -- the flip and truncation
   mutations retain the committed hash on purpose and bind the deterministic
-  token-hash refusal before OpenSSL is reached;
+  token-hash refusal before OpenSSL is reached.  Its path is walked component
+  by component too, and the 91 declared token paths reach their files through
+  no link either -- across all three walked kinds this tree presents 161
+  distinct components below the records root and not one of them is a symlink
+  (sixth gate round one);
 - the baseline opens all three of those files by name and waits on the open;
   the port opens each with ``O_NONBLOCK`` where the platform has the flag and
   clears it again once ``fstat`` has judged the descriptor, so a file replaced
@@ -157,7 +167,20 @@ Deliberately outside the mutation contract:
   path-level check at all and gains one in the same form.  All 56 of those
   files in the pinned tree -- the genesis file, both trust bundles and all 53
   sidecars -- are regular files and none is a symlink, and no mutation here
-  replaces one with anything else, so no case reaches any of it;
+  replaces one with anything else, so no case reaches any of it.  The bundle
+  asks three further questions of its file -- whether the bytes are the
+  canonical encoding of the payload, their SHA-256, and their size -- and the
+  port now answers all three from the one read rather than from a
+  ``read_bytes``, a ``sha256_file`` and a ``stat`` of the path (sixth gate
+  round one).  The values are the same values for a file nothing rewrites
+  between them, which is every case here, so no comparison moves; what moves
+  is that a bundle replaced mid-load can no longer make the anchors and their
+  commitments describe two different instants.  The component walk does not
+  cover these three: each refuses a link at its own final component, the
+  sidecars' other components are the records' and are walked with them, and
+  genesis sits directly under the records root, which leaves ``records/trust``
+  -- not a link here -- read through no walk, and a bundle's bytes are pinned
+  entire in any case;
 - the baseline compares a bundle's anchors with the code identities in one
   direction only, so an identity scoped to a bundle whose anchors do not
   include it is ignored; the port requires the two sets to be equal at load.
@@ -206,7 +229,15 @@ Deliberately outside the mutation contract:
   file under two paths that do not fold together -- a symlinked parent
   directory or a second hard link -- which no comparison of names separates,
   and which the same writer turns into the same evidence (fifth gate round
-  two).  And the ``PKIStatusInfo`` wrapper around a token is unsigned, as are
+  two).  Those two shapes compose, and composed they defeat all four rules:
+  a direct path and an alias of the token's *directory* fold apart, and with
+  the entry replaced between the reads the object rule sees two inodes, the
+  digest rule two true digests and the timestamp rule two genuine issuances.
+  So the port walks every component of a token path from the records root
+  down and refuses a link at any of them, upstream of all four (sixth gate
+  round one); the object rule is kept because a second hard link needs no
+  link anywhere.  And the ``PKIStatusInfo`` wrapper around a token is
+  unsigned, as are
   a ``SignedData``'s ``certificates``, ``crls`` and ``unsignedAttrs``, so one
   issuance has many valid encodings with different file digests.  The signer
   is half of that last identity because a ``TSTInfo`` need not name its
@@ -232,10 +263,20 @@ Deliberately outside the mutation contract:
   anchor allowing an active signer beside a new one is refused instead of
   skipped, being neither a rename nor a new authority (fifth gate round two);
   so is one carrying part of an active authority and not the whole of it --
-  a piece of one active anchor's signers, or the signers of two of them
+  a piece of one active class's signers, or the signers of two classes
   together -- which the flattened set of active signers could not tell from a
   rename, since flattening is exactly what loses whose key is whose (fifth
-  gate round three).  Each candidate the walk admits also joins the sets the
+  gate round three).  The classes are the connected components of the active
+  anchors, joined wherever two carry one ``(ID, root SPKI)`` or share a
+  signing key, because an activated rename made two anchors one authority and
+  a rotation under either name extended that one authority's keys: grouping
+  per anchor instead left an authority that had been renamed and then rotated
+  holding a key under each of its names, so a further rename carrying the
+  whole of it equalled neither and was refused, and that transition could not
+  be witnessed at all (sixth gate round one).  The grouping only ever turns a
+  refusal into a skip -- a component is connected through shared keys, so
+  where every touched anchor's own set equalled the pending signers the class
+  does too.  Each candidate the walk admits also joins the sets the
   next is measured against, so two pending bundles introducing one authority
   under two anchors -- one new authority demanding two supplemental outcomes
   -- are refused too (round two); except that a later pending bundle's anchor
