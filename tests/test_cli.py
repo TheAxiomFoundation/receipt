@@ -1383,6 +1383,86 @@ def test_a_flooded_manifest_field_is_bounded_in_both_renderers(
     assert set(custody[0]) == {"name", "ok", "detail", "failure"}
 
 
+def test_the_verdict_path_escapes_no_more_than_it_prints(
+    repo: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Binds S5R4-F7: the escaped copy was built before the bound was applied.
+
+    ``_rendered`` was ``_bounded(_terminal_safe(text))``, which builds the
+    escaped copy of the whole string and then throws all but four thousand
+    characters of it away. The strings it is handed are the ones no schema
+    bounds — the custody half raises its own text, and
+    ``receipt.release_chain``'s wording is pinned by a differential harness —
+    so a release manifest with a million-character ``schemaVersion`` cost a
+    list of a million pieces and a joined copy of them, twice, to produce
+    two bounded fields.
+
+    Escaping and bounding are one pass over the input now, stopping at the
+    first character whose escaping would carry the output past the bound. The
+    recorder is the assertion: ``_terminal_safe`` is not on the verdict path
+    at all any more, so nothing escapes the tail. What the marker names is
+    the count of *input* characters omitted, which for this all-ASCII field
+    is the same number the old marker gave — the verdict an auditor reads is
+    unchanged.
+
+    Without the fix ``_terminal_safe`` is called twice with a
+    million-character string.
+    """
+
+    import receipt.cli as cli_module
+
+    from receipt.cli import MAX_RENDERED_FIELD
+
+    escaped: list[int] = []
+    real = cli_module._terminal_safe
+
+    def recorder(text: str) -> str:
+        escaped.append(len(text))
+        return real(text)
+
+    monkeypatch.setattr(cli_module, "_terminal_safe", recorder)
+
+    failure = _flood_the_manifest_schema(repo, 1_000_000)
+    marker = f"…[{len(failure) - MAX_RENDERED_FIELD} more characters]"
+
+    assert run(repo) == EXIT_FAIL
+    text = capsys.readouterr().err
+    assert escaped == []
+    assert text.count(marker) == 2
+    assert len(text) <= 2 * (MAX_RENDERED_FIELD + len(marker)) + 1024
+
+
+def test_the_fused_bound_never_cuts_an_escape_in_half() -> None:
+    """Binds S5R4-F7, the other half: where the walk is allowed to stop.
+
+    Truncating an already-escaped string cuts wherever the character count
+    lands, which can be the middle of an escape sequence: 410 copies of
+    U+1D173 escape to 4,100 characters, and a cut at 4,096 leaves
+    ``\\U0001`` on the line — six characters that are not the spelling of
+    anything. The fused walk stops at the character that would have crossed
+    the bound and never includes part of one, so the output is a whole number
+    of escapes and the marker says how many input characters are missing.
+
+    Without the fusion the last field on that line is a fragment.
+    """
+
+    from receipt.cli import MAX_RENDERED_FIELD, _rendered
+
+    beam = "\U0001d173"
+    assert len(_rendered(beam)) == 10
+    per_field = MAX_RENDERED_FIELD // 10
+    exact = _rendered(beam * per_field)
+    assert exact == "\\U0001d173" * per_field
+    # A whole number of escapes, which is the most that fits: 409 of them is
+    # 4,090 characters and the 410th would be 4,100.
+    assert len(exact) == 4090 <= MAX_RENDERED_FIELD < 4100
+    over = _rendered(beam * (per_field + 1))
+    assert over == "\\U0001d173" * per_field + "…[1 more characters]"
+    assert "\\U0001d173…" in over and "\\U0001…" not in over
+
+
 def test_an_ordinary_failure_is_unchanged_by_the_rendering_bound(
     repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1416,16 +1496,22 @@ def test_the_rendering_bound_truncates_at_its_own_edge_and_not_before() -> None:
     naming exactly one omitted character. An off-by-one here would either
     truncate text that fits or let one character past the bound, and the
     end-to-end tests above are too coarse to see either.
+
+    Asked of ``_rendered`` because S5R4-F7 fused the escaping and the bound
+    into it; the boundary itself is where it was, which is what this pins.
+    These strings carry nothing the escaper touches, so escaped length and
+    input length agree and the marker's count means the same thing either
+    way.
     """
 
-    from receipt.cli import MAX_RENDERED_FIELD, _bounded
+    from receipt.cli import MAX_RENDERED_FIELD, _rendered
 
-    assert _bounded("") == ""
+    assert _rendered("") == ""
     exact = "x" * MAX_RENDERED_FIELD
-    assert _bounded(exact) == exact
+    assert _rendered(exact) == exact
     over = "x" * (MAX_RENDERED_FIELD + 1)
-    assert _bounded(over) == exact + "…[1 more characters]"
-    far_over = _bounded("x" * (MAX_RENDERED_FIELD + 500))
+    assert _rendered(over) == exact + "…[1 more characters]"
+    far_over = _rendered("x" * (MAX_RENDERED_FIELD + 500))
     assert far_over.endswith("…[500 more characters]")
 
 
@@ -1661,16 +1747,20 @@ def test_the_text_bound_still_counts_the_characters_it_prints() -> None:
     half alone, and applying it to both would have bounded ordinary
     non-ASCII prose at a sixth of its stated length.
 
+    Asked of ``_rendered`` since S5R4-F7 fused the two policies into it, and
+    of a UTF-8 emission, which is what leaves ordinary non-ASCII prose as
+    itself.
+
     This test passes with the S5R2-F6 change disabled, which is the point:
     it is here to catch the new measure being applied to the wrong half.
     """
 
-    from receipt.cli import MAX_RENDERED_FIELD, _bounded
+    from receipt.cli import MAX_RENDERED_FIELD, _rendered
 
     bmp = "é" * (MAX_RENDERED_FIELD + 5)
-    bounded = _bounded(bmp)
+    bounded = _rendered(bmp)
     assert bounded == "é" * MAX_RENDERED_FIELD + "…[5 more characters]"
-    assert _bounded("é" * MAX_RENDERED_FIELD) == "é" * MAX_RENDERED_FIELD
+    assert _rendered("é" * MAX_RENDERED_FIELD) == "é" * MAX_RENDERED_FIELD
 
 
 def _physical_rows(text: str, columns: int = 80) -> list[str]:

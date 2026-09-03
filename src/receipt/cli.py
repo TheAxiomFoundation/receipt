@@ -17,9 +17,8 @@ aborted run, and a result that cannot be rendered all included. A machine
 consumer that keys on ``verdict`` therefore fails closed with the command.
 
 The text renderer is the verdict's last boundary, so every string it takes
-from the result goes through :func:`_rendered` — escaped by
-:func:`_terminal_safe`, then bounded by :func:`_bounded` — before it reaches
-a line.
+from the result goes through :func:`_rendered` — escaped and bounded in one
+pass over the input — before it reaches a line.
 Not every string in a verdict is written by someone the verdict is about, but
 enough of them are: a filename in the release manifest directory, a path under
 a content root, a pass failure quoting either. One carrying
@@ -107,7 +106,12 @@ a release manifest with a million-character ``schemaVersion`` scrolled the
 verdict away through the custody half instead (peer review, round eight).
 Every result-derived string either renderer prints is therefore truncated at
 :data:`receipt._render.MAX_RENDERED_FIELD` with the marker
-``receipt.corpus._quoted`` uses. That bound lives in ``receipt._render``
+``receipt.corpus._quoted`` uses. The text half applies that bound *while* it
+escapes rather than afterwards, so a million-character field costs the bound
+rather than the field: escaping the whole string first built an escaped copy
+of an attacker-controlled value to produce four thousand characters of output
+(peer review, Sol round 4), and the marker there counts input characters,
+since the tail it names was never escaped. That bound lives in ``receipt._render``
 rather than here because ``receipt.corpus`` charges its verdict budgets
 against it: the corpus used to charge the string the producer wrote while
 this module printed the string the bound returned, so the accounting and
@@ -282,15 +286,46 @@ def _python_escape(code: int) -> str:
 _TERMINAL_ESCAPES = {chr(code): _python_escape(code) for code in _TERMINAL_UNSAFE}
 
 
+def _escaped_character(character: str) -> str:
+    """The spelling one character reaches a terminal in: itself, or an escape.
+
+    The escaping policy, one character at a time, so that the two callers
+    that need it cannot drift: :func:`_terminal_safe`, which escapes a whole
+    string, and :func:`_rendered`, which escapes only as far as the bound
+    reaches. Which classes are escaped, and why each of them is, is stated
+    in :func:`_terminal_safe`.
+    """
+
+    replacement = _TERMINAL_ESCAPES.get(character)
+    if replacement is not None:
+        return replacement
+    code = ord(character)
+    if (
+        0xD800 <= code <= 0xDFFF
+        or code in _FORMAT_CONTROL_CODES
+        or unicodedata.category(character) == "Cf"
+    ):
+        return _python_escape(code)
+    return character
+
+
 def _terminal_safe(text: str) -> str:
     """Replace every code point that must not reach a terminal with its escape.
 
-    Applied — through :func:`_rendered`, which bounds the result afterwards
-    — to every string the text verdict takes from the result: pass names,
-    details and failures, the spec's name and path, the root, gate ids,
-    evidence keys and values, and the abort message ``_refuse`` prints, and
-    to nothing else. The fixed lines of the verdict are literals in this
-    module and carry none of these characters, so they are left alone.
+    The whole string, escaped and returned whole. That is *not* what the
+    verdict path does any more — :func:`_rendered` escapes and bounds in one
+    pass, and this is no longer on the way to a line — but the policy the
+    verdict applies is stated here, character class by character class, and
+    :func:`_escaped_character` is the code both share. A caller that wants a
+    whole escaped string, and the tests that pin which classes are escaped
+    and which are left alone, ask for it here.
+
+    The classes are applied to every string the text verdict takes from the
+    result: pass names, details and failures, the spec's name and path, the
+    root, gate ids, evidence keys and values, and the abort message
+    ``_refuse`` prints, and to nothing else. The fixed lines of the verdict
+    are literals in this module and carry none of these characters, so they
+    are left alone.
 
     Four classes:
 
@@ -321,58 +356,63 @@ def _terminal_safe(text: str) -> str:
     longer but nothing else about it changes: no truncation, no reordering,
     no substitution of anything printable. What an auditor reads is still the
     filename the producer chose, in a spelling that cannot move the cursor.
-    Bounding the length is a separate policy — see :func:`_bounded` — applied
-    after this one, so an escape sequence counts as the characters it prints.
+    Bounding the length is a separate policy, and :func:`_rendered` applies
+    the two together rather than one after the other.
     """
 
-    escaped: list[str] = []
-    for character in text:
-        replacement = _TERMINAL_ESCAPES.get(character)
-        if replacement is not None:
-            escaped.append(replacement)
-            continue
-        code = ord(character)
-        if (
-            0xD800 <= code <= 0xDFFF
-            or code in _FORMAT_CONTROL_CODES
-            or unicodedata.category(character) == "Cf"
-        ):
-            escaped.append(_python_escape(code))
-            continue
-        escaped.append(character)
-    return "".join(escaped)
-
-
-def _bounded(text: str) -> str:
-    """Truncate one rendered string to :data:`MAX_RENDERED_FIELD` characters.
-
-    The marker is ``receipt.corpus._quoted``'s, so a truncation reads the
-    same wherever an auditor meets one, and it names the number of
-    characters omitted rather than merely saying that something was.
-
-    Applied *after* :func:`_terminal_safe` in the text renderer, so what is
-    counted is what the terminal receives: an escape sequence is six
-    characters of output and is charged as six. This is the text renderer's
-    rule and only its: the JSON renderer counts what ``json.dumps`` will
-    emit instead, through :func:`receipt._render.bounded_encoded`, because a
-    code-point count there bounded a twelvefold larger rendering.
-    """
-
-    if len(text) <= MAX_RENDERED_FIELD:
-        return text
-    omitted = len(text) - MAX_RENDERED_FIELD
-    return f"{text[:MAX_RENDERED_FIELD]}…[{omitted} more characters]"
+    return "".join(_escaped_character(character) for character in text)
 
 
 def _rendered(text: str) -> str:
-    """Escape a result-derived string and then bound it: the text renderer's rule.
+    """Escape a result-derived string and bound it, in one pass over the input.
 
     One function so the two policies cannot be applied to different sets of
     strings. Every string ``_format_text`` and :func:`_refuse` take from a
-    result go through this and nothing else does.
+    result goes through this and nothing else does.
+
+    Escaping and bounding are fused rather than sequenced. Escaping the whole
+    string first built the escaped copy of an attacker-controlled value
+    before anything looked at its length — a one-million-character failure
+    field, which the schema bounds in ``receipt.corpus`` do not cover because
+    the custody half raises its own text, cost a list of a million pieces and
+    a joined copy of them to produce four thousand characters of output (peer
+    review, Sol round 4). Here the input is walked one character at a time
+    and the walk stops at the first character whose escaping would carry the
+    output past the bound, so the work and the allocation are bounded by
+    :data:`receipt._render.MAX_RENDERED_FIELD` rather than by the length of
+    what a producer sent. It is the same shape as
+    :func:`receipt._render.encoded_split`, which is the JSON half's answer to
+    the same question.
+
+    The character that would have crossed the bound is not kept, so what is
+    returned is at most the bound plus the marker, and no escape sequence is
+    ever cut in half — which truncating an already-escaped string could do,
+    and did.
+
+    The marker's count is of *input* characters omitted, and that is a
+    change of meaning worth stating: the truncated tail was never escaped, so
+    there is no escaped length to report, and what an auditor is told is how
+    many characters of the producer's own string are missing. For the strings
+    a real verdict carries the two counts are the same, because escaping
+    changes nothing about ordinary text.
+
+    What is counted on this side is characters, which is what a terminal
+    receives: an escape sequence is six characters of output and is charged
+    as six. The JSON renderer counts what ``json.dumps`` will emit instead,
+    through :func:`receipt._render.bounded_encoded`, because a code-point
+    count there bounded a twelvefold larger rendering.
     """
 
-    return _bounded(_terminal_safe(text))
+    escaped: list[str] = []
+    total = 0
+    for index, character in enumerate(text):
+        piece = _escaped_character(character)
+        total += len(piece)
+        if total > MAX_RENDERED_FIELD:
+            omitted = len(text) - index
+            return f"{''.join(escaped)}…[{omitted} more characters]"
+        escaped.append(piece)
+    return "".join(escaped)
 
 
 def _bounded_payload(value: object) -> object:
