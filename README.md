@@ -36,7 +36,7 @@ receipt verify --spec path/to/your/spec.py
 
 ## Install
 
-Requires Python 3.11+, `git`, and OpenSSL 3.0 or newer as `openssl` on the path: verifying an RFC 3161 token passes `-no-CAstore`, which older releases do not have, and counting a pinned root's certificates uses `storeutl`, which LibreSSL — the stock `/usr/bin/openssl` on macOS — has at no version. `receipt.tsa` checks the version once per process and refuses a build below the floor by name, before it reads a trust bundle; elsewhere in the package an unusable `openssl` surfaces wherever OpenSSL itself fails. Install OpenSSL (for example `brew install openssl`) and put its `openssl` first on the path.
+Requires Python 3.11+, `git`, and OpenSSL 3.0 or newer as `openssl` on the path: verifying an RFC 3161 token passes `-no-CAstore`, which older releases do not have, and counting a pinned root's certificates uses `storeutl`, which LibreSSL — the stock `/usr/bin/openssl` on macOS — has at no version. `receipt.tsa` checks the version once per process and refuses a build below the floor by name, before it reads a trust bundle; elsewhere in the package an unusable `openssl` surfaces wherever OpenSSL itself fails. Install OpenSSL (for example `brew install openssl`) and put its `openssl` first on the path. The corpus sweep's change detection requires POSIX change-time semantics; on Windows it refuses to verify rather than trusting a stamp a writer can restore. Corpus paths are portable names: ASCII letters, digits, '.', '_' and '-', not ending in a dot and not a Win32 device name; anything else refuses verification.
 
 ```bash
 uv pip install receipt
