@@ -89,7 +89,11 @@ classification-only refusal a push verification was held to.
 Docstrings labelled S5-R2-F1 onward name that fifth gate's second round,
 numbering from one again: S5-R2-F1 the untracked and ignored listings that
 took git's exit status for a complete enumeration, S5-R2-F2 the manifest
-path's type decision that read every ``OSError`` as absence.
+path's type decision that read every ``OSError`` as absence. That round's
+S5-R2-F3 — the release tree's confinement walk the public verifier never ran
+— is bound in tests/test_release_chain.py and tests/test_cli.py, where
+``verify_release_chain`` and ``receipt verify`` are driven with no append gate
+in the picture.
 
 The fixture is a local git repository built from scratch, and no network is
 used anywhere here. Most of it holds a README and no manifests, so the gate's

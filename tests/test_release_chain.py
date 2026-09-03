@@ -12,6 +12,11 @@ documented as the append gate's, and this is where it is shown to be the
 package's — ``verify_release_chain`` and ``receipt verify``'s custody pass
 refuse on the same platforms, in the same words, with no append gate in the
 picture.
+
+Two more are labelled S5-R2-F3 and belong to that branch's fifth gate, second
+round, for the same reason: the release tree's confinement walk was added for
+the append gate and reached only from there, so the public verifier had none
+of it.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ import os
 import pathlib
 import shutil
 import subprocess
+from dataclasses import replace
 
 import pytest
 
@@ -1298,3 +1304,97 @@ def test_receipt_verify_reports_the_platform_refusal_as_the_custody_failure(
     rendered = capsys.readouterr().err
     assert "VERDICT: FAIL — custody" in rendered
     assert PLATFORM_REFUSAL in rendered
+
+
+def test_a_symlinked_interior_manifest_component_is_refused(
+    repo: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """Binds S5-R2-F3. The release tree's confinement walk —
+    ``assert_no_symlinked_release_root``, which since round 12 walks all three
+    configured paths whole — was added for the append gate and was reached
+    only from there, through ``hold_release_root``. The public verifier ran
+    none of it, so a spec whose manifest directory sits below an interior
+    component (``releases/journal/manifests``) had that component resolved
+    like any other name: an untracked symlink at ``releases/journal`` pointing
+    outside the tree made the chain in *that* directory the one this function
+    verified, and the verdict spoke for a release history no part of which is
+    in the tree the auditor was handed.
+
+    Measured at this round's head with ``assert_no_symlinked_release_root``
+    removed from ``verify_release_chain``, on this exact arrangement: the call
+    returns a verification whose head manifest is the one stored outside the
+    root, ``0000-<digest>.json``, and returns it as a pass. Nothing else here
+    would have said otherwise — the index reconciliation that catches a linked
+    component in the append gate is not on this path at all, and there is no
+    base to compare against.
+
+    The walk runs at the top now, after the arguments are validated and the
+    anchor probe has had its say and before the enumeration, so both the gate
+    and ``receipt verify`` reach it."""
+
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    shutil.move(str(repo / "releases" / "manifests"), str(outside / "manifests"))
+    (repo / "releases" / "journal").symlink_to(outside)
+    spec, _ = load_spec(repo / "verification/spec.py")
+    nested = replace(
+        spec.chain,
+        manifest_relative=pathlib.PurePosixPath("releases/journal/manifests"),
+    )
+    # The link really does deliver the chain: this is a confinement question,
+    # not a question about whether the manifests are valid.
+    assert (repo / "releases/journal/manifests").is_dir()
+
+    with pytest.raises(ReleaseChainError) as refusal:
+        verify_release_chain(repo, spec=nested)
+    assert str(refusal.value) == (
+        "release root path traverses a symlink at 'releases/journal': "
+        "releases/journal/manifests"
+    )
+
+
+def test_a_folded_manifest_leaf_is_refused_by_the_public_verifier(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S5-R2-F3's other half, and the reason the walk binds spellings as well
+    as types. Round 12 bound the configured leaf's spelling, so a spec naming
+    ``releases/manifests`` over a ``releases/Manifests`` on disk is refused
+    rather than verified out of a directory the spec never named — but only
+    where the walk ran, which was the append gate alone. ``receipt verify``,
+    whose custody pass is this function, verified it.
+
+    Simulated the way round 12's own spelling cases are, because a
+    name-folding filesystem produces one pair of facts and only one of them
+    can be arranged everywhere: the ``lstat`` of the requested spelling
+    succeeds (real here — the directory is spelled exactly as the spec pins
+    it), and the holding directory's listing does not contain that spelling
+    (simulated, by answering the one ``os.listdir`` of the release root with a
+    folded name and delegating every other listing, which is the whole of what
+    ``_assert_component_spelled`` reads).
+
+    Measured at this round's head with ``assert_no_symlinked_release_root``
+    removed from ``verify_release_chain``, under the same simulated listing:
+    the chain verifies and the head manifest is returned as a pass."""
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    release_root = (repo / "releases").resolve()
+    real_listdir = os.listdir
+
+    def a_listing_that_folds(where: object) -> list[str]:
+        listed = real_listdir(where)  # type: ignore[arg-type]
+        if pathlib.Path(os.fspath(where)).resolve() == release_root:
+            return [
+                "Manifests" if name == "manifests" else name for name in listed
+            ]
+        return listed
+
+    monkeypatch.setattr(os, "listdir", a_listing_that_folds)
+    # The other half of the pair is real: the pinned spelling still resolves.
+    assert (release_root / "manifests").is_dir()
+
+    with pytest.raises(ReleaseChainError) as refusal:
+        verify_release_chain(repo, spec=spec.chain)
+    assert str(refusal.value) == (
+        "path component releases/manifests is not spelled by its directory: "
+        "releases/manifests"
+    )

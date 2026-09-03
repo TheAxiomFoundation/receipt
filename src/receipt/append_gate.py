@@ -250,7 +250,13 @@ by the same rule those three follow rather than being further entry-level
 exceptions.
 ``release_chain.assert_no_symlinked_state_component`` runs at the top of each
 state read and ``release_chain.assert_no_symlinked_release_root`` at the top
-of both release-proposal paths, each ahead of every read through the path it
+of both release-proposal paths — and, since it is the package's requirement
+rather than this gate's, again at the top of ``verify_release_chain``, so that
+``receipt verify`` is confined by it with no gate in the picture; the gate's
+earlier call is kept because it is the one that stands ahead of the
+release-history pass and the push path's type decision, and because
+``hold_release_root`` opens the directory that walk approves and holds it for
+the whole proposal — each ahead of every read through the path it
 walks, because a path reached through a linked component — or under a spelling
 the candidate tree does not hold — is not the path this verdict is about, and
 nothing read through it is evidence about this proposal. The second walks
