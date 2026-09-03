@@ -76,7 +76,6 @@ import pathlib
 import shutil
 import signal
 import subprocess
-import tempfile
 import unicodedata
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
@@ -165,27 +164,30 @@ BASE_ROW_COUNT = 2
 GATE_FILE = "scripts/check_append.py"
 
 
-def _filesystem_conflates(spelled: str, with_other: str) -> bool:
-    """Whether the filesystem holding temporary files folds two spellings.
+def a_folded_spelling(parent: pathlib.Path, spelled: str) -> bool:
+    """Whether ``spelled`` resolves under ``parent`` without being listed there.
 
-    Asked of the filesystem the fixtures are built on, because that is what
-    decides whether a spelling case can be constructed at all: where names are
-    compared exactly, a name that resolves is a name its directory lists, so a
-    working tree cannot hold one spelling and answer to another. APFS and HFS+
-    fold both case and Unicode normalisation; ext4 — and so CI — folds
-    neither.
+    The exact condition ``release_chain._assert_component_spelled`` refuses on,
+    asked of the fixture that was actually built rather than of the filesystem
+    in the abstract. A probe of the filesystem's *lookup* does not predict it:
+    a rename to a folded-equal name need not change the stored spelling, so a
+    filesystem that resolves ``Releases`` for ``releases`` can still leave the
+    directory spelled exactly as the spec names it, and then there is no case.
+    Where names are compared exactly there is never one — a name that resolves
+    is a name its directory lists — which is what the branches below say.
     """
 
-    with tempfile.TemporaryDirectory() as name:
-        directory = pathlib.Path(name)
-        (directory / spelled).mkdir()
-        return (directory / with_other).exists()
-
-
-CASE_IS_FOLDED = _filesystem_conflates("receipt-probe", "RECEIPT-PROBE")
-NORMALISATION_IS_FOLDED = _filesystem_conflates(
-    unicodedata.normalize("NFD", "receipt-probé"), "receipt-probé"
-)
+    try:
+        listed = os.listdir(parent)
+    except OSError:
+        return False
+    if spelled in listed:
+        return False
+    try:
+        os.lstat(parent / spelled)
+    except OSError:
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -3895,26 +3897,42 @@ def test_a_release_root_carrying_glob_magic_enumerates_only_itself(
     """S4R2-F4's other half of what a pathspec means, and the honest state of
     it: ``git ls-tree`` does not glob a bare pathspec on the git this package
     is verified with, so a root spelled ``rel[e]ases`` was already enumerated
-    as the directory of that name and this case passes with the literalization
-    reverted. ``git ls-files`` with the same pathspec is the other way — it
-    returns a sibling ``releases/`` too — which is why the index reads were
-    literalized first, and which is the whole point here: whether a configured
-    path is read as a name or as a pattern was a property of one command's
-    default in one version of git, and git's pathspec-mode variables rewrite
-    it for every command. ``_git_environment`` drops those and ``:(literal)``
-    says what is meant, so this run does not depend on either.
+    as the directory of that name and the run below passes with the
+    literalization reverted. ``git ls-files`` is the other way, and this tree
+    is the shape that shows it: a directory ``rel[e]ases`` beside a top-level
+    file named ``releases``, which the bracket expression matches. That
+    difference is what the two assertions on this git bind, and it is the
+    whole point — whether a configured path is read as a name or as a pattern
+    was a property of one command's default in one version of git, and git's
+    pathspec-mode variables rewrite it for every command. ``_git_environment``
+    drops those and ``:(literal)`` says what is meant, so neither the index
+    reads nor the tree enumeration depends on either.
 
-    The sibling is committed and left alone, so anything that enumerated it as
-    part of the release root would report it deleted from a root the walk
-    cannot find it under."""
+    Neither command matches a sibling *directory's* contents this way: a
+    wildcard pathspec is matched against whole index paths, so ``rel[e]ases``
+    cannot match ``releases/unrelated.md``. The sibling here is a file for
+    that reason."""
 
     spec = spec_with_release_root("rel[e]ases")
     candidate = base_repository(tmp_path, "rel[e]ases")
-    sibling = candidate.root / "releases"
-    sibling.mkdir()
-    (sibling / "unrelated.md").write_text("not a release\n", encoding="utf-8")
-    candidate = commit_all(candidate, "a sibling the glob would reach")
+    (candidate.root / "releases").write_text(
+        "not a release tree\n", encoding="utf-8"
+    )
+    candidate = commit_all(candidate, "a sibling the glob reaches")
     append_one_row(candidate)
+
+    # Asked of this git directly, because it is the reason for the change and
+    # not something the run below can show: handed the root bare, ls-files
+    # answers with the sibling too; named literally, it does not.
+    bare = release_chain._git_run(
+        candidate.root, ["ls-files", "-z", "--", "rel[e]ases"]
+    )
+    literal = release_chain._git_run(
+        candidate.root, ["ls-files", "-z", "--", ":(literal)rel[e]ases"]
+    )
+    assert b"releases\x00" in bare.stdout
+    assert b"releases\x00" not in literal.stdout
+    assert b"rel[e]ases/README.md\x00" in literal.stdout
 
     assert set(
         release_chain.git_tree_entries(candidate.root, candidate.base, "rel[e]ases")
@@ -4295,10 +4313,11 @@ def test_a_release_root_spelled_differently_on_disk_is_refused(
 
     candidate = base_repository(tmp_path)
     (candidate.root / "releases").rename(candidate.root / "Releases")
+    folded = a_folded_spelling(candidate.root, "releases")
 
     with pytest.raises(AppendError) as refusal:
         run_push_gate(candidate) if path == "push" else run_gate(candidate)
-    if CASE_IS_FOLDED:
+    if folded:
         expected = (
             "path component releases is not spelled by its directory: releases"
         )
@@ -4334,10 +4353,11 @@ def test_a_nested_release_root_component_in_another_normalisation_is_refused(
     spec = spec_with_release_root(f"{composed}/releases")
     candidate = base_repository(tmp_path, f"{composed}/releases")
     (candidate.root / composed).rename(candidate.root / decomposed)
+    folded = a_folded_spelling(candidate.root, composed)
 
     with pytest.raises(AppendError) as refusal:
         run_push_gate(candidate, spec=spec)
-    if NORMALISATION_IS_FOLDED:
+    if folded:
         expected = (
             f"path component {composed} is not spelled by its directory: "
             f"{composed}/releases"
@@ -4350,10 +4370,6 @@ def test_a_nested_release_root_component_in_another_normalisation_is_refused(
     assert str(refusal.value) == expected
 
 
-@pytest.mark.skipif(
-    not CASE_IS_FOLDED,
-    reason="a name that resolves is a name its directory lists here",
-)
 def test_a_state_path_component_spelled_differently_on_disk_is_refused(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -4367,14 +4383,18 @@ def test_a_state_path_component_spelled_differently_on_disk_is_refused(
     ``assert_state_path_tracked`` cannot answer it: the index entry it asks
     about is there and is exactly right, which is the point — the index is
     correct and the working tree is answering for it with something else.
-    Where names are compared exactly this refusal is unreachable, so the test
-    is skipped rather than asserting a different tree's answer; what covers
-    the index side there, on every filesystem, is
-    ``assert_index_carries_no_protected_alias``. Without the check this tree
-    is accepted, with the ledger read out of ``Ledger/``."""
+    Where names are compared exactly this refusal is unreachable — the rename
+    is a deletion, and a state path that is not there is a different question
+    — so the test skips rather than assert a different tree's answer; what
+    covers the index side there, on every filesystem, is
+    ``assert_index_carries_no_protected_alias``, and what covers this check
+    there is the simulated fold below. Without the check this tree is
+    accepted, with the ledger read out of ``Ledger/``."""
 
     candidate = base_repository(tmp_path)
     (candidate.root / "ledger").rename(candidate.root / "Ledger")
+    if not a_folded_spelling(candidate.root, "ledger"):
+        pytest.skip("the rename left no folded spelling to answer for")
 
     with pytest.raises(AppendError) as refusal:
         run_push_gate(candidate)
@@ -4395,11 +4415,14 @@ def test_a_dangling_release_root_link_is_named_as_a_link(
     relative to <commit>: releases/README.md`` — for the consequence rather
     than for the link. Verified by running this tree with the walk removed.
 
-    The walk refuses it as the link it is, which changes that refusal. It is
-    the only pre-existing refusal this round pre-empts, it is stated in both
-    module docstrings, and this test is what holds it to the one case: a link
-    the enumeration does reach still gets the enumeration's own sentence,
-    which the test above pins."""
+    The walk refuses it as the link it is, which changes that refusal. Of the
+    links the walk meets it is the only one whose refusal moves — a link the
+    enumeration does reach still gets the enumeration's own sentence, which
+    the test above pins — and this test is what holds it to that one case. It
+    is not the only pre-existing refusal this round pre-empts: the spelling
+    check inside both walks pre-empts whatever the content behind a folded
+    name would have been refused for, which ``append_gate``'s module docstring
+    states with both cases measured."""
 
     candidate = base_repository(tmp_path)
     append_one_row(candidate)
@@ -4411,3 +4434,91 @@ def test_a_dangling_release_root_link_is_named_as_a_link(
     with pytest.raises(AppendError) as refusal:
         run_gate(candidate)
     assert str(refusal.value) == "releases must be a real directory, not a symlink"
+
+
+def test_a_path_the_index_stores_as_non_utf8_bytes_is_not_the_gate_s_business(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S4R2-F2a's blast radius, bound. The alias check reads the whole index,
+    and the parse it reuses decoded every path as strict UTF-8 — which was
+    right while a literal pathspec meant the only records it ever saw were the
+    ones about a configured path. Over the whole index it is a refusal about
+    somebody else's file: git stores paths as bytes, a filename that is not
+    valid UTF-8 is legal and ordinary in a history authored under a non-UTF-8
+    locale, and one of them anywhere in the repository refused every proposal
+    at entry with ``cannot parse the candidate index`` — verified against
+    d48b8ed, where the same tree is accepted.
+
+    The whole-index read carries such a path through with ``surrogateescape``
+    instead. It cannot hide an alias: protected paths come from the spec as
+    ``str``, and a filesystem that folds names is one that requires valid
+    UTF-8 filenames, so a record this cannot decode is not a spelling of a
+    protected path on any tree that could exist.
+
+    The entry is written straight into the index because APFS refuses the
+    filename on disk, which is also how a clone of such a history reaches a
+    macOS auditor: the index carries the path, the checkout cannot."""
+
+    candidate = base_repository(tmp_path)
+    latin1 = os.fsdecode(b"notes-caf\xe9.txt")
+    index_an_alias(candidate, "releases/README.md", latin1)
+    recorded = release_chain._git_run(candidate.root, ["ls-files", "-z"]).stdout
+    assert b"notes-caf\xe9.txt" in recorded
+
+    assert run_push_gate(candidate) == (
+        "thesis-facts append check OK: 2 rows, immutable prefix 1"
+    )
+
+
+@pytest.mark.parametrize(
+    "component, path",
+    [
+        ("releases", "releases"),
+        ("ledger", "ledger/official_observations.jsonl"),
+    ],
+    ids=["release-root", "state-path"],
+)
+def test_a_folded_component_is_refused_on_any_filesystem(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    component: str,
+    path: str,
+) -> None:
+    """S4R2-F2b where the filesystem will not produce the case. A checkout
+    that holds one spelling and answers to another cannot be built where names
+    are compared exactly — a name that resolves is a name its directory lists
+    — so on ext4, and therefore on CI, the three tests above assert the
+    pre-existing refusal that fires there instead and one of them skips. Then
+    nothing on the runners this project uses binds the refusal itself.
+
+    What a name-folding filesystem produces is one pair of facts: the
+    directory's listing does not hold the requested spelling, and an ``lstat``
+    of that spelling succeeds anyway. Here the second is real and the first is
+    simulated, by answering one ``os.listdir`` of the candidate root with the
+    folded spelling and delegating every other listing. That is the whole of
+    what ``_assert_component_spelled`` reads, so the refusal, its message and
+    its placement are bound on every filesystem, and the tests above stay as
+    the end-to-end binding wherever a real checkout can carry the case.
+
+    Both call sites are covered, because they are two walks: the release
+    root's own, and the one every state read performs."""
+
+    candidate = base_repository(tmp_path)
+    real_listdir = os.listdir
+
+    def a_listing_that_folds(where: Any) -> list[str]:
+        listed = real_listdir(where)
+        if pathlib.Path(os.fspath(where)) == candidate.root:
+            folded = component.capitalize()
+            return [folded if name == component else name for name in listed]
+        return listed
+
+    monkeypatch.setattr(os, "listdir", a_listing_that_folds)
+    # The other half of the pair is real: the spelling still resolves.
+    assert (candidate.root / component).is_dir()
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate)
+    assert str(refusal.value) == (
+        f"path component {component} is not spelled by its directory: {path}"
+    )

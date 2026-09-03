@@ -100,7 +100,7 @@ work and is not done here.
 They run beside the extracted checks without altering any of their refusals,
 and every new refusal runs after every pre-existing file-level refusal — with
 three stated exceptions at entry, all saying that a comparison cannot be made
-here rather than making one, and one further placement stated after them. The
+here rather than making one, and two further placements stated after them. The
 checkout-level ``release_chain.assert_file_modes_authoritative`` runs ahead of
 the release-history file checks (and after the base ref is resolved, so a
 false setting cannot mask a base that names nothing). The per-state-path
@@ -121,23 +121,39 @@ classified is not the tree this verdict was asked about; it runs again before
 the gate-only return, which is the one exit reached without a state read and
 therefore without the descent that would otherwise make the comparison.
 
-``release_chain.assert_no_symlinked_release_root`` is placed by the same rule
-those three follow rather than being a fourth entry-level one: it runs at the
-top of both release-proposal paths, ahead of every read through the release
-root, because a root reached through a linked component — or under a spelling
-the candidate tree does not hold — is not this proposal's release root, and
-nothing read through it is evidence about this proposal. For a
-single-component root, which is what every consumer here and every fixture
-has, a link the enumeration would itself have met is answered in the
-enumeration's own words, so that refusal is unchanged. One link it would not
-have met is pre-empted, and it is named here rather than glossed: a *dangling*
-link at the root, which ``_working_release_files`` answers by returning
-nothing, so the base-ref path used to refuse it one file later as ``existing
-release file was deleted relative to <commit>``. It is refused as the link it
-is now, and a test pins that. A root of more than one component can also
+Two component walks are placed by the same rule those three follow rather
+than being further entry-level exceptions.
+``release_chain.assert_no_symlinked_state_component`` runs at the top of each
+state read and ``release_chain.assert_no_symlinked_release_root`` at the top
+of both release-proposal paths, each ahead of every read through the path it
+walks, because a path reached through a linked component — or under a spelling
+the candidate tree does not hold — is not the path this verdict is about, and
+nothing read through it is evidence about this proposal. Standing there means
+standing where a pre-existing refusal about that content would have stood, and
+three cases do:
+
+For the release root's own leaf, a link the enumeration would itself have met
+is answered in the enumeration's own words, so that refusal is unchanged. A
+dangling link is the one it would not have met — ``_working_release_files``
+asks ``exists()``, which follows it, and returns nothing at all — so against a
+base that tree used to be refused a file later, as ``existing release file was
+deleted relative to <commit>``. It is refused as the link it is now, and a
+test pins that. For a root of more than one component the walk can also
 pre-empt the enumeration's byte and mode refusals about the files it would
 have reached through the link — comparisons whose subject is a file outside
 the tree.
+
+And the spelling refusal in either walk pre-empts whatever the content behind
+the folded name would have been refused for, on a filesystem that folds names,
+which is the only kind where it can fire at all. Renaming ``releases`` to
+``Releases`` beside a rewritten release file moves the answer from ``existing
+release file bytes changed relative to <commit>`` to the spelling refusal, for
+a single-component root and with no link anywhere; renaming ``ledger`` to
+``Ledger`` beside a tampered frozen prefix moves it from ``immutable prefix
+line 1 ... was rewritten``. Both were checked against this branch's head
+before this round rather than reasoned about. That is the price of asking the
+question before the read instead of after it, and asking it after the read is
+not available: the read is what the folded name would have answered.
 
 Nothing else is an exception: the per-file
 ``release_chain.assert_index_agrees_with_tree``, the check beside it that
