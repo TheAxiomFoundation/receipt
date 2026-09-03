@@ -94,6 +94,26 @@ anything reading the stream as bytes (peer review, Sol round 4). UTF-8 is
 trusted because its code units are bytes and the escaper judged every one of
 them; a wider unit is a unit the escaper never saw.
 
+That decision is made once. It was sampled in :func:`main` to bound the text
+and sampled again in :func:`_emit` to encode it, so a stream whose
+``encoding`` answers differently to two reads — a wrapper a host has
+substituted, a stream reopened under another locale — was measured as UTF-8
+and written as ASCII: a field of 4,096 emoji passed a bound of 4,096 and
+arrived as 40,960 bytes, which is the exact defect measuring in the
+emission's units was added to close (peer review, Sol round 5).
+:func:`main` asks once and hands the answer to :func:`_format_text` and to
+:func:`_emit` alike, and :func:`_emit` no longer asks.
+
+And a stream the verdict cannot be written to safely is refused rather than
+written to unsafely. A stream with no binary buffer is written through its
+own text API, which re-encodes with its own codec — so the bytes the
+escaper had approved were decoded and handed straight back to the codec the
+decision had just rejected: cp037 spells an ordinary letter as a byte in the
+C1 range, and UTF-16 puts a NUL beside every ASCII character (peer review,
+Sol round 5). That fallback runs only where the stream's own codec is the
+trusted UTF-8 now, and refuses otherwise, which the render boundary turns
+into the refusal it already has for a verdict it cannot render.
+
 The JSON renderer needs nothing of the kind. ``json.dumps`` with
 ``ensure_ascii`` at its default escapes every non-ASCII code point into a
 ``\\uXXXX`` sequence inside the quoted string — lone surrogates and format
@@ -133,9 +153,10 @@ passed a bound counted in characters and arrived as 40,960 bytes of
 ``\\U0001f600``, ten times the bound and out of a field the bound had already
 accepted (peer review, Sol round 4). So the emission encoding is decided in
 :func:`main`, before the verdict is rendered rather than after, and handed to
-:func:`_format_text`; where it will fall back, each non-ASCII character is
-escaped to the spelling the codec produces *before* it is measured. What is
-counted is what the stream is given. The JSON renderer counts
+:func:`_format_text` and to :func:`_emit` together; where it will fall back,
+each non-ASCII character is escaped to the spelling the codec produces
+*before* it is measured. What is counted is what the stream is given, and it
+is given what was counted. The JSON renderer counts
 what ``json.dumps`` will emit: with ``ensure_ascii`` on, a value bounded to
 4,096 code points outside the BMP rendered as 49,152 characters, twelve
 times the bound and out of a string the bound had already accepted (peer
@@ -501,7 +522,10 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
 
     ``encoding`` is what :func:`_byte_safe_encoding` decided for the stream
     this verdict is going to, threaded from :func:`main` so that every
-    result-derived field is measured in the units the stream receives. It
+    result-derived field is measured in the units the stream receives — and
+    handed to :func:`_emit` as well, so the units a field is measured in are
+    the units its bytes are written in and no second sampling of the stream
+    can put the two out of step. It
     defaults to UTF-8, which is the text as a modern terminal takes it, so a
     caller that only wants the verdict does not have to know about
     emissions; :func:`_rendered` says why the two cannot be separated.
@@ -702,6 +726,26 @@ def _escapes_non_ascii(encoding: str) -> bool:
         return True
 
 
+def _stream_encoding(stream: TextIO) -> str:
+    """The canonical name of this stream's own codec, or ``""`` if it has none.
+
+    One place asks the question, so :func:`_byte_safe_encoding` and
+    :func:`_emit`'s bufferless guard cannot disagree about what a stream's
+    codec is. ``codecs.lookup`` is what canonicalises the spelling, turning
+    ``UTF_8`` and ``utf8`` into ``utf-8``; a stream with no ``encoding``, a
+    non-string one, and an unknown spelling all answer ``""``, which is in no
+    trusted set and so is the fail-closed answer at both call sites.
+    """
+
+    encoding = getattr(stream, "encoding", None)
+    if not isinstance(encoding, str):
+        return ""
+    try:
+        return codecs.lookup(encoding).name
+    except (LookupError, ValueError):
+        return ""
+
+
 def _byte_safe_encoding(stream: TextIO) -> str:
     """The encoding to write this stream in, which is not always its own.
 
@@ -751,16 +795,20 @@ def _byte_safe_encoding(stream: TextIO) -> str:
     where it used to receive the characters. The gain is that no encoding
     this command does not model can turn printable text into a control
     sequence.
+
+    Asked once per emission, by :func:`main`, and the answer is handed to
+    everything downstream. Asking again inside :func:`_emit` made the
+    command's decision depend on a stream answering the same question the
+    same way twice (peer review, Sol round 5).
+
+    What is returned is the *canonical* spelling rather than the stream's
+    own, which is the same codec by another name and is what lets the
+    trusted answer be compared and refused by one set of names.
     """
 
-    encoding = getattr(stream, "encoding", None)
-    if isinstance(encoding, str):
-        try:
-            canonical = codecs.lookup(encoding).name
-        except (LookupError, ValueError):
-            canonical = ""
-        if canonical in _TRUSTED_ENCODINGS:
-            return encoding
+    canonical = _stream_encoding(stream)
+    if canonical in _TRUSTED_ENCODINGS:
+        return canonical
     return "ascii"
 
 
@@ -801,7 +849,7 @@ def _write_all(target: Any, payload: Any) -> None:
         payload = payload[written:]
 
 
-def _emit(text: str, stream: TextIO) -> None:
+def _emit(text: str, stream: TextIO, *, encoding: str) -> None:
     """Write one rendered verdict to a stream that may not accept every character.
 
     ``print`` hands text to the stream's own codec with the stream's own
@@ -829,12 +877,31 @@ def _emit(text: str, stream: TextIO) -> None:
     spells the printable U+5B1B and U+6D38 as ``ESC [ 8 m`` (peer review,
     Sol round 4).
 
+    That decision arrives as ``encoding`` and is not re-taken here. It was,
+    and :func:`main` had already taken it once to bound the verdict's
+    fields, so the two calls could disagree: a stream that answered
+    ``utf-8`` when the text was measured and ``ascii`` when it was written
+    put 40,960 bytes of ``\\U0001f600`` on the wire for a field bounded at
+    4,096 characters — the defect the units change closed, reopened by
+    sampling twice (peer review, Sol round 5). One decision, two uses.
+
     The text stream is flushed before the buffer is written so the two
     layers cannot reorder, and a stream with no usable ``buffer`` — a
     wrapper some host has substituted, or a wrapper whose buffer has been
     detached, which raises rather than being absent — is written through its
-    text API with the same already-encoded text, which by construction it
-    can encode.
+    text API with the same already-encoded text.
+
+    That fallback is available only where the stream's own codec is the
+    trusted UTF-8, and refuses otherwise. Writing through the text API
+    re-encodes with the stream's own codec, so the bytes the escaper had
+    approved were decoded and handed straight back to the codec
+    :func:`_byte_safe_encoding` had just rejected — cp037 spells an ordinary
+    ``a`` as 0x81 and a space as 0x40, putting bytes in the C1 range under
+    text carrying no control character, and UTF-16 puts a NUL beside every
+    ASCII character (peer review, Sol round 5). There is nothing safe to do
+    with such a stream, so the write refuses and the render boundary in
+    :func:`main` turns that into the refusal it already has for a verdict it
+    cannot render.
 
     A write is repeated until the whole payload is gone, through
     :func:`_write_all`, because a single call is not obliged to take all of
@@ -854,7 +921,6 @@ def _emit(text: str, stream: TextIO) -> None:
     verdict on the same stream.
     """
 
-    encoding = _byte_safe_encoding(stream)
     data = (text + "\n").encode(encoding, errors="backslashreplace")
     try:
         # Not ``getattr(..., None)``: a detached ``TextIOWrapper`` raises
@@ -864,6 +930,11 @@ def _emit(text: str, stream: TextIO) -> None:
     except (AttributeError, ValueError):
         buffer = None
     if buffer is None:
+        if _stream_encoding(stream) not in _TRUSTED_ENCODINGS:
+            raise OSError(
+                "verdict stream has no binary buffer and its encoding is not "
+                "UTF-8; the verdict cannot be written safely"
+            )
         _write_all(stream, data.decode(encoding, errors="replace"))
         stream.flush()
         return
@@ -924,23 +995,30 @@ def _refuse(as_json: bool, stage: str, message: str, code: int) -> int:
     """
 
     try:
+        # The stream and its encoding are each taken once and bound to a
+        # local, so the codec the message is measured against is the codec
+        # its bytes are written in; see :func:`_emit`.
+        stream = sys.stderr
+        encoding = _byte_safe_encoding(stream)
         _emit(
-            "receipt verify: "
-            f"{_rendered(message, encoding=_byte_safe_encoding(sys.stderr))}"
+            f"receipt verify: {_rendered(message, encoding=encoding)}"
             "\nreceipt verify: FAIL",
-            sys.stderr,
+            stream,
+            encoding=encoding,
         )
     except Exception:  # noqa: BLE001 - a refusal that cannot print is still a refusal
         pass
     if as_json:
         try:
+            stream = sys.stdout
             _emit(
                 json.dumps(
                     _bounded_payload(_fail_payload(stage, message)),
                     indent=2,
                     sort_keys=True,
                 ),
-                sys.stdout,
+                stream,
+                encoding=_byte_safe_encoding(stream),
             )
         except Exception:  # noqa: BLE001 - as above; the exit code carries it
             pass
@@ -1015,10 +1093,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     # than an escape.
     if as_json:
         try:
+            stream = sys.stdout
+            encoding = _byte_safe_encoding(stream)
             rendered = json.dumps(
                 _bounded_payload(result_to_dict(result)), indent=2, sort_keys=True
             )
-            _emit(rendered, sys.stdout)
+            _emit(rendered, stream, encoding=encoding)
         except Exception as exc:  # noqa: BLE001 - rendering is inside the contract
             return _refuse(
                 as_json,
@@ -1034,9 +1114,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             # the emission: what the fields are measured against and what the
             # bytes are written in. Measuring in characters and then writing
             # in ASCII let 4,096 emoji pass a bound of 4,096 and arrive as
-            # 40,960 bytes (peer review, Sol round 4).
-            text = _format_text(result, encoding=_byte_safe_encoding(stream))
-            _emit(text, stream)
+            # 40,960 bytes (peer review, Sol round 4) — and asking the stream
+            # a second time inside ``_emit`` let a stream that answered
+            # differently twice do the same thing (peer review, Sol round 5).
+            encoding = _byte_safe_encoding(stream)
+            text = _format_text(result, encoding=encoding)
+            _emit(text, stream, encoding=encoding)
         except Exception as exc:  # noqa: BLE001 - rendering is inside the contract
             return _refuse(
                 False,

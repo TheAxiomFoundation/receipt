@@ -2044,11 +2044,11 @@ def test_a_short_write_does_not_truncate_the_verdict() -> None:
     else.
     """
 
-    from receipt.cli import _emit
+    from receipt.cli import _byte_safe_encoding, _emit
 
     payload = "VERDICT: FAIL \u2014 binding\nreceipt verify: FAIL"
     stream = _PartialStdout(7)
-    _emit(payload, stream)
+    _emit(payload, stream, encoding=_byte_safe_encoding(stream))
     assert bytes(stream.buffer.data) == (payload + "\n").encode("utf-8")
     assert stream.buffer.calls > 6
 
@@ -2130,7 +2130,7 @@ def test_a_legacy_codec_cannot_turn_the_verdict_into_a_control_sequence(
     the stream.
     """
 
-    from receipt.cli import _emit
+    from receipt.cli import _byte_safe_encoding, _emit
 
     # What the stream's own codec would have made of it, which is the
     # finding: a byte the terminal reads as a control, out of text that
@@ -2139,7 +2139,7 @@ def test_a_legacy_codec_cannot_turn_the_verdict_into_a_control_sequence(
     assert all(ord(character) not in (0x1B, 0x9B) for character in payload)
 
     stream = _CodecStdout(encoding)
-    _emit(payload, stream)
+    _emit(payload, stream, encoding=_byte_safe_encoding(stream))
     data = stream.written()
     assert data.isascii()
     assert b"\x1b" not in data and b"\x9b" not in data
@@ -2169,11 +2169,11 @@ def test_a_utf8_stream_still_carries_the_characters_themselves(
     verdict to ASCII.
     """
 
-    from receipt.cli import _emit
+    from receipt.cli import _byte_safe_encoding, _emit
 
     payload = "FAILED: binding \u203a \u30c6\u30b9\u30c8.yaml"
     stream = _CodecStdout(encoding)
-    _emit(payload, stream)
+    _emit(payload, stream, encoding=_byte_safe_encoding(stream))
     assert stream.written().decode(encoding) == payload + "\n"
 
 
@@ -2202,18 +2202,169 @@ def test_a_wider_code_unit_cannot_carry_an_escape_sequence_either(
     these payloads puts 0x1b on the stream.
     """
 
-    from receipt.cli import _emit
+    from receipt.cli import _byte_safe_encoding, _emit
 
     payload = "FAILED: binding \u5b1b\u6d38.yaml"
     assert all(ord(character) not in (0x1B, 0x9B) for character in payload)
     assert 0x1B in payload.encode(encoding)
 
     stream = _CodecStdout(encoding)
-    _emit(payload, stream)
+    _emit(payload, stream, encoding=_byte_safe_encoding(stream))
     data = stream.written()
     assert data.isascii()
     assert b"\x1b" not in data and b"\x9b" not in data
     assert data == b"FAILED: binding \\u5b1b\\u6d38.yaml\n"
+
+
+class _ShiftingCodecStdout(io.TextIOWrapper):
+    """A stdout whose ``encoding`` answers differently to successive reads.
+
+    ``encoding`` is a plain attribute on a ``TextIOWrapper`` and a property
+    on plenty of the wrappers a host substitutes for one — a stream that
+    reports the console's current code page, a lazily reopened stream, a
+    proxy that follows the locale. Nothing in the contract says two reads
+    agree, and the command must not need them to.
+
+    The bytes go to the real underlying buffer, so what the verdict actually
+    received is what is asserted.
+    """
+
+    def __init__(self, first: str, then: str) -> None:
+        super().__init__(io.BytesIO(), encoding=first, errors="strict", newline="")
+        self._answers = [first, then]
+        self.reads = 0
+
+    @property
+    def encoding(self) -> str:  # type: ignore[override]
+        answer = self._answers[min(self.reads, len(self._answers) - 1)]
+        self.reads += 1
+        return answer
+
+    def written(self) -> bytes:
+        self.flush()
+        return self.buffer.getvalue()
+
+
+def test_the_emission_encoding_is_decided_once(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S6-F3: the stream was sampled twice and could answer twice.
+
+    S5R4-F8 made the text bound count in the units the stream receives by
+    deciding the emission encoding in ``main`` and threading it into
+    ``_format_text``. ``_emit`` then sampled the stream again to encode, so
+    the two halves rested on a stream answering the same question the same
+    way twice. A stream that reports ``utf-8`` to the first read and
+    ``ascii`` to the second is measured in characters and written with
+    ``backslashreplace``: 4,096 emoji pass a bound of 4,096 and arrive as
+    40,960 bytes of ``\\U0001f600``, which is the very defect S5R4-F8
+    closed, reopened by the second sampling.
+
+    ``main`` decides once and hands the decision to both, and ``_emit`` no
+    longer asks — so the stream is read exactly once and the verdict is
+    written in the encoding it was measured in. Without the fix the stream
+    is read twice and the field arrives tenfold, spelled in backslashes.
+    """
+
+    from receipt.cli import MAX_RENDERED_FIELD
+
+    emoji = "\U0001f600"
+    _flood_the_manifest_schema_with(repo, emoji * MAX_RENDERED_FIELD)
+    stream = _ShiftingCodecStdout("utf-8", "ascii")
+    monkeypatch.setattr(sys, "stderr", stream)
+
+    assert run(repo) == EXIT_FAIL
+    data = stream.written()
+
+    assert emoji.encode("utf-8") in data
+    assert b"\\U0001f600" not in data
+    assert stream.reads == 1
+    # Counted in the units the stream receives, which for a UTF-8 emission
+    # are the characters it decodes to: two bounded fields plus this
+    # module's own fixed lines. Without the fix the field arrives spelled in
+    # backslashes, which is ten ASCII characters for each of 4,096 emoji.
+    drawn = data.decode("utf-8")
+    assert len(drawn) < 2 * (MAX_RENDERED_FIELD + 64) + 2048
+    assert data.endswith("VERDICT: FAIL — custody\n".encode("utf-8"))
+
+
+class _BufferlessStdout(io.TextIOWrapper):
+    """A stdout with no usable binary layer, of a codec the test chooses.
+
+    The shape ``_emit``'s text fallback exists for: a detached wrapper, or
+    one a host substituted that never had a buffer. What it writes is kept
+    as text, because the point of the fallback is that the stream's own
+    codec is what turns it into bytes.
+    """
+
+    def __init__(self, encoding: str) -> None:
+        super().__init__(io.BytesIO(), encoding=encoding, errors="strict", newline="")
+        self.text: list[str] = []
+
+    @property
+    def buffer(self):  # type: ignore[override]
+        raise ValueError("underlying buffer has been detached")
+
+    def write(self, text: str) -> int:  # type: ignore[override]
+        self.text.append(text)
+        return len(text)
+
+
+def test_a_bufferless_stream_of_an_untrusted_codec_is_refused(
+    repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Binds S6-F3: the fallback handed the bytes back to the rejected codec.
+
+    ``_byte_safe_encoding`` refuses to trust a codec that can spell a
+    printable character as a terminal-controlling byte, and encodes as ASCII
+    instead. The bufferless fallback then decoded those safe bytes and wrote
+    the *text* through the stream, whose own codec encodes it again — the
+    one this module had just rejected. cp037 is an EBCDIC page: it spells an
+    ordinary ``a`` as 0x81 and a space as 0x40, so a verdict carrying no
+    control character at all leaves as bytes in the C1 range, and UTF-16
+    would put a NUL beside every ASCII character. Everything the escaping
+    and the codec choice bought was given back at the last step.
+
+    There is nothing safe to do with such a stream, so the write refuses and
+    the render boundary turns that into the refusal it already has. Without
+    the fix the run reports PASS and the stream holds EBCDIC bytes.
+    """
+
+    stream = _BufferlessStdout("cp037")
+    monkeypatch.setattr(sys, "stdout", stream)
+    assert run(repo) == EXIT_FAIL
+    assert stream.text == []
+    error = capsys.readouterr().err
+    assert "verdict could not be rendered; treat the run as unverified" in error
+    assert (
+        "OSError: verdict stream has no binary buffer and its encoding is not "
+        "UTF-8; the verdict cannot be written safely" in error
+    )
+    assert error.rstrip("\n").endswith("receipt verify: FAIL")
+
+
+def test_a_bufferless_utf8_stream_still_gets_the_verdict(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S6-F3, the control: the fallback still serves the stream it is for.
+
+    The refusal above must not cost the fallback its reason for existing. A
+    detached or substituted wrapper whose own codec is UTF-8 re-encodes the
+    text to exactly the bytes the buffer would have received, because UTF-8
+    is the one codec this module trusts to do that, so the verdict is
+    written through the text API and the run reports what it found.
+
+    This test passes with the S6-F3 change disabled, which is the point: it
+    is what keeps the guard from turning every bufferless stream into a
+    refusal.
+    """
+
+    stream = _BufferlessStdout("utf-8")
+    monkeypatch.setattr(sys, "stdout", stream)
+    assert run(repo) == EXIT_OK
+    assert "VERDICT: PASS" in "".join(stream.text)
 
 
 def test_a_strict_ascii_stdout_still_gets_the_text_verdict(
