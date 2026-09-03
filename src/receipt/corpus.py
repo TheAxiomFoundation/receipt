@@ -124,9 +124,10 @@ re-derived the set.
 Stamping only what those passes read was not enough. Neither walk reaches the
 directory that holds an attested file — attested paths sit outside the content
 roots, and a tombstone walk descends only toward a removed path — so a journal
-with no tombstones left ``.axiom`` unstamped, and replacing
-``.axiom/toolchain.toml`` by rename during the second tombstone pass moved a
-generation nothing had recorded (peer review, round seven). Every ancestor of
+whose tombstones sit elsewhere, or carries none at all, left ``.axiom``
+unstamped, and replacing ``.axiom/toolchain.toml`` by rename during the second
+tombstone pass moved a generation nothing had recorded (peer review, round
+seven). Every ancestor of
 every bound path, from the tree root down to the file's own parent, is
 therefore stamped as well, before the identity re-check re-states the files.
 
