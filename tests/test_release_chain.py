@@ -17,6 +17,13 @@ Two more are labelled S5-R2-F3 and belong to that branch's fifth gate, second
 round, for the same reason: the release tree's confinement walk was added for
 the append gate and reached only from there, so the public verifier had none
 of it.
+
+One at the end is labelled S5-G1-F2 and belongs to a fresh gate's first round:
+the whole-index alias scan compared each entry against the three paths a
+``ChainSpec`` carries and against nothing else, and a caller with configured
+surfaces of its own protects more than that. It is the package-level half —
+that the widening is the caller's to ask for and changes nothing for a caller
+that does not.
 """
 
 from __future__ import annotations
@@ -37,6 +44,7 @@ from receipt.release_chain import (
     ReleaseChainError,
     _combined_anchor_digest,
     _observe_anchor_bytes,
+    assert_index_carries_no_protected_alias,
     verify_release_chain,
 )
 from receipt.cli import EXIT_FAIL, main
@@ -1397,4 +1405,72 @@ def test_a_folded_manifest_leaf_is_refused_by_the_public_verifier(
     assert str(refusal.value) == (
         "path component releases/manifests is not spelled by its directory: "
         "releases/manifests"
+    )
+
+
+def a_repository_holding(tmp_path: pathlib.Path, *listed: str) -> pathlib.Path:
+    """A git repository whose index records exactly ``listed``.
+
+    Ambient user configuration is isolated the way ``tests/test_append_gate``'s
+    own fixture git isolates it, so the entries are this test's and nothing
+    else's.
+    """
+
+    root = tmp_path / "index-repo"
+    root.mkdir()
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "init", "--quiet"], check=True, env=environment
+    )
+    for name in listed:
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(root), "add", "-A"], check=True, env=environment
+    )
+    return root
+
+
+def test_the_alias_scan_protects_only_what_its_caller_names(
+    repo: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """Binds S5-G1-F2 where the widening is decided: the package's own scan.
+
+    ``assert_index_carries_no_protected_alias`` compared every index entry
+    against the three paths a ``ChainSpec`` carries, and those are the paths
+    this module reads for itself. A caller that also classifies proposals by
+    surface patterns protects more than that, and every surface match is by
+    exact spelling, so an entry folding onto one of them was invisible on both
+    sides — which is the finding, bound end to end in
+    tests/test_append_gate.py, where the same tree is accepted as
+    ``thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs
+    base`` without the fix.
+
+    Widening it stays the caller's decision, because a ``ChainSpec`` names no
+    surfaces and ``verify_release_chain``'s callers configure none: the
+    package-level contract is unchanged, and this pins that as much as the
+    refusal. Same index, same spec, refused when the surface is named and
+    untouched when it is not. Without the ``surfaces`` argument the second
+    call is the first, and neither refuses."""
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    root = a_repository_holding(tmp_path, "Tools/helper.py")
+
+    assert_index_carries_no_protected_alias(root, spec.chain)
+
+    with pytest.raises(ReleaseChainError) as refusal:
+        assert_index_carries_no_protected_alias(
+            root, spec.chain, surfaces=frozenset({"tools/**"})
+        )
+    assert str(refusal.value) == (
+        "index carries an alias of a protected path: Tools/helper.py "
+        "(for tools at tools)"
     )
