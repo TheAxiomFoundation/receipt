@@ -820,12 +820,24 @@ MAX_PATH_COMPONENTS_TOTAL = MAX_JOURNAL_ROWS * MAX_PATH_TEXT
 #: Derived, not picked: no path within ``MAX_PATH_TEXT`` has more than
 #: ``MAX_PATH_COMPONENTS`` components, and a default-capacity journal declares
 #: at most ``MAX_JOURNAL_ROWS`` paths, so no valid default-capacity journal can
-#: need more than 4,096 × 512 = 2,097,152 of them. The largest layout that
-#: actually reaches it is smaller still — distinct first components cost two
-#: characters each, which caps such a path at 511 components and 4,096 of them
-#: at 2,093,056 prefixes — so this ceiling refuses no journal the default
-#: capacity admits. A spec that pins a larger ``journal_row_capacity`` can
-#: exceed it and is refused here.
+#: need more than 4,096 × 512 = 2,097,152 of them, and this is that product.
+#:
+#: The margin under it is small enough to state rather than assume, because
+#: the review proposed a tighter ceiling a valid journal can pass. Those 4,096
+#: paths would name 2,097,152 distinct prefixes only if they shared none, and
+#: they cannot: a one-character portable name is one of 64 — the repertoire's
+#: 65 characters less the bare period, which ends in one — so at most 64 first
+#: components exist and the other 4,032 paths must share one. The most a
+#: default-capacity journal can name is therefore 2,093,120, which 4,096 paths
+#: of 512 one-character components reach by diverging at their *second*
+#: component (64 + 4,096 + 4,096 × 510). The review's 2,093,056 reasoned from
+#: paths that diverge at the *root*, which costs three characters to spell
+#: 4,096 of them and so caps such a path at 511 components; that is the worst
+#: case for what the old trie *allocated*, not for cardinality, and a ceiling
+#: set to it would refuse a journal 64 prefixes above it. So the ceiling is
+#: the product, and it refuses no journal the default capacity admits. A spec
+#: that pins a larger ``journal_row_capacity`` can exceed it and is refused
+#: here.
 MAX_ALIAS_INDEX_NODES = MAX_JOURNAL_ROWS * MAX_PATH_COMPONENTS
 #: The most characters the verdict's removedPaths may carry in total; the
 #: gate budget's counterpart for the other producer-controlled list the
