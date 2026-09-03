@@ -1452,14 +1452,18 @@ def test_the_alias_scan_covers_the_manifest_and_anchor_directories(
     alias is refused with no ``surfaces`` argument at all."""
 
     spec, _ = load_spec(repo / "verification/spec.py")
-    for alias in ("releases/Manifests/0000-alias.json", "releases/Anchors/root.pem"):
+    for alias, protected in (
+        ("releases/Manifests/0000-alias.json", "releases/manifests"),
+        ("releases/Anchors/root.pem", "releases/anchors"),
+    ):
         scratch = tmp_path / alias.split("/")[1]
         scratch.mkdir()
         root = a_repository_holding(scratch, alias)
         with pytest.raises(ReleaseChainError) as refusal:
             assert_index_carries_no_protected_alias(root, spec.chain)
-        assert str(refusal.value).startswith(
-            f"index carries an alias of a protected path: {alias} (for "
+        assert str(refusal.value) == (
+            f"index carries an alias of a protected path: {alias} "
+            f"(for {protected} at {protected})"
         )
 
 

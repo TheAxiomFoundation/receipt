@@ -225,7 +225,7 @@ rather than the protected path's own extends that entry-level check without
 moving it: it is the same read of the same index, at entry, answering about
 more of the same paths, and an entry spelled exactly right as far down as it
 goes is untouched. So does asking it about every path this run protects
-rather than the three a ``ChainSpec`` carries. The gate and data surfaces are
+rather than the five a ``ChainSpec`` carries. The gate and data surfaces are
 this consumer's configuration and they protect paths of their own —
 ``scripts/check_append.py``, and the directory a ``dir/**`` pattern names —
 which that scan compared against nothing, while every surface match here is
@@ -236,7 +236,8 @@ with a second committed object standing over the gate script the consumer
 runs. The protected set is derived from the spec the way
 ``_surface_directories`` derives the directories to enumerate — the exact
 patterns, the ``dir/**`` prefixes, the release root and its ancestors, the
-state paths — and the ``ChainSpec`` paths are compared first, so an entry that
+state paths, the manifest and anchor directories — and the ``ChainSpec``
+paths are compared first, so an entry that
 aliases two of them keeps the sentence it already had. That is asked on both
 paths, because an alias is a second committed object over a protected path
 whether or not a base is named.

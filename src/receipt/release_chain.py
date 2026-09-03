@@ -30,7 +30,7 @@ filesystem traversal does not descend a symlinked directory while resolving
 the whole name does — and because a case- or normalisation-insensitive
 filesystem answers one entry's question with another entry's file; the
 whole-index read that refuses an entry spelled as another spelling of a
-protected path — the three this module reads for itself, and every path a
+protected path — the five this module reads for itself, and every path a
 caller's own configured surfaces name, which it passes in — since every one of
 those reconciliations is blind to such an entry because each compares by exact
 spelling, and so is a caller's surface classification; its sibling read,
@@ -3141,7 +3141,7 @@ def assert_index_carries_no_protected_alias(
     same rule at the same place, and the sentence names both spellings as it
     always did.
 
-    Order is the three ``ChainSpec`` paths first and the surface-derived paths
+    Order is the five ``ChainSpec`` paths first and the surface-derived paths
     after them, sorted. An entry that aliases two protected paths at once is
     named for the first of them, and that is the sentence the trees already
     pinned before ``surfaces`` existed — ``Ledger`` is an alias of
