@@ -25,6 +25,8 @@ from receipt.corpus import (
     MAX_JOURNAL_BYTES,
     MAX_JOURNAL_ROW_BYTES,
     MAX_JOURNAL_ROWS,
+    MAX_PATH_COMPONENTS_TOTAL,
+    MAX_PATH_TEXT,
     MAX_REMOVED_TEXT,
     REMOVED_PATH_RENDER_STRUCTURE,
     CorpusError,
@@ -885,6 +887,104 @@ def test_two_declared_paths_under_distinct_ancestors_still_verify(
         tmp_path, render_journal(journal_rows(content=content)), spec=corpus_spec()
     )
     assert [entry.path for entry in verification.content] == sorted(content)
+
+
+def test_maximum_rows_at_maximum_portable_depth_use_a_shared_prefix_trie(
+) -> None:
+    """Binds S7-F1: cumulative prefix strings made depth times rows allocations.
+
+    These 4,096 paths are each 1,023 characters and 511 components, the
+    review's maximum-depth fixture. They make 2,093,056 prefix visits, but
+    share their first 510 components, so a component trie needs exactly
+    4,606 nodes. The old slice/join/fold loop instead materialised and
+    re-folded one cumulative string per visit, and had no allocation count
+    or budget for the test to assert; paths with distinct prefixes retained
+    that same 2.1-million cardinality in its dictionary.
+
+    Without S7-F1 the returned allocation count is absent or is the visit
+    count rather than 4,606, and the derived shared-budget assertions fail.
+    """
+
+    from receipt.corpus import _PathPrefixWork, _reject_aliasing_paths
+
+    shared = ["a"] * 510
+    paths = [
+        "/".join((*shared, f"{index:03x}"))
+        for index in range(MAX_JOURNAL_ROWS)
+    ]
+    assert len(paths) == 4096
+    assert len(paths[0]) == 1023
+    assert len(paths[0].split("/")) == 511
+
+    work = _PathPrefixWork()
+    entries = _reject_aliasing_paths(paths, work=work)
+
+    assert (
+        MAX_PATH_COMPONENTS_TOTAL
+        == MAX_JOURNAL_ROWS * MAX_PATH_TEXT
+        == 4194304
+    )
+    assert work.work == MAX_JOURNAL_ROWS * 511 == 2093056
+    assert entries == 510 + MAX_JOURNAL_ROWS == 4606
+
+
+def test_the_fixture_spends_eighteen_visits_from_one_shared_prefix_budget(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S7-F1: the alias and ancestor walks previously had no shared cap.
+
+    The fixture has eleven declared component prefixes and seven non-root
+    ancestor prefixes. At eighteen the whole verification completes; at
+    seventeen the final visit refuses in the budget's single sentence.
+    Without S7-F1 both runs complete because neither old walk charges a
+    prefix budget shared with the other.
+    """
+
+    write_tree(tmp_path)
+    monkeypatch.setattr("receipt.corpus.MAX_PATH_COMPONENTS_TOTAL", 18)
+    verify_corpus_binding(
+        tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+    )
+
+    monkeypatch.setattr("receipt.corpus.MAX_PATH_COMPONENTS_TOTAL", 17)
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        "declared paths visit more than 17 prefixes; the corpus cannot be "
+        "bound safely"
+    )
+
+
+def test_ancestor_stamping_stops_at_the_first_absent_prefix(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S7-F1: ancestor stamping descended below a path that could not exist.
+
+    Once ``absent`` fails ``lstat``, neither ``absent/child`` nor anything
+    beneath it can have a directory listing to protect. S7-F1 stops after
+    the root and that missing prefix and charges the one non-root visit.
+    Without the stop the recorder makes a third ``lstat`` below the absent
+    prefix, so the exact call list and budget count fail.
+    """
+
+    import receipt.corpus as corpus_module
+
+    calls: list[pathlib.Path] = []
+    real_lstat = corpus_module.os.lstat
+
+    def recording_lstat(path: os.PathLike[str]) -> os.stat_result:
+        calls.append(pathlib.Path(path))
+        return real_lstat(path)
+
+    monkeypatch.setattr(corpus_module.os, "lstat", recording_lstat)
+    work = corpus_module._PathPrefixWork()
+    generations = corpus_module._DirectoryGenerations(work)
+    generations.record_ancestors(tmp_path, "absent/child/file.yaml")
+
+    assert calls == [tmp_path, tmp_path / "absent"]
+    assert work.work == 1
 
 
 def test_refuses_a_fifo_at_an_attested_path_without_blocking(
