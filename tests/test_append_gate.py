@@ -3503,3 +3503,114 @@ def test_the_classification_is_bound_to_the_recorded_root_too(
         run_gate(candidate)
     assert swapped
     assert str(refusal.value) == "candidate root changed during verification"
+
+
+@pytest.mark.skipif(
+    os.getuid() == 0, reason="root traverses a directory it has no rights on"
+)
+def test_a_search_only_state_directory_is_descended_where_the_platform_allows(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S4-F5: the descriptor walk opened every directory above a state
+    file with ``O_RDONLY | O_DIRECTORY``, which asks for read permission the
+    pathname open it replaced never needed. A POSIX search-only directory —
+    mode 0o111, traversable but not listable, which is how a directory above
+    a published state file is often locked down — was read from happily
+    before and failed with a bare ``PermissionError`` afterwards. All the
+    walk does with a directory descriptor is ``openat`` and ``fstat`` through
+    it, and ``O_PATH`` and ``O_SEARCH`` both give exactly that without asking
+    for read.
+
+    So where the platform offers search rights the file is read and the
+    ordinary verdict stands; where it offers neither the requirement is
+    stated instead of raised. Linux has ``O_PATH``, Darwin has ``O_SEARCH``
+    from CPython 3.14, and an older CPython on Darwin has neither — the
+    assertion follows the module's own answer so the case is bound on all
+    three. Without the flag change the first branch is a
+    ``PermissionError`` escaping the gate."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    ledger_directory = candidate.root / "ledger"
+    ledger_directory.chmod(0o111)
+    try:
+        # Search-only, and the state file inside it is readable: the walk is
+        # the only thing standing between the gate and those bytes.
+        assert (candidate.root / CHAIN_SPEC.state_relative).read_bytes()
+        if release_chain.DESCENT_REQUIRES_DIRECTORY_READ:
+            with pytest.raises(AppendError) as refusal:
+                run_gate(candidate)
+            assert str(refusal.value) == (
+                "state path component ledger is not readable by this "
+                "verifier; secure descent requires read permission on every "
+                "directory above a state file on this platform: "
+                "ledger/official_observations.jsonl"
+            )
+        else:
+            assert run_gate(candidate) == (
+                "thesis-facts append check OK: 3 rows, immutable prefix 1, "
+                "+1 appended vs base"
+            )
+    finally:
+        ledger_directory.chmod(0o755)
+
+
+@pytest.mark.skipif(
+    os.getuid() == 0, reason="root traverses a directory it has no rights on"
+)
+def test_the_shared_state_reader_answers_the_same_way(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S4-F5 through ``release_chain``'s own reader, which is the one
+    ``verify_release_chain`` — and so ``receipt verify``'s custody pass —
+    uses. Both readers go through the same descent, so both gained the same
+    requirement and both state it the same way."""
+
+    candidate = base_repository(tmp_path)
+    ledger_directory = candidate.root / "ledger"
+    expected = (candidate.root / CHAIN_SPEC.state_relative).read_bytes()
+    ledger_directory.chmod(0o111)
+    try:
+        if release_chain.DESCENT_REQUIRES_DIRECTORY_READ:
+            with pytest.raises(ReleaseChainError) as refusal:
+                _regular_file_bytes(candidate.root, CHAIN_SPEC.state_relative)
+            assert str(refusal.value) == (
+                "state path component ledger is not readable by this "
+                "verifier; secure descent requires read permission on every "
+                "directory above a state file on this platform: "
+                "ledger/official_observations.jsonl"
+            )
+        else:
+            assert (
+                _regular_file_bytes(candidate.root, CHAIN_SPEC.state_relative)
+                == expected
+            )
+    finally:
+        ledger_directory.chmod(0o755)
+
+
+def test_the_descent_asks_for_no_more_than_it_uses(tmp_path: pathlib.Path) -> None:
+    """S4-F5's flag choice, stated rather than implied. Where the platform
+    has a search-only flag the walk uses it and asks for no read permission;
+    where it does not the walk falls back to ``O_RDONLY`` and says so through
+    ``DESCENT_REQUIRES_DIRECTORY_READ``, which is what the two tests above
+    branch on. ``O_DIRECTORY`` and ``O_NOFOLLOW`` are in the set either way,
+    because a component that became a file or a link must fail rather than be
+    followed."""
+
+    flags = release_chain.DIRECTORY_OPEN_FLAGS
+    assert flags & os.O_DIRECTORY
+    assert flags & os.O_NOFOLLOW
+    # Whatever this platform offers, the walk takes it: leaving an available
+    # search-only flag unused is the finding, and on a platform offering
+    # neither both sides of this are zero.
+    offered = getattr(os, "O_PATH", 0) or getattr(os, "O_SEARCH", 0)
+    assert release_chain.SEARCH_ONLY_DIRECTORY_FLAG == offered
+    if offered:
+        assert flags & offered
+        assert release_chain.DESCENT_REQUIRES_DIRECTORY_READ is False
+    else:
+        assert release_chain.DESCENT_REQUIRES_DIRECTORY_READ is True
+    # Whichever it is, the walk still reaches an ordinary state file.
+    candidate = base_repository(tmp_path)
+    assert _regular_file_bytes(candidate.root, CHAIN_SPEC.state_relative)

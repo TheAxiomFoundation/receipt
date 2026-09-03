@@ -47,7 +47,9 @@ its path is resolved twice, from a candidate root whose identity was recorded
 before the run began and is compared again wherever a verdict is decided
 without a state read — the surface classification and the gate-only exit,
 which perform no descent and so never reached that comparison — and never
-through a weaker descent than that — every
+through a weaker descent than that, nor a narrower one — the directories above
+a state file are opened with search rights where the platform offers them, and
+where it does not the read permission the descent needs is stated — every
 consumer here, the release verification included, is fed those bytes, and the
 file's mode and parent directories as that one read observed them, rather than
 the path, with each file re-checked at the end, forwards and then backwards,
