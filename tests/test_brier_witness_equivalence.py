@@ -103,6 +103,13 @@ Deliberately outside the mutation contract:
   compared message quotes an OpenSSL command line -- the flip and truncation
   mutations retain the committed hash on purpose and bind the deterministic
   token-hash refusal before OpenSSL is reached;
+- the baseline opens all three of those files by name and waits on the open;
+  the port opens each with ``O_NONBLOCK`` where the platform has the flag and
+  clears it again once ``fstat`` has judged the descriptor, so a file replaced
+  by a FIFO between a path-level check and the open is refused rather than
+  waited on indefinitely (peer review, fifth gate round one).  The flag
+  changes nothing about reading a regular file, and every file the harness
+  reads is one, so no case here moves;
 - the baseline compares a bundle's anchors with the code identities in one
   direction only, so an identity scoped to a bundle whose anchors do not
   include it is ignored; the port requires the two sets to be equal at load.

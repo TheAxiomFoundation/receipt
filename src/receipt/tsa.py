@@ -87,6 +87,17 @@ the bytes that were hashed are now the bytes both of them are given.  That
 digest identifies a file and not a timestamp, which is why
 :class:`TokenEvidence` also carries the digest of the signed ``TSTInfo``.
 
+All three of those reads open without waiting.  Each has a path-level check
+in front of it, and the check answers about a pathname while the descriptor
+is opened from that pathname again, so what is opened need not be what was
+checked: a regular file replaced by a FIFO in between is opened as a FIFO,
+and a read-only open of a FIFO waits for a writer with no timeout.  The
+refusal that ``fstat`` would then give is never reached, and a verification
+that should have failed hangs instead.  So the open carries ``O_NONBLOCK``
+where the platform has the flag, ``fstat`` refuses the descriptor in the
+caller's own words, and the flag is cleared before any byte is read -- it
+governs the open and nothing after it.
+
 Because OpenSSL is given the copies and never a repository path, the command
 text quoted in a failure names temporary files; every refusal of this
 module's own still names the record, the token and the root as the repository
@@ -130,6 +141,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+try:  # pragma: no cover - exercised by whichever platform runs the suite
+    import fcntl
+except ImportError:  # pragma: no cover - Windows has no fcntl, and no O_NONBLOCK
+    fcntl = None  # type: ignore[assignment]
 
 from receipt.canonical import canonical_bytes, canonical_sha256
 
@@ -1135,11 +1151,48 @@ def _certificate_count(path: Path, *, pinned_path: Path | None = None) -> int:
 
 
 #: Flags for the one read of a file this module goes on to judge and trust: no
-#: descriptor inherited across an exec, and no symlink followed at open time
-#: where the platform has the flag.
+#: descriptor inherited across an exec, no symlink followed at open time, and
+#: no open that waits -- each where the platform has the flag.
+#:
+#: ``O_NONBLOCK`` is what decides whether a refusal arrives at all.  The open
+#: has to happen before ``fstat`` can say what was opened, so a regular file
+#: replaced by a FIFO between a caller's path-level check and this open is
+#: opened as a FIFO -- and a blocking read-only open of a FIFO waits for a
+#: writer with no timeout, so the refusal that would follow is never reached
+#: and the verification hangs instead of failing (peer review, fifth gate
+#: round one).  A non-blocking open returns a descriptor at once and the
+#: ``fstat`` below refuses it.  ``_clear_nonblocking`` then takes the flag
+#: back off, so it governs the open and nothing else.
 _ONE_READ_FLAGS = (
-    os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    os.O_RDONLY
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
 )
+
+
+def _clear_nonblocking(descriptor: int) -> None:
+    """Take ``O_NONBLOCK`` back off a descriptor ``fstat`` has just judged.
+
+    The flag is set for the open, where it is the difference between a
+    refusal and a hang, and it is wanted for nothing after it: ``open(2)``
+    says it "also has the effect of making all subsequent I/O on the open
+    file non-blocking", so leaving it set would change the reads too.  Only a
+    regular file is ever read here -- the caller's ``fstat`` rule refuses
+    everything else before this is called -- and a regular file's reads do not
+    block, so clearing it is what keeps the read exactly the read it was
+    rather than a read that has to be prepared for ``EAGAIN``.  Chosen over
+    tolerating ``EAGAIN`` in the read loop for that reason: a retry loop would
+    be a second reading mode with no input in the pinned tree to exercise it.
+
+    Nothing to do where the platform has neither ``fcntl`` nor ``O_NONBLOCK``,
+    which is also where ``_ONE_READ_FLAGS`` did not set it.
+    """
+
+    if fcntl is None or not hasattr(os, "O_NONBLOCK"):
+        return
+    flags = fcntl.fcntl(descriptor, fcntl.F_GETFL)
+    fcntl.fcntl(descriptor, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
 
 
 def _read_file_once(path: Path, missing: str) -> bytes:
@@ -1158,6 +1211,11 @@ def _read_file_once(path: Path, missing: str) -> bytes:
     is decided about the same object the bytes come from; each caller keeps its
     path-level check in front, which means a race can change which of the two
     identical refusals fires but never the message.
+
+    That race is why the open is non-blocking: the caller's check answers
+    about a pathname and this opens the pathname again, so what is opened may
+    be a FIFO the check never saw, and opening one to read blocks until a
+    writer arrives.  See ``_ONE_READ_FLAGS``.
     """
 
     try:
@@ -1168,6 +1226,7 @@ def _read_file_once(path: Path, missing: str) -> bytes:
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise TsaError(missing)
+        _clear_nonblocking(descriptor)
         while True:
             chunk = os.read(descriptor, 1 << 20)
             if not chunk:

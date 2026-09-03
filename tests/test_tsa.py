@@ -18,6 +18,8 @@ import json
 import os
 import pathlib
 import re
+import signal
+import stat
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
@@ -2658,6 +2660,109 @@ def test_verify_witness_refuses_a_record_it_cannot_read_once(
     assert str(symlinked.value) == (
         f"witnessed record is missing or not a regular file: {linked}"
     )
+
+
+def replace_with_a_fifo_after_the_path_check(
+    monkeypatch: pytest.MonkeyPatch, victim: pathlib.Path
+) -> list[str]:
+    """Answer the path-level check about the real file, then make it a FIFO.
+
+    The race the non-blocking open exists for, arriving at the one moment
+    that opens it: ``Path.is_file`` is asked about a regular file and says so,
+    and by the time ``os.open`` runs on that same name a FIFO is there
+    instead. Every later check of the name is answered as the first one was,
+    because the finding is about what the descriptor turns out to be and not
+    about a screen that gets a second look. Returns the swap, so a test can
+    show the writer ran.
+    """
+
+    real_is_file = pathlib.Path.is_file
+    target = os.path.realpath(victim)
+    swapped: list[str] = []
+
+    def answering_then_swapping(self: pathlib.Path) -> bool:
+        answer = real_is_file(self)
+        if os.path.realpath(self) != target:
+            return answer
+        if not swapped:
+            assert answer, "the victim was not a regular file to begin with"
+            victim.unlink()
+            os.mkfifo(victim)
+            swapped.append(str(victim))
+        return True
+
+    monkeypatch.setattr(pathlib.Path, "is_file", answering_then_swapping)
+    return swapped
+
+
+@pytest.mark.parametrize("victim", ["record", "token", "root"])
+def test_a_fifo_raced_in_after_the_path_check_refuses_without_blocking(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+    victim: str,
+) -> None:
+    """S5-F3: the one read opens without waiting, so a refusal arrives at all.
+
+    ``_read_file_once`` opens before ``fstat`` can say what it opened, and the
+    path-level check in front of it answers about a name rather than about the
+    object the open will find. So a regular file replaced by a FIFO in that
+    window is opened as a FIFO -- and a read-only open of a FIFO waits for a
+    writer with no timeout. Without ``O_NONBLOCK`` the open never returns, the
+    regular-file refusal below is never reached, and a verification that
+    should have failed hangs; the alarm here is what turns that into a loud
+    failure instead of a hung suite. With it the open returns a descriptor at
+    once, ``fstat`` sees a FIFO, and the caller's own words come back.
+
+    All three files this module reads once, because all three have the same
+    window: the record, the claimed response, and the pinned root. The root's
+    refusal arrives inside the load-time wrapper, which is where every root
+    material failure has been carried since the anchors were validated at
+    load; the wording it carries is the caller's, unchanged.
+    """
+
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("platform has no FIFOs")
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    assert verify_tree(tree).status == "available"
+    records = tree.records.resolve()
+    root_path = records / "trust" / alpha.tsa.root_pem.name
+    token_path = records / RECORD_DAY / tree.tokens[alpha.anchor_id].name
+    targets = {
+        "record": (
+            tree.record,
+            f"witnessed record is missing or not a regular file: {tree.record}",
+        ),
+        "token": (
+            tree.tokens[alpha.anchor_id],
+            f"witness token is missing for {tree.record}: {token_path}",
+        ),
+        "root": (
+            tree.records / "trust" / alpha.tsa.root_pem.name,
+            f"TSA anchor {alpha.anchor_id} in bundle {BUNDLE_ID} references root "
+            "material that fails validation: pinned TSA root is missing or not "
+            f"a regular file: {root_path}",
+        ),
+    }
+    victim_path, expected = targets[victim]
+    swapped = replace_with_a_fifo_after_the_path_check(monkeypatch, victim_path)
+
+    def blocked(_signal: int, _frame: Any) -> None:
+        raise RuntimeError("the open blocked: the non-blocking flag is gone")
+
+    previous = signal.signal(signal.SIGALRM, blocked)
+    signal.alarm(30)
+    try:
+        with pytest.raises(TsaError) as caught:
+            verify_tree(tree)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+    # The writer really did run, and what was opened really was a FIFO.
+    assert swapped == [str(victim_path)]
+    assert stat.S_ISFIFO(os.lstat(victim_path).st_mode)
+    assert str(caught.value) == expected
 
 
 @pytest.mark.parametrize(
