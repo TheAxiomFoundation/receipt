@@ -47,16 +47,22 @@ claim fields, whose claim is then resolved and counted where the baseline
 ignored those fields; and a v2 witness that offers one RFC 3161 response
 under two of its outcomes, counted across the primary and supplemental
 outcomes together so that one response cannot stand for a bundle configuring
-more than one anchor -- counted three ways over: the physical file an
+more than one anchor -- counted four ways over: the physical path an
 outcome points at, refused before that outcome's response is read at all;
 the file digest that outcome declares, refused before its token is verified
-and so ahead of the ported refusals inside ``verify_timestamp_token``; and
-the pair of the ``TSTInfo`` an authority signed and the certificate that
-signed it, refused where that verification returns.  Each reaches what the
-one before it cannot.  Two outcomes may name one path and declare two
-digests, and each outcome reads the path for itself, so a writer serving a
-different valid response to each read satisfies both from a repository that
-never held both.  And nearly everything around a signed ``TSTInfo`` is the
+and so ahead of the ported refusals inside ``verify_timestamp_token``; the
+object the read actually opened, as ``(st_dev, st_ino)`` off the descriptor
+the bytes came out of, refused at the read; and the pair of the ``TSTInfo``
+an authority signed and the certificate that signed it, refused where that
+verification returns.  Each reaches what the one before it cannot.  Two
+outcomes may name one path and declare two digests, and each outcome reads
+the path for itself, so a writer serving a different valid response to each
+read satisfies both from a repository that never held both; and two
+outcomes may name one file under two paths, because a symlinked parent
+directory or a second hard link gives one object two names that no lexical
+comparison separates -- which is why the third identity is taken from the
+descriptor and not from a second look at the name, that look being the race
+itself.  And nearly everything around a signed ``TSTInfo`` is the
 producer's to rewrite -- the unsigned ``PKIStatusInfo`` wrapper, and the
 ``certificates``, ``crls`` and ``unsignedAttrs`` a ``SignedData`` carries
 outside its signature -- so one issuance has many valid encodings and a rule
@@ -166,7 +172,7 @@ import re
 import stat
 import subprocess
 import tempfile
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1290,7 +1296,7 @@ def _clear_nonblocking(descriptor: int) -> None:
     fcntl.fcntl(descriptor, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
 
 
-def _read_file_once(path: Path, missing: str) -> bytes:
+def _read_file_once(path: Path, missing: str) -> tuple[bytes, tuple[int, int]]:
     """Read every byte of ``path`` through one descriptor, or refuse.
 
     The three files this module both checks and then acts on -- a pinned root,
@@ -1311,6 +1317,14 @@ def _read_file_once(path: Path, missing: str) -> bytes:
     about a pathname and this opens the pathname again, so what is opened may
     be a FIFO the check never saw, and opening one to read blocks until a
     writer arrives.  See ``_ONE_READ_FLAGS``.
+
+    Returned beside the bytes is ``(st_dev, st_ino)`` from the very ``fstat``
+    that judged the descriptor -- the identity of the object the bytes came
+    out of, rather than of the name they were asked for.  A pathname is not
+    a file: a symlinked parent directory or a second hard link gives one
+    object two names, and a caller that has to tell two of its own reads
+    apart can only do it by what was opened.  ``_v2_witness_evidence`` is the
+    caller that does; the record and the pinned root drop it.
     """
 
     try:
@@ -1319,7 +1333,8 @@ def _read_file_once(path: Path, missing: str) -> bytes:
         raise TsaError(missing) from exc
     chunks: list[bytes] = []
     try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        judged = os.fstat(descriptor)
+        if not stat.S_ISREG(judged.st_mode):
             raise TsaError(missing)
         _clear_nonblocking(descriptor)
         while True:
@@ -1331,7 +1346,7 @@ def _read_file_once(path: Path, missing: str) -> bytes:
         raise TsaError(missing) from exc
     finally:
         os.close(descriptor)
-    return b"".join(chunks)
+    return b"".join(chunks), (judged.st_dev, judged.st_ino)
 
 
 def _read_witnessed_record(path: Path) -> bytes:
@@ -1359,7 +1374,8 @@ def _read_witnessed_record(path: Path) -> bytes:
     missing = f"witnessed record is missing or not a regular file: {path}"
     if not path.is_file() or path.is_symlink():
         raise TsaError(missing)
-    return _read_file_once(path, missing)
+    record, _identity = _read_file_once(path, missing)
+    return record
 
 
 def _read_pinned_root(path: Path) -> bytes:
@@ -1384,9 +1400,10 @@ def _read_pinned_root(path: Path) -> bytes:
     keeps its wording, which ``_read_file_once`` repeats for the descriptor.
     """
 
-    return _read_file_once(
+    pem, _identity = _read_file_once(
         path, f"pinned TSA root is missing or not a regular file: {path}"
     )
+    return pem
 
 
 def _write_root_snapshot(directory: Path, pem: bytes) -> Path:
@@ -1662,6 +1679,7 @@ def _verify_timestamp_token(
     records: Path,
     now: datetime | None = None,
     record: bytes | None = None,
+    on_token_read: Callable[[Path, tuple[int, int]], None] | None = None,
 ) -> tuple[TokenEvidence, _TimestampIdentity]:
     """``verify_timestamp_token``, and which timestamp it verified.
 
@@ -1669,6 +1687,15 @@ def _verify_timestamp_token(
     function; this is where its body lives, so that the one caller who needs
     to tell two outcomes' timestamps apart can have that answer without it
     appearing in :class:`TokenEvidence`.
+
+    ``on_token_read`` is given the resolved response path and the identity of
+    the object that read actually opened, at the moment the read returns.  A
+    caller taking several reads is handed it there rather than told afterwards
+    because that is the earliest it is knowable and the last moment before the
+    bytes are put to OpenSSL: ``_v2_witness_evidence`` refuses a second outcome
+    whose response is the same file as an earlier one's, and refusing it here
+    means the duplicate is never verified at all.  Raising out of the callback
+    is how it does that, so this must not swallow one.
     """
 
     if record is None:
@@ -1708,7 +1735,9 @@ def _verify_timestamp_token(
         token_missing = f"witness token is missing for {path}: {token_path}"
         if not token_path.is_file() or token_path.is_symlink():
             raise TsaError(token_missing)
-        token_bytes = _read_file_once(token_path, token_missing)
+        token_bytes, token_file = _read_file_once(token_path, token_missing)
+        if on_token_read is not None:
+            on_token_read(token_path, token_file)
         token_sha256 = hashlib.sha256(token_bytes).hexdigest()
         if token_sha256 != token_claim.get("tokenSha256"):
             raise TsaError(f"witness token hash mismatch for {path}")
@@ -2225,20 +2254,35 @@ def _v2_witness_evidence(
     # evidence about the same record from a pending authority and a reused
     # token covers neither (peer review, fourth gate round three).
     #
-    # Three rules, because the file an outcome points at, the bytes it claims
-    # are there and the timestamp inside them are three different things.  The
-    # first is the physical path itself.  Two outcomes may not name one file,
-    # whatever they say is in it: each outcome reads the path for itself, so a
-    # writer with access to the records tree can serve one valid response to
-    # the first read and another to the second, and both outcomes verify over
-    # evidence no single state of the repository ever held -- the two declared
-    # digests describe two files, and there is one (peer review, fifth gate
-    # round one).  Compared as the module resolves a claim into a file, so the
-    # two spellings physical_path maps together -- with and without the
-    # leading ``records`` component -- are one path and not two.  What it does
-    # not compare is inodes: two names reaching one file through a symlinked
-    # directory stay two paths here, and are left to the digest rule below,
-    # which sees the same bytes under both names.
+    # Four rules, because the name an outcome points at, the object that name
+    # reaches, the bytes it claims are there and the timestamp inside them are
+    # four different things.  The first is the physical path itself.  Two
+    # outcomes may not name one file, whatever they say is in it: each outcome
+    # reads the path for itself, so a writer with access to the records tree
+    # can serve one valid response to the first read and another to the
+    # second, and both outcomes verify over evidence no single state of the
+    # repository ever held -- the two declared digests describe two files, and
+    # there is one (peer review, fifth gate round one).  Compared as the
+    # module resolves a claim into a file, so the two spellings physical_path
+    # maps together -- with and without the leading ``records`` component --
+    # are one path and not two.
+    #
+    # What that comparison is about is a name, and a name is not a file.  The
+    # containment check inside physical_path resolves, but the value it
+    # returns and the value compared here do not, so a symlinked parent
+    # directory or a second hard link gives one object two paths that are
+    # distinct by every lexical measure (peer review, fifth gate round two).
+    # The declared-digest rule below does not close that either: with the same
+    # writer arriving between the two reads, the two outcomes read different
+    # bytes out of one object and each declares truly what it read.  So the
+    # second rule is the object.  Every response is read through one
+    # descriptor, and the fstat that judges that descriptor also says which
+    # object it is -- (st_dev, st_ino), taken from the descriptor the bytes
+    # came out of rather than from a second look at the name, which would be
+    # the very race being refused.  The refusal names both spellings, because
+    # what a producer has to fix is that two of its outcomes point at one
+    # file.  It fires at the read, inside the token verifier, which is the
+    # earliest the identity exists and still before those bytes reach OpenSSL.
     #
     # Then the file an outcome claims, refused before that outcome's token is
     # verified so that a duplicate is never put to
@@ -2264,13 +2308,14 @@ def _v2_witness_evidence(
     # two outcomes name the same bytes, and the timestamp rule when they name
     # different bytes carrying one authority's one timestamp.
     #
-    # All three refusals are new, and the path and file rules precede the
-    # ported refusals inside verify_timestamp_token for the outcome they stop.
-    # Admissible because the inputs they refuse are ones the pinned tree
-    # cannot present: its 53 witnesses declare 91 tokens at 91 distinct
-    # physical paths, with 91 distinct file digests and 91 distinct signed
-    # TSTInfos -- distinct before the signer qualifies them, so distinct
-    # after -- and no witness names one path twice.  The file rule reads the
+    # All four refusals are new, and the path, object and digest rules precede
+    # the ported refusals inside verify_timestamp_token for the outcome they
+    # stop.  Admissible because the inputs they refuse are ones the pinned
+    # tree cannot present: its 53 witnesses declare 91 tokens at 91 distinct
+    # physical paths naming 91 distinct files, with 91 distinct file digests
+    # and 91 distinct signed TSTInfos -- distinct before the signer qualifies
+    # them, so distinct after -- and no witness names one path twice.  The
+    # file rule reads the
     # outcome's declared tokenSha256 and records TokenEvidence.token_sha256 --
     # the digest of the bytes that were actually read and verified -- so a
     # declared digest that lies is caught by the ported witness-token-hash
@@ -2280,10 +2325,13 @@ def _v2_witness_evidence(
     #
     # Order among them is the order they were added, and it decides only which
     # message a witness that breaks two rules at once gets.  Two outcomes
-    # naming one file with one digest are the plainer reuse and keep the file
-    # rule's message, as they had it; what the path rule reaches is the case
-    # the digest rule cannot see, two different digests over one path.
+    # naming one file with one digest are the plainer reuse and keep the
+    # digest rule's message, as they had it; what the path rule reaches is the
+    # case the digest rule cannot see, two different digests over one path;
+    # and what the object rule reaches is the case neither can, two paths over
+    # one file.
     seen_token_paths: set[str] = set()
+    seen_token_files: dict[tuple[int, int], Path] = {}
     seen_response_files: set[str] = set()
     seen_timestamps: set[_TimestampIdentity] = set()
 
@@ -2311,6 +2359,19 @@ def _v2_witness_evidence(
                 f"duplicate TSA token path across anchor outcomes: {physical}"
             )
         seen_token_paths.add(str(physical))
+
+    def refuse_a_reused_token_file(physical: Path, identity: tuple[int, int]) -> None:
+        # Handed to the read inside the token verifier, so it speaks before
+        # the duplicate's bytes are put to OpenSSL.  Both spellings are named:
+        # the point of the refusal is that two outcomes reach one file, and a
+        # producer cannot act on being told only about the second.
+        earlier = seen_token_files.get(identity)
+        if earlier is not None:
+            raise TsaError(
+                f"duplicate TSA token file across anchor outcomes: {physical} "
+                f"is the same file as {earlier}"
+            )
+        seen_token_files[identity] = physical
 
     def refuse_a_reused_timestamp(identity: _TimestampIdentity) -> None:
         if identity in seen_timestamps:
@@ -2341,6 +2402,7 @@ def _v2_witness_evidence(
                 records=records,
                 now=now,
                 record=record,
+                on_token_read=refuse_a_reused_token_file,
             )
             refuse_a_reused_timestamp(identity)
             seen_response_files.add(evidence.token_sha256)
@@ -2413,6 +2475,7 @@ def _v2_witness_evidence(
                 records=records,
                 now=now,
                 record=record,
+                on_token_read=refuse_a_reused_token_file,
             )
             refuse_a_reused_timestamp(identity)
             seen_response_files.add(evidence.token_sha256)

@@ -3329,12 +3329,21 @@ def test_refuses_one_token_supplied_under_two_anchor_outcomes(
     assert [claim["tsaAnchorId"] for claim in verified] == [alpha.anchor_id]
 
 
+def file_identity(path: pathlib.Path) -> tuple[int, int]:
+    """``(st_dev, st_ino)`` for a path, as a test's own answer about a file."""
+
+    info = path.stat()
+    return (info.st_dev, info.st_ino)
+
+
 def record_one_reads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Every path ``_read_file_once`` is asked for, in the order it is asked."""
 
     original = tsa_module._read_file_once
 
-    def recording(path: pathlib.Path, missing: str) -> bytes:
+    def recording(
+        path: pathlib.Path, missing: str
+    ) -> tuple[bytes, tuple[int, int]]:
         reads.append(str(path))
         return original(path, missing)
 
@@ -3464,6 +3473,114 @@ def test_refuses_two_outcomes_that_name_one_response_path(
     # Refused before the second read, and before the second verification.
     assert reads.count(str(physical)) == 1
     assert [claim["tsaAnchorId"] for claim in verified] == [alpha.anchor_id]
+
+
+def one_file_under_a_second_name(
+    tree: WitnessTree, token: pathlib.Path, alias: str
+) -> pathlib.Path:
+    """A second path in the records tree reaching ``token``'s own object.
+
+    ``symlinked-parent`` puts a symlink to the day directory beside it, so the
+    alias differs only in a component ``physical_path`` never resolves;
+    ``hardlink`` gives the file a second name in the directory it is already
+    in. Both are ordinary things to find in a repository, and neither is a
+    symlink at the final component -- which is the one form the token read
+    already refuses, before ``O_NOFOLLOW`` would.
+    """
+
+    if alias == "symlinked-parent":
+        linked_day = tree.records / "day-alias"
+        linked_day.symlink_to(token.parent, target_is_directory=True)
+        return linked_day / token.name
+    second = token.parent / f"{token.stem}.linked.tsr"
+    os.link(token, second)
+    return second
+
+
+@pytest.mark.parametrize("alias", ["symlinked-parent", "hardlink"])
+def test_refuses_two_outcomes_whose_paths_reach_one_response_file(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+    alias: str,
+) -> None:
+    """S5R2-F2: the rule is about the file, and a path is not the file.
+
+    The path rule keys the lexical path a claim resolves to -- the string
+    ``physical_path`` returns -- while the containment check inside
+    ``physical_path`` resolves symlinks. So one object under two names is two
+    paths to the rule and one file to the filesystem: a symlink to the token
+    directory, or a second hard link to the response, and the two outcomes
+    are distinct by every comparison the module made. The declared-digest
+    rule does not see it either, because with a writer arriving between the
+    two reads the outcomes read different bytes out of that one object and
+    each declares truly what it read -- which is the same evidence the path
+    rule exists to refuse, reached by a spelling it cannot compare.
+
+    So the identity is taken from the ``fstat`` that judges the descriptor
+    the bytes came out of, which names the object rather than the name it was
+    asked for; a second ``stat`` of the pathname would be exactly the race
+    being refused. Without the rule this witness returns two ``TokenEvidence``
+    entries covering a two-anchor bundle out of one file. With it the second
+    outcome is refused at its read, before its bytes reach OpenSSL: the
+    recorder below shows ``ts -reply`` ran once. The control is the tree
+    untouched -- two genuinely distinct files are still two tokens, and the
+    two objects behind them are two.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    tree = build_witness_tree(tmp_path, local_anchors[:2])
+    shared = tree.tokens[alpha.anchor_id]
+    betas_response = tree.tokens[beta.anchor_id].read_bytes()
+
+    # The control: two outcomes, two files, two objects, two tokens.
+    control = verify_tree(tree)
+    assert [token.anchor_id for token in control.tokens] == [
+        alpha.anchor_id,
+        beta.anchor_id,
+    ]
+    assert file_identity(shared) != file_identity(tree.tokens[beta.anchor_id])
+
+    second_name = one_file_under_a_second_name(tree, shared, alias)
+    # The premise: two paths no lexical comparison joins, one object.
+    first_physical = tsa_module.physical_path(
+        tree.records.resolve(), logical_path(tree.records, shared)
+    )
+    second_physical = tsa_module.physical_path(
+        tree.records.resolve(), logical_path(tree.records, second_name)
+    )
+    assert str(first_physical) != str(second_physical)
+    assert file_identity(first_physical) == file_identity(second_physical)
+    assert not second_physical.is_symlink()
+
+    def point_betas_outcome_at_the_second_name(payload: dict[str, Any]) -> None:
+        first, second = payload["anchorOutcomes"]
+        assert (first["tsaAnchorId"], second["tsaAnchorId"]) == (
+            alpha.anchor_id,
+            beta.anchor_id,
+        )
+        second["tokenPath"] = logical_path(tree.records, second_name)
+        second["tokenSha256"] = sha256_bytes(betas_response)
+
+    rewrite_witness(tree, point_betas_outcome_at_the_second_name)
+    writes = serve_a_second_response_from_one_path(monkeypatch, shared, betas_response)
+    reads = record_one_reads(monkeypatch)
+    invocations = record_openssl_arguments(monkeypatch)
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    # The writer really did run, and both declared digests are true of what
+    # their own outcome read out of the one object.
+    assert writes == [str(shared)]
+    assert shared.read_bytes() == betas_response
+    assert str(caught.value) == (
+        f"duplicate TSA token file across anchor outcomes: {second_physical} "
+        f"is the same file as {first_physical}"
+    )
+    # Read twice, because the identity is what the second read reports; put
+    # to OpenSSL once, because the refusal arrives before that read is used.
+    assert reads.count(str(first_physical)) == 1
+    assert reads.count(str(second_physical)) == 1
+    assert [arguments[:2] for arguments in invocations].count(["ts", "-reply"]) == 1
 
 
 def pending_authority(

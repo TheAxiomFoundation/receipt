@@ -140,16 +140,21 @@ Deliberately outside the mutation contract:
 - the baseline de-duplicates a v2 witness's anchor outcomes by anchor id and
   leaves the response free; the port additionally requires every verified
   response to be distinct across the witness's primary and supplemental
-  outcomes together, by three rules: the physical path an outcome points at,
+  outcomes together, by four rules: the physical path an outcome points at,
   refused before that outcome's response is read; the file digest it
   declares, refused ahead of the ported refusals inside the token verifier;
-  and the ``TSTInfo`` an authority signed paired with the certificate that
-  signed it, refused where that verifier returns.  Each reaches what the one
+  the object that outcome's read opened, as ``(st_dev, st_ino)`` off the
+  descriptor the bytes came out of, refused at the read; and the ``TSTInfo``
+  an authority signed paired with the certificate that signed it, refused
+  where that verifier returns.  Each reaches what the one
   before it cannot.  Two outcomes naming
   one path may declare two digests, and each outcome reads the path itself,
   so a writer serving a different response to each read satisfies both from a
   repository that held neither state twice (peer review, fifth gate round
-  one).  And the ``PKIStatusInfo`` wrapper around a token is unsigned, as are
+  one).  Two outcomes may also name one file under two paths -- a symlinked
+  parent directory or a second hard link -- which no lexical comparison of
+  the two claims separates, and which the same writer turns into the same
+  evidence (fifth gate round two).  And the ``PKIStatusInfo`` wrapper around a token is unsigned, as are
   a ``SignedData``'s ``certificates``, ``crls`` and ``unsignedAttrs``, so one
   issuance has many valid encodings with different file digests.  The signer
   is half of that last identity because a ``TSTInfo`` need not name its
@@ -158,9 +163,10 @@ Deliberately outside the mutation contract:
   identical ``TSTInfo``s legitimately, and counting the signed bytes alone
   refused the second of two valid outcomes (same round).  The 53 pinned
   witnesses declare 91 tokens between them, at most two per witness, at 91
-  distinct physical paths with 91 distinct file digests and 91 distinct
+  distinct physical paths naming 91 distinct ``(st_dev, st_ino)`` objects
+  with 91 distinct file digests and 91 distinct
   signed ``TSTInfo``s -- distinct before the signer qualifies them, so
-  distinct after -- and no witness names one path twice, so none of the three
+  distinct after -- and no witness names one path twice, so none of the four
   refusals fires on any case here;
 - the baseline takes an anchor ID alone for the active identity when deciding
   which anchors of a pending bundle need a supplemental outcome, so a pending
