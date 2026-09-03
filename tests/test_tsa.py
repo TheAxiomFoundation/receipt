@@ -3875,6 +3875,17 @@ def test_refuses_two_outcomes_whose_paths_reach_one_response_file(
     recorder below shows ``ts -reply`` ran once. The control is the tree
     untouched -- two genuinely distinct files are still two tokens, and the
     two objects behind them are two.
+
+    S6-F1 puts a rule upstream of this one, and the two shapes part company
+    there. A symlinked parent is now refused by the component walk before the
+    aliased outcome is read at all, so that shape asserts the walk's refusal
+    and a read count of zero; what still binds the object rule is the hard
+    link, which is a second name in a directory with no link in it anywhere.
+    Both shapes are kept, because the object rule is what stands if the walk
+    is ever lost, and the walk is what stands if a repository grows a link
+    the object rule cannot see through -- an entry *replaced* between the two
+    reads, which
+    ``test_a_witness_token_path_may_not_traverse_a_symlink`` is about.
     """
 
     alpha, beta = local_anchors[0], local_anchors[1]
@@ -3921,14 +3932,23 @@ def test_refuses_two_outcomes_whose_paths_reach_one_response_file(
     # their own outcome read out of the one object.
     assert writes == [str(shared)]
     assert shared.read_bytes() == betas_response
-    assert str(caught.value) == (
-        f"duplicate TSA token file across anchor outcomes: {second_physical} "
-        f"is the same file as {first_physical}"
-    )
-    # Read twice, because the identity is what the second read reports; put
-    # to OpenSSL once, because the refusal arrives before that read is used.
+    if alias == "symlinked-parent":
+        # Pre-empted by the component walk, which is upstream of every
+        # identity rule and refuses before this outcome is read at all.
+        assert str(caught.value) == (
+            "witness token path traverses a symlink at "
+            f"{tree.records.resolve() / 'day-alias'}: {second_physical}"
+        )
+        assert reads.count(str(second_physical)) == 0
+    else:
+        assert str(caught.value) == (
+            f"duplicate TSA token file across anchor outcomes: {second_physical} "
+            f"is the same file as {first_physical}"
+        )
+        # Read twice, because the identity is what the second read reports.
+        assert reads.count(str(second_physical)) == 1
+    # Put to OpenSSL once, because the refusal arrives before that read is used.
     assert reads.count(str(first_physical)) == 1
-    assert reads.count(str(second_physical)) == 1
     assert [arguments[:2] for arguments in invocations].count(["ts", "-reply"]) == 1
 
 
@@ -4075,6 +4095,191 @@ def test_refuses_two_outcomes_whose_paths_fold_to_one_directory_entry(
     assert reads.count(str(first_physical)) == 1
     assert reads.count(str(second_physical)) == 0
     assert [arguments[:2] for arguments in invocations].count(["ts", "-reply"]) == 1
+
+
+def link_a_directory_over(target: pathlib.Path) -> pathlib.Path:
+    """Move ``target`` aside and leave a symlink to it at its own name.
+
+    The component the walk exists for, in the form a repository grows one:
+    every path through ``target`` still resolves to the same files, still
+    passes ``is_file``, and still has no link at its final component. What
+    changed is one directory in the middle, and nothing downstream of a name
+    can see it.
+    """
+
+    moved = target.with_name(f"{target.name}.real")
+    target.rename(moved)
+    target.symlink_to(moved.name, target_is_directory=True)
+    assert target.is_symlink() and target.is_dir()
+    return moved
+
+
+def test_a_witness_token_path_may_not_traverse_a_symlink(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S6-F1: a symlinked parent plus a replaced entry defeats all four rules.
+
+    The token-path rule keys the fold of the lexical path ``physical_path``
+    returns and throws away the resolved path the containment check inside it
+    computed, so a direct path and an alias of the token's *directory* are two
+    keys. Each of the other three rules is downstream of a name that has
+    already come apart from its object: with the shared entry *replaced*
+    between the two reads -- not rewritten -- the second read opens a new
+    inode, so the object rule sees two files; each outcome declares truly what
+    it read, so the digest rule sees two digests; and the two responses are
+    genuine issuances by two different authorities, so the timestamp rule sees
+    two timestamps. Every identity passes, and the witness returns two
+    ``TokenEvidence`` entries covering a two-anchor bundle for responses the
+    repository never held at both paths at once.
+
+    Four blind rules is a statement about where the rule belongs, not about
+    which of them to strengthen: no component of a path this module reads may
+    be a link. Walked with ``lstat`` from the records root down, behind the
+    path-level check so that a link at the final component keeps the refusal
+    it already had, and before the read so the aliased outcome is never read.
+    Without the walk this tree verifies with two tokens; the premises below
+    are asserted rather than assumed, one per rule the walk stands in front
+    of, and the control is the untouched tree.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    tree = build_witness_tree(tmp_path, local_anchors[:2])
+    shared = tree.tokens[alpha.anchor_id]
+    betas_response = tree.tokens[beta.anchor_id].read_bytes()
+    alphas_response = shared.read_bytes()
+
+    # The control: two outcomes, two entries, two objects, two tokens.
+    control = verify_tree(tree)
+    assert [token.anchor_id for token in control.tokens] == [
+        alpha.anchor_id,
+        beta.anchor_id,
+    ]
+    original_object = file_identity(shared)
+
+    linked_day = tree.records.resolve() / "day-alias"
+    linked_day.symlink_to(shared.parent, target_is_directory=True)
+    second_name = linked_day / shared.name
+    declared = logical_path(tree.records, shared)
+    second_spelling = logical_path(tree.records, second_name)
+    first_physical = tsa_module.physical_path(tree.records.resolve(), declared)
+    second_physical = tsa_module.physical_path(
+        tree.records.resolve(), second_spelling
+    )
+    # The premises, one per rule the walk stands in front of. The fold rule:
+    # two spellings no fold joins. The object rule: one object now, and a
+    # different one once the entry is replaced, asserted after the run. The
+    # digest rule: two different declared digests. The timestamp rule: two
+    # genuine issuances by two authorities. And the check that is already
+    # there sees nothing -- the alias is a file, and not a link itself.
+    assert tsa_module._path_fold(second_physical) != tsa_module._path_fold(
+        first_physical
+    )
+    assert file_identity(second_physical) == file_identity(first_physical)
+    assert sha256_bytes(alphas_response) != sha256_bytes(betas_response)
+    assert second_physical.is_file() and not second_physical.is_symlink()
+
+    def point_betas_outcome_through_the_alias(payload: dict[str, Any]) -> None:
+        first, second = payload["anchorOutcomes"]
+        assert (first["tsaAnchorId"], second["tsaAnchorId"]) == (
+            alpha.anchor_id,
+            beta.anchor_id,
+        )
+        second["tokenPath"] = second_spelling
+        second["tokenSha256"] = sha256_bytes(betas_response)
+
+    rewrite_witness(tree, point_betas_outcome_through_the_alias)
+    writes = replace_the_response_between_the_reads(
+        monkeypatch, shared, betas_response
+    )
+    reads = record_one_reads(monkeypatch)
+    invocations = record_openssl_arguments(monkeypatch)
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == (
+        f"witness token path traverses a symlink at {linked_day}: "
+        f"{second_physical}"
+    )
+    # The writer really did run, and really did put a second object at the
+    # one entry: the object rule would have counted two files.
+    assert writes == [str(shared)]
+    assert shared.read_bytes() == betas_response
+    assert file_identity(shared) != original_object
+    assert file_identity(second_physical) == file_identity(first_physical)
+    # Refused before the aliased outcome is read, and before its verification.
+    assert reads.count(str(first_physical)) == 1
+    assert reads.count(str(second_physical)) == 0
+    assert [arguments[:2] for arguments in invocations].count(["ts", "-reply"]) == 1
+
+
+@pytest.mark.parametrize("victim", ["record", "root"])
+def test_no_read_this_module_makes_traverses_a_symlinked_component(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...], victim: str
+) -> None:
+    """S6-F1: the same walk in front of the other two reads of the tree.
+
+    The token path is where the harm was found, and it is not the only path
+    this module resolves out of the repository and then reads. The record
+    under witness and each anchor's pinned root are read the same way -- a
+    path-level check about a name, ``O_NOFOLLOW`` about the object opened, and
+    nothing at all about the components between the records root and the final
+    one. A directory replaced by a link to itself leaves every one of those
+    checks answering exactly as it did, which is what the premises below
+    assert: the file is still a regular file, still not a link, and still
+    holds the same bytes.
+
+    Without the walk both cases verify unchanged, so what binds the fix is
+    the refusal. Each keeps the wording of the read it guards -- the record's
+    is its own, the root's arrives inside the load-time wrapper that carries
+    every root material failure -- and the control is the tree before the
+    directory is moved.
+
+    The residual, deliberately: the trust bundle, the witness sidecar and the
+    chain genesis are read through ``_load_json_once``, which refuses a link
+    at the final component but walks no components. The sidecar's are the
+    record's, and genesis sits directly under the records root, so the only
+    component this module reads through that no walk covers is
+    ``records/trust`` -- which the ``root`` case here puts a link at, and
+    which the bundle load then reads through without complaint. Benign, and
+    not silently so: a bundle's bytes are pinned by ``TrustBundleSpec``
+    entire, so whatever a link leads to must be the pinned bytes or the
+    commitment mismatch refuses it.
+    """
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    assert verify_tree(tree).status == "available"
+    records = tree.records.resolve()
+    root_path = records / "trust" / alpha.tsa.root_pem.name
+
+    if victim == "record":
+        component = records / RECORD_DAY
+        before = tree.record.read_bytes()
+        link_a_directory_over(tree.records / RECORD_DAY)
+        expected = (
+            f"witnessed record path traverses a symlink at {component}: "
+            f"{tree.record}"
+        )
+    else:
+        component = records / "trust"
+        before = root_path.read_bytes()
+        link_a_directory_over(tree.records / "trust")
+        expected = (
+            f"TSA anchor {alpha.anchor_id} in bundle {BUNDLE_ID} references "
+            "root material that fails validation: pinned TSA root path "
+            f"traverses a symlink at {component}: {root_path}"
+        )
+
+    # The premise: everything the existing checks look at is unchanged.
+    victim_path = tree.record if victim == "record" else root_path
+    assert component.is_symlink()
+    assert victim_path.is_file() and not victim_path.is_symlink()
+    assert victim_path.read_bytes() == before
+
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == expected
 
 
 def pending_authority(

@@ -645,6 +645,80 @@ def _path_fold(path: Path) -> tuple[str, ...]:
     )
 
 
+def _components_below(root: Path, path: Path) -> tuple[Path, ...]:
+    """Every component of ``path`` strictly below ``root``, outermost first.
+
+    Walked upwards from ``path`` rather than downwards from ``root``, because
+    ``root`` is resolved and ``path`` is not always spelled the way the
+    resolution spells it -- a caller handing ``verify_witness`` a record under
+    ``/var/folders/...`` on a machine whose ``/var`` is a link has a path no
+    lexical ``relative_to`` joins to a root under ``/private/var``.  So the
+    boundary is recognised at each step, lexically first and by resolution
+    after: a parent that *is* ``root`` under either reading ends the walk.
+
+    A parent that is itself a symlink never ends it, whatever it resolves to.
+    Otherwise a link placed at the root -- ``records/alias`` pointing at
+    ``records`` -- would resolve to the boundary, stop the walk one component
+    early, and hide the very component the walk exists to refuse.
+
+    An empty result means the walk never met ``root`` at all: a path outside
+    the records tree has no components below it, and this refuses nothing
+    about one.  Every path the module walks but the record under witness is
+    built by ``physical_path`` as ``root`` joined with a relative spelling, so
+    for those the first comparison always succeeds.
+    """
+
+    chain: list[Path] = []
+    probe = path
+    while True:
+        chain.append(probe)
+        parent = probe.parent
+        if parent == probe:
+            return ()
+        if parent == root or (
+            not parent.is_symlink() and parent.resolve() == root
+        ):
+            chain.reverse()
+            return tuple(chain)
+        probe = parent
+
+
+def _refuse_a_linked_component(root: Path, path: Path, *, subject: str) -> None:
+    """Refuse a path this module is about to read through a symlinked component.
+
+    Every read here is meant to be of the file the repository names, and
+    ``O_NOFOLLOW`` with the path-level ``is_symlink`` check in front of it says
+    that of the final component only.  A component above it is unguarded, and
+    a symlinked parent directory gives one object a second name that no
+    comparison of names separates: two anchor outcomes could name a token by
+    its direct path and by an alias of its directory, and with the shared
+    entry *replaced* between the two reads the second read finds a new inode,
+    a new digest and a genuine timestamp, so the fold rule sees two paths, the
+    object rule two objects, the digest rule two true digests and the
+    timestamp rule two issuances -- and two anchors are credited for responses
+    the repository never exposed at both paths at once (peer review, sixth
+    gate round one).
+
+    Every identity rule is downstream of the name, so the answer is upstream
+    of them: no component of a path this module reads may be a link.  ``lstat``
+    per component, from the records root down, in the shape
+    ``release_chain``'s own anchor-path walk uses -- carried here rather than
+    imported, because :mod:`receipt.tsa` depends on nothing in the package but
+    :mod:`receipt.canonical`.
+
+    Placed behind each caller's path-level check rather than in front of it,
+    so that a symlink at the *final* component keeps the refusal it already
+    had and no message moves; what this reaches is the components above it,
+    which nothing looked at.
+    """
+
+    for component in _components_below(root, path):
+        if component.is_symlink():
+            raise TsaError(
+                f"{subject} traverses a symlink at {component}: {path}"
+            )
+
+
 def load_json(path: Path) -> dict[str, Any]:
     """Read and parse one JSON object, as the baseline reads one.
 
@@ -1493,7 +1567,7 @@ def _read_file_once(path: Path, missing: str) -> tuple[bytes, tuple[int, int]]:
     return b"".join(chunks), (judged.st_dev, judged.st_ino)
 
 
-def _read_witnessed_record(path: Path) -> bytes:
+def _read_witnessed_record(records: Path, path: Path) -> bytes:
     """Read the record under witness once, and return what the token is about.
 
     The witnessed record was consumed through four separate opens of one
@@ -1513,11 +1587,17 @@ def _read_witnessed_record(path: Path) -> bytes:
     The refusal is new: the baseline let a missing record raise ``OSError``
     out of the hash, and the pinned tree presents no such record because the
     chain walk enumerates the files it then verifies.
+
+    ``records`` is the root the component walk is bounded at.  The check above
+    answers for the final component and ``O_NOFOLLOW`` for the object opened;
+    the components between the root and it are what
+    ``_refuse_a_linked_component`` reaches (sixth gate round one).
     """
 
     missing = f"witnessed record is missing or not a regular file: {path}"
     if not path.is_file() or path.is_symlink():
         raise TsaError(missing)
+    _refuse_a_linked_component(records, path, subject="witnessed record path")
     record, _identity = _read_file_once(path, missing)
     return record
 
@@ -1666,6 +1746,7 @@ def _root_material(
     root_path = physical_path(records, str(root.get("path", "")))
     if not root_path.is_file() or root_path.is_symlink():
         raise TsaError(f"pinned TSA root is missing or not a regular file: {root_path}")
+    _refuse_a_linked_component(records, root_path, subject="pinned TSA root path")
     pem = _read_pinned_root(root_path)
     if snapshot_dir is not None:
         return _judge_pinned_root(root_path, root, pem, snapshot_dir)
@@ -1853,7 +1934,7 @@ def verify_timestamp_token(
         spec=spec,
         records=records,
         now=now,
-        record=_read_witnessed_record(path),
+        record=_read_witnessed_record(records, path),
     )
     return evidence
 
@@ -1931,6 +2012,12 @@ def _verify_timestamp_token(
         token_missing = f"witness token is missing for {path}: {token_path}"
         if not token_path.is_file() or token_path.is_symlink():
             raise TsaError(token_missing)
+        # And no component above that one may be a link either, or two
+        # outcomes reach one entry by two names that every identity rule
+        # downstream of the name reports as two (sixth gate round one).
+        _refuse_a_linked_component(
+            records, token_path, subject="witness token path"
+        )
         token_bytes, token_file = _read_file_once(token_path, token_missing)
         if on_token_read is not None:
             on_token_read(token_path, token_file)
@@ -3051,7 +3138,7 @@ def _verify_witness_with_updates(
     # and the imprint `openssl ts -verify -data` recomputes.  Reading the
     # pathname once per question described four instants of a mutable file
     # (peer review, fourth gate round four).
-    record = _read_witnessed_record(path)
+    record = _read_witnessed_record(records, path)
     digest_sha = hashlib.sha256(record).hexdigest()
     witness_path = path.with_suffix(".witness.json")
     # The ported refusal, in its ported words and its ported place; what is
