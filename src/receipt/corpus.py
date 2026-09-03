@@ -274,7 +274,11 @@ disagree: Unicode 14.0 gives U+0131 the uppercase mapping U+0049, while
 ntfs-3g's reconstruction of the Windows XP through 7 tables maps it to
 itself. The dotted U+0130 is a different case and is no longer refused —
 it is already uppercase, has no simple uppercase mapping, and neither
-table maps it, so every source available agrees with the fold key about it
+table maps it, so no table available to read merges it with ``i`` the way
+one merges the dotless half. What ``casefold`` does to it is a separate
+matter and points the safe way: the two-character key ``i\u0307`` merges
+it with a *sequence* those tables keep apart, which over-refuses rather
+than under-refuses and which the declared-path alias check already answers
 (peer review, Sol round 2). Neither of the two that remain is modelled,
 because the module cannot know which filesystem is coming. Both are
 refused, along with an unassigned code point and a Unicode format control,
@@ -289,8 +293,12 @@ aliasing question at all. ``CON``, ``PRN``, ``AUX``, ``NUL`` and the
 extension follows them, so a journal and a POSIX file both spelling
 ``rules/NUL.yaml`` verified here while an ordinary Win32 open of that path
 read the null device instead of the witnessed bytes (peer review, round
-eight). The list is Microsoft's own, pinned in this module, matched per
-component on the text before the first period and case-insensitively.
+eight). The list is pinned in this module with every entry attributed to
+the source it rests on — Microsoft's naming page for all but two,
+``ntdll``'s own matcher for ``CONIN$`` and ``CONOUT$`` — and matched per
+component, case-insensitively, against the basename that matcher compares:
+the text before the first period *or colon*, with trailing spaces then
+removed.
 
 The same screen refuses a colon in any name it is handed, for a second
 Win32 reason with the same shape. A declared path has refused one since
@@ -328,10 +336,11 @@ from receipt._unicode_repertoire import (
 
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 GATE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._/-]{0,127}\Z")
-#: The punctuation an 8.3 short name may carry unchanged. Everything outside
-#: this set, the ASCII letters and the ASCII digits is replaced by an
-#: underscore when Win32 derives a short name, which is what
-#: :func:`_short_name_extension` models.
+#: The punctuation an 8.3 short name may carry unchanged. An ASCII character
+#: outside this set, the ASCII letters and the ASCII digits is replaced by an
+#: underscore when Win32 derives a short name — except a space, which is
+#: removed rather than replaced, and which is why
+#: :func:`_short_name_extension` strips spaces before it maps anything.
 SHORT_NAME_PUNCTUATION = frozenset("$%'-_@~`!(){}^#&")
 #: Every *ASCII* character an 8.3 short name may carry, which is that
 #: punctuation plus the ASCII letters and digits. An ASCII character outside
@@ -392,8 +401,13 @@ MAX_EVIDENCE_TEXT = 1024
 #: number of short entries and every one of them was validated — screened
 #: for size, for control characters, twice each — before the text budget
 #: below was consulted at all (peer review, Sol round 2). Checked against
-#: ``len(mapping)`` before the first entry is looked at, so the work one
-#: gate can ask for is bounded by this rather than by the row's length.
+#: ``len(mapping)`` before the first entry is looked at.
+#:
+#: What that bounds is the *validation* a gate can ask for, not its
+#: decoding: ``json.loads`` has already built the mapping by the time this
+#: runs, and what bounds that is the row's own bytes, which are the input.
+#: The two live at different levels and both are stated rather than
+#: conflated.
 #:
 #: Sixty-four is generous for a real declaration, which names a command, a
 #: workflow, a digest or two, and a reason.
@@ -950,7 +964,8 @@ def _assert_assigned(value: str, label: str) -> str:
 #:     COM9, COM¹, COM², COM³, LPT1, LPT2, LPT3, LPT4, LPT5, LPT6, LPT7,
 #:     LPT8, LPT9, LPT¹, LPT², and LPT³. Also avoid these names followed
 #:     immediately by an extension; for example, NUL.txt and NUL.tar.gz are
-#:     both equivalent to NUL.
+#:     both equivalent to NUL. [The page continues with a cross-reference
+#:     to its Namespaces section, trimmed here.]
 #:
 #: That sentence is the source of every entry below except the two named
 #: next, and of the superscripts in particular, which the same page's note
@@ -1239,12 +1254,13 @@ def _short_name_extension(name: str) -> str | None:
       at all, exactly as it has none in the short name Win32 hands out;
     - what follows the last remaining period is the extension. If no period
       remains there is none;
-    - each of its characters is mapped: an ASCII letter is uppercased, an
+    - it is truncated to three characters, which is all an 8.3 extension
+      holds;
+    - each of those three is mapped: an ASCII letter is uppercased, an
       ASCII digit and the punctuation in :data:`SHORT_NAME_PUNCTUATION` are
       kept, and any other ASCII character — a surviving period included —
       becomes an underscore, which is what Win32 substitutes for a character
-      the 8.3 namespace cannot hold;
-    - the result is truncated to three characters.
+      the 8.3 namespace cannot hold.
 
     A *non-ASCII* character among those three is not mapped at all: the name
     is refused. Mapping it to an underscore was wrong in the direction that
@@ -2477,7 +2493,8 @@ def _tree_content_paths(
                 # the 8.3 model below reads its extension. A name the fold
                 # key and a real filesystem disagree about — an unassigned
                 # code point, a format control, a code point HFS+ ignores, a
-                # Turkic i NTFS folds onto I — would decide membership one
+                # Turkic dotless i an upcase table folds onto I — would
+                # decide membership one
                 # way here and another on the host that resolves the tree.
                 _assert_foldable(candidate.name, f"tree entry {_quoted(relative)}")
                 # And before anything decides what kind of entry it is: a
@@ -2631,11 +2648,13 @@ def _assert_spelled_by_its_directory(
     standing rule (see :func:`_list_directory`): a parent that resolves the
     component but cannot be enumerated leaves the question unanswered.
 
-    The cost is one listing per component of each bound path, and it is not
-    shared between paths. A cached listing would answer a later path's
-    question with an earlier look, which is the staleness the second
-    tombstone pass exists to avoid; the walk is already re-run per bound
-    path for the same reason.
+    The cost is one listing per component of each bound path, twice per
+    verification — :func:`_regular_file_digest` walks every bound path and
+    the closing identity re-check walks it again — and it is not shared
+    between paths or between the two walks. A cached listing would answer a
+    later question with an earlier look, which is the staleness the second
+    tombstone pass exists to avoid; the walk is already re-run for the same
+    reason.
     """
 
     try:

@@ -4248,7 +4248,7 @@ def test_refuses_two_declared_paths_hfs_plus_would_call_one_file(
     )
 
 
-def test_refuses_a_dotless_i_beside_the_name_ntfs_folds_it_onto(
+def test_refuses_a_dotless_i_beside_the_name_an_upcase_table_folds_it_onto(
     tmp_path: pathlib.Path,
 ) -> None:
     """Binds S5-F2, restated by S5R2-F11: an upcase table and ``casefold``.
@@ -4354,8 +4354,10 @@ def test_the_dotless_i_claim_is_checked_against_a_real_upcase_table() -> None:
     the default ``$UpCase`` it builds when a volume's own table cannot be
     read, described in its comment as "the table as defined by Windows XP"
     with deltas up to Windows 7. It encodes the table as ranges and offsets,
-    and the relevant structure is ``uc_dup_table``, which maps each odd code
-    point onto the even one below it:
+    and the relevant structure is ``uc_dup_table``, whose loop is
+    ``for (i = start; i < end; i += 2) uc[i + 1] = i`` — every second code
+    point of a range mapped onto the one before it, which is odd-onto-even
+    where the range starts even and even-onto-odd where it starts odd:
 
         static int uc_dup_table[][2] = { /* Start, End */
         {0x0100, 0x012F}, {0x01A0, 0x01A6}, ...
@@ -4905,7 +4907,13 @@ def test_refuses_a_required_attested_path_the_directory_does_not_spell(
     requirement, which is why the spelling is bound rather than the
     resolution.
 
-    Without the fix the resolving host reports the requirement met.
+    The assertion is deliberately on the path the refusal names rather than
+    on which refusal it is, because the two hosts refuse for different
+    reasons and both are correct. That also means this test binds the fix
+    only where the declared spelling resolves: on a case-sensitive host the
+    pre-existing missing-file refusal satisfies it, and its two siblings
+    above assert the mechanism by host. Without the fix the resolving host
+    reports the requirement met.
     """
 
     attested = {**ATTESTED, "readme.md": "# corpus\n"}
@@ -5148,7 +5156,7 @@ def test_refuses_a_gate_declaring_more_evidence_entries_than_the_limit(
     value over ``MAX_EVIDENCE_TEXT``, which is the refusal that would speak
     if any entry were validated first. The cardinality refusal is what comes
     back, so no entry was. Without the fix the oversize refusal speaks
-    instead, after 64 entries have already been screened.
+    instead, on the very first entry it screens.
     """
 
     write_tree(tmp_path)
@@ -5433,12 +5441,21 @@ def test_the_short_name_grammar_is_the_one_generation_produces() -> None:
     """Binds S5R2-F9: the grammar itself, at its every boundary.
 
     Each accepted spelling below is one 8.3 generation can hand out and each
-    refused one is not, and every clause of the grammar has a pair that
-    turns on it: the repertoire, the one-to-six basis, the one-to-six
-    digits, the eight-character stem, the three-character extension, and
-    the tail being taken from the *last* tilde rather than the first —
+    refused one is not, and every clause of the grammar has a case that
+    turns on it *alone*: the ASCII repertoire (``a ~1.txt``, ``a+~1.txt``),
+    the one-to-six basis (``ABCDEFG~1``), the one-to-six digits
+    (``A~1234567``) and their lower bound (``A~``), the eight-character stem
+    (``AB~123456``, whose basis and digits are both legal), the
+    three-character extension (``RULESF~1.YAML``) and its lower bound
+    (``RULESF~1.``), and the numeric tail being a tail at all
+    (``A~1B.TXT``). One more case is about where the tail is taken from:
     ``A~1FOO~1.TXT`` is what generation gives a long name beginning
-    ``A~1foo``, and a first-tilde split would not recognise it.
+    ``A~1foo``, and a split at the *first* tilde would not recognise it.
+
+    Non-ASCII characters are accepted in both parts, which
+    :func:`_short_name_character` explains and which
+    ``test_a_short_name_carrying_an_oem_character_is_still_refused`` binds
+    end to end.
     """
 
     from receipt.corpus import _is_short_name
@@ -5456,11 +5473,15 @@ def test_the_short_name_grammar_is_the_one_generation_produces() -> None:
     for name in (
         "A~1B.TXT",  # no numeric tail
         "~1foo.txt",  # nothing before the tilde
-        "a ~1.txt",  # a space is not in the repertoire
+        "a ~1.txt",  # a space is not in the ASCII repertoire
+        "a+~1.txt",  # nor is a plus, which generation replaces
         "SMUGGL~12.YML",  # a nine-character stem
+        "AB~123456",  # six digits and a two-character basis: stem of nine
+        "A~",  # no digits at all
         "A~1234567",  # seven digits
-        "ABCDEFG~1",  # a seven-character basis, and a nine-character stem
+        "ABCDEFG~1",  # a seven-character basis
         "RULESF~1.YAML",  # a four-character extension
+        "RULESF~1.",  # an empty extension
         "RULESF~1.Y.M",  # a period inside the extension
         "rules.yaml",  # no tilde at all
         ".yml",  # an empty stem
