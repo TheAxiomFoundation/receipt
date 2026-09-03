@@ -264,6 +264,16 @@ def _assert_root_unchanged(candidate: _CandidateTree) -> None:
     run began. The refusal is the wording
     ``release_chain.confined_state_descriptor`` already gives for this fact,
     so one sentence names it wherever it is found.
+
+    Like every other check here this is a comparison at an instant, not a
+    lock, and it says the same thing ``_assert_states_unchanged`` says about
+    the state files: what it establishes is that the root was the recorded
+    directory at these two moments, not that the reads between them saw it.
+    A root exchanged after the first comparison, used to answer the surface
+    probes, and moved back before the second still yields the gate-only
+    acceptance. Closing that needs an immutable snapshot of the tree under
+    audit, which this gate does not have; it is the same residual, and the
+    same follow-up.
     """
 
     try:
@@ -1512,8 +1522,9 @@ def verify_append_gate(
     # commit; an untracked state file is the same fact without the gitlink.
     # Like the checkout guard, this says a comparison cannot be made rather
     # than making one, so it runs before the checks that would make it — the
-    # second and last place a refusal added after the extraction precedes a
-    # pre-existing one, stated in the module docstring and pinned by a test.
+    # second of the three places a refusal added after the extraction precedes
+    # a pre-existing one (the third is _assert_root_unchanged just below),
+    # stated in the module docstring and pinned by a test.
     for relative in (spec.chain.state_relative, spec.chain.prefix_relative):
         try:
             assert_state_path_tracked(candidate.root, relative)

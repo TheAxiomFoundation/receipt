@@ -3539,10 +3539,11 @@ def test_a_search_only_state_directory_is_descended_where_the_platform_allows(
 
     So where the platform offers search rights the file is read and the
     ordinary verdict stands; where it offers neither the requirement is
-    stated instead of raised. Linux has ``O_PATH``, Darwin has ``O_SEARCH``
-    from CPython 3.14, and an older CPython on Darwin has neither — the
-    assertion follows the module's own answer so the case is bound on all
-    three. Without the flag change the first branch is a
+    stated instead of raised. Linux has ``O_PATH`` and Darwin has
+    ``O_SEARCH``, so every platform this is tested on takes the first branch
+    — the assertion follows the module's own answer rather than the
+    platform's name, and the test below forces the second branch so its
+    refusal is bound too. Without the flag change this is a
     ``PermissionError`` escaping the gate."""
 
     candidate = base_repository(tmp_path)
@@ -3630,3 +3631,61 @@ def test_the_descent_asks_for_no_more_than_it_uses(tmp_path: pathlib.Path) -> No
     # Whichever it is, the walk still reaches an ordinary state file.
     candidate = base_repository(tmp_path)
     assert _regular_file_bytes(candidate.root, CHAIN_SPEC.state_relative)
+
+
+def without_a_search_only_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Present a platform whose ``os`` exposes neither ``O_PATH`` nor
+    ``O_SEARCH``, which no interpreter this is run on actually is.
+
+    Both constants are read at call time, so patching them is the same
+    technique the ``os.supports_dir_fd`` cases use, and it reaches the branch
+    that only such a platform would otherwise take.
+    """
+
+    monkeypatch.setattr(release_chain, "SEARCH_ONLY_DIRECTORY_FLAG", 0)
+    monkeypatch.setattr(release_chain, "DESCENT_REQUIRES_DIRECTORY_READ", True)
+    monkeypatch.setattr(
+        release_chain,
+        "DIRECTORY_OPEN_FLAGS",
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+
+
+@pytest.mark.skipif(
+    os.getuid() == 0, reason="root traverses a directory it has no rights on"
+)
+@pytest.mark.parametrize(
+    "unreadable", ["ledger", ""], ids=["intermediate-component", "candidate-root"]
+)
+def test_the_descent_states_the_read_it_needs_where_it_has_no_search_flag(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, unreadable: str
+) -> None:
+    """S4-F5's other branch, which no interpreter this runs on takes: Linux
+    exposes ``O_PATH`` and Darwin exposes ``O_SEARCH`` (checked from CPython
+    3.9 to 3.14), so ``DESCENT_REQUIRES_DIRECTORY_READ`` is false everywhere
+    the suite runs and the refusal that branch gives would otherwise be
+    asserted by nothing. Forcing the fallback flags binds it. Both the
+    candidate root and an intermediate component are covered, because the
+    root is opened before the component walk and would otherwise answer
+    ``candidate root changed during verification`` — which would be false:
+    the root did not change, it cannot be read."""
+
+    candidate = base_repository(tmp_path)
+    without_a_search_only_flag(monkeypatch)
+    directory = candidate.root / unreadable if unreadable else candidate.root
+    expected = (
+        f"state path component {directory if not unreadable else unreadable} "
+        "is not readable by this verifier; secure descent requires read "
+        "permission on every directory above a state file on this platform: "
+        "ledger/official_observations.jsonl"
+    )
+    directory.chmod(0o111)
+    try:
+        with pytest.raises(ReleaseChainError) as read:
+            _regular_file_bytes(candidate.root, CHAIN_SPEC.state_relative)
+        assert str(read.value) == expected
+        with pytest.raises(AppendError) as refusal:
+            run_push_gate(candidate)
+        assert str(refusal.value) == expected
+    finally:
+        directory.chmod(0o755)

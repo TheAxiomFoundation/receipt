@@ -53,7 +53,7 @@ caller, since every state read in it comes through here: on Windows
 ``verify_release_chain``, and so ``receipt verify``'s custody pass, refuses
 exactly as the append gate does, and ``README.md`` states it. It opens each
 directory component with search rights alone where the platform offers them
-(``O_PATH`` on Linux, ``O_SEARCH`` elsewhere), which is all it uses them for,
+(``O_PATH`` on Linux, ``O_SEARCH`` on Darwin), which is all it uses them for,
 so a POSIX search-only directory above a readable state file is descended as
 the pathname open used to descend it; where the platform offers neither, the
 read permission the descent then needs is stated in the refusal rather than
@@ -1105,8 +1105,9 @@ STATE_OPEN_FLAGS = (
 
 # The descent below needs a directory descriptor it can ``openat`` and
 # ``fstat`` through, and nothing else. ``O_PATH`` (Linux) and ``O_SEARCH``
-# (POSIX 2008; Darwin defines it and CPython exposes it from 3.14) both give
-# exactly that without asking for read permission on the directory. Where
+# (POSIX 2008; Darwin defines it and CPython exposes it there, checked from
+# 3.9 to 3.14) both give exactly that without asking for read permission on
+# the directory. Where
 # neither exists the open has to ask for read, and a POSIX search-only
 # directory — mode 0o111, traversable but not listable — above a perfectly
 # readable state file then fails with EACCES; see confined_state_descriptor.
@@ -1181,8 +1182,9 @@ def confined_state_descriptor(
     The directories are opened with search rights alone where the platform
     offers them. All this walk does with a directory descriptor is ``openat``
     and ``fstat`` through it, and ``O_PATH`` (Linux) and ``O_SEARCH`` (POSIX
-    2008; Darwin defines it and CPython exposes it from 3.14) both give
-    exactly that without asking for read permission on the directory.
+    2008; Darwin defines it and CPython exposes it there, checked from 3.9 to
+    3.14) both give exactly that without asking for read permission on the
+    directory.
     ``O_RDONLY | O_DIRECTORY`` asks for read, which the pathname open this
     replaced never needed: a POSIX search-only directory — mode 0o111,
     traversable but not listable, which is how a directory above a published
@@ -1190,10 +1192,11 @@ def confined_state_descriptor(
     with ``EACCES`` here. Where neither flag exists the requirement is stated
     rather than raised as a bare ``PermissionError``: the component is named,
     and the refusal says that secure descent needs read permission on every
-    directory above a state file on this platform. The root keeps the
-    answer described above for a caller that recorded an identity, because a
-    root that was openable when it was recorded and is not now is a root that
-    changed, whatever the errno.
+    directory above a state file on this platform. That covers the root as
+    well, and is asked of it before the identity comparison below, because an
+    unreadable root is not a changed one and saying so would misname the
+    fact — ``_set_root`` records the root with ``lstat`` and never establishes
+    that it was openable with these flags.
 
     Where ``dir_fd`` is unsupported — Windows, where ``os.open`` is not in
     ``os.supports_dir_fd`` — this refuses rather than falling back to the
@@ -1235,6 +1238,15 @@ def confined_state_descriptor(
     try:
         parent = os.open(root, directory_flags)
     except OSError as exc:
+        if DESCENT_REQUIRES_DIRECTORY_READ and exc.errno == errno.EACCES:
+            # Before the identity answer below: a root this verifier cannot
+            # open for want of read permission is unreadable, not changed.
+            raise ReleaseChainError(
+                f"state path component {root} is not readable by this "
+                "verifier; secure descent requires read permission on every "
+                "directory above a state file on this platform: "
+                f"{relative.as_posix()}"
+            ) from exc
         if root_identity is None:
             raise
         # A caller that recorded an identity established this directory when
@@ -1863,9 +1875,18 @@ def _git_environment() -> dict[str, str]:
     tree cannot be enumerated at all — and ``GIT_GLOB_PATHSPECS`` and
     ``GIT_NOGLOB_PATHSPECS`` likewise decide what a name means before the
     command line is read. All four are dropped, so a pathspec written here
-    means here what it says. Everything else in the ambient environment is
-    carried through, so ``GIT_DIR``, credentials, and the caller's own
-    isolation still apply.
+    means here what it says.
+
+    Everything else in the ambient environment is carried through, and this
+    function is not a sanitizer: it turns off the two mechanisms named above
+    and nothing else. Other variables git reads can still decide what these
+    commands answer about — ``GIT_DIR`` and ``GIT_INDEX_FILE`` were each
+    checked and each make ``ls-files`` report another repository's entry for
+    the path asked about, from this repository's working directory — so a
+    caller that does not control the environment it invokes this package in
+    has a problem larger than this function's scope. That is stated rather
+    than fixed here; narrowing the environment to an allowlist is a change to
+    what every consumer's git reads see, not a check added to one of them.
     """
 
     environment = {**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"}
@@ -2368,17 +2389,23 @@ def assert_release_file_still_indexed(
 def _assert_no_symlinked_release_component(root: pathlib.Path, listed: str) -> None:
     """Refuse an indexed release path reached through a linked directory.
 
-    The reconciliation below asks whether an indexed path is a regular file
-    on disk, and ``is_file()`` answers about whatever the whole name resolves
-    to — every intermediate component followed. The traversal that would have
-    seen those components does not follow them: ``rglob`` yields a symlinked
-    directory and does not descend it, and the scan skips it. So an index
-    entry under ``releases/vendor``, with ``vendor`` a link to a directory
-    outside the checkout, was in no walk, was reported as present and
-    regular, and its content — no part of the candidate tree, no part of what
-    the base can be diffed against — stood in for the release file the commit
-    records. Walk the parents with ``lstat`` first, in the words the state
-    paths' walk uses for the same fact.
+    The reconciliation below used to ask whether an indexed path is a regular
+    file on disk, and ``is_file()`` answers about whatever the whole name
+    resolves to — every intermediate component followed. The traversal that
+    would have seen those components does not follow them: ``rglob`` yields a
+    symlinked directory and does not descend it, and the scan skips it. So an
+    index entry under ``releases/vendor``, with ``vendor`` a link to a
+    directory outside the checkout, was in no walk, was reported as present
+    and regular, and its content — no part of the candidate tree, no part of
+    what the base can be diffed against — stood in for the release file the
+    commit records.
+
+    That reconciliation now compares the traversal's own spellings and
+    resolves nothing, so such an entry is refused either way. This walk is
+    kept, and kept first, because the fact it names is the specific one: the
+    path is served through a link, which is why no walk reached it, and that
+    is worth saying instead of reporting the entry as absent. It is said in
+    the words the state paths' walk uses for the same fact.
     """
 
     current = root
@@ -2432,16 +2459,33 @@ def assert_release_root_index_regular(root: pathlib.Path, spec: ChainSpec) -> No
     filesystem's resolution of the entry's name. Asking ``is_file()`` about
     each indexed path lets a case-insensitive or normalisation-insensitive
     filesystem — APFS, HFS+, NTFS — answer for a differently spelled entry:
-    with ``releases/README.md`` and ``releases/readme.md`` both in the index
+    with ``releases/README.md`` and ``releases/README.MD`` both in the index
     and one file on disk, one file answered both questions, so one committed
     release object was in no enumeration and was never verified while the
     reconciliation called the two sides agreed. The traversal that has to
-    find them all is the authority on what is there: it yields each regular
+    find them all is what the comparison is against: it yields each regular
     file spelled as the directory spells it, and an index entry has to appear
-    in that set exactly. An entry the walk does not spell is absent *under
-    that spelling*, which is what the refusal says, and it says it on every
-    filesystem — where two names collide only one of them can be the file,
-    and where they do not the other one is simply not on disk.
+    in that set exactly.
+
+    That is the standard this package already holds release files to, rather
+    than a new one. ``_working_release_files`` keys the base comparison by
+    the same traversal's spellings, and ``verify_release_history_immutable``
+    looks a base entry up by the name git recorded, so a release path the
+    walk spells differently from the index — a name the checkout stored in
+    another Unicode normalisation, or one under a directory the walk cannot
+    list — is already refused against a base, as ``existing release file was
+    deleted relative to {commit}``, before any of this. What this brings to
+    the same standard is the candidate index and the push path, which had
+    neither comparison.
+
+    So the refusal means what it says under the spelling this package
+    compares by, and it is deliberately fail-closed: a checkout whose release
+    tree the traversal cannot match to the commit, whichever way round, is
+    not one this verifier can answer for. The two rights are not in tension
+    with the descent above, either. Enumerating a directory needs read
+    permission because listing it is the operation; descending a known path
+    needs only the right to traverse, which is why the state walk asks for no
+    more than that.
 
     Both callers run this after every comparison that existed before it, for
     the reason the per-file index check does: an entry that is also a mode or
@@ -2511,12 +2555,9 @@ def assert_release_root_index_regular(root: pathlib.Path, spec: ChainSpec) -> No
     # working tree does not hold it as a regular file under that spelling.
     # A symlink counts as not holding it — the enumeration refuses one it
     # reaches, and this is the same fact for an entry it never reaches at
-    # all. Its parents are walked first, because a name resolves through
-    # every component while the traversal above resolves none of it:
-    # ``rglob`` does not descend a symlinked directory, so a release path
-    # served through one was in no walk and yet answered "regular file"
-    # here, from wherever the link points. The leaf keeps its own refusal,
-    # below.
+    # all. Its parents are walked first so an entry served through a
+    # symlinked directory is named as that rather than reported as absent,
+    # which is the more specific of the two true things to say about it.
     for listed in sorted(modes):
         _assert_no_symlinked_release_component(root, listed)
         if listed not in walked:
