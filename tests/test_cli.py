@@ -1463,6 +1463,119 @@ def test_the_fused_bound_never_cuts_an_escape_in_half() -> None:
     assert "\\U0001d173…" in over and "\\U0001…" not in over
 
 
+def _flood_the_manifest_schema_with(repo: pathlib.Path, filler: str) -> str:
+    """``_flood_the_manifest_schema`` with a character of the test's choosing."""
+
+    manifest = manifest_stem(repo)
+    payload = json.loads(manifest.read_text())
+    payload["schemaVersion"] = filler
+    manifest.write_text(json.dumps(payload))
+    return f"unsupported manifest schema {payload['schemaVersion']!r}"
+
+
+@pytest.mark.parametrize(
+    "encoding, expanded",
+    [("ascii", True), ("utf-8", False)],
+)
+def test_a_field_is_bounded_in_the_units_the_stream_receives(
+    repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    encoding: str,
+    expanded: bool,
+) -> None:
+    """Binds S5R4-F8: the bound was counted in the wrong units.
+
+    The text bound counts the characters it prints, which is right for a
+    terminal that receives characters — and an ASCII or legacy stream does
+    not. ``_emit`` encodes with ``backslashreplace`` there, so each emoji in
+    a bounded field leaves as the ten characters ``\\U0001f600``: 4,096 of
+    them passed a bound of 4,096 and arrived as 40,960 bytes, ten times the
+    bound, out of a field the bound had already accepted. Four thousand
+    printable characters is the flood the bound exists to stop; forty
+    thousand scrolls the trusted last line off any terminal.
+
+    The emission encoding is decided before the verdict is rendered now and
+    threaded into ``_format_text``, and where it will fall back to ASCII each
+    non-ASCII character is escaped to the codec's own spelling *before* it is
+    measured. So what is counted is what the stream is given, on both kinds
+    of stream: the UTF-8 case here is the control, and its field carries the
+    emoji themselves.
+
+    Asserted over the raw bytes, because bytes are what the finding is about.
+    Without the fix the ASCII stream receives more than forty thousand bytes
+    for the same field.
+    """
+
+    from receipt.cli import MAX_RENDERED_FIELD
+
+    emoji = "\U0001f600"
+    failure = _flood_the_manifest_schema_with(repo, emoji * MAX_RENDERED_FIELD)
+    stream = _CodecStdout(encoding)
+    monkeypatch.setattr(sys, "stderr", stream)
+
+    assert run(repo) == EXIT_FAIL
+    data = stream.written()
+
+    # The verdict prints the failure twice, and every other line is fixed
+    # text this module owns. One field is at most the bound plus a marker,
+    # measured in what the stream draws — which for an ASCII stream is its
+    # bytes and for a UTF-8 one is the characters they decode to.
+    marker = "…[".encode(encoding, "backslashreplace")
+    assert data.count(marker) == 2
+    drawn = data.decode(encoding)
+    assert len(drawn) < 2 * (MAX_RENDERED_FIELD + 64) + 2048
+    assert data.endswith(
+        "VERDICT: FAIL — custody\n".encode(encoding, "backslashreplace")
+    )
+    # The library's text around the flood: everything up to the first emoji.
+    prefix = failure[: failure.index(emoji)]
+
+    if expanded:
+        # Ten bytes per emoji, so the field holds as many as fit beside the
+        # prefix and the marker names every input character past them. The
+        # byte count is the finding: without the fix it is over forty
+        # thousand for one field.
+        assert data.isascii()
+        assert len(data) < 2 * (MAX_RENDERED_FIELD + 64) + 2048
+        assert b"\\U0001f600" in data
+        kept = len(prefix) + (MAX_RENDERED_FIELD - len(prefix)) // len(
+            "\\U0001f600"
+        )
+        assert f"…[{len(failure) - kept} more characters]".encode(
+            "ascii", "backslashreplace"
+        ) in data
+    else:
+        # Unchanged: on UTF-8 a character is a character, so the field holds
+        # the bound's worth of emoji and nothing is escaped at all.
+        assert emoji.encode("utf-8") in data
+        assert b"\\U0001f600" not in data
+        assert f"…[{len(failure) - MAX_RENDERED_FIELD} more characters]".encode(
+            "utf-8"
+        ) in data
+
+
+def test_the_ascii_measure_is_the_spelling_the_codec_produces() -> None:
+    """Binds S5R4-F8: measuring one spelling and emitting another is no bound.
+
+    What makes the ASCII measure a bound rather than an estimate is that the
+    escape ``_rendered`` counts is the escape ``_emit`` will write —
+    ``backslashreplace``'s own, character for character. If the two spellings
+    disagreed anywhere the count would be wrong by the difference, in one
+    direction or the other, for every character of that class.
+
+    Checked across the classes the codec spells differently — a Latin-1
+    character, a BMP character, one outside the BMP, a C1 control, and a lone
+    surrogate — rather than argued from the source of ``_python_escape``.
+    """
+
+    from receipt.cli import _rendered
+
+    for character in ("\u00e9", "\u203a", "\U0001f600", "\u009b", "\udc9b"):
+        assert _rendered(character, encoding="ascii") == character.encode(
+            "ascii", "backslashreplace"
+        ).decode("ascii")
+
+
 def test_an_ordinary_failure_is_unchanged_by_the_rendering_bound(
     repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
