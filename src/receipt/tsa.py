@@ -3112,19 +3112,6 @@ def _build_authority_history(
         if collision is not None:
             raise TsaError(_pending_class_collision_message(history, *collision))
 
-    # And asked again of the finished graph, because a bundle can merge two
-    # classes an earlier bundle held apart without presenting both of their
-    # slots itself: the pass above sees nothing at either bundle, while the
-    # complete history puts the earlier bundle's two anchors in one class.
-    # The prefix pass runs first so it takes every collision it can see and
-    # this one names the earlier slots only where nothing better is available;
-    # both run before the split-or-merge errors gathered above, so the more
-    # precise two-anchor diagnosis wins when both describe one transition.
-    for batch in pending_batches:
-        collision = _first_class_collision(history, batch)
-        if collision is not None:
-            raise TsaError(_pending_class_collision_message(history, *collision))
-
     if errors:
         raise TsaError(min(errors)[1])
     return history, tuple(active_occurrences), tuple(pending_batches)
