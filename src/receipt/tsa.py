@@ -14,45 +14,45 @@ input the pinned tree never presents and so each outside the differential
 contract: a record under witness that is not a readable regular file, which
 the baseline let raise out of the hash; a legacy witness over a bundle
 configuring more than one anchor; a bundle configuring an anchor the spec
-carries no identity for, or one whose
-declared root SPKI or allowed signers differ from that identity, or whose
-referenced root material fails the ported material checks or carries an SPKI
-other than the identity's (all compared at load for every anchor, not only
-the one a witness selects); a pinned root PEM that OpenSSL's own parser
-(``openssl storeutl -noout -certs``) does not count exactly one certificate
-in, or whose certificates it cannot count at all -- the declared certificate
-hash and SPKI describe only the first certificate, while a ``-CAfile`` trusts
-every certificate it is given, so with exactly one counted what the identity
-pins is the whole of what the two verifications trust; a bundle whose
-configured anchors are not exactly the anchors the spec's identities for that
-bundle name, so an identity the consumer scoped to it cannot be quietly
-absent from it; a bundle two of whose anchors allow the same signer, which is
-one authority under two names -- the ported allowed-signer check binds a
-token to the signers of the anchor its outcome selects, so a shared signer is
-exactly what lets one RFC 3161 response satisfy two outcomes, while a shared
-root with disjoint signers does not and stays allowed (one check on the
-anchors covers the identities the spec scopes to the bundle as well, whose
-signer sets each anchor's has just been required to equal); a pending bundle
-anchor reusing an active anchor ID under a different code-pinned root, which
-is a new authority and so must carry a supplemental outcome before the
-transition can activate it -- the ported supplemental-outcome refusal,
-reaching a case the baseline let through because it took the ID alone for the
-identity; an unavailable witness of either schema whose reason is not a
-string, or that carries token evidence at the witness level (the v2
-per-anchor outcome has always refused both); an unavailable legacy witness
-that names a bundle by any of its three claim fields, whose claim is then
-resolved and counted where the baseline ignored those fields; and a v2
-witness that offers one RFC 3161 timestamp under two of its outcomes, counted
-across the primary and supplemental outcomes together so that one response
-cannot stand for a bundle configuring more than one anchor -- counted twice
-over: the file an outcome names, refused before that outcome's token is
-verified and so ahead of the ported refusals inside
-``verify_timestamp_token``, and the ``TSTInfo`` the authority signed, refused
-where that verification returns.  The second rule is what the first cannot
-be: nearly everything around a signed ``TSTInfo`` is the producer's to
-rewrite -- the unsigned ``PKIStatusInfo`` wrapper, and the ``certificates``,
-``crls`` and ``unsignedAttrs`` a ``SignedData`` carries outside its signature
--- so one issuance has many valid encodings and a rule counting files counts
+carries no identity for, or one whose declared root SPKI or allowed signers
+differ from that identity, or whose referenced root material fails the
+ported material checks or carries an SPKI other than the identity's (all
+compared at load for every anchor, not only the one a witness selects); a
+pinned root PEM that OpenSSL's own parser (``openssl storeutl -noout
+-certs``) does not count exactly one certificate in, or whose certificates
+it cannot count at all -- the declared certificate hash and SPKI describe
+only the first certificate, while a ``-CAfile`` trusts every certificate it
+is given, so with exactly one counted what the identity pins is the whole of
+what the two verifications trust; a bundle whose configured anchors are not
+exactly the anchors the spec's identities for that bundle name, so an
+identity the consumer scoped to it cannot be quietly absent from it; a
+bundle two of whose anchors allow the same signer, which is one authority
+under two names -- the ported allowed-signer check binds a token to the
+signers of the anchor its outcome selects, so a shared signer is exactly
+what lets one RFC 3161 response satisfy two outcomes, while a shared root
+with disjoint signers does not and stays allowed (one check on the anchors
+covers the identities the spec scopes to the bundle as well, whose signer
+sets each anchor's has just been required to equal); a pending bundle anchor
+reusing an active anchor ID under a different code-pinned root, which is a
+new authority and so must carry a supplemental outcome before the transition
+can activate it -- the ported supplemental-outcome refusal, reaching a case
+the baseline let through because it took the ID alone for the identity; an
+unavailable witness of either schema whose reason is not a string, or that
+carries token evidence at the witness level (the v2 per-anchor outcome has
+always refused both); an unavailable legacy witness that names a bundle by
+any of its three claim fields, whose claim is then resolved and counted
+where the baseline ignored those fields; and a v2 witness that offers one
+RFC 3161 timestamp under two of its outcomes, counted across the primary and
+supplemental outcomes together so that one response cannot stand for a
+bundle configuring more than one anchor -- counted twice over: the file an
+outcome names, refused before that outcome's token is verified and so ahead
+of the ported refusals inside ``verify_timestamp_token``, and the
+``TSTInfo`` the authority signed, refused where that verification returns.
+The second rule is what the first cannot be: nearly everything around a
+signed ``TSTInfo`` is the producer's to rewrite -- the unsigned
+``PKIStatusInfo`` wrapper, and the ``certificates``, ``crls`` and
+``unsignedAttrs`` a ``SignedData`` carries outside its signature -- so one
+issuance has many valid encodings and a rule counting files counts
 encodings.  Both are admissible because no witness in the pinned tree offers
 one timestamp twice.
 
