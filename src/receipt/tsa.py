@@ -9,10 +9,15 @@ through a frozen :class:`TsaSpec` supplied by consumer code.  This module
 ships no repository-specific trust defaults and performs no chain walk or
 producer signature verification.
 
-The port is stricter than the baseline in nineteen places, each refusing an
+The port is stricter than the baseline in twenty places, each refusing an
 input the pinned tree never presents and so each outside the differential
 contract: a record under witness that is not a readable regular file, which
-the baseline let raise out of the hash; a legacy witness over a bundle
+the baseline let raise out of the hash; a path this module resolves out of
+the repository and then reads -- the record under witness, an anchor's
+pinned root, or a claimed response -- one of whose components below the
+records root is a symlink, which nothing looked at, the path-level check and
+``O_NOFOLLOW`` both answering for the final component alone; a legacy
+witness over a bundle
 configuring more than one anchor; a bundle configuring an anchor the spec
 carries no identity for, or one whose declared root SPKI or allowed signers
 differ from that identity, or whose referenced root material fails the
@@ -37,12 +42,13 @@ reusing an active anchor ID under a different code-pinned root, which is a
 new authority and so must carry a supplemental outcome before the transition
 can activate it -- the ported supplemental-outcome refusal, reaching a case
 the baseline let through because it took the ID alone for the identity,
-while a pending anchor whose signers are exactly one active anchor's signers
-is that active authority under a new name and is skipped for the same reason
-a bundle may not allow one signer under two of its anchors; a pending anchor
-carrying part of an active authority and not the whole of it -- a piece of
-one active anchor's signers (a split), the signers of two of them together
-(a merge), or an active anchor's signers beside a key that is nobody's --
+while a pending anchor whose signers are exactly the signers of one active
+authority's equivalence class is that authority under a new name and is
+skipped for the same reason a bundle may not allow one signer under two of
+its anchors; a pending anchor carrying part of an active authority and not
+the whole of it -- a piece of one active class's signers (a split), the
+signers of two classes together (a merge), or a class's signers beside a key
+that is nobody's --
 which is neither a rename nor a new authority and so is refused rather than
 skipped or admitted, since skipping it activates something with no
 supplemental evidence and admitting it lets an authority the chain already
@@ -50,8 +56,17 @@ trusts produce the very token the new key is supposed to prove; two pending
 bundles that introduce one authority under two anchors, sharing a signer,
 which is one new authority demanding and receiving two supplemental outcomes
 and so counted twice -- every equivalence above is computed against the
-active bundles, and each candidate the walk admits now joins the sets the
-next is measured against, except that a later pending bundle's anchor
+active bundles, whose anchors are grouped into classes: the connected
+components of them, joined wherever two carry one ``(ID, root SPKI)`` or
+share a signing key, each class's signers the union over its members.  Both
+joins are one statement made at two moments, which is why the grouping is
+transitive: an activated rename made two anchors one authority, and a
+rotation under either name extended that one authority's keys, so an
+authority renamed and then rotated is one class holding a key under each of
+its names, and a further rename of it carries the whole class and equals
+neither anchor's own set (peer review, sixth gate round one).  Each
+candidate the walk admits now joins the sets the next is measured against,
+except that a later pending bundle's anchor
 carrying an admitted anchor's ``(ID, root SPKI)`` succeeds it rather than
 colliding with it, one authority keeping its name across two versions of a
 catch-up; a caller-supplied trust transition that omits an update the
@@ -92,9 +107,20 @@ name one file under two paths that do not fold together, because a symlinked
 parent directory or a second hard link gives one object two names that no
 comparison of names separates -- which is why the third identity is taken
 from the descriptor and not from a second look at the name, that look being
-the race itself.  And nearly everything around a signed ``TSTInfo`` is the
-producer's to rewrite -- the unsigned ``PKIStatusInfo`` wrapper, and the
-``certificates``, ``crls`` and ``unsignedAttrs`` a ``SignedData`` carries
+the race itself.  Those last two shapes compose, and composed they defeat
+all four: a direct path and an alias of the token's *directory* fold apart,
+and with the shared entry replaced between the two reads the object rule
+sees two inodes, the digest rule two digests each true of what its own
+outcome read, and the timestamp rule two genuine issuances (peer review,
+sixth gate round one).  Four blind rules is a statement about where the rule
+belongs rather than about which of them to strengthen, and the answer is
+upstream of all of them: no component of a path this module reads may be a
+link, which is the refusal counted above.  The object rule stays, because it
+is what stands if the walk is ever lost and because a second hard link needs
+no link anywhere to reach one file by two names.  And nearly everything
+around a signed ``TSTInfo`` is the producer's to rewrite -- the unsigned
+``PKIStatusInfo`` wrapper, and the ``certificates``, ``crls`` and
+``unsignedAttrs`` a ``SignedData`` carries
 outside its signature -- so one issuance has many valid encodings and a rule
 counting files counts encodings.  The signer is half of that last identity
 because a ``TSTInfo`` need not say whose it is: RFC 3161 makes its serial
@@ -103,7 +129,10 @@ optional, so two independent pinned authorities can sign byte-identical
 ``TSTInfo``s with no forgery at all.  All four are admissible because no
 witness in the pinned tree names one path twice, spells one path two ways
 (its 91 declared token paths have 91 distinct fold keys), reaches one file
-by two paths, or offers one authority's timestamp twice.
+by two paths, or offers one authority's timestamp twice; and the walk in
+front of them because nothing in that tree is reached through a link at all
+-- its 91 token paths, 53 record paths and 2 pinned root paths pass through
+161 distinct components below the records root, not one of them a symlink.
 
 The pinned root behind the two counting refusals is read from the repository
 exactly once, and every check runs on those bytes: the PEM hash over the
@@ -115,7 +144,9 @@ substitutes another file between validation and use -- the plain form of a
 authority appended after the count -- changes what is on disk and not what is
 trusted; and because nothing is re-encoded, a pinned root's auxiliary trust
 settings apply exactly as pinned.  This module's own refusals go on naming
-the repository path.
+the repository path, and the path it reads is walked component by component
+first, so the file it reads is the one the repository names all the way
+down rather than one a linked directory redirects to.
 
 The record under witness is read exactly once as well, and those same bytes
 answer every question asked about it: the digest its sidecar has to match,
@@ -127,6 +158,7 @@ whether a token covered the record at all: a writer could leave the witnessed
 record in place for the digest and the time checks, substitute another for
 that read with a token genuinely stamped over the substitute, and put the
 first back, and the evidence then named a record OpenSSL had never seen.
+Its path is walked too, for the same reason the response's is.
 
 The trust transition the record carries comes from that snapshot too, and it
 is the one thing that used to come from somewhere else.  ``verify_witness``
@@ -159,7 +191,8 @@ and this one's" at once.  ``verify_witness`` keeps the one list, with 0.5.1's
 signature, because the upstream integration this is a port of walks its chain
 that way; what it leaves is said above and said again in its own docstring.
 
-The claimed response is read once for the same reason.  Its ``tokenSha256``
+The claimed response is read once for the same reason, and its path walked
+component by component before that read.  Its ``tokenSha256``
 was taken from one open of its pathname and ``openssl ts -reply`` and
 ``openssl ts -verify`` then made two more, so the digest reported as evidence
 described the file at an earlier instant than the one the verifications read;
@@ -199,16 +232,43 @@ words, and a symlink at the final component, which ``O_NOFOLLOW`` now
 refuses.  Genesis had no path-level check at all, so its refusal is the new
 one counted above.
 
-All six of those reads open without waiting.  Each has a path-level check
-in front of it, and the check answers about a pathname while the descriptor
-is opened from that pathname again, so what is opened need not be what was
-checked: a regular file replaced by a FIFO in between is opened as a FIFO,
-and a read-only open of a FIFO waits for a writer with no timeout.  The
-refusal that ``fstat`` would then give is never reached, and a verification
-that should have failed hangs instead.  So the open carries ``O_NONBLOCK``
-where the platform has the flag, ``fstat`` refuses the descriptor in the
-caller's own words, and the flag is cleared before any byte is read -- it
-governs the open and nothing after it.
+The bundle asks more of its file than the other two, and asked it of the
+path.  ``_load_json_once`` captured its bytes and parsed them, and the load
+then opened the pathname three more times: ``read_bytes`` for the
+canonical-JSON comparison, ``sha256_file`` for the commitment hash, and a
+``stat`` for the size.  So the anchor set came from one instant of a mutable
+file and the three commitments that are supposed to describe that anchor set
+from three later ones -- and a writer replacing the bundle with a FIFO after
+the guarded read had those re-reads waiting for a writer with no timeout,
+which is the hang the discipline exists to prevent, reached through the one
+input that had not been given it (peer review, sixth gate round one).
+``_read_json_once`` returns the captured bytes beside the payload and all
+three answers come from them; ``_load_json_once`` keeps its own shape for the
+two callers with nothing further to ask.  ``sha256_file`` stays as the public
+ported helper, called from nowhere in here.
+
+What the component walk does not cover is these three, deliberately.  Each
+refuses a link at its own final component, the sidecar's other components are
+the record's and are walked with it, and genesis sits directly under the
+records root -- so the one component this module reads through that no walk
+looks at is ``records/trust``.  A bundle's bytes are pinned entire by its
+:class:`TrustBundleSpec`, hash, size and canonical digest together, so
+whatever a link there leads to is either the pinned bytes or a commitment
+mismatch, which is why the walk stops where it does rather than growing a
+fourth refusal for a file whose every byte is already committed.
+
+All six of those reads open without waiting, and three of them -- the
+record, the response and the pinned root -- have every component of their
+path ``lstat``ed from the records root down first.  Each has a path-level
+check in front of it, and the check answers about a pathname while the
+descriptor is opened from that pathname again, so what is opened need not be
+what was checked: a regular file replaced by a FIFO in between is opened as
+a FIFO, and a read-only open of a FIFO waits for a writer with no timeout.
+The refusal that ``fstat`` would then give is never reached, and a
+verification that should have failed hangs instead.  So the open carries
+``O_NONBLOCK`` where the platform has the flag, ``fstat`` refuses the
+descriptor in the caller's own words, and the flag is cleared before any
+byte is read -- it governs the open and nothing after it.
 
 The record, the response and the pinned root open in binary too, and so does
 the private copy of the pinned root.
@@ -251,8 +311,9 @@ other, and what closed it is the pending-authority rules above: two outcomes
 rest on one authority's signature only if two anchors both pin the
 certificate that response was signed with, and no pairing of anchors that
 could reaches two outcomes -- inside one bundle they are refused at load;
-across an active and a pending bundle the pending one is skipped as a rename
-or refused as a split or a merge, so it never becomes a candidate at all; and
+across an active and a pending bundle the pending one is measured against
+whole classes and is skipped as a rename or refused as a split or a merge,
+so it never becomes a candidate at all; and
 across two pending bundles they are refused as an alias, or, where the two
 are one authority under one name, the later succeeds the earlier and only
 one of them is a candidate.  Its text is new to this branch rather than
