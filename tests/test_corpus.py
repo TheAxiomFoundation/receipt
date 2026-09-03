@@ -657,33 +657,46 @@ def test_spec_refuses_an_empty_content_root() -> None:
 
 
 def test_the_spec_pins_a_suffix_by_one_rule_or_refuses_it() -> None:
-    """Binds the policy, suffix half: four screens become one rule.
+    """Binds the policy, suffix half, and S5R4-F5: the rule is the repertoire.
 
     A pin used to be screened four times over — a leading dot, a foldability
     screen against a pinned Unicode table, an ASCII rule, and a fold-key
     length test to decide which pins the ASCII rule applied to — and every
     one of those was added by a review round that found the previous
-    arrangement wrong. The rule now is that a pin is a period and one to
-    sixteen ASCII letters or digits. This asserts the classes each of the
-    four used to answer for, and one the arrangement never covered at all:
-    an unassigned code point, a non-ASCII letter inside an alias-capable
-    pin, a non-ASCII letter outside one, a second period, a separator, a
-    bare period, and a pin with no period.
+    arrangement wrong. The policy replaced them with one rule, and stated it
+    one notch too tightly: a period and one to sixteen ASCII letters or
+    digits. That was a compatibility break the finding named — the released
+    ``CorpusSpec`` accepted any dot-prefixed suffix, and none of ``.tar.gz``,
+    ``.a-b`` or ``._`` can be an 8.3 extension, while ``-`` and ``_`` are in
+    the portable repertoire already (S5R4-F5).
 
-    Without the rule ``.yaml\u0378`` constructs — the fold screen it used to
-    face is gone with the pinned table — and the suffix is then folded
-    against every path in the tree and every entry name the sweep sees.
+    So the rule is a period followed by portable characters, with interior
+    periods allowed and no length cap, and it still refuses everything the
+    four screens were there for: an unassigned code point, a non-ASCII
+    letter inside an alias-capable pin, a non-ASCII letter outside one, a
+    separator, a bare period, and a pin with no period.
+
+    Without the widening ``.tar.gz``, ``.a-b``, ``._`` and a twenty-character
+    pin are refused at construction and a consumer whose corpus is spelled
+    that way cannot state its own spec. Without the rule itself
+    ``.yaml\u0378`` constructs — the fold screen it used to face is gone with
+    the pinned table — and the suffix is then folded against every path in
+    the tree and every entry name the sweep sees.
     """
 
     for suffix in (
-        ".yaml\u0378", ".\u00e9ml", ".\u00e9yaml", ".tar.gz", ".y/ml", ".", "yaml"
+        ".yaml\u0378", ".\u00e9ml", ".\u00e9yaml", ".y/ml", ".", "yaml", ""
     ):
         with pytest.raises(CorpusError) as caught:
             corpus_spec(content_suffixes=(suffix,))
         assert str(caught.value).startswith(
-            "CorpusSpec content suffix must be '.' followed by one to sixteen"
+            "CorpusSpec content suffix must be '.' followed by one or more "
+            "portable characters"
         ), suffix
     assert corpus_spec(content_suffixes=(".yaml", ".yml")).content_suffixes
+    # The four the sixteen-character grammar took away, given back.
+    for suffix in (".tar.gz", ".a-b", "._", "." + "y" * 20):
+        assert corpus_spec(content_suffixes=(suffix,)).content_suffixes == (suffix,)
 
 
 def test_the_spec_refuses_a_content_root_outside_the_portable_repertoire() -> None:
@@ -4468,8 +4481,9 @@ def test_the_spec_refuses_a_non_ascii_content_suffix_at_construction() -> None:
         with pytest.raises(CorpusError) as caught:
             corpus_spec(content_suffixes=(".yaml", suffix))
         assert str(caught.value) == (
-            "CorpusSpec content suffix must be '.' followed by one to "
-            f"sixteen ASCII letters or digits: {suffix!r}"
+            "CorpusSpec content suffix must be '.' followed by one or more "
+            f"portable characters (ASCII letters, digits, '.', '_' and '-'): "
+            f"{suffix!r}"
         )
 
 
@@ -5630,9 +5644,18 @@ def test_alias_capability_is_bounded_at_both_ends() -> None:
     The lower end is now a statement rather than a guard, because
     :data:`CONTENT_SUFFIX_RE` admits no pin shorter than two characters —
     which is asserted here too, so removing the guard cannot quietly outlive
-    the rule that makes it safe. And the measurement is the written length
+    the rule that makes it safe. And the measurement is the written spelling
     again rather than the fold key, which is sound only because a pin is
     ASCII: that is asserted as well.
+
+    S5R4-F5 moved the measurement from a length to a shape, because the
+    schema admits interior periods again. ``.tar.gz`` is six characters, so
+    a length test would have called it incapable for the wrong reason and a
+    six-character pin without a period would have been called incapable
+    correctly by accident; what makes ``.tar.gz`` incapable is that an 8.3
+    extension is the text after the *last* period and carries none of its
+    own. Without the shape rule a pin like ``.a.b`` is compared against a
+    derived extension it can never equal.
 
     Without the bounds a four-character pin is compared truncated, and a
     bare period is treated as carryable.
@@ -5643,7 +5666,13 @@ def test_alias_capability_is_bounded_at_both_ends() -> None:
     assert not _alias_capable_suffix(".")
     assert _alias_capable_suffix(".y")
     assert _alias_capable_suffix(".yml")
+    assert _alias_capable_suffix(".a-b")
+    assert _alias_capable_suffix("._")
     assert not _alias_capable_suffix(".yaml")
+    # Four characters after the period, and a second period: neither can be
+    # the extension an 8.3 alias carries.
+    assert not _alias_capable_suffix(".tar.gz")
+    assert not _alias_capable_suffix(".a.b")
     # The schema is what keeps the low end unreachable.
     for degenerate in (".", ""):
         with pytest.raises(CorpusError):

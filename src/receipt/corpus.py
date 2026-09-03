@@ -293,11 +293,19 @@ normalization and default-ignorables on HFS+ — either collapses onto it or
 cannot arise at all, because the characters it would act on are not in the
 repertoire.
 
-A pinned content suffix is bound one step tighter, by :class:`CorpusSpec` at
-construction: a period followed by one to sixteen ASCII letters or digits. A
-suffix carrying a separator, or a second period, would make "ends in this
-suffix" a different question from "has this extension", and the 8.3
-comparison below needs the second one.
+A pinned content suffix is bound by the same repertoire, by
+:class:`CorpusSpec` at construction: a period followed by one or more
+portable characters. That is the released semantics narrowed by the
+repertoire and by nothing else — a pin carrying a character no portable name
+can hold could never match one, and a pin is compared only against names the
+screen has already passed. A grammar of one to sixteen ASCII letters or
+digits was tried instead and was a compatibility break for no gain: it
+refused ``.tar.gz``, ``.a-b`` and ``._``, and it capped a length nothing here
+depends on (peer review, Sol round 4). What that grammar was protecting is
+the 8.3 comparison, which is well defined only for a pin that is
+structurally an extension — a single period and one to three characters —
+so that comparison asks :data:`ALIAS_CAPABLE_SUFFIX_RE` which pins it may be
+made of, and every other pin is answered by "ends in this suffix" alone.
 
 Two Win32 facts survive the policy rather than being subsumed by it, and both
 are screens rather than models. ``CON``, ``PRN``, ``AUX``, ``NUL`` and the
@@ -369,16 +377,36 @@ SHORT_NAME_PUNCTUATION = frozenset("$%'-_@~`!(){}^#&")
 #: does not admit an empty component, nor ``.`` or ``..``, both of which end
 #: in a period.
 PORTABLE_NAME_RE = re.compile(r"[A-Za-z0-9._-]+\Z")
-#: A pinned content suffix: a period and one to sixteen ASCII letters or
-#: digits, refused by :class:`CorpusSpec` at construction if it is anything
-#: else. Tighter than a portable name by exactly what the two questions asked
-#: of a suffix need. ``_has_pinned_suffix`` asks whether a path *ends in* the
-#: pin, and :func:`_short_name_carries_pinned_suffix` asks whether an alias's
-#: three-character extension *is* the pin; a suffix carrying a separator or a
-#: second period makes those two different questions, and a suffix carrying a
-#: character outside the repertoire cannot be compared against a name that is
-#: inside it. Sixteen is generous for a real one, which is three or four.
-CONTENT_SUFFIX_RE = re.compile(r"\.[A-Za-z0-9]{1,16}\Z")
+#: A pinned content suffix: a period, then one or more characters of the
+#: portable repertoire, refused by :class:`CorpusSpec` at construction if it
+#: is anything else. What it adds to :data:`PORTABLE_NAME_RE` is the leading
+#: period and nothing else — a suffix is compared against names that have
+#: passed that screen, so a character outside the repertoire could never
+#: match one, and a character inside it always can.
+#:
+#: The released ``CorpusSpec`` accepted any dot-prefixed suffix, and a
+#: grammar of one to sixteen ASCII letters or digits was a compatibility
+#: break for no gain: it refused ``.tar.gz``, ``.a-b`` and ``._``, none of
+#: which can be an 8.3 extension and two of which are spelled out of
+#: characters the repertoire already holds, and it capped a length nothing
+#: about this module depends on (peer review, Sol round 4). Interior periods
+#: and a length past sixteen are admitted again.
+#:
+#: The two questions asked of a pin stay separate, and the separation is
+#: where the old grammar was trying to help. ``_has_pinned_suffix`` asks
+#: whether a path *ends in* the pin, which is well defined for any suffix;
+#: :func:`_short_name_carries_pinned_suffix` asks whether an alias's
+#: three-character extension *is* the pin, which is well defined only for a
+#: pin that is structurally an 8.3 extension. So the second question is
+#: asked of those pins alone — see :data:`ALIAS_CAPABLE_SUFFIX_RE` — rather
+#: than being made safe by refusing every other pin at construction.
+CONTENT_SUFFIX_RE = re.compile(r"\.[A-Za-z0-9._-]+\Z")
+#: A pin that is structurally an 8.3 extension: a single period followed by
+#: one to three repertoire characters, which is what an alias's extension can
+#: be. A pin carrying a second period, or more than three characters after
+#: the period, is the extension of no short name and
+#: :func:`_short_name_carries_pinned_suffix` ignores it.
+ALIAS_CAPABLE_SUFFIX_RE = re.compile(r"\.[A-Za-z0-9_-]{1,3}\Z")
 
 CONTENT_KIND = "content"
 ATTESTED_KIND = "attested"
@@ -687,15 +715,19 @@ class CorpusSpec:
         for suffix in self.content_suffixes:
             # One rule, CONTENT_SUFFIX_RE, in place of four screens that grew
             # one review round at a time: a leading dot, a foldability screen,
-            # an ASCII rule asked only of alias-capable pins, and a
-            # fold-key length test to decide which those were. What a pin has
-            # to be is a period and one to sixteen ASCII letters or digits;
-            # the constant says why each half of that is needed, and the
-            # module docstring says why the repertoire is ASCII at all.
+            # an ASCII rule asked only of alias-capable pins, and a fold-key
+            # length test to decide which those were. What a pin has to be is
+            # a period followed by portable characters — the released
+            # semantics, narrowed by the repertoire and by nothing else. A
+            # length cap and a ban on interior periods were a compatibility
+            # break that bought nothing, because the question they were
+            # protecting is asked only of the pins it is well defined for
+            # (peer review, Sol round 4).
             if type(suffix) is not str or CONTENT_SUFFIX_RE.fullmatch(suffix) is None:
                 raise CorpusError(
-                    "CorpusSpec content suffix must be '.' followed by one to "
-                    f"sixteen ASCII letters or digits: {_quoted(suffix)}"
+                    "CorpusSpec content suffix must be '.' followed by one or "
+                    "more portable characters (ASCII letters, digits, '.', "
+                    f"'_' and '-'): {_quoted(suffix)}"
                 )
         if type(self.required_attested_paths) is not frozenset:
             raise CorpusError("CorpusSpec required_attested_paths must be a frozenset")
@@ -1111,16 +1143,26 @@ def _assert_portable_name(value: str, label: str) -> str:
 def _alias_capable_suffix(suffix: str) -> bool:
     """Whether an 8.3 alias extension could ever be this pinned suffix.
 
-    An alias extension is one to three characters, so a carryable pin is a
-    period and one to three more, which is a length of two to four. A pin
-    longer than that is the extension of no alias, and comparing the first
-    three characters of one refused an ordinary ``notes.yam`` under a
+    An alias extension is one to three characters of the 8.3 namespace, so a
+    carryable pin is a period followed by one to three repertoire characters
+    and nothing else — which is exactly :data:`ALIAS_CAPABLE_SUFFIX_RE`. A
+    pin longer than that is the extension of no alias, and comparing the
+    first three characters of one refused an ordinary ``notes.yam`` under a
     ``.yaml`` configuration although no alias can end ``.yaml`` (peer review,
     round eight).
 
-    The written length is the measurement, and under the portable-name policy
-    that is not a shortcut: :data:`CONTENT_SUFFIX_RE` admits only ASCII
-    letters and digits after the period, and NFC plus case folding changes
+    Measured by shape rather than by length, because the schema admits a pin
+    with interior periods again: ``.tar.gz`` is six characters and would have
+    passed a two-to-four *length* test on nothing but arithmetic if the
+    schema had ever admitted a six-character one, and it is emphatically not
+    an extension — the text after the last period of an 8.3 name is ``GZ``,
+    which is a different pin (peer review, Sol round 4). A single period,
+    then one to three characters an 8.3 extension can hold, is the whole
+    rule.
+
+    The written spelling is the measurement, and under the portable-name
+    policy that is not a shortcut: :data:`CONTENT_SUFFIX_RE` admits only
+    repertoire characters after the period, and NFC plus case folding changes
     neither the length nor the character count of ASCII. Measuring the fold
     key instead was necessary while a pin could be an NFD spelling of
     something non-ASCII, which is a state the schema no longer admits.
@@ -1129,7 +1171,7 @@ def _alias_capable_suffix(suffix: str) -> bool:
     schema admits is two characters, so nothing reaching here is shorter.
     """
 
-    return 2 <= len(suffix) <= 4
+    return ALIAS_CAPABLE_SUFFIX_RE.fullmatch(suffix) is not None
 
 
 def _short_name_extension(name: str) -> str | None:
@@ -1215,10 +1257,10 @@ def _short_name_carries_pinned_suffix(name: str, suffixes: tuple[str, ...]) -> b
     written name. What that models, and what it does not, is stated there.
 
     Only a pin an alias can carry is compared, and it is compared exactly.
-    An 8.3 extension is at most three characters, so a pin whose own
-    extension is longer than three cannot be the extension of any alias, and
-    such a pin is ignored here entirely; :func:`_alias_capable_suffix`
-    decides that. Truncating the pin instead and
+    An 8.3 extension is at most three characters and carries no period of its
+    own, so a pin longer than that, or one carrying a second period like
+    ``.tar.gz``, is the extension of no alias and is ignored here entirely;
+    :func:`_alias_capable_suffix` decides that. Truncating the pin instead and
     comparing the first three characters was unsound the other way: with
     ``.yaml`` pinned, an ordinary ``notes.yam`` was refused as though its
     alias carried the pin, although no alias of anything can end ``.yaml``
