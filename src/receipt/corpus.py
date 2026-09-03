@@ -53,13 +53,25 @@ Three row kinds, one journal:
     verifier's: with ``.éml`` pinned, ``smuggled.émlx`` is aliased ``.ÉML``
     on a code page 850 volume while the underscore model read ``._ML`` and
     skipped the file. So an extension carrying a non-ASCII character is
-    refused as underivable rather than guessed at, and a pinned content
-    suffix must be ASCII. At the other end, an alias extension is at most
-    three characters, so a pin longer than that cannot be carried by any
-    alias; comparing the first three characters of a longer pin refused an
-    ordinary ``notes.yam`` under a ``.yaml`` configuration although no
-    alias can end ``.yaml``. Only a pin an alias could carry is compared,
-    and it is compared exactly (peer review, round eight).
+    refused as underivable rather than guessed at, and an alias-capable
+    pinned content suffix must be ASCII. At the other end, an alias
+    extension is at most three characters, so a pin longer than that cannot
+    be carried by any alias; comparing the first three characters of a
+    longer pin refused an ordinary ``notes.yam`` under a ``.yaml``
+    configuration although no alias can end ``.yaml``. Only a pin an alias
+    could carry is compared, and it is compared exactly (peer review, round
+    eight).
+
+    Both of those bounds are applied before the model is asked anything,
+    because applying them afterwards refused names over questions nobody
+    had put. The alias-capable pins are selected first, so a configuration
+    pinning only ``.yaml`` derives no extension at all and ``notes.é`` is
+    an ordinary non-content file rather than an underivable one; the
+    extension source is truncated to three characters first, so the code
+    page decides only about characters that reach the alias and ``x.ymlé``
+    yields ``YML`` rather than a refusal; and the ASCII rule on a pin is
+    asked only of pins an alias could carry, so ``.éyaml`` is a legal
+    configuration and ``.éml`` is still refused (peer review, Sol round 2).
 
 ``attested``
     An exact path bound by digest without a sweep — the toolchain pin, the
@@ -582,7 +594,15 @@ class CorpusSpec:
             # auditor's clone does not report it. A pin the screen cannot
             # judge against would leave the sweep unable to answer the
             # question the pin exists to ask (peer review, round eight).
-            if any(ord(character) > 0x7F for character in suffix):
+            #
+            # Asked of alias-capable pins only, for the reason
+            # _short_name_carries_pinned_suffix gives: an extension of more
+            # than three characters is carried by no alias, so ".éyaml" asks
+            # the screen nothing and refusing it refused a legal
+            # configuration over a question that is never put (peer review,
+            # Sol round 2). ".éml" is still refused, because that one is a
+            # pin an alias could carry and the derivation cannot be made.
+            if len(suffix) <= 4 and any(ord(character) > 0x7F for character in suffix):
                 raise CorpusError(
                     "CorpusSpec content suffix must be ASCII, because an 8.3 "
                     "alias extension cannot be derived against a non-ASCII "
@@ -1123,7 +1143,7 @@ def _short_name_extension(name: str) -> str | None:
       the 8.3 namespace cannot hold;
     - the result is truncated to three characters.
 
-    A *non-ASCII* character in the extension is not mapped at all: the name
+    A *non-ASCII* character among those three is not mapped at all: the name
     is refused. Mapping it to an underscore was wrong in the direction that
     matters. The 8.3 namespace is an OEM code page, not ASCII, so a
     character the volume's code page can represent survives into the short
@@ -1134,9 +1154,17 @@ def _short_name_extension(name: str) -> str | None:
     not something an auditor's clone reports, and guessing wrong in either
     direction is a wrong answer about closed-world membership, so the
     verifier says it cannot derive the alias rather than deriving one it
-    cannot stand behind. That refusal is why a pinned content suffix must be
-    ASCII: :class:`CorpusSpec` refuses a non-ASCII one at construction, so a
-    corpus cannot be configured into a state where no name can be judged.
+    cannot stand behind. That refusal is why an alias-capable pinned content
+    suffix must be ASCII: :class:`CorpusSpec` refuses a non-ASCII one at
+    construction, so a corpus cannot be configured into a state where no
+    name can be judged.
+
+    "Among those three" is the whole of the uncertainty and the whole of the
+    refusal. The truncation happens before the question is asked, because a
+    character past the third cannot reach the derived extension and no code
+    page decides anything about it: ``x.ymlé`` yields ``YML`` on every
+    volume there is, and refusing it as underivable refused an ordinary name
+    over a question nobody had put (peer review, Sol round 2).
 
     What is modelled is the extension and nothing else. The *stem* is not:
     it depends on collisions with names this verifier cannot see, so the
@@ -1151,23 +1179,32 @@ def _short_name_extension(name: str) -> str | None:
     _, dot, extension = stripped.rpartition(".")
     if not dot:
         return None
-    if any(ord(character) > 0x7F for character in extension):
+    # Truncation comes first, because the uncertainty this function refuses
+    # over is only about characters that reach the alias. An 8.3 extension is
+    # three characters, so the fourth and later characters of the extension
+    # source are dropped whatever they are: refusing ``x.ymlé`` because of a
+    # code page that cannot decide anything about ``YML`` was a refusal with
+    # no question behind it (peer review, Sol round 2).
+    source = extension[:3]
+    if any(ord(character) > 0x7F for character in source):
         raise CorpusError(
             "8.3 alias extension cannot be derived for a name whose extension "
             "carries non-ASCII characters (the volume's OEM code page decides "
             f"it): {_quoted(name)}"
         )
-    mapped = "".join(
-        character.upper()
-        if "a" <= character <= "z" or "A" <= character <= "Z"
-        else (
-            character
-            if "0" <= character <= "9" or character in SHORT_NAME_PUNCTUATION
-            else "_"
+    return (
+        "".join(
+            character.upper()
+            if "a" <= character <= "z" or "A" <= character <= "Z"
+            else (
+                character
+                if "0" <= character <= "9" or character in SHORT_NAME_PUNCTUATION
+                else "_"
+            )
+            for character in source
         )
-        for character in extension
+        or None
     )
-    return mapped[:3] or None
 
 
 def _short_name_carries_pinned_suffix(name: str, suffixes: tuple[str, ...]) -> bool:
@@ -1196,6 +1233,14 @@ def _short_name_carries_pinned_suffix(name: str, suffixes: tuple[str, ...]) -> b
     left is an exact comparison between the derived alias extension and a
     pin short enough to be one.
 
+    The pins are filtered *before* the name is touched, and the order is
+    load-bearing rather than tidy. Deriving first meant a name was refused
+    as underivable for a configuration that had no alias-capable pin at all:
+    with only ``.yaml`` pinned, ``notes.é`` raised the OEM refusal although
+    the answer this function would have given is False whatever the code
+    page decides (peer review, Sol round 2). Where no pin can be carried by
+    an alias, there is no question, and no name is asked one.
+
     Compared through :func:`_path_fold`, the key by which membership is
     decided everywhere else in this module, so ``.YML`` and ``.yml`` are one
     suffix here exactly as they are there.
@@ -1205,17 +1250,22 @@ def _short_name_carries_pinned_suffix(name: str, suffixes: tuple[str, ...]) -> b
     surfaces where the sweep meets the entry.
     """
 
+    # The pins are filtered before the name is touched, which is the order
+    # the two halves have to run in. An 8.3 extension is at most three
+    # characters, so a pin longer than that can be carried by no alias and
+    # asks nothing of this name; deriving first meant a configuration with
+    # only such pins still refused ``notes.é`` as underivable, over a
+    # question no pin could have asked (peer review, Sol round 2).
+    capable = [suffix for suffix in suffixes if len(suffix) <= 4]
+    if not capable:
+        return False
     extension = _short_name_extension(name)
     if extension is None:
         # No extension, so 8.3 generation produces a short name with none
         # either, and a pinned suffix always begins with a dot.
         return False
     alias = "." + extension
-    return any(
-        _path_fold(alias) == _path_fold(suffix)
-        for suffix in suffixes
-        if len(suffix) <= 4
-    )
+    return any(_path_fold(alias) == _path_fold(suffix) for suffix in capable)
 
 
 def _aliases_natively(segment: str) -> bool:
