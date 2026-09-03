@@ -93,10 +93,18 @@ Three row kinds, one journal:
     differ in case and nothing else: a ``toolchain.toml.`` beside the bound
     ``toolchain.toml`` folds to a different key and *is* the bound name on
     Win32, which strips the trailing period before it resolves (peer review,
-    Sol round 4). Asked of attested paths, because nothing else enumerates them: a
-    content path is already known to be spelled the way a listing emits it,
-    since the sweep builds its set out of listing names and the membership
-    comparison proves the two sets equal.
+    Sol round 4). Asked of attested paths, because nothing else enumerates
+    them: a content path is already known to be spelled the way a listing
+    emits it, since the sweep builds its set out of listing names and the
+    membership comparison proves the two sets equal. It is asked twice —
+    before the hashing and again in the closing identity loop — and both
+    askings charge one budget, because draining a parent's whole listing per
+    component of every attested path costs about 2×R×E entry visits over a
+    wide parent and nothing bounded it (peer review, Sol round 4). Nothing
+    is cached between paths, for the reason the tombstone pass gives, and
+    within one path there is nothing to cache: the parents of the components
+    of one path are distinct directories, one per level.
+
     Retiring one is recorded by a ``removed`` row, and the file has to leave
     the tree with it: a removed path still on disk refuses, whichever kind
     it was. Two questions are asked about a tombstone, in this order — does
@@ -677,6 +685,36 @@ MAX_REMOVED_TEXT = 262144
 #: read R times rather than once — and every one of those reads is charged
 #: here, which is the point: a re-read is work, and the cap is on work.
 MAX_TOMBSTONE_WORK = 262144
+#: The most directory entries the attested spelling walk may read before it
+#: is refused as unbindable, counted once for the verification rather than
+#: once per path.
+#:
+#: The walk asks one question per component of every attested path — does
+#: this directory emit exactly this spelling, and does it emit another one
+#: beside it — and answering it means draining the parent's whole listing,
+#: because the answer is about the entries the check does *not* want as much
+#: as the one it does. It runs twice per verification, before the hashing and
+#: again in the closing identity loop. So R attested rows sharing a parent of
+#: E entries cost about 2×R×E entry visits, and nothing bounded it: a journal
+#: attesting a few hundred paths in a directory an adversary has filled is a
+#: verifier that reads for as long as the tree is wide (peer review, Sol
+#: round 4). Every other walk in this module is budgeted; this one was the
+#: exception.
+#:
+#: The same number as ``MAX_TOMBSTONE_WORK`` and the same shape of bound: an
+#: entry is charged as it is taken from the listing, so the listing is
+#: abandoned where the charge refuses rather than being drained first, and
+#: both passes charge one running total, so re-asking the question cannot buy
+#: the tree a second walk's worth of budget. Nothing is cached between paths
+#: — a cached listing would answer a later question with an earlier look,
+#: which is the staleness the second tombstone pass exists to avoid — and
+#: within one path there is nothing to cache: the parents of the components
+#: of one path are distinct directories by construction, one per level.
+#:
+#: Generous for any real corpus. The package's own fixture spends six entry
+#: visits on one attested path over two passes, and a consumer attesting
+#: fifty paths in a directory of two hundred entries spends twenty thousand.
+MAX_SPELLING_WORK = 262144
 #: The most characters a refusal quotes of a producer-controlled value.
 MAX_QUOTED_TEXT = 256
 
@@ -2387,7 +2425,7 @@ def _tree_content_paths(
         # empty or suffix-empty root behind a symlinked parent would enumerate
         # nothing and silently pass. (Cross-family review finding.)
         base = _assert_no_symlinked_component(
-            root, base_relative, what="pinned content root", spelled=False
+            root, base_relative, what="pinned content root", work=None
         )
         _assert_no_aliasing_root_component(root, base_relative, generations=generations)
         if not base.exists():
@@ -2544,8 +2582,38 @@ def _assert_no_aliasing_root_component(
         walked.append(component)
 
 
+class _SpellingWork:
+    """The one budget both attested spelling passes charge against.
+
+    A counter rather than an index: unlike :class:`_TombstoneIndex` this
+    caches nothing, so there is nothing here but the running total and the
+    refusal it raises. See :data:`MAX_SPELLING_WORK` for why the two passes
+    share it and why nothing is cached.
+    """
+
+    def __init__(self) -> None:
+        self._work = 0
+
+    @property
+    def work(self) -> int:
+        """Entry visits charged so far, across both passes."""
+
+        return self._work
+
+    def charge(self) -> None:
+        """Charge one directory entry, refusing when the budget is spent."""
+
+        self._work += 1
+        if self._work > MAX_SPELLING_WORK:
+            raise CorpusError(
+                "the attested spelling check would read more than "
+                f"{MAX_SPELLING_WORK} directory entries; the tree cannot be "
+                "bound"
+            )
+
+
 def _assert_spelled_by_its_directory(
-    parent: pathlib.Path, component: str, relative: str
+    parent: pathlib.Path, component: str, relative: str, *, work: _SpellingWork
 ) -> None:
     """Refuse a component the filesystem resolves but its directory does not emit.
 
@@ -2640,6 +2708,14 @@ def _assert_spelled_by_its_directory(
     try:
         with os.scandir(parent) as entries:
             for entry in entries:
+                # Charged as the entry arrives and before anything is done
+                # with it, so a directory wider than what is left of the
+                # budget is abandoned part-way rather than drained, screened
+                # and compared first. ``scandir`` fetches in batches and this
+                # runs inside its ``with``, so what is read past the refusal
+                # is the batch in hand and nothing more — the same shape the
+                # tombstone index uses, for the same reason.
+                work.charge()
                 _assert_portable_name(
                     entry.name, f"tree entry beside {_quoted(relative)}"
                 )
@@ -2670,7 +2746,11 @@ def _assert_spelled_by_its_directory(
 
 
 def _assert_no_symlinked_component(
-    root: pathlib.Path, relative: str, *, what: str = "bound path", spelled: bool = True
+    root: pathlib.Path,
+    relative: str,
+    *,
+    what: str = "bound path",
+    work: _SpellingWork | None,
 ) -> pathlib.Path:
     """Walk every component, refusing if any of them is a symlink or reparse.
 
@@ -2690,13 +2770,21 @@ def _assert_no_symlinked_component(
     symlink question comes first because it is the more urgent one and
     because it is the reason the walk exists.
 
-    ``spelled=False`` turns that half off, and exactly one caller passes it:
-    the content-root walk, whose components are checked a line later by
-    :func:`_assert_no_aliasing_root_component`. That check asks the same
-    question and answers it better — it names the entry that aliases the
-    pinned spelling — so letting the generic refusal preempt it would trade
-    a refusal an auditor can act on for one they cannot (adversarial review
-    of the Sol round 2 fix).
+    ``work`` decides both halves of that, and has no default. It is the
+    budget the spelling walk charges against — one budget for the two passes
+    of a whole verification, see :data:`MAX_SPELLING_WORK` — and passing
+    ``None`` is what turns the spelling half off, so the switch and the
+    budget cannot disagree: there is no way to ask for the walk without
+    paying for it, and no way to forget the budget by omission.
+
+    ``None`` has two callers. The content-root walk passes it because its
+    components are checked a line later by
+    :func:`_assert_no_aliasing_root_component`, which asks the same question
+    and answers it better — it names the entry that aliases the pinned
+    spelling — so letting the generic refusal preempt it would trade a
+    refusal an auditor can act on for one they cannot (adversarial review of
+    the Sol round 2 fix). The content hashing passes it because the sweep has
+    already proved every content path is spelled the way a listing emits it.
     """
 
     current = root
@@ -2712,8 +2800,8 @@ def _assert_no_symlinked_component(
                 f"{what} traverses a symlink or reparse point at "
                 f"{_quoted(current.relative_to(root).as_posix())}: {relative}"
             )
-        if spelled:
-            _assert_spelled_by_its_directory(parent, segment, relative)
+        if work is not None:
+            _assert_spelled_by_its_directory(parent, segment, relative, work=work)
     return current
 
 
@@ -2738,7 +2826,10 @@ class _FileIdentity(NamedTuple):
 
 
 def _regular_file_digest(
-    root: pathlib.Path, relative: str, *, spelled: bool = True
+    root: pathlib.Path,
+    relative: str,
+    *,
+    work: _SpellingWork | None,
 ) -> tuple[str, _FileIdentity]:
     """Hash a bound file, closing the check/open race at the final component.
 
@@ -2773,22 +2864,21 @@ def _regular_file_digest(
     landing after that re-check has already run, which is one reason the
     verdict speaks of the bytes as they existed when hashed.
 
-    ``spelled`` says whether the component walk should also bind each
-    component to the spelling its directory emits. Content paths pass
-    ``False``, and not to save work alone: the closed-world sweep built the
-    tree set out of ``os.scandir`` names and the membership comparison
-    proved the journal's set equal to it, so every content path here was
-    *already* emitted by a listing under exactly this spelling, and asking
-    again would answer a question already answered — at a cost of one
+    ``work`` says whether the component walk should also bind each component
+    to the spelling its directory emits, and pays for it when it does.
+    Content paths pass ``None``, and not to save work alone: the closed-world
+    sweep built the tree set out of ``os.scandir`` names and the membership
+    comparison proved the journal's set equal to it, so every content path
+    here was *already* emitted by a listing under exactly this spelling, and
+    asking again would answer a question already answered — at a cost of one
     listing per component per file, which for a wide content directory is
-    quadratic and unbudgeted in a module that budgets its other walks.
-    Attested paths pass ``True``, because nothing enumerates them — and for
-    the same reason :func:`verify_corpus_binding` asks the question a second
-    time in its closing identity loop, where a content path again passes
-    ``False``.
+    quadratic. Attested paths pass the verification's budget, because nothing
+    enumerates them — and for the same reason
+    :func:`verify_corpus_binding` asks the question a second time in its
+    closing identity loop, where a content path again passes ``None``.
     """
 
-    path = _assert_no_symlinked_component(root, relative, spelled=spelled)
+    path = _assert_no_symlinked_component(root, relative, work=work)
     try:
         before = os.lstat(path)
     except OSError as exc:
@@ -2952,11 +3042,12 @@ def verify_corpus_binding(
     hashed: dict[str, _FileIdentity] = {}
 
     for path in sorted(journal_paths):
-        # spelled=False: the sweep above built its set from listing names and
-        # the membership comparison proved the two sets equal, so each of
-        # these paths is already known to be spelled the way a listing emits
-        # it. See _regular_file_digest.
-        digest, identity = _regular_file_digest(root, path, spelled=False)
+        # work=None: the sweep above built its set from listing names and the
+        # membership comparison proved the two sets equal, so each of these
+        # paths is already known to be spelled the way a listing emits it, and
+        # asking again would spend a budget on an answer already in hand. See
+        # _regular_file_digest.
+        digest, identity = _regular_file_digest(root, path, work=None)
         if digest != content[path].sha256:
             raise CorpusError(
                 f"content file {_quoted(path)} does not match its witnessed digest: "
@@ -2981,8 +3072,15 @@ def verify_corpus_binding(
     generations = _DirectoryGenerations()
     for path in sorted(attested):
         generations.record_ancestors(root, path)
+    # One budget for both spelling passes, constructed here and carried into
+    # the closing identity loop. The walk drains a parent's whole listing per
+    # component and runs twice per attested path, so R rows over a wide
+    # parent cost about 2×R×E entry visits with nothing to stop it (peer
+    # review, Sol round 4); every other walk in this module is budgeted and
+    # this one is now too.
+    spelling = _SpellingWork()
     for path in sorted(attested):
-        digest, identity = _regular_file_digest(root, path)
+        digest, identity = _regular_file_digest(root, path, work=spelling)
         if digest != attested[path].sha256:
             raise CorpusError(
                 f"attested file {_quoted(path)} does not match its witnessed digest: "
@@ -3035,7 +3133,9 @@ def verify_corpus_binding(
     for path in sorted(hashed):
         try:
             # The spelling question is re-asked for attested paths and not
-            # for content ones, which is the same split the hashing made and
+            # for content ones — the budget is what carries it, and passing
+            # None is what declines it — which is the same split the hashing
+            # made and
             # for the same two reasons. A content path's spelling was proved
             # by the membership comparison against a set the sweep built out
             # of listing names, and the closing sweep above has just proved
@@ -3047,7 +3147,7 @@ def verify_corpus_binding(
             # with nothing after it to notice (peer review, Sol round 3).
             after = os.lstat(
                 _assert_no_symlinked_component(
-                    root, path, spelled=path in attested
+                    root, path, work=spelling if path in attested else None
                 )
             )
         except OSError as exc:

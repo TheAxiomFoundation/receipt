@@ -5099,8 +5099,10 @@ def test_stamps_an_attested_ancestor_before_its_spelling_is_walked(
     real = corpus_module._assert_spelled_by_its_directory
     armed = [True]
 
-    def walk_then_mutate(parent: pathlib.Path, component: str, relative: str) -> None:
-        real(parent, component, relative)
+    def walk_then_mutate(
+        parent: pathlib.Path, component: str, relative: str, **options: object
+    ) -> None:
+        real(parent, component, relative, **options)  # type: ignore[arg-type]
         if armed[0] and component == "toolchain.toml":
             armed[0] = False
             scratch = tmp_path / ".axiom" / "scratch.tmp"
@@ -5162,6 +5164,96 @@ def test_the_closing_walk_re_asks_an_attested_path_for_its_spelling(
         "path component 'toolchain.toml' is not spelled by its directory: "
         ".axiom/toolchain.toml"
     )
+
+
+def _wide_attested_corpus(
+    tmp_path: pathlib.Path, paths: int
+) -> tuple[dict[str, str], list[dict[str, object]]]:
+    """A tree whose attested paths all sit in one directory, and its journal.
+
+    Every one of them is walked twice, and each walk drains the whole of
+    ``.axiom`` — which is what makes the pass quadratic in a directory the
+    producer chooses the width of.
+    """
+
+    attested = {
+        f".axiom/pin{index}.toml": f"[pin]\nindex = {index}\n"
+        for index in range(paths)
+    }
+    write_tree(tmp_path, attested=attested)
+    return attested, journal_rows(attested=attested)
+
+
+def test_the_attested_spelling_walk_is_bounded_by_one_work_budget(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S5R4-F6: the spelling walk was the one walk with no ceiling.
+
+    Binding a spelling means draining the parent's whole listing, because
+    the answer is as much about the entries the check does not want — a
+    second spelling of the component, a name outside the repertoire — as
+    about the one it does. The walk runs once per component of every
+    attested path, and twice per verification, so R rows sharing a parent of
+    E entries cost about 2×R×E entry visits. Nothing charged them: the
+    tombstone pass is budgeted, the journal is budgeted, and this walk read
+    for as long as the tree was wide.
+
+    One budget for the verification now, charged per entry as the entry
+    arrives, so the listing is abandoned where the charge refuses rather than
+    drained first. The budget is lowered here rather than met, which is the
+    only way to test a ceiling generous enough that a real corpus cannot
+    approach it.
+
+    Without the charge this verification returns a CorpusVerification, having
+    read every entry the producer put in ``.axiom`` once for each attested
+    row, twice over.
+    """
+
+    from receipt.corpus import MAX_SPELLING_WORK
+
+    monkeypatch.setattr("receipt.corpus.MAX_SPELLING_WORK", 64)
+    _, rows = _wide_attested_corpus(tmp_path, 8)
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path,
+            render_journal(rows),
+            spec=corpus_spec(required_attested_paths=frozenset({".axiom/pin0.toml"})),
+        )
+    assert str(caught.value) == (
+        "the attested spelling check would read more than 64 directory "
+        "entries; the tree cannot be bound"
+    )
+    # The shipped ceiling, so lowering it here cannot be mistaken for what a
+    # consumer runs against.
+    assert MAX_SPELLING_WORK == 262144
+
+
+def test_an_ordinary_corpus_is_far_inside_the_spelling_budget(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S5R4-F6, the control: what an ordinary corpus actually spends.
+
+    The ceiling has to be a backstop rather than a live limit, so this pins
+    the cost of a real corpus instead of asserting that a generous number is
+    generous. The fixture attests one path of two components: the walk reads
+    the tree root and ``.axiom`` once per component per pass, which is six
+    entry visits over two passes for the tree this package ships, and it
+    verifies with the budget set to sixteen. At five it refuses, so the six
+    is measured rather than claimed.
+
+    Its first half is the control the shipped ceiling rests on — a corpus
+    must verify well inside the budget, and would still verify here with the
+    charge removed — and its second half is what turns "well inside" into a
+    number.
+    """
+
+    write_tree(tmp_path)
+    journal = render_journal(journal_rows())
+    monkeypatch.setattr("receipt.corpus.MAX_SPELLING_WORK", 16)
+    assert verify_corpus_binding(tmp_path, journal, spec=corpus_spec()).attested
+    monkeypatch.setattr("receipt.corpus.MAX_SPELLING_WORK", 5)
+    with pytest.raises(CorpusError, match="would read more than 5 directory"):
+        verify_corpus_binding(tmp_path, journal, spec=corpus_spec())
 
 
 def test_refuses_a_required_attested_path_the_directory_does_not_spell(
