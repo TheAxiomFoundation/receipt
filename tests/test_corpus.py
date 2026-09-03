@@ -2644,7 +2644,7 @@ def test_the_tombstone_index_keys_two_case_varied_directories_apart(
     listings = {"": ["A", "a"], "A": [], "a": ["TARGET"]}
     monkeypatch.setattr(os, "scandir", _declared_scandir(listings))
     root = _CaseFoldingPath("", listings)
-    index = _TombstoneIndex(root)
+    index = _TombstoneIndex(root, generations=None)
 
     upper = index.folded(_CaseFoldingPath("A", listings), "A", "A/target")
     lower = index.folded(_CaseFoldingPath("a", listings), "a", "A/target")
@@ -2812,21 +2812,27 @@ def test_a_tombstone_entry_that_vanishes_after_the_listing_is_not_a_survivor(
     """Binds F7: a listed entry may be gone by the time it is stat-ed.
 
     ``entry.lstat()`` sat outside the ``except OSError`` arm, so a directory
-    deleted between the listing and the probe raised FileNotFoundError out of
-    the verifier. Without the fix this test errors with FileNotFoundError;
-    with it the entry is simply not a survivor, and the tombstone — whose path
-    really is gone — is honoured.
+    named by a listing but absent by the time the search probed it raised
+    FileNotFoundError out of the verifier. Without the fix this test errors
+    with FileNotFoundError; with it the entry is simply not a survivor, and
+    the tombstone — whose path really is gone — is honoured.
+
+    The entry is declared rather than deleted, for the reason
+    ``_late_survivor_scandir`` gives and for one more since S6-F1: the run's
+    directory recorder now stamps a directory at the *first* pass that reads
+    it, so really removing ``retired/vanishing`` while the first tombstone
+    pass walks moves ``retired``'s mtime against a stamp taken before the
+    removal, and the verification refuses — correctly, since the tree did
+    change under it, but for a reason that is not this finding. A name only
+    the listing carries leaves the probe's error handling the one thing
+    under test.
     """
 
     body = '{"applied": true}\n'
     write_tree(tmp_path)
-    (tmp_path / "retired/vanishing").mkdir(parents=True)
+    (tmp_path / "retired").mkdir(parents=True)
     rows = _tombstone_rows("retired/vanishing/apply-manifest.json", body)
-    monkeypatch.setattr(
-        os,
-        "scandir",
-        _mutating_scandir("retired", lambda d: (d / "vanishing").rmdir()),
-    )
+    monkeypatch.setattr(os, "scandir", _scandir("retired", extra=["vanishing"]))
     verification = verify_corpus_binding(
         tmp_path, render_journal(rows), spec=corpus_spec()
     )
@@ -3651,6 +3657,117 @@ def test_a_content_file_inserted_during_the_second_tombstone_pass_refuses(
     assert str(caught.value) == (
         "the tree changed during verification; the closed-world verdict is refused"
     )
+
+
+def _mutate_between_the_sweeps(monkeypatch: pytest.MonkeyPatch, mutate) -> list[int]:
+    """Fire ``mutate`` once from inside the hashing, between the two sweeps.
+
+    The hashing runs after the opening membership sweep and the first
+    tombstone pass and before the closing sweep, so a change fired from
+    there lands in the span S6-F1 is about: after the tree has been
+    enumerated once and before it is enumerated again. Returns the call
+    counter so a test can assert the wrapper really fired.
+    """
+
+    import receipt.corpus as corpus_mod
+
+    real = corpus_mod._regular_file_digest
+    calls: list[int] = []
+
+    def hash_then_mutate(root: pathlib.Path, relative: str, **options: object):
+        result = real(root, relative, **options)  # type: ignore[arg-type]
+        calls.append(1)
+        if len(calls) == 1:
+            mutate()
+        return result
+
+    monkeypatch.setattr(corpus_mod, "_regular_file_digest", hash_then_mutate)
+    return calls
+
+
+def test_a_content_file_created_and_removed_between_the_sweeps_refuses(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S6-F1: the recorder began after the tree had already been read.
+
+    The directory-generation recorder was built after the opening membership
+    sweep, the first tombstone pass and the hashing, so the earliest stamp of
+    any directory was taken by the *closing* sweep. That leaves a change
+    landing in the first half of the run watched by nothing: membership
+    cannot see a content file that is created and removed between the two
+    sweeps — neither enumeration ever holds it, so the two sets are equal —
+    and the stamp the closing sweep took was taken after the mutation, so it
+    matched as well. The verification returned a PASS over a tree that had
+    gained and lost a file under a content root while it was being called
+    closed, which is outside the residual the module documents: the change
+    landed well before that directory's final re-read.
+
+    One recorder now, built before anything reads the tree and carried into
+    every directory read the run makes, so ``rules/tax`` is stamped by the
+    opening sweep and ``assert_unchanged`` holds it against that stamp.
+    Without the fix this verification returns a CorpusVerification naming all
+    three content files.
+
+    The file is written with a pinned suffix on purpose: had either sweep
+    been looking when it existed, membership would have refused it as
+    unlisted. Neither was, which is the whole finding.
+
+    The wrapper asserts its own premise — that the create and the removal
+    moved the directory's mtime and ctime — because a filesystem whose
+    directory timestamps cannot distinguish them would leave a window this
+    check cannot see. That is a property of the stamp rather than of the
+    pass, and it is the same caveat the two tests above state.
+    """
+
+    from receipt.corpus import _directory_generation
+
+    write_tree(tmp_path)
+    directory = tmp_path / "rules/tax"
+    smuggled = directory / "smuggled.yaml"
+
+    def create_then_remove() -> None:
+        before = _directory_generation(directory)
+        smuggled.write_text("name: evil\n")
+        smuggled.unlink()
+        assert not smuggled.exists()
+        assert _directory_generation(directory) != before
+
+    calls = _mutate_between_the_sweeps(monkeypatch, create_then_remove)
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    assert calls
+    assert str(caught.value) == (
+        "the tree changed during verification; the closed-world verdict is refused"
+    )
+
+
+def test_an_untouched_tree_still_verifies_through_the_same_wrapper(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S6-F1, the control: stamping from the first read refuses nothing.
+
+    Stamping every directory from the run's *earliest* read of it widens the
+    window the closing check covers to the whole verification, which is only
+    correct if nothing the verifier itself does moves a stamp. It does not:
+    reading a directory touches its atime, and neither mtime nor ctime, and
+    the verifier never writes. This drives the same wrapper over the same
+    tree with the mutation removed and asserts the verdict is unchanged.
+
+    This test passes with the S6-F1 change disabled, which is the point: it
+    is what keeps the wider window from turning an ordinary corpus into a
+    refusal.
+    """
+
+    write_tree(tmp_path)
+    calls = _mutate_between_the_sweeps(monkeypatch, lambda: None)
+    verification = verify_corpus_binding(
+        tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+    )
+    assert calls
+    assert [entry.path for entry in verification.content] == sorted(CONTENT)
+    assert [entry.path for entry in verification.attested] == sorted(ATTESTED)
 
 
 def test_a_bound_file_rewritten_during_the_second_tombstone_pass_refuses(

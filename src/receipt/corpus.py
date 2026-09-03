@@ -235,11 +235,10 @@ Putting that run last used to cost a window: no membership re-sweep follows
 it, so a content file inserted while it walked, or a bound file rewritten by
 rename while it walked, was never looked at again. A third re-sweep would only
 move that boundary, so the walk is watched by generation instead. Every
-directory the closing membership sweep and that walk read is stamped — device,
-inode, mtime, ctime — an instant before it is read, and every stamp is
-re-stated after the walk has finished. An entry added, removed or renamed
-moves its parent's mtime and ctime, so the change is refused although nothing
-re-derived the set.
+directory any pass of the run reads is stamped — device, inode, mtime, ctime —
+an instant before it is read, and every stamp is re-stated after the last pass
+has finished. An entry added, removed or renamed moves its parent's mtime and
+ctime, so the change is refused although nothing re-derived the set.
 
 Stamping only what those passes read was not enough. Neither walk reaches the
 directory that holds an attested file — attested paths sit outside the content
@@ -251,17 +250,28 @@ seven). Every ancestor of
 every bound path, from the tree root down to the file's own parent, is
 therefore stamped as well.
 
-*When* those stamps are taken is load-bearing for the attested half. Taking
-them after the hashing left one window that nothing watched at all: the
-spelling walk and the hash are two separate lookups of the same name, and on
-the volume the spelling check is about, a case-only rename landing between
-them resolves through the declared spelling — the walk had passed, the hash
-took the renamed entry's bytes, and the stamps recorded the tree as the rename
-had left it (peer review, Sol round 3). So the ancestors of every attested
-path are stamped before the first spelling walk reads anything, and the walk
-itself is re-run for attested paths in the closing identity loop. Content
-ancestors are stamped where they were, after the closing membership sweep,
-because a content path's spelling is what that sweep re-derives.
+*When* each stamp is taken is what decides what the re-check can promise, and
+the answer is: at the run's first read of that directory, by whichever pass
+makes it. One recorder is built before anything looks at the tree and is
+carried into every directory read the run performs — the opening membership
+sweep, the root-component checks, the first tombstone pass, the parents the
+attested spelling walk drains, the closing sweep and the second tombstone
+pass — and the earliest stamp of a directory is the one that is kept.
+
+Starting it later broke that promise twice over, and the wider break is that
+re-deriving membership does not cover the span before the recorder existed. A
+content file created and then removed between the opening sweep and the
+closing one leaves the two membership snapshots equal — the set never differs
+at either look — while the directory that carried it was first stamped after
+the mutation, so the stamp matched as well and the run passed (peer review,
+Sol round 5). The narrower break was on the attested half: taking the stamps
+after the hashing left the spelling walk and the hash, which are two separate
+lookups of the same name, with nothing between them, and on the volume the
+spelling check is about a case-only rename landing there resolves through the
+declared spelling — the walk had passed, the hash took the renamed entry's
+bytes, and the stamps recorded the tree as the rename had left it (peer
+review, Sol round 3). The walk is re-run for attested paths in the closing
+identity loop, so both of its readings sit inside the window the stamps close.
 
 The per-file identity that re-check compares carries the file's own ctime for
 the same reason the directory stamp does. Size and mtime are values a writer
@@ -273,7 +283,9 @@ What that check gives is a contract worth stating exactly, because the
 obvious stronger one is false. The stamps are re-stated twice — forwards in
 sorted order and then backwards — and a mismatch in either pass refuses. A
 directory change is therefore detected if it lands before that directory's
-final re-read. What remains is the span after each directory's last re-read,
+final re-read, which is true as written because the stamp it is held against
+is the run's first read of that directory and not a late pass's. What remains
+is the span after each directory's last re-read,
 which is not one instant: it is one instant for whichever directory is
 re-read last and a little more for each of the others. Re-reading once, in
 sorted order, made that span much longer than the module admitted — a writer
@@ -1773,7 +1785,7 @@ def _list_directory(
     directory: pathlib.Path,
     relative: str,
     *,
-    generations: "_DirectoryGenerations | None" = None,
+    generations: "_DirectoryGenerations",
 ) -> list[pathlib.Path]:
     """List one directory, refusing to continue if it cannot be read.
 
@@ -1784,14 +1796,14 @@ def _list_directory(
     when it simply could not look. Enumeration failure must be a refusal, not
     an empty result. (Found by cross-family review.)
 
-    ``generations``, when given, is told what this directory looked like an
-    instant before the listing, so a later pass can be asked whether it still
-    looks that way. The recorder is passed only by the *final* membership
-    sweep; see :class:`_DirectoryGenerations`.
+    ``generations`` is told what this directory looked like an instant
+    before the listing, so the closing re-check can be asked whether it still
+    looks that way. It has no default: every read the run makes carries the
+    run's one recorder, and the earliest stamp of a directory is the one that
+    is kept. See :class:`_DirectoryGenerations`.
     """
 
-    if generations is not None:
-        generations.record(directory, relative)
+    generations.record(directory, relative)
     try:
         return sorted(directory.iterdir(), key=lambda entry: entry.name)
     except OSError as exc:
@@ -1878,7 +1890,7 @@ def _directory_generation(
 
 
 class _DirectoryGenerations:
-    """What each directory the closing passes read looked like when read.
+    """What every directory the run reads looked like the first time it read it.
 
     The two re-checks answer for the sets they re-derive: membership is
     re-swept and every bound file's identity is re-stated. Neither says
@@ -1888,11 +1900,24 @@ class _DirectoryGenerations:
     enumerated again, and a bound file rewritten by rename while it ran kept
     the identity the re-check had already accepted (peer review, round six).
 
-    So every directory those closing passes list is stamped an instant before
-    the listing, and every stamp is re-stated once the last of them has
-    finished. A directory whose generation moved refuses the verdict: an
-    insertion, a removal, a rename over an existing name — each of them moves
-    the parent's mtime and ctime, whatever it does to the file itself.
+    So every directory the run lists is stamped an instant before the
+    listing, and every stamp is re-stated once the last pass has finished. A
+    directory whose generation moved refuses the verdict: an insertion, a
+    removal, a rename over an existing name — each of them moves the parent's
+    mtime and ctime, whatever it does to the file itself.
+
+    One recorder, from the run's first read. Building it after the opening
+    sweep, the first tombstone pass and the hashing left that whole half of
+    the run outside the window, and re-deriving membership does not cover it:
+    a content file created and then removed between the opening sweep and the
+    closing one leaves both membership snapshots equal, and the directory that
+    carried it was first stamped after the mutation, so its stamp matched too
+    (peer review, Sol round 5). Every read the run makes is handed this one
+    recorder — the opening sweep, the root-component checks, the first
+    tombstone pass, the parents the attested spelling walk drains, the closing
+    sweep and the second tombstone pass — and none of them may decline it:
+    the parameter has no default anywhere it is taken, for the reason the
+    spelling budget has none.
 
     What is stamped is not only what those passes *read*. Stamping the
     directories the walks happened to enumerate left every ancestor of an
@@ -1905,9 +1930,10 @@ class _DirectoryGenerations:
     tree root down to the file's own parent — is stamped as well, before the
     identity re-check re-states the files themselves.
 
-    The first reading of a directory wins. A directory the uncached tombstone
-    pass lists repeatedly is therefore held against what it looked like the
-    first time anything in the closing sequence read it, not the last, so the
+    The first reading of a directory wins. A directory listed repeatedly —
+    by the two membership sweeps, by the spelling walk's two passes, or by
+    the uncached tombstone pass — is therefore held against what it looked
+    like the first time anything in the run read it, not the last, so the
     window the check closes is the widest one available rather than the
     narrowest.
 
@@ -1927,7 +1953,7 @@ class _DirectoryGenerations:
         ] = {}
 
     def record(self, directory: pathlib.Path, relative: str) -> None:
-        """Stamp this directory, if the closing sequence has not stamped it yet."""
+        """Stamp this directory, if the run has not stamped it yet."""
 
         if relative in self._seen:
             return
@@ -1936,11 +1962,14 @@ class _DirectoryGenerations:
     def record_ancestors(self, root: pathlib.Path, relative: str) -> None:
         """Stamp the tree root and every directory down to this path's parent.
 
-        A bound file's parent is not necessarily a directory either closing
-        pass enumerates — an attested path sits outside the content roots,
-        and the tombstone walk descends only toward a removed path — so the
-        directories that hold the verdict's own subjects are stamped by name
-        rather than by being walked into.
+        A bound file's parent is not necessarily a directory any pass
+        enumerates — an attested path sits outside the content roots, the
+        tombstone walk descends only toward a removed path, and the spelling
+        walk is declined for content paths — so the directories that hold the
+        verdict's own subjects are stamped by name rather than by being
+        walked into. Kept even though the spelling walk now stamps the
+        parents it drains: what is stamped must not depend on which optional
+        pass ran.
         """
 
         self.record(root, "")
@@ -2055,10 +2084,14 @@ class _TombstoneIndex:
     and every entry of every one of those listings is charged against the
     same carried budget — a re-read is work, and the budget bounds work.
 
-    ``generations``, when given, is told what each directory looked like an
-    instant before it was listed. See :class:`_DirectoryGenerations`: the
-    second pass is the last thing in the run that reads the tree, so it is
-    the one window nothing downstream can close by re-deriving a set.
+    ``generations`` is told what each directory looked like an instant
+    before it was listed, and both passes are given the run's recorder. See
+    :class:`_DirectoryGenerations`: the second pass is the last thing in the
+    run that reads the tree, so it is the one window nothing downstream can
+    close by re-deriving a set — and the first pass runs before the hashing,
+    so a directory it reads is stamped there rather than at whatever later
+    pass happens to reach it. ``None`` is accepted so a unit test can drive
+    the index alone; :func:`verify_corpus_binding` never passes it.
     """
 
     def __init__(
@@ -2067,7 +2100,7 @@ class _TombstoneIndex:
         *,
         charged: int = 0,
         cache: bool = True,
-        generations: "_DirectoryGenerations | None" = None,
+        generations: "_DirectoryGenerations | None",
     ) -> None:
         self.root = root
         self._directories: dict[str, dict[str, list[pathlib.Path]] | None] = {}
@@ -2422,7 +2455,7 @@ def _tree_content_paths(
     root: pathlib.Path,
     spec: CorpusSpec,
     *,
-    generations: "_DirectoryGenerations | None" = None,
+    generations: "_DirectoryGenerations",
 ) -> dict[str, pathlib.Path]:
     """Enumerate every regular file the spec calls content.
 
@@ -2447,10 +2480,12 @@ def _tree_content_paths(
     :func:`_reject_control_characters` closes from the producer's side, open
     from the tree's (peer review, round three).
 
-    ``generations``, when given, is told what every directory this walk reads
-    looked like an instant before it read it — the root-component listings
-    included, since a new directory aliasing a root component appears in one
-    of those and nowhere else. Only the closing sweep passes a recorder;
+    ``generations`` is told what every directory this walk reads looked like
+    an instant before it read it — the root-component listings included,
+    since a new directory aliasing a root component appears in one of those
+    and nowhere else. Both sweeps pass the run's one recorder, so a directory
+    the opening sweep read is held against what it looked like *then* and not
+    against what the closing sweep found (peer review, Sol round 5);
     :class:`_DirectoryGenerations` says what it is for.
     """
 
@@ -2461,7 +2496,11 @@ def _tree_content_paths(
         # empty or suffix-empty root behind a symlinked parent would enumerate
         # nothing and silently pass. (Cross-family review finding.)
         base = _assert_no_symlinked_component(
-            root, base_relative, what="pinned content root", work=None
+            root,
+            base_relative,
+            what="pinned content root",
+            work=None,
+            generations=generations,
         )
         _assert_no_aliasing_root_component(root, base_relative, generations=generations)
         if not base.exists():
@@ -2559,7 +2598,7 @@ def _assert_no_aliasing_root_component(
     root: pathlib.Path,
     relative: str,
     *,
-    generations: "_DirectoryGenerations | None" = None,
+    generations: "_DirectoryGenerations",
 ) -> None:
     """Refuse a tree entry that aliases a component of a pinned content root.
 
@@ -2649,7 +2688,13 @@ class _SpellingWork:
 
 
 def _assert_spelled_by_its_directory(
-    parent: pathlib.Path, component: str, relative: str, *, work: _SpellingWork
+    parent: pathlib.Path,
+    component: str,
+    relative: str,
+    *,
+    parent_relative: str,
+    work: _SpellingWork,
+    generations: "_DirectoryGenerations",
 ) -> None:
     """Refuse a component the filesystem resolves but its directory does not emit.
 
@@ -2713,6 +2758,15 @@ def _assert_spelled_by_its_directory(
     standing rule (see :func:`_list_directory`): a parent that resolves the
     component but cannot be enumerated leaves the question unanswered.
 
+    The parent is stamped an instant before it is drained, under
+    ``parent_relative`` — its own spelling relative to the tree root, which
+    is the key :class:`_DirectoryGenerations` uses. This walk is the first
+    thing in the run to read the directory holding an attested file, so
+    without the stamp taken here that directory's generation dated from
+    whatever later pass reached it (peer review, Sol round 5). The stamp is
+    taken after the resolution check above, because a component nothing
+    answers to is a directory this function never reads.
+
     The cost is one listing per component, and it is asked once per
     *attested* path only. Asking it of content paths as well answered a
     question the sweep had already answered — every content path that
@@ -2735,6 +2789,7 @@ def _assert_spelled_by_its_directory(
             "cannot check the spelling a bound path component resolves "
             f"under: {relative} ({exc.strerror})"
         ) from exc
+    generations.record(parent, parent_relative)
     folded = _path_fold(component)
     spelled = False
     # Only the first fold-equal sibling is kept: it is what the refusal
@@ -2787,6 +2842,7 @@ def _assert_no_symlinked_component(
     *,
     what: str = "bound path",
     work: _SpellingWork | None,
+    generations: "_DirectoryGenerations",
 ) -> pathlib.Path:
     """Walk every component, refusing if any of them is a symlink or reparse.
 
@@ -2813,6 +2869,13 @@ def _assert_no_symlinked_component(
     budget cannot disagree: there is no way to ask for the walk without
     paying for it, and no way to forget the budget by omission.
 
+    ``generations`` is the run's directory recorder, carried through to the
+    spelling walk so that a parent it drains is stamped at this read rather
+    than at whatever later pass reaches it. It has no default for the reason
+    ``work`` has none, and it is taken even when ``work`` is ``None``: which
+    reads happen must not depend on the caller remembering to hand over the
+    recorder.
+
     ``None`` has two callers. The content-root walk passes it because its
     components are checked a line later by
     :func:`_assert_no_aliasing_root_component`, which asks the same question
@@ -2824,8 +2887,10 @@ def _assert_no_symlinked_component(
     """
 
     current = root
+    walked: list[str] = []
     for segment in relative.split("/"):
         parent = current
+        parent_relative = "/".join(walked)
         current = current / segment
         # is_symlink() catches POSIX symlinks; on Windows a junction/reparse
         # point is not a symlink but is reported by st_reparse_tag, so refuse
@@ -2837,7 +2902,15 @@ def _assert_no_symlinked_component(
                 f"{_quoted(current.relative_to(root).as_posix())}: {relative}"
             )
         if work is not None:
-            _assert_spelled_by_its_directory(parent, segment, relative, work=work)
+            _assert_spelled_by_its_directory(
+                parent,
+                segment,
+                relative,
+                parent_relative=parent_relative,
+                work=work,
+                generations=generations,
+            )
+        walked.append(segment)
     return current
 
 
@@ -2866,6 +2939,7 @@ def _regular_file_digest(
     relative: str,
     *,
     work: _SpellingWork | None,
+    generations: "_DirectoryGenerations",
 ) -> tuple[str, _FileIdentity]:
     """Hash a bound file, closing the check/open race at the final component.
 
@@ -2912,9 +2986,14 @@ def _regular_file_digest(
     enumerates them — and for the same reason
     :func:`verify_corpus_binding` asks the question a second time in its
     closing identity loop, where a content path again passes ``None``.
+
+    ``generations`` is the run's directory recorder, passed straight through
+    to the component walk; see :class:`_DirectoryGenerations`.
     """
 
-    path = _assert_no_symlinked_component(root, relative, work=work)
+    path = _assert_no_symlinked_component(
+        root, relative, work=work, generations=generations
+    )
     try:
         before = os.lstat(path)
     except OSError as exc:
@@ -3015,6 +3094,15 @@ def verify_corpus_binding(
         )
 
     root = root.resolve()
+    # One recorder, built before anything reads the tree and handed to every
+    # directory read that follows, so each directory's stamp is the run's
+    # earliest look at it. Building it after the opening sweep, the first
+    # tombstone pass and the hashing left that half of the run unwatched, and
+    # re-deriving membership does not cover it: a content file created and
+    # then removed between the two sweeps leaves both snapshots equal, while
+    # the directory that carried it was first stamped after the mutation, so
+    # its stamp matched too (peer review, Sol round 5).
+    generations = _DirectoryGenerations()
     content, attested, gates, removed = parse_journal(journal_bytes, spec=spec)
 
     # Two declared paths that a case- or normalization-insensitive filesystem
@@ -3030,7 +3118,7 @@ def verify_corpus_binding(
     # in one merged directory (peer review, Sol round 3).
     _reject_aliasing_paths(list(content) + list(attested))
 
-    tree = _tree_content_paths(root, spec)
+    tree = _tree_content_paths(root, spec, generations=generations)
     journal_paths = set(content)
     tree_paths = set(tree)
 
@@ -3072,7 +3160,7 @@ def verify_corpus_binding(
     # is what re-establishes absence; this one is what makes an ordinary
     # unhonoured tombstone refuse before the verifier spends any IO hashing a
     # tree it is going to refuse anyway.
-    tombstones = _TombstoneIndex(root)
+    tombstones = _TombstoneIndex(root, generations=generations)
     _assert_tombstones_absent(root, removed, tombstones)
 
     hashed: dict[str, _FileIdentity] = {}
@@ -3083,7 +3171,9 @@ def verify_corpus_binding(
         # paths is already known to be spelled the way a listing emits it, and
         # asking again would spend a budget on an answer already in hand. See
         # _regular_file_digest.
-        digest, identity = _regular_file_digest(root, path, work=None)
+        digest, identity = _regular_file_digest(
+            root, path, work=None, generations=generations
+        )
         if digest != content[path].sha256:
             raise CorpusError(
                 f"content file {_quoted(path)} does not match its witnessed digest: "
@@ -3105,7 +3195,9 @@ def verify_corpus_binding(
     # tree as the rename had left it — so nothing downstream could see it
     # (peer review, Sol round 3). ``.axiom`` is stamped before anything reads
     # it, and the walk's own listing is inside the window the stamps close.
-    generations = _DirectoryGenerations()
+    #
+    # By name, and kept although the walk below now stamps each parent it
+    # drains: what is watched must not depend on which optional pass ran.
     for path in sorted(attested):
         generations.record_ancestors(root, path)
     # One budget for both spelling passes, constructed here and carried into
@@ -3116,7 +3208,9 @@ def verify_corpus_binding(
     # this one is now too.
     spelling = _SpellingWork()
     for path in sorted(attested):
-        digest, identity = _regular_file_digest(root, path, work=spelling)
+        digest, identity = _regular_file_digest(
+            root, path, work=spelling, generations=generations
+        )
         if digest != attested[path].sha256:
             raise CorpusError(
                 f"attested file {_quoted(path)} does not match its witnessed digest: "
@@ -3183,7 +3277,10 @@ def verify_corpus_binding(
             # with nothing after it to notice (peer review, Sol round 3).
             after = os.lstat(
                 _assert_no_symlinked_component(
-                    root, path, work=spelling if path in attested else None
+                    root,
+                    path,
+                    work=spelling if path in attested else None,
+                    generations=generations,
                 )
             )
         except OSError as exc:
