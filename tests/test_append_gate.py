@@ -2456,7 +2456,12 @@ def test_state_reads_refuse_a_platform_without_secure_descent(
     anywhere saying the confinement had lapsed. A verifier that quietly
     weakens itself on some platforms states an invariant it does not hold
     there. It now says it cannot read the state files instead. Both readers
-    go through the same helper, so both say it."""
+    go through the same helper, so both say it.
+
+    The message also names the requirement as the package's, which is S4-F6:
+    ``release_chain``'s reader is the one ``verify_release_chain`` uses, so
+    the same refusal stops ``receipt verify``'s custody pass and not only
+    this gate."""
 
     candidate = base_repository(tmp_path)
     append_one_row(candidate)
@@ -2467,13 +2472,13 @@ def test_state_reads_refuse_a_platform_without_secure_descent(
         run_gate(candidate)
     assert str(refusal.value) == (
         "state files cannot be read with secure descent on this platform "
-        "(os.open lacks dir_fd support)"
+        "(os.open lacks dir_fd support); receipt requires a POSIX platform"
     )
     with pytest.raises(ReleaseChainError) as read:
         _regular_file_bytes(candidate.root, CHAIN_SPEC.state_relative)
     assert str(read.value) == (
         "state files cannot be read with secure descent on this platform "
-        "(os.open lacks dir_fd support)"
+        "(os.open lacks dir_fd support); receipt requires a POSIX platform"
     )
 
 

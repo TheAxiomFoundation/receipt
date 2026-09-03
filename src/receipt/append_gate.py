@@ -110,11 +110,15 @@ One refusal here is not about a tree at all, and is stated because it does
 pre-empt everything on every input wherever it applies: where ``os.open``
 cannot take a ``dir_fd``, the state reads refuse before anything is compared,
 because the confinement they claim is unavailable on that platform. That is
-the gate declining to answer, not a verdict about a proposal, and it is a
-stated requirement rather than a silent one: the append gate's state reads
-require an ``os.open`` that accepts ``dir_fd``, which is every POSIX platform
-CPython supports and not Windows; on Windows the gate refuses to verify
-rather than reading state through a weaker path. ``README.md`` says the same.
+the gate declining to answer, not a verdict about a proposal. It is not the
+gate's requirement either, but the package's: the reader is
+``release_chain``'s, so ``verify_release_chain`` and ``receipt verify``'s
+custody pass refuse in the same words on the same platforms. receipt requires
+a POSIX platform — its state reads open through directory descriptors
+(``os.open`` with ``dir_fd``, which every POSIX platform CPython supports and
+Windows does not), so on Windows ``receipt verify`` and the append gate refuse
+rather than reading state through a weaker path. The refusal says so, and
+``README.md`` says the same.
 
 All of it carries its own tests in tests/test_append_gate.py.
 """

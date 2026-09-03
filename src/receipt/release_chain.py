@@ -48,7 +48,10 @@ That descent returns the identity of every directory it opened, so a caller
 can ask afterwards whether the file is still reached through the same ones,
 optionally pins the root against an identity the caller recorded earlier, and
 refuses outright rather than falling back to a pathname open where ``os.open``
-takes no ``dir_fd``. It opens each directory component with search rights
+takes no ``dir_fd`` — a requirement of the package rather than of any one
+caller, since every state read in it comes through here: on Windows
+``verify_release_chain``, and so ``receipt verify``'s custody pass, refuses
+exactly as the append gate does, and ``README.md`` states it. It opens each directory component with search rights
 alone where the platform offers them (``O_PATH`` on Linux, ``O_SEARCH``
 elsewhere), which is all it uses them for, so a POSIX search-only directory
 above a readable state file is descended as the pathname open used to descend
@@ -1201,6 +1204,11 @@ def confined_state_descriptor(
     an invariant it does not hold there, so it says instead that it cannot
     read the state files here.
 
+    That refusal is the whole package's, not the append gate's alone: this
+    is the reader ``_regular_file_bytes`` uses, so ``verify_release_chain``
+    and therefore ``receipt verify``'s custody pass stop here too. The
+    message says so, and ``README.md`` states the requirement under Install.
+
     The root itself is opened with ``O_NOFOLLOW`` and ``O_DIRECTORY`` like
     every component below it — it was opened without either, so a candidate
     root that had become a symlink was followed by the one open the walk
@@ -1221,7 +1229,7 @@ def confined_state_descriptor(
     if os.open not in os.supports_dir_fd:
         raise ReleaseChainError(
             "state files cannot be read with secure descent on this platform "
-            "(os.open lacks dir_fd support)"
+            "(os.open lacks dir_fd support); receipt requires a POSIX platform"
         )
     directory_flags = DIRECTORY_OPEN_FLAGS
     try:
