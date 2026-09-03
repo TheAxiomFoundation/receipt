@@ -91,8 +91,15 @@ was taken from one open of its pathname and ``openssl ts -reply`` and
 ``openssl ts -verify`` then made two more, so the digest reported as evidence
 described the file at an earlier instant than the one the verifications read;
 the bytes that were hashed are now the bytes both of them are given.  That
-digest identifies a file and not a timestamp, which is why
-:class:`TokenEvidence` also carries the digest of the signed ``TSTInfo``.
+digest identifies a file and not a timestamp, which is why the private
+``_verify_timestamp_token`` returns the digest of the signed ``TSTInfo``
+beside its evidence.  Beside, and not inside: :class:`TokenEvidence` is the
+public dataclass 0.5.1 shipped, field for field and in order, because the
+digest is a counting aid one caller in this module needs and adding it as a
+required field would break a keyword construction that omitted it, shift a
+positional one, and change what serializing the fields produces -- none of
+them things a maintenance release may do.  A later minor version can expose
+it if a consumer asks for it.
 
 All three of those reads open without waiting.  Each has a path-level check
 in front of it, and the check answers about a pathname while the descriptor
@@ -387,21 +394,42 @@ class TokenEvidence:
     trust_bundle_path: str
     token_path: str
     token_sha256: str
-    #: SHA-256 of the DER ``TSTInfo`` the authority signed, as ``openssl cms
-    #: -verify`` wrote it out -- the timestamp itself, not the file it arrived
-    #: in and not the CMS envelope around it.  Both of those are largely
-    #: unauthenticated: a ``TimeStampResp``'s ``PKIStatusInfo`` wrapper is
-    #: unsigned, and a ``SignedData``'s ``certificates``, ``crls`` and
-    #: ``unsignedAttrs`` are outside the signature, so one issuance has many
-    #: valid encodings with different digests.  Its ``TSTInfo`` has one, and
-    #: two issuances differ in it by serial number and genTime.
-    signed_timestamp_sha256: str
     policy_oid: str
     imprint_algorithm_oid: str
     gen_time: str
     tsa_subject: str
     tsa_certificate_sha256: str
     tsa_spki_sha256: str
+
+
+@dataclass(frozen=True)
+class _TimestampIdentity:
+    """Which timestamp a verified response carries, for counting purposes.
+
+    Private, and returned beside the evidence rather than carried inside it.
+    An earlier revision of this branch added the ``TSTInfo`` digest as a
+    required field of :class:`TokenEvidence`, which is public and frozen and
+    part of a maintenance release: a keyword construction that omitted it
+    would have raised, a positional one would have shifted, and anything
+    serializing the fields would have gained a key.  None of that is
+    something a bug-fix release may do to a consumer, and no consumer needs
+    the identity to read the evidence -- it exists so that
+    ``_v2_witness_evidence`` can tell two outcomes resting on one timestamp
+    from two outcomes resting on two (peer review, fifth gate round one).  A
+    0.6 that a consumer asks for it can expose it; until then it stays here.
+
+    ``tst_info_sha256`` is the SHA-256 of the DER ``TSTInfo`` the authority
+    signed, as the authenticated ``openssl cms -verify`` wrote it out -- the
+    timestamp itself, not the file it arrived in and not the CMS envelope
+    around it.  Both of those are largely unauthenticated: a
+    ``TimeStampResp``'s ``PKIStatusInfo`` wrapper is unsigned, and a
+    ``SignedData``'s ``certificates``, ``crls`` and ``unsignedAttrs`` are
+    outside the signature, so one issuance has many valid encodings with
+    different digests.  Its ``TSTInfo`` has one, and two issuances by one
+    authority differ in it by serial number and genTime.
+    """
+
+    tst_info_sha256: str
 
 
 @dataclass(frozen=True)
@@ -1546,6 +1574,43 @@ def verify_timestamp_token(
     are the bytes OpenSSL recomputes the token's imprint over.  A direct
     caller may leave it out, in which case this takes that one read itself;
     either way ``path`` is read at most once and never again.
+
+    Signature and return are the package's 0.5.1 ones exactly.  The work is
+    ``_verify_timestamp_token``, which returns the same evidence and, beside
+    it, the private identity of the timestamp that was verified; this drops
+    that identity, because it is a counting aid ``_v2_witness_evidence``
+    needs and not something a public dataclass may grow a field for in a
+    maintenance release (peer review, fifth gate round one).
+    """
+
+    evidence, _identity = _verify_timestamp_token(
+        path,
+        token_claim,
+        bundle_reference,
+        spec=spec,
+        records=records,
+        now=now,
+        record=record,
+    )
+    return evidence
+
+
+def _verify_timestamp_token(
+    path: Path,
+    token_claim: dict[str, Any],
+    bundle_reference: dict[str, Any],
+    *,
+    spec: TsaSpec,
+    records: Path,
+    now: datetime | None = None,
+    record: bytes | None = None,
+) -> tuple[TokenEvidence, _TimestampIdentity]:
+    """``verify_timestamp_token``, and which timestamp it verified.
+
+    Every refusal, every check and every check's place belong to the public
+    function; this is where its body lives, so that the one caller who needs
+    to tell two outcomes' timestamps apart can have that answer without it
+    appearing in :class:`TokenEvidence`.
     """
 
     if record is None:
@@ -1747,7 +1812,7 @@ def verify_timestamp_token(
         # outcomes rest on one timestamp (peer review, fourth gate round
         # four).  Taken from the authenticated run above, not from the
         # -nosigs extraction that preceded it.
-        signed_timestamp_sha256 = hashlib.sha256(tst_info.read_bytes()).hexdigest()
+        tst_info_sha256 = hashlib.sha256(tst_info.read_bytes()).hexdigest()
         signer_identity = _certificate_identity(signer)
 
     allowed_signers = anchor.get("allowedSigners")
@@ -1769,13 +1834,12 @@ def verify_timestamp_token(
                 f"witness {key} mismatch for {path}: expected {actual}, "
                 f"got {token_claim[key]}"
             )
-    return TokenEvidence(
+    evidence = TokenEvidence(
         anchor_id=str(anchor["id"]),
         trust_bundle_id=str(trust["bundleId"]),
         trust_bundle_path=bundle_path,
         token_path=token_logical,
         token_sha256=token_sha256,
-        signed_timestamp_sha256=signed_timestamp_sha256,
         policy_oid=policy_oid,
         imprint_algorithm_oid=imprint_algorithm_oid,
         gen_time=_format_utc(gen_time),
@@ -1783,6 +1847,7 @@ def verify_timestamp_token(
         tsa_certificate_sha256=signer_identity["certificateSha256"],
         tsa_spki_sha256=signer_identity["spkiSha256"],
     )
+    return evidence, _TimestampIdentity(tst_info_sha256=tst_info_sha256)
 
 
 _TOKEN_EVIDENCE_FIELDS = {
@@ -2122,9 +2187,10 @@ def _v2_witness_evidence(
     # a SignedData's certificates, crls and unsignedAttrs are outside the
     # signature -- so one issuance has many valid encodings with different
     # file digests, and any of them satisfies a rule that counts files.  The
-    # other rule counts what the authority signed: TokenEvidence's
-    # signed_timestamp_sha256, the digest of the TSTInfo, which no re-encoding
-    # can move without breaking the signature the -CAfile verification checks.
+    # other rule counts what the authority signed: the digest of the TSTInfo
+    # that _verify_timestamp_token returns beside its evidence, which no
+    # re-encoding can move without breaking the signature the -CAfile
+    # verification checks.
     # It is knowable only once that verification has run, so it is checked
     # where verify_timestamp_token returns (peer review, fourth gate round
     # four).  The file rule therefore fires when two outcomes name the same
@@ -2178,11 +2244,11 @@ def _v2_witness_evidence(
             )
         seen_token_paths.add(str(physical))
 
-    def refuse_a_reused_timestamp(evidence: TokenEvidence) -> None:
-        if evidence.signed_timestamp_sha256 in seen_timestamps:
+    def refuse_a_reused_timestamp(identity: _TimestampIdentity) -> None:
+        if identity.tst_info_sha256 in seen_timestamps:
             raise TsaError(
                 "duplicate TSA timestamp across anchor outcomes: "
-                f"{evidence.signed_timestamp_sha256}"
+                f"{identity.tst_info_sha256}"
             )
 
     for outcome in outcomes:
@@ -2198,7 +2264,7 @@ def _v2_witness_evidence(
             claim = {**witness, **outcome}
             refuse_a_reused_response_file(claim.get("tokenSha256"))
             refuse_a_reused_token_path(claim.get("tokenPath"))
-            evidence = verify_timestamp_token(
+            evidence, identity = _verify_timestamp_token(
                 path,
                 claim,
                 bundle_reference,
@@ -2207,9 +2273,9 @@ def _v2_witness_evidence(
                 now=now,
                 record=record,
             )
-            refuse_a_reused_timestamp(evidence)
+            refuse_a_reused_timestamp(identity)
             seen_response_files.add(evidence.token_sha256)
-            seen_timestamps.add(evidence.signed_timestamp_sha256)
+            seen_timestamps.add(identity.tst_info_sha256)
             tokens.append(evidence)
         elif outcome_status == "unavailable":
             _unavailable_outcome(outcome, label=f"TSA anchor {anchor_id}")
@@ -2270,7 +2336,7 @@ def _v2_witness_evidence(
         if outcome_status == "available":
             refuse_a_reused_response_file(outcome.get("tokenSha256"))
             refuse_a_reused_token_path(outcome.get("tokenPath"))
-            evidence = verify_timestamp_token(
+            evidence, identity = _verify_timestamp_token(
                 path,
                 outcome,
                 reference,
@@ -2279,9 +2345,9 @@ def _v2_witness_evidence(
                 now=now,
                 record=record,
             )
-            refuse_a_reused_timestamp(evidence)
+            refuse_a_reused_timestamp(identity)
             seen_response_files.add(evidence.token_sha256)
-            seen_timestamps.add(evidence.signed_timestamp_sha256)
+            seen_timestamps.add(identity.tst_info_sha256)
             supplemental_tokens.append(evidence)
         elif outcome_status == "unavailable":
             _unavailable_outcome(outcome, label=f"supplemental TSA anchor {anchor_id}")

@@ -275,6 +275,71 @@ def test_tsa_has_no_release_chain_dependency() -> None:
     assert "receipt.release_chain" not in source.read_text()
 
 
+#: ``TokenEvidence``'s fields, in order, as 0.5.1 shipped them.
+RELEASED_TOKEN_EVIDENCE_FIELDS = (
+    "anchor_id",
+    "trust_bundle_id",
+    "trust_bundle_path",
+    "token_path",
+    "token_sha256",
+    "policy_oid",
+    "imprint_algorithm_oid",
+    "gen_time",
+    "tsa_subject",
+    "tsa_certificate_sha256",
+    "tsa_spki_sha256",
+)
+
+
+def test_token_evidence_is_the_released_dataclass_unchanged() -> None:
+    """S5-F5: a bug-fix release does not move a public dataclass.
+
+    A revision of this branch added the signed timestamp's digest as a
+    required field of ``TokenEvidence`` -- public, frozen, and shipped in
+    0.5.1. Required, so a keyword construction that omitted it raised;
+    positional, so every argument after ``token_sha256`` shifted by one; and
+    a field, so anything walking ``dataclasses.fields`` gained a key. That is
+    a compatibility break with nothing announcing it, in a release whose
+    whole claim is that it fixes bugs.
+
+    The digest is a counting aid that lets ``_v2_witness_evidence`` tell two
+    outcomes resting on one timestamp from two outcomes resting on two, and
+    it now travels beside the evidence in a private ``_TimestampIdentity``
+    rather than inside it. Nothing public moved: this pins the field names
+    and their order against 0.5.1's, builds the dataclass by keyword without
+    the field that was added, and checks the entry point still returns a
+    ``TokenEvidence`` -- with 0.5.1's parameters, plus the keyword-only
+    ``record`` this branch added with a default, which is additive.
+    """
+
+    names = tuple(field.name for field in dataclasses.fields(TokenEvidence))
+    assert names == RELEASED_TOKEN_EVIDENCE_FIELDS
+    # The construction the added field would have broken.
+    evidence = TokenEvidence(**{name: name for name in names})
+    assert dataclasses.asdict(evidence) == {name: name for name in names}
+    # And it is not there under some other spelling.
+    assert not [name for name in names if "timestamp" in name]
+
+    signature = inspect.signature(verify_timestamp_token)
+    assert signature.return_annotation == "TokenEvidence"
+    assert [
+        (name, parameter.kind.name, parameter.default is inspect.Parameter.empty)
+        for name, parameter in signature.parameters.items()
+    ] == [
+        ("path", "POSITIONAL_OR_KEYWORD", True),
+        ("token_claim", "POSITIONAL_OR_KEYWORD", True),
+        ("bundle_reference", "POSITIONAL_OR_KEYWORD", True),
+        ("spec", "KEYWORD_ONLY", True),
+        ("records", "KEYWORD_ONLY", True),
+        ("now", "KEYWORD_ONLY", False),
+        ("record", "KEYWORD_ONLY", False),
+    ]
+    # The identity exists, privately, and carries what the rule counts.
+    assert tuple(
+        field.name for field in dataclasses.fields(tsa_module._TimestampIdentity)
+    ) == ("tst_info_sha256",)
+
+
 # --- end-to-end verification against a locally generated RFC 3161 authority --
 
 SHA256_IMPRINT_OID = "2.16.840.1.101.3.4.2.1"
@@ -2623,16 +2688,16 @@ def test_the_witness_digest_and_the_verified_imprint_come_from_one_read(
         witnessed
     )
 
-    original = tsa_module.verify_timestamp_token
+    original = tsa_module._verify_timestamp_token
 
-    def substituting(*arguments: Any, **keywords: Any) -> TokenEvidence:
+    def substituting(*arguments: Any, **keywords: Any) -> tuple[TokenEvidence, Any]:
         tree.record.write_bytes(substitute)
         try:
             return original(*arguments, **keywords)
         finally:
             tree.record.write_bytes(witnessed)
 
-    monkeypatch.setattr(tsa_module, "verify_timestamp_token", substituting)
+    monkeypatch.setattr(tsa_module, "_verify_timestamp_token", substituting)
     with pytest.raises(TsaError) as caught:
         verify_tree(tree)
     assert tree.record.read_bytes() == witnessed
@@ -2835,9 +2900,15 @@ def alias_of(anchor: LocalAnchor, *, anchor_id: str) -> LocalAnchor:
 def record_token_verifications(
     monkeypatch: pytest.MonkeyPatch,
 ) -> list[dict[str, Any]]:
-    """Watch every token ``_v2_witness_evidence`` actually puts to OpenSSL."""
+    """Watch every token a witness actually puts to OpenSSL.
 
-    original = tsa_module.verify_timestamp_token
+    Interposed on the private ``_verify_timestamp_token``, which is where the
+    body lives and which the public function delegates to, so one recorder
+    sees the v2 path (which calls it for the timestamp identity beside the
+    evidence) and the v1 path (which goes through the public function) alike.
+    """
+
+    original = tsa_module._verify_timestamp_token
     verified: list[dict[str, Any]] = []
 
     def recording(
@@ -2845,11 +2916,11 @@ def record_token_verifications(
         token_claim: dict[str, Any],
         bundle_reference: dict[str, Any],
         **keywords: Any,
-    ) -> TokenEvidence:
+    ) -> tuple[TokenEvidence, Any]:
         verified.append(dict(token_claim))
         return original(path, token_claim, bundle_reference, **keywords)
 
-    monkeypatch.setattr(tsa_module, "verify_timestamp_token", recording)
+    monkeypatch.setattr(tsa_module, "_verify_timestamp_token", recording)
     return verified
 
 
@@ -3284,11 +3355,16 @@ def test_refuses_a_token_reused_between_a_primary_and_a_supplemental_outcome(
         incoming.anchor_id
     ]
     # Two authorities' stamps of one digest are two tokens by every identity:
-    # distinct paths, distinct files, distinct signed TSTInfos.
+    # distinct paths, distinct files, and -- asked of OpenSSL rather than of
+    # the module under test -- distinct signed TSTInfos.
+    assert evidence.tokens[0].token_path != evidence.supplemental_tokens[0].token_path
     assert (
-        evidence.tokens[0].signed_timestamp_sha256
-        != evidence.supplemental_tokens[0].signed_timestamp_sha256
+        evidence.tokens[0].token_sha256
+        != evidence.supplemental_tokens[0].token_sha256
     )
+    assert signed_timestamp_of(
+        tmp_path, tree.tokens[alpha.anchor_id]
+    ) != signed_timestamp_of(tmp_path, own_token)
 
     # And the reuse the rules refuse.
     rewrite_witness(
@@ -3492,13 +3568,15 @@ def test_a_token_swapped_after_its_hash_check_is_not_what_gets_verified(
     genuine stamps by the pinned authority over this very record, so the
     substituted one verifies just as well and nothing downstream objects.
 
-    The two are distinguishable in the evidence, asserted below: a second
-    issuance carries its own serial, so its signed token has its own digest.
-    Without the one read the swap moves that digest while ``token_sha256``
-    goes on naming the file the witness declared, which is evidence about two
+    The two are distinguishable, asserted below: a second issuance carries its
+    own serial, so its signed token has its own digest, which is the private
+    identity ``_verify_timestamp_token`` returns beside the evidence. Without
+    the one read the swap moves that identity while ``token_sha256`` goes on
+    naming the file the witness declared, which is evidence about two
     different responses in one record. With it the verifications are given a
     private copy of the bytes that were hashed, and the swap changes what is
-    on disk and nothing else.
+    on disk and nothing else -- the evidence and the identity both come back
+    unmoved.
     """
 
     alpha = local_anchors[0]
@@ -3509,32 +3587,36 @@ def test_a_token_swapped_after_its_hash_check_is_not_what_gets_verified(
     assert sha256_bytes(substitute.read_bytes()) != sha256_bytes(claimed.read_bytes())
 
     claim = token_claim(tree, alpha)
-    verify = lambda: verify_timestamp_token(
-        tree.record, claim, tree.reference, spec=tree.spec, records=tree.records
-    )
-    unswapped = verify()
-    # The premise: the substitute is a response of its own, and the evidence
-    # would say so.
-    substituted_evidence = verify_timestamp_token(
-        tree.record,
-        claim_against(tree, tree.reference, alpha, substitute),
-        tree.reference,
-        spec=tree.spec,
-        records=tree.records,
-    )
+
+    def verified(against: dict[str, Any]) -> tuple[TokenEvidence, Any]:
+        return tsa_module._verify_timestamp_token(
+            tree.record, against, tree.reference, spec=tree.spec, records=tree.records
+        )
+
+    unswapped, unswapped_identity = verified(claim)
+    # The public entry point returns exactly that evidence, and only it.
     assert (
-        substituted_evidence.signed_timestamp_sha256
-        != unswapped.signed_timestamp_sha256
+        verify_timestamp_token(
+            tree.record, claim, tree.reference, spec=tree.spec, records=tree.records
+        )
+        == unswapped
     )
+    # The premise: the substitute is a response of its own, and the identity
+    # of what it carries says so.
+    _substituted, substituted_identity = verified(
+        claim_against(tree, tree.reference, alpha, substitute)
+    )
+    assert substituted_identity != unswapped_identity
 
     reads = swap_the_token_at_the_first_read(
         monkeypatch, claimed, substitute.read_bytes()
     )
-    swapped = verify()
+    swapped, swapped_identity = verified(claim)
     # The writer really did run, and really did change the declared file.
     assert reads == ["-reply"]
     assert claimed.read_bytes() == substitute.read_bytes()
     assert swapped == unswapped
+    assert swapped_identity == unswapped_identity
     assert swapped.token_sha256 == claim["tokenSha256"]
 
 
@@ -3607,9 +3689,9 @@ def extracted_token_of(directory: pathlib.Path, response: pathlib.Path) -> bytes
 def signed_timestamp_of(directory: pathlib.Path, response: pathlib.Path) -> bytes:
     """The DER ``TSTInfo`` the authority signed, out of a response file.
 
-    What ``TokenEvidence.signed_timestamp_sha256`` is a digest of, obtained
-    the way an auditor would: two OpenSSL calls, with no help from the module
-    under test.
+    What the private ``_TimestampIdentity`` is a digest of, obtained the way
+    an auditor would: two OpenSSL calls, with no help from the module under
+    test.
     """
 
     token = directory / f"{response.stem}.token.der"
