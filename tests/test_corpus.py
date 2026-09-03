@@ -3198,6 +3198,139 @@ def test_a_bound_file_rewritten_during_the_second_tombstone_pass_refuses(
     )
 
 
+def _replace_keeping_size_and_mtime(
+    target: pathlib.Path, body: str, staging: pathlib.Path
+) -> None:
+    """Rename ``body`` over ``target`` and put the old mtime back.
+
+    How a careful writer replaces a file, and how an adversary hides having
+    done it: same length, same modification time, a new inode. Everything
+    the identity re-check compared before this round survives it except the
+    inode — and the rename lands after that re-check has run, so the only
+    thing left that can notice is the parent directory's own generation.
+
+    The replacement is staged *outside* the verified tree, which is not
+    tidiness: creating and removing a staging file inside the tree root would
+    move the root's own generation, and the root is stamped by every walk, so
+    the test would refuse for a reason that has nothing to do with the file
+    under test.
+    """
+
+    before = target.stat()
+    assert len(body.encode()) == before.st_size
+    staged = staging / f"{target.name}.staged"
+    staged.write_text(body)
+    os.replace(staged, target)
+    os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+
+def test_an_attested_file_replaced_during_the_second_tombstone_pass_refuses(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S4-F2: generation tracking watched the walks, not the verdict's own files.
+
+    Round six stamped every directory the closing membership sweep and the
+    second tombstone walk *read*. Neither of them reads the directory that
+    holds an attested file: attested paths sit outside the content roots, and
+    a tombstone walk descends only toward a removed path — here a path under
+    ``retired/``, so the walk touches the tree root and ``retired`` and
+    nothing else. ``.axiom`` was stamped by nothing.
+
+    So a producer with write access to the clone could wait until the bound
+    files' identities had been re-stated, then replace
+    ``.axiom/toolchain.toml`` while the last pass walked elsewhere. The
+    rename moves only ``.axiom``'s mtime and ctime, no stamp existed to
+    compare them against, and the verdict returned the digest of bytes the
+    tree no longer held.
+
+    Every ancestor of every bound path is stamped now, before the identity
+    re-check, and ``assert_unchanged`` re-states them last. Without the fix
+    this verification returns a CorpusVerification naming a toolchain pin
+    that is no longer in the tree.
+    """
+
+    body = '{"applied": true}\n'
+    write_tree(tmp_path)
+    (tmp_path / "retired").mkdir()
+    rows = _tombstone_rows("retired/apply-manifest.json", body)
+    replacement = '[toolchain]\ncorpus_release = "test-2026-99-99"\n'
+    monkeypatch.setattr(
+        "receipt.corpus._fold_survivor",
+        _after_nth_search(
+            "retired/apply-manifest.json",
+            2,
+            lambda: _replace_keeping_size_and_mtime(
+                tmp_path / ".axiom/toolchain.toml", replacement, tmp_path.parent
+            ),
+        ),
+    )
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+    assert str(caught.value) == (
+        "the tree changed during verification; the closed-world verdict is refused"
+    )
+    assert (tmp_path / ".axiom/toolchain.toml").read_text() == replacement
+
+
+def test_a_bound_file_rewritten_in_place_with_its_mtime_restored_refuses(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S4-F2: the identity tuple compared only what a writer can restore.
+
+    The per-file identity re-check held a bound file to the device, inode,
+    size and mtime the hashing descriptor saw. A rewrite through the same
+    open inode changes none of the first three, and the fourth is a value
+    ``os.utime`` puts back — so a rewrite landing between the hashing and the
+    re-check passed the re-check, and no directory generation saw it either,
+    because writing through an existing inode does not touch the parent
+    directory at all.
+
+    The identity now carries ``st_ctime_ns``, which on POSIX is the inode
+    change time and is not settable from userspace. The rewrite is fired
+    from inside the closing membership sweep, which is the window between the
+    hashing and the re-check; the sweep's own answer is unaffected, since
+    membership does not change. Without the ctime term this verification
+    returns a CorpusVerification reporting a digest the tree no longer holds.
+    """
+
+    import receipt.corpus as corpus_mod
+
+    write_tree(tmp_path)
+    target = tmp_path / "rules/tax/rate.yaml"
+    replacement = "name: rate\nvalue: 0.99\n"
+    assert len(replacement) == len(CONTENT["rules/tax/rate.yaml"])
+    real = corpus_mod._tree_content_paths
+    calls = {"n": 0}
+
+    def sweep_then_rewrite(root: pathlib.Path, spec: object, **passed) -> dict:
+        result = real(root, spec, **passed)
+        calls["n"] += 1
+        if calls["n"] == 2:
+            before = target.stat()
+            with open(target, "r+b") as handle:
+                handle.write(replacement.encode())
+            os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+            after = target.stat()
+            # The premise: everything the old tuple compared is back.
+            assert (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) == (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+            )
+        return result
+
+    monkeypatch.setattr(corpus_mod, "_tree_content_paths", sweep_then_rewrite)
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        "bound file 'rules/tax/rate.yaml' changed during verification; the "
+        "verdict is refused"
+    )
+
+
 def test_refuses_a_gate_whose_escaped_evidence_floods_the_verdict(
     tmp_path: pathlib.Path,
 ) -> None:
