@@ -833,30 +833,44 @@ MAX_PATH_COMPONENTS_TOTAL = MAX_JOURNAL_ROWS * MAX_PATH_TEXT
 #: run allocates for: every distinct declared prefix that exists on disk
 #: becomes one entry in :class:`_DirectoryGenerations`, held from the first
 #: read to ``assert_unchanged``. So the cardinality is bounded here, once,
-#: before any of it is stat-ed, and the refusal names the index rather than
-#: the pass that would have run out of memory.
+#: before any of it is stat-ed.
 #:
 #: Derived, not picked: no path within ``MAX_PATH_TEXT`` has more than
 #: ``MAX_PATH_COMPONENTS`` components, and a default-capacity journal declares
 #: at most ``MAX_JOURNAL_ROWS`` paths, so no valid default-capacity journal can
 #: need more than 4,096 × 512 = 2,097,152 of them, and this is that product.
 #:
-#: The margin under it is small enough to state rather than assume, because
-#: the review proposed a tighter ceiling a valid journal can pass. Those 4,096
-#: paths would name 2,097,152 distinct prefixes only if they shared none, and
-#: they cannot: a one-character portable name is one of 64 — the repertoire's
-#: 65 characters less the bare period, which ends in one — so at most 64 first
-#: components exist and the other 4,032 paths must share one. The most a
-#: default-capacity journal can name is therefore 2,093,120, which 4,096 paths
-#: of 512 one-character components reach by diverging at their *second*
-#: component (64 + 4,096 + 4,096 × 510). The review's 2,093,056 reasoned from
-#: paths that diverge at the *root*, which costs three characters to spell
-#: 4,096 of them and so caps such a path at 511 components; that is the worst
-#: case for what the old trie *allocated*, not for cardinality, and a ceiling
-#: set to it would refuse a journal 64 prefixes above it. So the ceiling is
-#: the product, and it refuses no journal the default capacity admits. A spec
-#: that pins a larger ``journal_row_capacity`` can exceed it and is refused
-#: here.
+#: Being that product makes it a backstop rather than a live limit, in the
+#: way ``MAX_GATE_DECLARATIONS`` is, and for a reason that holds whatever a
+#: consumer pins. ``MAX_PATH_COMPONENTS_TOTAL`` is
+#: ``MAX_JOURNAL_ROWS × MAX_PATH_TEXT``, which is exactly twice this, and
+#: :func:`_reject_aliasing_paths` charges that one counter once per prefix it
+#: visits and once per distinct prefix it counts. A counted prefix is always
+#: a visited one, so counting N of them has already charged at least 2N: the
+#: visit budget refuses at 4,194,305 before this cap could refuse at
+#: 2,097,153, and the refusal below is unreachable by construction (peer
+#: review, Sol round 8). It is kept because it states a bound a reader can
+#: check and because it would become live again if the ratio between these
+#: constants moved; a test pins the ratio, so moving one of them fails a test
+#: rather than quietly reviving or burying this cap.
+#:
+#: The margin under it is stated rather than assumed, because the review
+#: proposed a tighter ceiling a valid journal can pass. Those 4,096 paths
+#: would name 2,097,152 distinct prefixes only if they shared none, and they
+#: cannot. Prefixes are counted by fold key, and the repertoire spells 38
+#: fold-distinct one-character names — 64 names, of which the 52 letters fold
+#: onto 26 — and 1,482 fold-distinct two-character ones; a path of 512
+#: components fits ``MAX_PATH_TEXT`` only if at most one of them is two
+#: characters long. So 1,520 maximum-depth paths can diverge at the root and
+#: the remaining 2,576 must share a first component and diverge below it:
+#: 1,520 × 512 + 2,576 × 511 = 2,094,576, which is 1,456 above the 2,093,120
+#: this comment used to claim and 2,576 below the ceiling. The old figure
+#: counted 64 first components rather than 38 fold-distinct ones, and the
+#: layout it named — 4,096 paths of 512 one-character components diverging at
+#: their second — is refused on the first pass as two paths that alias. A
+#: test builds the admissible layout and counts it rather than asserting the
+#: arithmetic, so a repertoire or a bound that made it inadmissible fails
+#: rather than passes.
 MAX_ALIAS_INDEX_NODES = MAX_JOURNAL_ROWS * MAX_PATH_COMPONENTS
 #: The most characters the verdict's removedPaths may carry in total; the
 #: gate budget's counterpart for the other producer-controlled list the

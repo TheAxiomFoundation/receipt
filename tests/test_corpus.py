@@ -994,50 +994,207 @@ def test_a_root_divergent_maximum_depth_layout_is_counted_and_not_held(
     assert peak < 16 * 1024 * 1024
 
 
+def _fold_distinct_short_names() -> tuple[list[str], list[str]]:
+    """Every fold-distinct portable name of one character, and of two.
+
+    Built from ``PORTABLE_NAME_RE`` and ``_path_fold`` rather than counted by
+    hand, because the count is the whole of S8-F4: the ceiling's margin was
+    derived from the 64 one-character portable names and the index counts
+    prefixes by fold key, where the 52 letters are 26.
+    """
+
+    from receipt.corpus import _assert_portable_name, _path_fold
+
+    def portable(name: str) -> bool:
+        try:
+            _assert_portable_name(name, "declared path component")
+        except CorpusError:
+            return False
+        return True
+
+    characters = [chr(point) for point in range(128)]
+    ones = [name for name in characters if portable(name)]
+    twos = [
+        first + second
+        for first in characters
+        for second in ones
+        if portable(first + second)
+    ]
+
+    def distinct(names: list[str]) -> list[str]:
+        seen: dict[str, str] = {}
+        for name in names:
+            seen.setdefault(_path_fold(name), name)
+        return sorted(seen.values())
+
+    return distinct(ones), distinct(twos)
+
+
+def _widest_default_journal_paths() -> tuple[str, ...]:
+    """The default-capacity path set naming the most distinct folded prefixes.
+
+    Constructed rather than asserted (S8-F4). Each of the 1,520 fold-distinct
+    one- and two-character names heads one root-divergent maximum-depth path,
+    which is every root divergence the repertoire and ``MAX_PATH_TEXT``
+    admit; the remaining rows share a one-character first component and
+    diverge at their second, which costs each of them one prefix. A
+    maximum-depth path carries at most one two-character component, so the
+    shared paths take a one-character head and any other name below it.
+    """
+
+    from receipt.corpus import MAX_PATH_COMPONENTS, _path_fold
+
+    ones, twos = _fold_distinct_short_names()
+    heads = ones + twos
+    filler = "a"
+    deep_tail = "/".join(filler for _ in range(MAX_PATH_COMPONENTS - 1))
+    paths = [f"{head}/{deep_tail}" for head in heads]
+    shared_tail = "/".join(filler for _ in range(MAX_PATH_COMPONENTS - 2))
+    for first in ones:
+        for second in heads:
+            if len(paths) == MAX_JOURNAL_ROWS:
+                return tuple(paths)
+            if _path_fold(second) == _path_fold(filler):
+                # That is the root-divergent path under this head already.
+                continue
+            paths.append(f"{first}/{second}/{shared_tail}")
+    return tuple(paths)
+
+
 def test_the_alias_index_ceiling_is_above_the_widest_default_journal() -> None:
-    """Binds S7-R3-F1: the review's proposed ceiling refuses a valid journal.
+    """Binds S7-R3-F1 and S8-F4: the margin was derived twice over from 64.
 
     The ceiling exists to refuse a declared set whose distinct prefixes the
     generations recorder could not hold, so it has to sit above the most a
     default-capacity journal can name — and the review's 2,093,056 does not.
     That number is the worst case for what the old trie *allocated*: paths
     that diverge at the root need three characters to spell 4,096 first
-    components, so they carry 511 components rather than 512. Cardinality
-    peaks elsewhere. Paths of 512 one-character components must share a
-    first component, because the repertoire spells only 64 one-character
-    names — its 65 characters less the bare period, which ends in one — but
-    64 × 64 = 4,096 second components are enough to separate every path from
-    every other, so 4,096 of them name 64 + 4,096 + 4,096 × 510 = 2,093,120
-    prefixes, 64 above the proposed ceiling.
+    components, so they carry 511 components rather than 512.
 
-    Without S7-R3-F1 there is no constant here to compare against; with the
-    proposed one this fails, which is why the ceiling is the product of the
-    two caps instead.
+    Cardinality peaks elsewhere, and this test used to say where by
+    arithmetic alone: 64 one-character names, 4,096 second components,
+    2,093,120 prefixes. Both halves were wrong. The index counts prefixes by
+    *fold key*, and only 38 of the 64 one-character names are fold-distinct,
+    so that layout aliases and is refused on the first pass — S8-F4. And the
+    true maximum is higher, not lower: 1,520 fold-distinct one- and
+    two-character names head one maximum-depth path each, the other 2,576
+    rows share a first component, and 1,520 x 512 + 2,576 x 511 = 2,094,576,
+    which is 1,456 above the number this test used to assert. A ceiling
+    tightened to that number would have refused a legitimate journal by 1,456
+    prefixes.
+
+    So the layout is built and counted rather than stated. Without S8-F4 this
+    file asserts 2,093,120 from a path set it never constructs, which is why
+    it could not notice that the set is inadmissible.
     """
 
     from receipt.corpus import (
         MAX_ALIAS_INDEX_NODES,
         MAX_PATH_COMPONENTS,
-        PORTABLE_NAME_RE,
+        MAX_PATH_TEXT,
+        _PathPrefixWork,
+        _reject_aliasing_paths,
+        _validate_relative_path,
     )
 
-    one_character_names = [
+    ones, twos = _fold_distinct_short_names()
+    assert (len(ones), len(twos)) == (38, 1482)
+
+    paths = _widest_default_journal_paths()
+    assert len(paths) == len(set(paths)) == MAX_JOURNAL_ROWS
+    for path in paths:
+        # Admissible, which is what the old arithmetic never checked.
+        _validate_relative_path(path, "content path")
+    assert max(len(path) for path in paths) <= MAX_PATH_TEXT
+    assert max(path.count("/") + 1 for path in paths) == MAX_PATH_COMPONENTS
+
+    assert len(ones) + len(twos) == 1520
+    nodes = _reject_aliasing_paths(paths, work=_PathPrefixWork())
+    assert nodes == 1520 * 512 + 2576 * 511 == 2094576
+    assert MAX_ALIAS_INDEX_NODES - nodes == 2576
+
+
+def test_the_layout_the_old_margin_named_is_refused_as_aliasing() -> None:
+    """Binds S8-F4: the witness the margin was derived from cannot be built.
+
+    "4,096 paths of 512 one-character components diverging at their second
+    component" needs 64 fold-distinct one-character names. There are 38: the
+    52 letters fold onto 26. So the second and the third path of that layout
+    are ``-/A/a/...`` and ``-/a/a/...``, which fold to one key, and
+    ``_reject_aliasing_paths`` refuses the whole set before it counts
+    anything.
+
+    Without S8-F4 nothing in this file builds that layout, so nothing notices.
+    """
+
+    from receipt.corpus import (
+        MAX_PATH_COMPONENTS,
+        PORTABLE_NAME_RE,
+        _PathPrefixWork,
+        _reject_aliasing_paths,
+    )
+
+    ones = [
         chr(point)
         for point in range(128)
         if PORTABLE_NAME_RE.fullmatch(chr(point)) is not None
         and not chr(point).endswith(".")
     ]
-    assert len(one_character_names) == 64
-    assert len(one_character_names) ** 2 >= MAX_JOURNAL_ROWS
+    assert len(ones) == 64
+    tail = "/".join("a" for _ in range(MAX_PATH_COMPONENTS - 2))
+    claimed = [
+        f"{first}/{second}/{tail}" for first in ones for second in ones
+    ][:MAX_JOURNAL_ROWS]
+    assert len(claimed) == MAX_JOURNAL_ROWS
 
-    widest = (
-        len(one_character_names)
-        + MAX_JOURNAL_ROWS
-        + MAX_JOURNAL_ROWS * (MAX_PATH_COMPONENTS - 2)
+    with pytest.raises(CorpusError) as caught:
+        _reject_aliasing_paths(tuple(claimed), work=_PathPrefixWork())
+    assert "would alias on a case- or normalization-insensitive filesystem" in str(
+        caught.value
     )
-    assert widest == 2093120
-    assert MAX_ALIAS_INDEX_NODES == MAX_JOURNAL_ROWS * MAX_PATH_COMPONENTS
-    assert MAX_ALIAS_INDEX_NODES - widest == 4032
+
+
+def test_the_alias_index_ceiling_cannot_be_reached() -> None:
+    """Binds S8-F4: the ceiling's refusal is unreachable by construction.
+
+    ``_reject_aliasing_paths`` charges one shared counter once per prefix it
+    visits and once per distinct prefix it counts, and a counted prefix is
+    always a visited one, so counting N prefixes has charged at least 2N.
+    ``MAX_PATH_COMPONENTS_TOTAL`` is exactly twice ``MAX_ALIAS_INDEX_NODES``,
+    which puts the visit refusal strictly before the node refusal for every
+    input: the set that would name 2,097,153 prefixes has already charged
+    4,194,306 against a budget of 4,194,304.
+
+    The comment said instead that "a spec that pins a larger
+    ``journal_row_capacity`` can exceed it and is refused here", and the PR
+    body listed the refusal among the verdicts that change. Neither is true —
+    a larger capacity adds paths, and every path adds at least as many visits
+    as counted prefixes, so the inequality is unaffected by the pin.
+
+    This is the ratio the constant's comment says a test pins, so that moving
+    one of the four fails here rather than quietly reviving or burying the
+    cap. The refusal itself is bound by the neighbouring test, which patches
+    the ceiling down to reach it.
+    """
+
+    from receipt.corpus import (
+        MAX_ALIAS_INDEX_NODES,
+        MAX_PATH_COMPONENTS,
+        MAX_PATH_COMPONENTS_TOTAL,
+        MAX_PATH_TEXT,
+        _PathPrefixWork,
+        _reject_aliasing_paths,
+    )
+
+    assert MAX_PATH_COMPONENTS_TOTAL == 2 * MAX_ALIAS_INDEX_NODES
+    assert MAX_PATH_COMPONENTS == (MAX_PATH_TEXT + 1) // 2
+
+    # And the inequality the proof rests on, measured on the layout that
+    # maximises cardinality: every counted prefix was visited first.
+    work = _PathPrefixWork()
+    nodes = _reject_aliasing_paths(_widest_default_journal_paths(), work=work)
+    assert work.work >= 2 * nodes
+    assert work.work <= MAX_PATH_COMPONENTS_TOTAL
 
 
 def test_the_alias_index_refuses_more_prefixes_than_its_ceiling(
