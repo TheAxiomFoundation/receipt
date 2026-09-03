@@ -83,7 +83,8 @@ Docstrings labelled S5-F1 onward name a fifth gate's first round, numbering
 from one again: S5-F1 the ignored files the surface classification's untracked
 listing excludes, S5-F2 the caching settings this verifier read and believed
 rather than overriding on the reads they decide, S5-F3 the configured leaf
-under the release root whose spelling no walk bound.
+under the release root whose spelling no walk bound, S5-F4 the
+classification-only refusal a push verification was held to.
 
 The fixture is a local git repository built from scratch, and no network is
 used anywhere here. Most of it holds a README and no manifests, so the gate's
@@ -6208,9 +6209,10 @@ def test_an_index_entry_that_hides_the_working_tree_is_refused(
 
     Refusing the flag itself is the answer, at entry, for any entry rather
     than only the protected ones: the classification the bit corrupts covers
-    every path in the tree. Without the second pass in
-    ``assert_index_carries_no_protected_alias`` this run returns that
-    acceptance."""
+    every path in the tree. Without
+    ``assert_index_hides_no_working_tree_change`` this run returns that
+    acceptance. S5-F4 moved that refusal to this path alone, which is the path
+    the classification is on; the case it binds is unchanged."""
 
     candidate = base_repository(tmp_path)
     state_path = CHAIN_SPEC.state_relative.as_posix()
@@ -6225,6 +6227,142 @@ def test_an_index_entry_that_hides_the_working_tree_is_refused(
     assert str(refusal.value) == (
         f"index entry for {state_path} is marked assume-unchanged or "
         "skip-worktree, which hides working-tree changes from git"
+    )
+
+
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+def test_the_push_path_verifies_a_tree_whose_index_hides_an_entry(
+    tmp_path: pathlib.Path, flag: str
+) -> None:
+    """Binds S5-F4. The hidden-entry refusal is about ``git diff``: the bit
+    stops git comparing that path against the working tree, and the only thing
+    here that reads ``git diff`` is the surface classification, which only the
+    base-ref path performs. The push path names no base, classifies nothing,
+    and answers for the two state files and the release tree by reading them —
+    the ledger's bytes come from a descriptor this run opened, its category
+    from that run's own ``lstat``, and ``assert_index_agrees_with_tree``
+    compares them against the index directly rather than through a diff. So
+    the bit hides nothing from this path, and refusing here refused a valid
+    verification for a mechanism it does not use.
+
+    Measured at d6f1035, where the refusal ran unconditionally: ``index entry
+    for ledger/official_observations.jsonl is marked assume-unchanged or
+    skip-worktree, which hides working-tree changes from git`` — for a tree
+    with no proposal in it at all."""
+
+    candidate = base_repository(tmp_path)
+    state_path = CHAIN_SPEC.state_relative.as_posix()
+    git(candidate.root, "update-index", flag, "--", state_path)
+
+    assert run_push_gate(candidate) == (
+        "thesis-facts append check OK: 2 rows, immutable prefix 1"
+    )
+
+
+def test_the_push_path_still_reads_a_ledger_its_index_hides(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S5-F4's premise, stated as a measurement rather than as reasoning. The
+    reason the push path may verify a tree whose index hides an entry is that
+    it never asks git what changed: it reads the ledger and refuses on what it
+    finds. So the rewrite the bit conceals from ``git diff`` — which the
+    assertion below shows really is concealed — is still the rewrite this path
+    refuses, in the frozen prefix's own words."""
+
+    candidate = base_repository(tmp_path)
+    state_path = CHAIN_SPEC.state_relative.as_posix()
+    git(candidate.root, "update-index", "--assume-unchanged", "--", state_path)
+    rows = [observation_row(number) for number in range(1, BASE_ROW_COUNT + 1)]
+    rows[0]["value"] = rows[0]["value"] + 1
+    rows[0]["assertionVersion"]["id"] = expected_assertion_version_id(
+        rows[0], GATE_SPEC
+    )
+    write_ledger(candidate.root, rows)
+    assert git(candidate.root, "diff", "--name-only") == ""
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate)
+    assert str(refusal.value) == (
+        "immutable prefix line 1 (fixture.series.observation_1) was rewritten"
+    )
+
+
+def test_a_push_verification_is_not_refused_for_a_monitor_or_a_hidden_entry(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S5-F4 with S5-F2, which are the same finding from two sides: the
+    checkout-level refusals this branch had accumulated were about the
+    classification, and the push path performs none. A tree carrying both — a
+    file-system monitor git would trust and an index entry marked
+    assume-unchanged — verifies on the push path exactly as an ordinary tree
+    does. At ccc20b4 the monitor alone was ``working-tree changes cannot be
+    classified: core.fsmonitor is enabled…`` and the entry alone was ``index
+    entry for ledger/official_observations.jsonl is marked
+    assume-unchanged…``, both on this path."""
+
+    candidate = base_repository(tmp_path)
+    a_lying_file_system_monitor(candidate)
+    git(
+        candidate.root,
+        "update-index",
+        "--assume-unchanged",
+        "--",
+        CHAIN_SPEC.prefix_relative.as_posix(),
+    )
+
+    assert run_push_gate(candidate) == (
+        "thesis-facts append check OK: 2 rows, immutable prefix 1"
+    )
+
+
+def test_an_index_alias_is_refused_on_the_push_path_too(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S5-F4's other half: only the hidden-entry refusal moved. An alias is a
+    second committed object standing over a protected path — the one file on a
+    name-folding checkout answering for either of two entries, with nothing in
+    the index or the tree to say which — and that is as true of a push as of a
+    proposal against a base. It is asked on both paths, and this pins that the
+    split left it there.
+
+    ``test_an_index_alias_of_the_release_root_is_refused`` and its siblings
+    bind the refusal itself; this binds the path it is asked on."""
+
+    candidate = base_repository(tmp_path)
+    index_an_alias(candidate, "releases/README.md", "Releases/README.md")
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate)
+    assert str(refusal.value) == (
+        "index carries an alias of a protected path: Releases/README.md "
+        "(for releases at releases)"
+    )
+
+
+def test_an_alias_refusal_precedes_the_hidden_entry_refusal(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S5-F4 kept the order the single function had. The alias refusal was the
+    first of that read's two passes so that a tree an alias already refuses
+    keeps that refusal; splitting the passes into two functions keeps the
+    calls in that order, and a tree carrying both still answers with the
+    alias."""
+
+    candidate = base_repository(tmp_path)
+    index_an_alias(candidate, "releases/README.md", "Releases/README.md")
+    git(
+        candidate.root,
+        "update-index",
+        "--assume-unchanged",
+        "--",
+        CHAIN_SPEC.state_relative.as_posix(),
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "index carries an alias of a protected path: Releases/README.md "
+        "(for releases at releases)"
     )
 
 
