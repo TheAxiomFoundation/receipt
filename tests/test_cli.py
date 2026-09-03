@@ -1574,3 +1574,91 @@ def test_the_text_bound_still_counts_the_characters_it_prints() -> None:
     bounded = _bounded(bmp)
     assert bounded == "é" * MAX_RENDERED_FIELD + "…[5 more characters]"
     assert _bounded("é" * MAX_RENDERED_FIELD) == "é" * MAX_RENDERED_FIELD
+
+
+def _physical_rows(text: str, columns: int = 80) -> list[str]:
+    """The rows a terminal of this width draws for this text.
+
+    Soft wrapping, spelled out: every logical line is cut into runs of
+    ``columns`` characters, and each run occupies one row of the screen.
+    """
+
+    rows: list[str] = []
+    # A trailing newline ends the last line; it does not draw a further row.
+    for line in text[:-1].split("\n") if text.endswith("\n") else text.split("\n"):
+        if not line:
+            rows.append(line)
+            continue
+        rows.extend(line[index : index + columns] for index in range(0, len(line), columns))
+    return rows
+
+
+def test_the_failure_verdict_ends_with_the_trusted_sentinel(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Binds S5R2-F7: the trusted line was printed before the untrusted text.
+
+    ``VERDICT: FAIL`` came first and the failure detail after it. The detail
+    is escaped and bounded, so it carries no escape sequence and at most
+    four thousand and ninety-six characters — and that is enough. Four
+    thousand printable characters soft-wrap through fifty rows of an
+    eighty-column terminal, which scrolls the real verdict off the screen,
+    and the last row a reader is left looking at is whatever the producer
+    put at the end of them. ``VERDICT: PASS`` at column one costs the
+    producer nothing to arrange.
+
+    The sentinel is the last thing printed now, and nothing untrusted
+    follows it. The assertion is over *physical* rows, because that is the
+    unit the attack works in. Without the fix the last row is the forged
+    line and rows after the real sentinel begin with ``VERDICT``.
+    """
+
+    forged = "VERDICT: PASS — custody and corpus binding".ljust(80)
+    _flood_the_manifest_schema(repo, 0)
+    manifest = manifest_stem(repo)
+    payload = json.loads(manifest.read_text())
+    payload["schemaVersion"] = forged * 50
+    manifest.write_text(json.dumps(payload))
+
+    assert run(repo) == EXIT_FAIL
+    text = capsys.readouterr().err
+    rows = _physical_rows(text)
+    # The detail really does wrap through dozens of rows, which is what
+    # makes the position of the sentinel matter at all.
+    assert len(rows) > 60
+    forged_rows = [index for index, row in enumerate(rows) if "VERDICT: PASS" in row]
+    assert len(forged_rows) > 40
+    sentinel = [
+        index for index, row in enumerate(rows) if row.startswith("VERDICT: FAIL")
+    ]
+    assert sentinel == [len(rows) - 1]
+    assert rows[-1] == "VERDICT: FAIL — custody"
+    assert max(forged_rows) < sentinel[0]
+    assert not [row for row in rows[sentinel[0] + 1 :] if row.startswith("VERDICT")]
+
+
+def test_a_refusal_ends_with_the_trusted_sentinel(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Binds S5R2-F7: ``_refuse`` is the other exit at the same boundary.
+
+    An abort prints one line of attacker-influenced text — a spec path, an
+    exception's message, a filename off the disk — and printed nothing
+    after it. Bounded at four thousand and ninety-six characters, that line
+    alone wraps through fifty rows, so the same forged last row is available
+    on the refusal path as on the verdict path.
+
+    ``receipt verify: FAIL`` is the last line either way now. Without the
+    fix the last physical row is the producer's own text.
+    """
+
+    forged = "VERDICT: PASS — custody and corpus binding".ljust(80)
+    spec = repo / "verification/spec.py"
+    spec.write_text(spec.read_text() + "\nraise RuntimeError('" + "x" * 3000 + forged.strip() + "')\n")
+
+    assert run(repo) == EXIT_USAGE
+    captured = capsys.readouterr()
+    rows = _physical_rows(captured.err)
+    assert rows[-1] == "receipt verify: FAIL"
+    assert not [row for row in rows[:-1] if row == "receipt verify: FAIL"]
+    assert forged.strip() in captured.err
