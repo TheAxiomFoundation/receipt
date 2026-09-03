@@ -4131,6 +4131,212 @@ def test_two_pending_bundles_may_introduce_two_authorities(
     }
 
 
+def give_the_record_its_own_updates(
+    tree: WitnessTree,
+    anchors: Sequence[LocalAnchor],
+    updates: Sequence[Mapping[str, Any]],
+) -> str:
+    """Put ``updates`` in the witnessed record, re-stamp, and return the digest.
+
+    A record that carries a trust transition is the only input the caller
+    comparison has anything to say about, and the tree builder writes records
+    that carry none. Changing the record changes its digest, so every token
+    over it has to be signed again and the sidecar's ``digestSha256`` and
+    every declared ``tokenSha256`` moved with it -- which is what this does,
+    leaving a tree that verifies exactly as the builder's did.
+    """
+
+    payload = json.loads(tree.record.read_text())
+    payload["trustBundleUpdates"] = [dict(update) for update in updates]
+    tree.record.write_bytes(canonical_bytes(payload) + b"\n")
+    digest = sha256_bytes(tree.record.read_bytes())
+    for anchor in anchors:
+        anchor.tsa.stamp(digest, tree.tokens[anchor.anchor_id])
+
+    def refresh(witness: dict[str, Any]) -> None:
+        witness["digestSha256"] = digest
+        for outcome in witness.get("anchorOutcomes", [witness]):
+            token = tree.tokens.get(str(outcome.get("tsaAnchorId")))
+            if token is not None:
+                outcome["tokenSha256"] = sha256_bytes(token.read_bytes())
+
+    rewrite_witness(tree, refresh)
+    return digest
+
+
+def a_record_carrying_its_own_transition(
+    root: pathlib.Path,
+    local_anchors: Sequence[LocalAnchor],
+    rotated_alpha: LocalTsa,
+) -> tuple[WitnessTree, dict[str, Any], dict[str, Any], LocalAnchor, TsaSpec]:
+    """The chain-walk shape: one pending bundle before this record, one in it.
+
+    ``rotation`` is a bundle version an earlier record introduced and no
+    witness has activated yet -- a signer rotation, so it is skipped as a
+    supplemental candidate and demands nothing of this witness. ``arrival``
+    is the bundle this record's own ``trustBundleUpdates`` carries, and it
+    introduces an authority the chain does not know, so it demands a
+    supplemental outcome. A chain walker supplies both: the pending updates
+    it has accumulated, and this record's own.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    tree = build_witness_tree(root, local_anchors[:1])
+    rotation, spec = add_bundle_version(
+        tree,
+        local_anchors[:1],
+        version=2,
+        signers={alpha.anchor_id: certificate_pins(rotated_alpha.signer_pem)},
+    )
+    incoming = alias_of(beta, anchor_id="beta-arriving-2026")
+    arrival, spec = pending_authority(tree, incoming, version=3, base=spec)
+    give_the_record_its_own_updates(tree, local_anchors[:1], [arrival])
+    return tree, rotation, arrival, incoming, spec
+
+
+def test_refuses_a_supplied_transition_that_omits_the_snapshots_own_updates(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_alpha: LocalTsa,
+) -> None:
+    """S5R2-F1: the record's updates come from the bytes the token covered.
+
+    ``verify_witness`` read the record once and derived everything from that
+    snapshot -- except the trust transition, which it took from the caller
+    whenever the caller offered one. So the token evidence described the
+    bytes this call read while the transition described a different, earlier
+    read of the same path: a writer replacing the record between the caller's
+    read and this one made the evidence cover record B and the transition
+    cover record A, and the authorities record B activates were never
+    considered at all.
+
+    The record here carries a bundle introducing an authority the chain does
+    not know, and the witness answers for none of it. The premise, asserted
+    first, is that the record's own updates really do demand something this
+    witness has not got: supplied truthfully, the transition is refused for a
+    missing supplemental outcome. Supplied as an earlier read of the record
+    would have produced them -- the accumulated pending update and nothing of
+    this record's -- it used to verify, because nothing looked at the record
+    it had just hashed. Now the snapshot's own updates are derived either way
+    and a supplied list that omits one is refused.
+    """
+
+    tree, rotation, arrival, incoming, spec = a_record_carrying_its_own_transition(
+        tmp_path, local_anchors, rotated_alpha
+    )
+
+    def transition(supplied: list[dict[str, Any]]) -> WitnessEvidence:
+        return verify_witness(
+            tree.record,
+            spec=spec,
+            records=tree.records,
+            trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+            transition_bundle_updates=supplied,
+        )
+
+    # The premise: the record's own update demands a supplemental outcome.
+    with pytest.raises(TsaError) as truthful:
+        transition([rotation, arrival])
+    assert str(truthful.value) == (
+        "supplemental TSA outcome mismatch: "
+        f"missing=[('{arrival['path']}', '{incoming.anchor_id}')], extra=[]"
+    )
+    # And the stale list, which used to make that demand disappear.
+    for stale in ([], [rotation]):
+        with pytest.raises(TsaError) as caught:
+            transition(stale)
+        assert str(caught.value) == (
+            "transition bundle updates supplied by the caller omit the "
+            "witnessed record's own"
+        )
+
+
+def test_a_chain_walkers_accumulated_transition_is_still_accepted(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_alpha: LocalTsa,
+) -> None:
+    """S5R2-F1: a supplied list is a superset by design, and stays one.
+
+    The comparison is one-way on purpose. A chain walker supplies the pending
+    updates of the records before this one together with this record's own,
+    the way the differential harness does, and the witness cannot derive the
+    first kind -- so extra entries are the normal case and only a *missing*
+    snapshot-derived update is a refusal. The three callers this module has to
+    keep working are asserted together: the accumulated list, this record's own
+    alone, and nothing at all, all reaching the same evidence.
+
+    And the way out of the one gap the comparison leaves. A caller that
+    supplied this record's updates from a second read of this record, beside
+    the snapshot's own, would be indistinguishable from one supplying earlier
+    records' -- both are extra entries. ``_verify_witness_with_updates`` hands
+    back the snapshot-derived list so such a caller never has to read the
+    record itself, and what it hands back is the snapshot's own and not the
+    superset it was given, which is what makes it usable for that.
+    """
+
+    tree, rotation, arrival, incoming, spec = a_record_carrying_its_own_transition(
+        tmp_path, local_anchors, rotated_alpha
+    )
+    beta = local_anchors[1]
+    supplemental_token = tree.records / RECORD_DAY / f"record-0001.{incoming.anchor_id}.tsr"
+    beta.tsa.stamp(sha256_bytes(tree.record.read_bytes()), supplemental_token)
+    rewrite_witness(
+        tree,
+        lambda payload: payload.__setitem__(
+            "supplementalOutcomes",
+            [supplemental_outcome(tree, arrival, incoming, supplemental_token)],
+        ),
+    )
+
+    accumulated = verify_witness(
+        tree.record,
+        spec=spec,
+        records=tree.records,
+        trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+        transition_bundle_updates=[rotation, arrival],
+    )
+    assert accumulated.status == "available"
+    assert [token.anchor_id for token in accumulated.supplemental_tokens] == [
+        incoming.anchor_id
+    ]
+    own_only = verify_witness(
+        tree.record,
+        spec=spec,
+        records=tree.records,
+        trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+        transition_bundle_updates=[arrival],
+    )
+    derived = verify_witness(
+        tree.record,
+        spec=spec,
+        records=tree.records,
+        trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+    )
+    assert own_only == accumulated
+    assert derived == accumulated
+
+    # What the verification used, for a caller that must not read the record
+    # a second time to know it: the snapshot's own updates, not the superset.
+    evidence, updates = tsa_module._verify_witness_with_updates(
+        tree.record,
+        spec=spec,
+        records=tree.records,
+        trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+        transition_bundle_updates=[rotation, arrival],
+    )
+    assert evidence == accumulated
+    assert updates == [arrival]
+    assert updates == json.loads(tree.record.read_text())["trustBundleUpdates"]
+    _unsupplied, derived_updates = tsa_module._verify_witness_with_updates(
+        tree.record,
+        spec=spec,
+        records=tree.records,
+        trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+    )
+    assert derived_updates == updates
+
+
 def swap_the_token_at_the_first_read(
     monkeypatch: pytest.MonkeyPatch, target: pathlib.Path, content: bytes
 ) -> list[str]:

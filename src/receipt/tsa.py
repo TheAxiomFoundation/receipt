@@ -9,7 +9,7 @@ through a frozen :class:`TsaSpec` supplied by consumer code.  This module
 ships no repository-specific trust defaults and performs no chain walk or
 producer signature verification.
 
-The port is stricter than the baseline in seventeen places, each refusing an
+The port is stricter than the baseline in eighteen places, each refusing an
 input the pinned tree never presents and so each outside the differential
 contract: a record under witness that is not a readable regular file, which
 the baseline let raise out of the hash; a legacy witness over a bundle
@@ -48,7 +48,10 @@ pending bundles that introduce one authority under two anchors, sharing an
 ID and root or a signer, which is one new authority demanding and receiving
 two supplemental outcomes and so counted twice -- every equivalence above is
 computed against the active bundles, and each candidate the walk admits now
-joins the sets the next is measured against; an unavailable
+joins the sets the next is measured against; a caller-supplied trust
+transition that omits an update the witnessed record itself carries, which
+is a transition read from one instant of the record and evidence taken from
+another; an unavailable
 witness of either schema whose reason is not a string, or that carries token
 evidence at the witness level (the v2 per-anchor outcome has always refused
 both); an unavailable legacy witness that names a bundle by any of its three
@@ -105,6 +108,24 @@ whether a token covered the record at all: a writer could leave the witnessed
 record in place for the digest and the time checks, substitute another for
 that read with a token genuinely stamped over the substitute, and put the
 first back, and the evidence then named a record OpenSSL had never seen.
+
+The trust transition the record carries comes from that snapshot too, and it
+is the one thing that used to come from somewhere else.  ``verify_witness``
+takes a ``transition_bundle_updates`` list, and a chain walker legitimately
+supplies the accumulated pending updates of earlier records together with
+this record's own -- so the list was taken entire and the record was not
+consulted at all, which put the evidence and the transition at two different
+instants of one mutable path.  The record's own updates are now always
+derived here, and a supplied list is compared with them: every derived update
+must appear in it, or this refuses.  The comparison is one-way because the
+list is a superset by design, and that bounds what it closes -- a caller
+supplying this record's updates from a second read of *this* record, beside
+the snapshot's own, is indistinguishable from one supplying earlier records',
+since both are extra entries.  So the package offers
+``_verify_witness_with_updates``, which returns the snapshot-derived list the
+verification used: a caller that accumulates pending updates takes this
+record's from the verification rather than from a read of its own, and
+supplies only the earlier ones.
 
 The claimed response is read once for the same reason.  Its ``tokenSha256``
 was taken from one open of its pathname and ``openssl ts -reply`` and
@@ -2635,6 +2656,69 @@ def verify_witness(
     trusted_bundles: Mapping[str, dict[str, Any]] | None = None,
     transition_bundle_updates: list[dict[str, Any]] | None = None,
 ) -> WitnessEvidence:
+    """Verify one record's RFC 3161 witness against a consumer-pinned spec.
+
+    ``transition_bundle_updates`` is the trust transition in flight when this
+    record was written: the pending bundle updates of the records before it,
+    plus this record's own.  A caller walking a chain accumulates the first
+    kind and cannot be asked to leave them out, so the argument stays a list
+    of both -- but this record's own are derived here, from the bytes this
+    call read and hashed, and never taken from the caller's word for them.
+
+    Deriving them and comparing is the whole of the fix.  A supplied list was
+    trusted entire, so the token evidence covered the snapshot this call read
+    while the updates evaluated beside it came from a different, earlier read
+    of the same path: a concurrent replacement made the evidence describe
+    record B and the transition describe record A (peer review, fifth gate
+    round two).  Every update the snapshot carries must now appear in the
+    supplied list -- by equality of the update mapping, which is the whole of
+    what a bundle reference is -- or this refuses.
+
+    Say plainly what that does and does not close.  A supplied list is a
+    superset by design, so a caller that supplies this record's updates *from
+    an earlier read of this record*, beside the snapshot's own, cannot be told
+    apart from one supplying earlier records' pending updates: both are extra
+    entries the witness has no way to attribute.  What the comparison
+    guarantees is that nothing the snapshot carries is missing, and that is
+    all it guarantees.  The rest is the caller's to arrange, so this module
+    offers ``_verify_witness_with_updates``, which returns the snapshot-derived
+    updates the verification actually used: a chain walker that accumulates
+    pending updates should take this record's from there rather than from a
+    read of its own, and then supply only the earlier records' pending ones.
+    """
+
+    evidence, _updates = _verify_witness_with_updates(
+        path,
+        spec=spec,
+        records=records,
+        now=now,
+        trusted_bundles=trusted_bundles,
+        transition_bundle_updates=transition_bundle_updates,
+    )
+    return evidence
+
+
+def _verify_witness_with_updates(
+    path: Path,
+    *,
+    spec: TsaSpec,
+    records: Path | None = None,
+    now: datetime | None = None,
+    trusted_bundles: Mapping[str, dict[str, Any]] | None = None,
+    transition_bundle_updates: list[dict[str, Any]] | None = None,
+) -> tuple[WitnessEvidence, list[dict[str, Any]]]:
+    """``verify_witness``, and the record's own trust-bundle updates.
+
+    Every refusal and every check's place belongs to the public function; this
+    is where its body lives.  The second return value is the list derived from
+    the bytes this call read -- validated, in the record's own order -- so a
+    caller that has to carry this record's pending updates forward can take
+    them from the verification instead of reading the record again.  That is
+    the only way for such a caller to supply earlier records' updates without
+    also supplying its own from a second read, which is the one substitution
+    the comparison in here cannot see.
+    """
+
     records = (records or path.parents[1]).resolve()
     # One read of the record, and every question about it is asked of these
     # bytes: the digest the sidecar has to match, the trust-bundle updates it
@@ -2658,10 +2742,23 @@ def verify_witness(
         trusted_bundles = bootstrap_trust_bundles(
             records, genesis, spec=spec, required=True
         )
-    if transition_bundle_updates is None:
-        transition_bundle_updates = trust_bundle_updates(
-            records, _record_payload(record, path), spec=spec
-        )
+    # The record's own updates, from the snapshot, always.  When the caller
+    # supplied a list this used to be skipped entirely, and the list was taken
+    # on trust; now it is derived either way, in the same place, and a
+    # supplied list is compared with it rather than believed.
+    supplied = transition_bundle_updates
+    updates = trust_bundle_updates(records, _record_payload(record, path), spec=spec)
+    if supplied is None:
+        transition_bundle_updates = updates
+    else:
+        if any(update not in supplied for update in updates):
+            raise TsaError(
+                "transition bundle updates supplied by the caller omit the "
+                "witnessed record's own"
+            )
+        # Used as given: it carries the pending updates of earlier records,
+        # which this call has no way to derive and no business dropping.
+        transition_bundle_updates = supplied
     schema = witness.get("schemaVersion")
     if schema == "thesis_rfc3161_witness_v1":
         preferred = (
@@ -2690,26 +2787,32 @@ def verify_witness(
                 records, preferred, spec=spec
             )
             _require_single_anchor(legacy_trust)
-        return _v1_witness_evidence(
-            path,
-            witness,
-            spec=spec,
-            records=records,
-            record=record,
-            digest_sha256=digest_sha,
-            trusted_bundles=trusted_bundles,
-            now=now,
+        return (
+            _v1_witness_evidence(
+                path,
+                witness,
+                spec=spec,
+                records=records,
+                record=record,
+                digest_sha256=digest_sha,
+                trusted_bundles=trusted_bundles,
+                now=now,
+            ),
+            updates,
         )
     if schema == "thesis_rfc3161_witness_v2":
-        return _v2_witness_evidence(
-            path,
-            witness,
-            spec=spec,
-            records=records,
-            record=record,
-            digest_sha256=digest_sha,
-            trusted_bundles=trusted_bundles,
-            transition_bundle_updates=transition_bundle_updates,
-            now=now,
+        return (
+            _v2_witness_evidence(
+                path,
+                witness,
+                spec=spec,
+                records=records,
+                record=record,
+                digest_sha256=digest_sha,
+                trusted_bundles=trusted_bundles,
+                transition_bundle_updates=transition_bundle_updates,
+                now=now,
+            ),
+            updates,
         )
     raise TsaError(f"unsupported witness schema for {path}")

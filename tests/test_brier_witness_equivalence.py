@@ -116,6 +116,20 @@ Deliberately outside the mutation contract:
   runs and no case here can move on it; on Windows it is what keeps a ``\r\n``
   or a ``0x1A`` in a record, a response or a root PEM from being translated
   between the disk and the digest;
+- the baseline reads the trust-bundle updates a record carries out of a
+  fresh open of that record whenever the chain walk hands them in; the port
+  derives them from the one read it hashed and verified, and requires a
+  supplied list to contain every one of them, refusing otherwise (peer
+  review, fifth gate round two).  ``verify_candidate`` below supplies
+  ``[*pending, *current_updates]`` -- the accumulated pending updates of
+  earlier records plus this record's own, parsed from the same payload the
+  walk verified -- so the supplied list is always a superset of what the port
+  derives and no case here reaches the refusal.  The derivation itself now
+  runs on every call rather than only when no list is supplied, so the ported
+  ``trustBundleUpdates`` refusals could in principle fire inside
+  ``verify_witness`` where they did not before; the walk runs
+  ``trust_bundle_updates`` on the same payload before the call, so any such
+  refusal still arrives from there first, in the same words;
 - the baseline compares a bundle's anchors with the code identities in one
   direction only, so an identity scoped to a bundle whose anchors do not
   include it is ignored; the port requires the two sets to be equal at load.
