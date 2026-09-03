@@ -191,6 +191,23 @@ normalization for everything 14.0 encoded: identical text is accepted or
 refused identically on every supported interpreter (peer review, round
 seven).
 
+That screen is one function, ``_assert_foldable``, and the repertoire is
+only the first of the questions it asks. The fold key is this module's
+model of when two names are one name, and it is not a proof about the
+filesystem a consumer will resolve the tree on. Two real filesystems
+disagree with it in ways that open the closed world: HFS+ ignores
+default-ignorable code points when it compares names, so ``evil.y\u200dml``
+escapes a ``.yml`` sweep and a tombstone's fold bucket here while opening
+``evil.yml`` there; and NTFS's upcase table maps the Turkic dotted and
+dotless i onto ``I``, so ``evıl.yml`` and ``evil.yml`` are one name there
+and two under ``casefold`` (peer review, round eight). Neither is modelled,
+because the module cannot know which filesystem is coming. Both are
+refused, along with an unassigned code point and a Unicode format control,
+by one screen run everywhere a name is folded — declared paths, the spec's
+own roots and suffixes, the entry names the sweep judges, and the entry
+names the tombstone search buckets — with a distinct message for each
+class.
+
 Every trust anchor arrives from the consumer's committed :class:`CorpusSpec`.
 The module ships no defaults: not a content root, not a required gate, not an
 accepted tier.
@@ -210,7 +227,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
-from receipt._unicode_repertoire import UNICODE_VERSION, is_unassigned
+from receipt._unicode_repertoire import (
+    FORMAT_CONTROL_RANGES,
+    UNICODE_VERSION,
+    is_default_ignorable,
+    is_unassigned,
+)
 
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 GATE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._/-]{0,127}\Z")
@@ -430,7 +452,7 @@ class CorpusSpec:
             # _validate_relative_path below, which screens it again; a suffix
             # reached nothing, which is the hole (see the suffix loop).
             for component in root.as_posix().split("/"):
-                _assert_assigned(component, "CorpusSpec content root")
+                _assert_foldable(component, "CorpusSpec content root")
             _validate_relative_path(root.as_posix(), "content root")
         if type(self.content_suffixes) is not tuple or not self.content_suffixes:
             raise CorpusError("CorpusSpec must declare at least one content suffix")
@@ -444,9 +466,9 @@ class CorpusSpec:
             # against every entry name the sweep sees. An unassigned code
             # point in one folds differently under each supported table, so
             # which files the closed world contained depended on the
-            # verifier's interpreter — the same defect _assert_assigned closes
+            # verifier's interpreter — the same defect _assert_foldable closes
             # everywhere else this module folds (peer review, round four).
-            _assert_assigned(suffix, "CorpusSpec content suffix")
+            _assert_foldable(suffix, "CorpusSpec content suffix")
         if type(self.required_attested_paths) is not frozenset:
             raise CorpusError("CorpusSpec required_attested_paths must be a frozenset")
         for path in sorted(self.required_attested_paths):
@@ -568,26 +590,19 @@ def _quoted(value: Any) -> str:
     return f"{text[:MAX_QUOTED_TEXT]}…[{len(text) - MAX_QUOTED_TEXT} more characters]"
 
 
-#: Unicode category Cf as of Unicode 16.0.0, the table Python 3.14 ships,
-#: pinned here so the refusal does not depend on which interpreter renders
-#: the verdict: Python 3.11 carries Unicode 14, under which U+1343A is
-#: unassigned and passed while 3.12 and 3.13 refused it (peer review). A code
-#: point refuses if it is in this table OR the running interpreter's table
-#: calls it Cf, so a later table can only widen the set, never narrow it.
-_FORMAT_CONTROL_RANGES = (
-    (0x00AD, 0x00AD), (0x0600, 0x0605), (0x061C, 0x061C), (0x06DD, 0x06DD),
-    (0x070F, 0x070F), (0x0890, 0x0891), (0x08E2, 0x08E2), (0x180E, 0x180E),
-    (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x2064), (0x2066, 0x206F),
-    (0xFEFF, 0xFEFF), (0xFFF9, 0xFFFB), (0x110BD, 0x110BD), (0x110CD, 0x110CD),
-    (0x13430, 0x1343F), (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A),
-    (0xE0001, 0xE0001), (0xE0020, 0xE007F),
-)
-
-
 def _is_format_control(code: int, category: str) -> bool:
+    """Whether this code point is a Unicode format control on any pinned table.
+
+    The pinned Unicode 16.0 ``Cf`` set lives in
+    :data:`receipt._unicode_repertoire.FORMAT_CONTROL_RANGES` — it moved
+    there so ``receipt.cli`` can escape the same set on its way to a
+    terminal — and the running interpreter's own answer widens it, never
+    narrows it.
+    """
+
     if category == "Cf":
         return True
-    return any(low <= code <= high for low, high in _FORMAT_CONTROL_RANGES)
+    return any(low <= code <= high for low, high in FORMAT_CONTROL_RANGES)
 
 
 def _reject_control_characters(value: str, label: str) -> str:
@@ -738,6 +753,93 @@ def _assert_assigned(value: str, label: str) -> str:
             raise CorpusError(
                 f"{label} contains a code point outside the pinned Unicode "
                 f"{UNICODE_VERSION} repertoire ({code:#06x}): {_quoted(value)}"
+            )
+    return value
+
+
+#: The Turkic dotted capital I and dotless small i. NTFS's upcase table maps
+#: both onto ASCII ``I``, so ``evıl.yml`` and ``evil.yml`` are one name on an
+#: NTFS volume; ``str.casefold`` keeps them apart, and so does this module's
+#: fold key. The pair is refused by :func:`_assert_foldable` rather than
+#: modelled, for the reason stated there.
+TURKIC_DOTTED_AND_DOTLESS_I = ("\u0130", "\u0131")
+
+
+def _assert_foldable(value: str, label: str) -> str:
+    """Refuse a name whose equivalence class this module cannot compute.
+
+    One screen, run everywhere this module folds a name: declared paths, the
+    spec's own roots and suffixes, the tree entry names the closed-world
+    sweep judges, and the entry names the tombstone search buckets. What it
+    asks is not "is this name legal" but "does :func:`_path_fold` decide the
+    same question a real filesystem will decide". Where the answer is no, the
+    name is refused.
+
+    Refusal is the honest answer here because the alternative is to model a
+    filesystem this module cannot identify. A verifier runs on the auditor's
+    clone; the tree may be resolved later on APFS, HFS+, ext4, NTFS or
+    something else, and each has its own idea of when two names are one
+    name. The fold key is one such idea — NFC plus case folding — and it is
+    the one every other check in this module is built on. A name whose
+    equivalence class differs between that key and a real filesystem is a
+    name the closed world cannot be closed over: the sweep and the tombstone
+    search would put it in one bucket and the filesystem in another, so
+    "these are exactly the files" would be false on the host that matters
+    without being false on the host that checked (peer review, round eight).
+
+    Four refusals, each with its own message, each checked over the whole
+    string before the next one is asked — so which class a name is refused
+    under is a property of the name and not of where in it the offending
+    character sits:
+
+    - a code point outside the pinned Unicode 14.0 repertoire, which is
+      :func:`_assert_assigned` and the oldest of the four;
+    - a Unicode format control. This is the ``Cf`` screen
+      :func:`_reject_control_characters` has always applied to *producer*
+      text, now applied to filesystem names as well. Asked before the
+      default-ignorable question although the two sets overlap heavily,
+      because a format control is refused for two independent reasons — it
+      changes what a reader sees and it may be ignored by a name comparison
+      — and this is the message a declared path carrying one already gets,
+      so U+200D reads the same wherever it turns up;
+    - a default-ignorable code point. HFS+ ignores these when it compares
+      names, so ``evil.y\u200dml`` and ``evil.yml`` are one file there: the
+      first escapes a ``.yml`` sweep and a tombstone's fold bucket here
+      while opening the second one there. The table is Unicode 14.0's, in
+      :mod:`receipt._unicode_repertoire`;
+    - U+0130 or U+0131. NTFS case-folds the Turkic dotted and dotless i onto
+      ``I``, so ``evıl.yml`` and ``evil.yml`` are one name there and two
+      under ``casefold``. Refusing the pair is the only answer that does not
+      require choosing whose case-folding this module implements: adopting
+      NTFS's would break every POSIX host that holds the two names apart,
+      and keeping ``casefold`` leaves the NTFS consumer with a name outside
+      the closed world.
+
+    ``value`` may be a whole relative path or a single component; every
+    message quotes it whole through :func:`_quoted`, so a refusal names what
+    was screened.
+    """
+
+    _assert_assigned(value, label)
+    for character in value:
+        code = ord(character)
+        if _is_format_control(code, unicodedata.category(character)):
+            raise CorpusError(
+                f"{label} contains a Unicode format control "
+                f"({code:#04x}): {_quoted(value)}"
+            )
+    for character in value:
+        if is_default_ignorable(ord(character)):
+            raise CorpusError(
+                f"{label} contains a code point a target filesystem may ignore "
+                f"when comparing names ({ord(character):#06x}): {_quoted(value)}"
+            )
+    for character in value:
+        if character in TURKIC_DOTTED_AND_DOTLESS_I:
+            raise CorpusError(
+                f"{label} contains the Turkic dotted or dotless i "
+                f"({ord(character):#06x}), which NTFS case-folds onto I while "
+                f"this fold key keeps it distinct: {_quoted(value)}"
             )
     return value
 
@@ -907,7 +1009,7 @@ def _validate_relative_path(value: Any, label: str) -> str:
                 f"{label} has a component Windows would alias: {_quoted(value)}"
             )
     _reject_control_characters(value, label)
-    _assert_assigned(value, label)
+    _assert_foldable(value, label)
     if ":" in value:
         # On Windows, "C:/x" survives every relative-path check above yet
         # joins drive-absolute under pathlib, letting a row reference a file
@@ -1532,11 +1634,11 @@ class _TombstoneIndex:
         # directory: the order a bucket is tried in does not depend on which
         # tombstone is asking, only which spelling comes first does.
         for name in sorted(names):
-            # Screened before it is folded, for the reason _assert_assigned
-            # gives: an unassigned code point in an entry name would put the
-            # entry in one fold bucket on one interpreter and another on the
-            # next, which decides whether a tombstone is honoured.
-            _assert_assigned(name, "tree entry examined for a tombstone")
+            # Screened before it is folded, for the reason _assert_foldable
+            # gives: a name whose equivalence class the fold key gets wrong
+            # lands in one bucket here and another on the filesystem that
+            # resolves it, which decides whether a tombstone is honoured.
+            _assert_foldable(name, "tree entry examined for a tombstone")
             folded.setdefault(_path_fold(name), []).append(directory / name)
         if self._cache:
             self._directories[key] = folded
@@ -1827,12 +1929,13 @@ def _tree_content_paths(
                 directory, directory_relative, generations=generations
             ):
                 relative = candidate.relative_to(root).as_posix()
-                # Before the suffix predicate folds this name. A tree entry
-                # carrying an unassigned code point folds differently on
-                # different Unicode tables, so whether it is content — and so
-                # whether the closed world contains it — would depend on the
-                # verifier's interpreter rather than on the tree.
-                _assert_assigned(candidate.name, f"tree entry {_quoted(relative)}")
+                # Before the suffix predicate folds this name, and before
+                # the 8.3 model below reads its extension. A name the fold
+                # key and a real filesystem disagree about — an unassigned
+                # code point, a format control, a code point HFS+ ignores, a
+                # Turkic i NTFS folds onto I — would decide membership one
+                # way here and another on the host that resolves the tree.
+                _assert_foldable(candidate.name, f"tree entry {_quoted(relative)}")
                 # And before anything decides what kind of entry it is: a
                 # trailing dot or space aliases a directory as readily as a
                 # file, and the name is all this question needs.
@@ -1931,7 +2034,7 @@ def _assert_no_aliasing_root_component(
         for entry in _list_directory(
             current, "/".join(walked), generations=generations
         ):
-            _assert_assigned(entry.name, f"tree entry beside {_quoted(relative)}")
+            _assert_foldable(entry.name, f"tree entry beside {_quoted(relative)}")
             # The trailing-dot/space rule reaches here too, and it is not a
             # detail of tidiness: an entry named "rules " beside the pinned
             # "rules" is that root on Windows, holding whatever a producer

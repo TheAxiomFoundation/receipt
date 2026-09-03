@@ -1454,14 +1454,18 @@ def test_refuses_a_format_control_whatever_unicode_table_the_interpreter_carries
     which Python 3.11 ships, so the same journal was refused on 3.12 and
     accepted on 3.11 (peer review). The module pins Unicode 16.0's Cf set and
     refuses anything in it or anything the running table calls Cf.
+
+    The table moved to ``receipt._unicode_repertoire`` in S5-F2, so that
+    ``receipt.cli`` can escape the same set on its way to a terminal; its
+    contents are unchanged and this test is unchanged but for the import.
     """
 
     import unicodedata
 
-    from receipt.corpus import _FORMAT_CONTROL_RANGES
+    from receipt._unicode_repertoire import FORMAT_CONTROL_RANGES
 
     pinned = {
-        code for low, high in _FORMAT_CONTROL_RANGES for code in range(low, high + 1)
+        code for low, high in FORMAT_CONTROL_RANGES for code in range(low, high + 1)
     }
     assert 0x1343A in pinned
     running = {
@@ -4005,3 +4009,296 @@ def test_a_directory_changed_after_its_own_re_read_is_caught_going_back(
         "rules/benefit",
         "rules",
     ]
+
+
+ZERO_WIDTH_JOINER = "‍"
+COMBINING_GRAPHEME_JOINER = "͏"
+DOTLESS_SMALL_I = "ı"
+DOTTED_CAPITAL_I = "İ"
+
+
+#: The ``Default_Ignorable_Code_Point`` section of Unicode 14.0.0's
+#: DerivedCoreProperties.txt, verbatim, so the generator's self-check runs
+#: offline and the source of the shipped table is on the record beside it:
+#: https://www.unicode.org/Public/14.0.0/ucd/DerivedCoreProperties.txt
+#: Quoted exactly as published, which is why these lines run past the width
+#: the rest of this module keeps to — a re-wrapped quotation proves nothing.
+UCD_14_DEFAULT_IGNORABLE = """\
+00AD          ; Default_Ignorable_Code_Point # Cf       SOFT HYPHEN
+034F          ; Default_Ignorable_Code_Point # Mn       COMBINING GRAPHEME JOINER
+061C          ; Default_Ignorable_Code_Point # Cf       ARABIC LETTER MARK
+115F..1160    ; Default_Ignorable_Code_Point # Lo   [2] HANGUL CHOSEONG FILLER..HANGUL JUNGSEONG FILLER
+17B4..17B5    ; Default_Ignorable_Code_Point # Mn   [2] KHMER VOWEL INHERENT AQ..KHMER VOWEL INHERENT AA
+180B..180D    ; Default_Ignorable_Code_Point # Mn   [3] MONGOLIAN FREE VARIATION SELECTOR ONE..MONGOLIAN FREE VARIATION SELECTOR THREE
+180E          ; Default_Ignorable_Code_Point # Cf       MONGOLIAN VOWEL SEPARATOR
+180F          ; Default_Ignorable_Code_Point # Mn       MONGOLIAN FREE VARIATION SELECTOR FOUR
+200B..200F    ; Default_Ignorable_Code_Point # Cf   [5] ZERO WIDTH SPACE..RIGHT-TO-LEFT MARK
+202A..202E    ; Default_Ignorable_Code_Point # Cf   [5] LEFT-TO-RIGHT EMBEDDING..RIGHT-TO-LEFT OVERRIDE
+2060..2064    ; Default_Ignorable_Code_Point # Cf   [5] WORD JOINER..INVISIBLE PLUS
+2065          ; Default_Ignorable_Code_Point # Cn       <reserved-2065>
+2066..206F    ; Default_Ignorable_Code_Point # Cf  [10] LEFT-TO-RIGHT ISOLATE..NOMINAL DIGIT SHAPES
+3164          ; Default_Ignorable_Code_Point # Lo       HANGUL FILLER
+FE00..FE0F    ; Default_Ignorable_Code_Point # Mn  [16] VARIATION SELECTOR-1..VARIATION SELECTOR-16
+FEFF          ; Default_Ignorable_Code_Point # Cf       ZERO WIDTH NO-BREAK SPACE
+FFA0          ; Default_Ignorable_Code_Point # Lo       HALFWIDTH HANGUL FILLER
+FFF0..FFF8    ; Default_Ignorable_Code_Point # Cn   [9] <reserved-FFF0>..<reserved-FFF8>
+1BCA0..1BCA3  ; Default_Ignorable_Code_Point # Cf   [4] SHORTHAND FORMAT LETTER OVERLAP..SHORTHAND FORMAT UP STEP
+1D173..1D17A  ; Default_Ignorable_Code_Point # Cf   [8] MUSICAL SYMBOL BEGIN BEAM..MUSICAL SYMBOL END PHRASE
+E0000         ; Default_Ignorable_Code_Point # Cn       <reserved-E0000>
+E0001         ; Default_Ignorable_Code_Point # Cf       LANGUAGE TAG
+E0002..E001F  ; Default_Ignorable_Code_Point # Cn  [30] <reserved-E0002>..<reserved-E001F>
+E0020..E007F  ; Default_Ignorable_Code_Point # Cf  [96] TAG SPACE..CANCEL TAG
+E0080..E00FF  ; Default_Ignorable_Code_Point # Cn [128] <reserved-E0080>..<reserved-E00FF>
+E0100..E01EF  ; Default_Ignorable_Code_Point # Mn [240] VARIATION SELECTOR-17..VARIATION SELECTOR-256
+E01F0..E0FFF  ; Default_Ignorable_Code_Point # Cn [3600] <reserved-E01F0>..<reserved-E0FFF>
+"""
+
+
+def test_refuses_a_tree_entry_a_target_filesystem_would_ignore_a_code_point_in(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5-F2: the fold key is not a proof about the target filesystem.
+
+    HFS+ ignores default-ignorable code points when it compares names, so
+    ``rules/evil.y\\u200dml`` and ``rules/evil.yml`` are one file there. Here
+    they are two: the fold key is NFC plus case folding, which preserves the
+    joiner, so the first name carries the suffix ``.y\\u200dml``, is not
+    content under a ``.yml`` pin, and was skipped by the sweep — while on the
+    filesystem the module's whole portability model is about, it opens a
+    content file that no journal row binds and no sweep ever saw.
+
+    The screen refuses the name instead of trying to decide which
+    filesystem's equivalence the auditor will use, because it cannot know:
+    the clone is verified on one host and resolved on another.
+
+    Without the screen this verification returns a CorpusVerification with
+    the file sitting in the tree, unbound. The 8.3 rule from S5-F3 refuses
+    the same name a few lines later, for the unrelated reason that its
+    extension carries a non-ASCII character — so disabling this screen alone
+    on the finished head moves the refusal rather than removing it, and it
+    is the *skip* that was the defect.
+    """
+
+    write_tree(tmp_path)
+    (tmp_path / "rules" / f"evil.y{ZERO_WIDTH_JOINER}ml").write_text("name: evil\n")
+    spec = corpus_spec(content_suffixes=(".yaml", ".yml"))
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, render_journal(journal_rows()), spec=spec)
+    assert str(caught.value) == (
+        "tree entry 'rules/evil.y\\u200dml' contains a Unicode format control "
+        "(0x200d): 'evil.y\\u200dml'"
+    )
+
+
+def test_refuses_a_tombstone_listing_entry_a_filesystem_may_ignore(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S5-F2: the tombstone search buckets by the same fold key.
+
+    A tombstone is honoured when no fold-equal spelling survives in a
+    listing. ``apply-manifest.jso\\u200dn`` is not fold-equal to
+    ``apply-manifest.json`` here — the joiner survives NFC and case folding
+    — so the bucket lookup misses it and the verdict names the path as
+    removed. On HFS+ that entry *is* the removed path: the file the journal
+    says is gone still answers to the name it was retired under.
+
+    The entry is injected into the listing rather than written, for the
+    reason ``_late_survivor_scandir`` gives: what has to be held against is
+    a filesystem that emits the name, and injecting it says the same thing
+    on every host. Without the screen this verification passes and reports
+    ``retired/apply-manifest.json`` under removedPaths.
+    """
+
+    body = '{"applied": true}\n'
+    write_tree(tmp_path)
+    (tmp_path / "retired").mkdir()
+    rows = _tombstone_rows("retired/apply-manifest.json", body)
+    monkeypatch.setattr(
+        os,
+        "scandir",
+        _scandir("retired", extra=[f"apply-manifest.jso{ZERO_WIDTH_JOINER}n"]),
+    )
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+    assert str(caught.value) == (
+        "tree entry examined for a tombstone contains a Unicode format control "
+        "(0x200d): 'apply-manifest.jso\\u200dn'"
+    )
+
+
+def test_refuses_two_declared_paths_hfs_plus_would_call_one_file(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5-F2: the default-ignorable class is wider than the Cf class.
+
+    U+034F COMBINING GRAPHEME JOINER is default-ignorable and *not* a format
+    control, so the Cf screen never saw it while HFS+ ignores it exactly as
+    it ignores U+200D. A journal binding both ``rules/tax/rate.yaml`` and
+    ``rules/tax/ra\\u034fte.yaml`` therefore declares two content files that
+    are one file on that filesystem, and ``_reject_aliasing_paths`` could not
+    pair them because their fold keys differ.
+
+    This is the same hazard that function refuses for case and normalization
+    aliases, one class further out: a closed world whose membership depends
+    on which filesystem the auditor resolved the tree on is not closed. Both
+    files are real here and both hash, so without the screen this
+    verification passes and reports a closed world of four content files
+    that no HFS+ consumer can hold.
+    """
+
+    smuggled = f"rules/tax/ra{COMBINING_GRAPHEME_JOINER}te.yaml"
+    content = dict(CONTENT)
+    content[smuggled] = "name: rate\nvalue: 0.99\n"
+    write_tree(tmp_path, content=content)
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows(content=content)), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        "journal row 4 path contains a code point a target filesystem may "
+        f"ignore when comparing names (0x034f): '{smuggled}'"
+    )
+
+
+def test_refuses_a_dotless_i_beside_the_name_ntfs_folds_it_onto(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5-F2: NTFS's upcase table and ``casefold`` disagree about i.
+
+    NTFS maps U+0131 DOTLESS SMALL I onto ASCII ``I`` in its upcase table,
+    so ``rules/tax/evıl.yaml`` and ``rules/tax/evil.yaml`` are one file on an
+    NTFS volume. ``str.casefold`` keeps them apart, and so does every fold
+    key in this module, so a journal can bind both and a POSIX verifier will
+    find both — while the consumer whose host actually resolves the tree can
+    hold only one of them, and cannot tell which of the two digests the file
+    it has is supposed to match.
+
+    Refusing the pair is the only answer that does not require choosing
+    whose case-folding this module implements. Adopting NTFS's would fold
+    two names together that a POSIX host genuinely keeps apart, which breaks
+    the closed world in the other direction.
+
+    Both files are real and both are bound, so without the screen this
+    verification returns a CorpusVerification over five content files.
+    """
+
+    content = dict(CONTENT)
+    content["rules/tax/evil.yaml"] = "name: evil\nvalue: 1\n"
+    content[f"rules/tax/ev{DOTLESS_SMALL_I}l.yaml"] = "name: evil\nvalue: 2\n"
+    write_tree(tmp_path, content=content)
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows(content=content)), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        "journal row 3 path contains the Turkic dotted or dotless i "
+        "(0x0131), which NTFS case-folds onto I while this fold key keeps it "
+        f"distinct: 'rules/tax/ev{DOTLESS_SMALL_I}l.yaml'"
+    )
+
+
+def test_refuses_a_declared_path_carrying_the_turkic_dotted_capital_i(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5-F2: the pair is refused, not only the half that reads as i.
+
+    U+0130 LATIN CAPITAL LETTER I WITH DOT ABOVE is the other half of the
+    Turkic pair. NTFS's upcase table maps it onto ASCII ``I`` too, so
+    ``rules/tax/İ.yaml`` and ``rules/tax/i.yaml`` are one file there while
+    ``casefold`` gives U+0130 the two-character key ``i̇`` and keeps them
+    distinct.
+
+    Pinned separately from its sibling because a screen that refused only
+    U+0131 would satisfy that test and leave this spelling — the one a
+    Turkish-locale producer is far more likely to write — going through.
+    The file is real, so the name is screened as a tree entry as well as a
+    journal path; the journal path is reached first. Without the screen this
+    verification passes over a corpus whose closed world an NTFS consumer
+    cannot reproduce.
+    """
+
+    content = dict(CONTENT)
+    content[f"rules/tax/{DOTTED_CAPITAL_I}.yaml"] = "name: dotted\nvalue: 1\n"
+    write_tree(tmp_path, content=content)
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows(content=content)), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        "journal row 4 path contains the Turkic dotted or dotless i "
+        "(0x0130), which NTFS case-folds onto I while this fold key keeps it "
+        f"distinct: 'rules/tax/{DOTTED_CAPITAL_I}.yaml'"
+    )
+
+
+def test_the_shipped_ignorable_table_is_what_its_generator_produces() -> None:
+    """Binds S5-F2: the pinned property table must be checkable, not asserted.
+
+    ``unicodedata`` exposes no ``Default_Ignorable_Code_Point`` query at all,
+    so the table cannot be re-derived from the running interpreter the way
+    the unassigned ranges can. It is parsed from the published property file
+    instead, and the 27 lines of that file are carried here verbatim — the
+    ``Default_Ignorable_Code_Point`` section of
+
+        https://www.unicode.org/Public/14.0.0/ucd/DerivedCoreProperties.txt
+
+    — so the check runs offline and the source text sits beside the claim it
+    supports. Parsing them must reproduce the shipped tuple exactly: 17
+    ranges, 4,174 code points, with the four Mongolian lines merged into one
+    range and the seven tag-and-variation-selector lines into another.
+
+    Without the fix there is no table to check. A hand-edited one is what
+    this catches: an entry dropped, a range widened, or the merge done wrong.
+    """
+
+    from receipt._unicode_repertoire import (
+        DEFAULT_IGNORABLE_RANGES,
+        generate_default_ignorable_ranges,
+    )
+
+    assert generate_default_ignorable_ranges(UCD_14_DEFAULT_IGNORABLE) == (
+        DEFAULT_IGNORABLE_RANGES
+    )
+    assert len(DEFAULT_IGNORABLE_RANGES) == 17
+    assert sum(last - first + 1 for first, last in DEFAULT_IGNORABLE_RANGES) == 4174
+    assert (
+        len(
+            [
+                line
+                for line in UCD_14_DEFAULT_IGNORABLE.splitlines()
+                if "; Default_Ignorable_Code_Point" in line
+            ]
+        )
+        == 27
+    )
+
+
+def test_the_shipped_ignorable_table_is_sorted_disjoint_and_in_range() -> None:
+    """Binds S5-F2: ``is_default_ignorable`` bisects, so it assumes all three.
+
+    The lookup finds the last range starting at or below a code point and
+    looks no further, which is only correct for ranges that are sorted and
+    do not overlap. Adjacency is checked too: two touching ranges would mean
+    the generator's merge failed to join what the file split, and a hand edit
+    that split a range is exactly what this catches.
+    """
+
+    from receipt._unicode_repertoire import (
+        DEFAULT_IGNORABLE_RANGES,
+        is_default_ignorable,
+    )
+
+    assert DEFAULT_IGNORABLE_RANGES
+    previous = -1
+    for first, last in DEFAULT_IGNORABLE_RANGES:
+        assert 0 <= first <= last <= 0x10FFFF
+        assert first > previous + 1
+        previous = last
+    for first, last in DEFAULT_IGNORABLE_RANGES:
+        assert is_default_ignorable(first) and is_default_ignorable(last)
+        assert not is_default_ignorable(first - 1)
+        assert not is_default_ignorable(last + 1)
+    # The two classes the screen keeps apart, and one ordinary character.
+    assert is_default_ignorable(0x200D) and is_default_ignorable(0x034F)
+    assert not is_default_ignorable(ord("a"))
+    assert not is_default_ignorable(0x0131)
