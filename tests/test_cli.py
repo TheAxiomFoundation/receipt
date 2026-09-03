@@ -1155,3 +1155,151 @@ def test_the_json_renderer_escapes_the_same_classes_by_itself() -> None:
     )
     rendered = json.dumps({"failure": covered}, indent=2, sort_keys=True)
     assert not _terminal_controls(rendered)
+
+
+# --- second fresh gate, round one: the two classes the escaping missed ------
+
+
+RIGHT_TO_LEFT_OVERRIDE = "‮"
+
+
+def _build_pass_result(spec_path: pathlib.Path):
+    """A minimal PASS verdict carrying one caller-chosen spec path.
+
+    ``passes=()`` makes ``result.ok`` true — ``all([])`` — and ``chain=None``
+    leaves the witness clause empty, so what the renderer produces is the
+    fixed PASS text plus exactly the four result strings at the top. The spec
+    path is one of them, and a PASS prints it as readily as a FAIL does,
+    which is the half of S5-F5 that does not need the run to fail.
+    """
+
+    from receipt.verify import VerifyResult
+
+    return VerifyResult(
+        spec_name="receipt test corpus",
+        spec_path=spec_path,
+        spec_sha256="0" * 64,
+        root=spec_path.parent.parent,
+        receipt_version="test",
+        producer_spki_sha256="0" * 64,
+        passes=(),
+        chain=None,
+        corpus=None,
+    )
+
+
+def test_a_spec_path_byte_that_did_not_decode_cannot_reach_the_terminal() -> None:
+    """Binds S5-F5: an undecodable filename byte is a lone surrogate, not a control.
+
+    POSIX filenames are bytes. A byte the filesystem encoding cannot decode
+    comes back from ``os.fsdecode`` as a lone surrogate under
+    ``surrogateescape`` — ``b"evil\\x9b.py"`` becomes ``"evil\\udc9b.py"`` —
+    and that string carries no C0, DEL, C1 or line-separator code point at
+    all. So it went through the helper untouched, and the same
+    ``surrogateescape`` handler on the way out turned it back into the byte
+    0x9B, which is CSI: the single-byte introducer an 8-bit-clean terminal
+    reads exactly as ``ESC [``.
+
+    The path is the *spec* path, and a PASS prints that line as readily as a
+    FAIL does, so this needed no failing run to reach an auditor's terminal.
+
+    Rendered directly rather than through a real clone because macOS will
+    not create the filename: APFS refuses a name that is not valid UTF-8
+    with EILSEQ, while ext4 stores the bytes without comment. The verifier
+    has to hold on the filesystems that allow it.
+
+    Without the fix ``text`` still carries U+DC9B and the encoded output
+    still carries the raw 0x9B byte, which is exactly what the last two
+    assertions check.
+    """
+
+    import os
+
+    from receipt.cli import _format_text
+
+    name = os.fsdecode(b"evil\x9b.py")
+    assert any(0xD800 <= ord(character) <= 0xDFFF for character in name)
+    text = _format_text(_build_pass_result(pathlib.Path("/repo/verification") / name))
+
+    assert "VERDICT: PASS — custody and corpus binding" in text
+    assert "evil\\udc9b.py" in text
+    assert not [c for c in text if 0xD800 <= ord(c) <= 0xDFFF]
+    assert b"\x9b" not in text.encode("utf-8", errors="surrogateescape")
+
+
+def test_a_bidi_override_in_a_release_manifest_name_is_escaped(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Binds S5-F5: a format control redraws a line without being a control.
+
+    U+202E RIGHT-TO-LEFT OVERRIDE reverses everything after it, so text a
+    reader takes for the library's own words can be spelled by whoever chose
+    the filename. ``receipt.release_chain`` names an unknown file in the
+    closed release manifest directory by interpolating ``entry.name``
+    directly — its wording is pinned byte for byte by a differential harness
+    and is not the place to fix this — and the renderer let the code point
+    through because it is not a C0 control.
+
+    ``receipt.corpus`` refuses these on the way in, at the schema boundary.
+    The custody half has no such screen, which is why the renderer needs one.
+
+    Without the fix the raw U+202E is in the output and the auditor reads
+    the refusal reversed from the filename onward.
+    """
+
+    (repo / "releases/manifests" / f"notes{RIGHT_TO_LEFT_OVERRIDE}.txt").write_text("x")
+    assert run(repo) == EXIT_FAIL
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert RIGHT_TO_LEFT_OVERRIDE not in captured.err
+    assert "notes\\u202e.txt" in captured.err
+    verdict_lines = [
+        line for line in captured.err.splitlines() if line.startswith("VERDICT")
+    ]
+    assert verdict_lines == ["VERDICT: FAIL — custody"]
+
+
+def test_terminal_safe_escapes_lone_surrogates_and_format_controls() -> None:
+    """Binds S5-F5: the two classes added, over their whole extent.
+
+    Every lone surrogate and every code point in the pinned Unicode 16.0
+    ``Cf`` table must leave as its Python escape, and the escape must be
+    ``repr``'s own spelling — including the letter forms ``\\t``, ``\\n`` and
+    ``\\r``, which is what keeps a name reading the same here as it does
+    through ``receipt.corpus._quoted``. The spelling is computed rather than
+    taken from ``repr``, so that a code point a future table called
+    printable would still be escaped; this asserts the two agree today.
+
+    The running interpreter's own ``Cf`` answer widens the set, which is the
+    rule ``receipt.corpus`` applies at the schema boundary, so a control
+    assigned after Unicode 16.0 is escaped by whichever of the two tables
+    knows about it.
+
+    Without the fix every assertion over the two classes fails on its first
+    code point: the helper returns the character unchanged.
+    """
+
+    import unicodedata
+
+    from receipt.cli import _FORMAT_CONTROL_CODES, _python_escape, _terminal_safe
+
+    for code in (*range(0xD800, 0xE000), *sorted(_FORMAT_CONTROL_CODES)):
+        escaped = _terminal_safe(chr(code))
+        assert escaped == _python_escape(code) == repr(chr(code))[1:-1]
+        assert chr(code) not in escaped
+    assert _terminal_safe("\udc9b") == "\\udc9b"
+    assert _terminal_safe("‮") == "\\u202e"
+    assert _terminal_safe("​") == "\\u200b"
+    assert _terminal_safe("\U000e0001") == "\\U000e0001"
+    # The running table widens the pinned one; on every supported
+    # interpreter it is a subset of it, and this holds either way.
+    running_only = [
+        code
+        for code in range(0x110000)
+        if unicodedata.category(chr(code)) == "Cf" and code not in _FORMAT_CONTROL_CODES
+    ]
+    for code in running_only:
+        assert _terminal_safe(chr(code)) == _python_escape(code)
+    # Untouched: ordinary text, including characters that merely look exotic.
+    for text in ("rules/tax/rate.yaml", "café", "中文", "\U0001F600", "a\\b", ""):
+        assert _terminal_safe(text) == text
