@@ -107,12 +107,13 @@ Deliberately outside the mutation contract:
   ``freetsa-root-2016`` and ``digicert-trusted-root-g4`` and the spec pins
   exactly those two, so no case here reaches the refusal;
 - the baseline runs against whatever ``openssl`` is on the path; the port
-  refuses one that is not OpenSSL 1.1.1 or newer, once per process and before
+  refuses one that is not OpenSSL 3.0 or newer, once per process and before
   any bundle is read, because it counts a pinned root's certificates with
-  ``storeutl`` and LibreSSL has no such subcommand.  Both sides of every
-  comparison here run under the same interpreter and the same ``openssl``, and
-  a machine that fails the check runs neither, so no case here can differ on
-  it;
+  ``storeutl`` and verifies an available token with ``-no-CAstore``: LibreSSL
+  has neither at any version, and an OpenSSL before 3.0 has not the option.
+  Both sides of every comparison here run under the same interpreter and the
+  same ``openssl``, and a machine that fails the check runs neither, so no
+  case here can differ on it;
 - the baseline lets two anchors of one bundle allow the same signer; the port
   refuses that bundle at load, because one authority under two anchor ids is
   satisfied twice by one response.  ``tsa-anchors-v1`` configures one anchor,

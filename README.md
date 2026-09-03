@@ -36,7 +36,7 @@ receipt verify --spec path/to/your/spec.py
 
 ## Install
 
-Requires Python 3.11+, `git`, and OpenSSL 1.1.1 or newer as `openssl` on the path. LibreSSL, the stock `/usr/bin/openssl` on macOS, lacks `storeutl` and is refused before any trust bundle is read; install OpenSSL (for example `brew install openssl`) and put its `openssl` first on the path.
+Requires Python 3.11+, `git`, and OpenSSL 3.0 or newer as `openssl` on the path — verifying a token passes `-no-CAstore`, which older releases do not have, and counting a pinned root's certificates uses `storeutl`. LibreSSL, the stock `/usr/bin/openssl` on macOS, has neither and is refused before any trust bundle is read; install OpenSSL (for example `brew install openssl`) and put its `openssl` first on the path.
 
 ```bash
 uv pip install receipt

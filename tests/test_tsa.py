@@ -3114,9 +3114,10 @@ def substitute_openssl_version(monkeypatch: pytest.MonkeyPatch, banner: str) -> 
 @pytest.mark.parametrize(
     ("banner", "supported"),
     [
-        ("OpenSSL 1.1.1w  11 Sep 2023", True),
+        ("OpenSSL 3.0.0 7 sep 2021", True),
         ("OpenSSL 3.0.13 30 Jan 2024", True),
         ("OpenSSL 3.6.3 9 Jun 2026 (Library: OpenSSL 3.6.3 9 Jun 2026)", True),
+        ("OpenSSL 1.1.1w  11 Sep 2023", False),
         ("OpenSSL 1.1.0h  27 Mar 2018", False),
         ("OpenSSL 1.0.2u  20 Dec 2019", False),
         ("LibreSSL 3.3.6", False),
@@ -3126,14 +3127,18 @@ def substitute_openssl_version(monkeypatch: pytest.MonkeyPatch, banner: str) -> 
     ],
 )
 def test_the_openssl_version_gate_reads_the_banner(banner: str, supported: bool) -> None:
-    """S3-F3: what the preflight accepts, stated one banner at a time.
+    """S4-F3: what the preflight accepts, stated one banner at a time.
 
-    ``storeutl`` arrived in OpenSSL 1.1.0 and 1.1.1 is the first release with
-    the ``-attime`` and ``ts`` behaviour the differential harness pins, so
-    1.1.1 is the floor. The letter suffix real releases carry (``1.1.1w``) is
-    not part of the comparison, and an implementation that is not OpenSSL is
-    refused on its name however high its own version runs -- LibreSSL 4.1.0
-    still has no ``storeutl``.
+    The floor is 3.0, and 3.0.0 exactly is on the accepting side of it.
+    ``storeutl`` arrived earlier, in 1.1.0, so it is not what sets the floor:
+    verifying a token passes ``-no-CAstore``, whose store the OpenSSL 3.0
+    release notes introduce, and 1.1.1 -- the floor until this round, and the
+    version the README named as the minimum -- passed the gate and then
+    refused every valid witness on an unknown option. The letter suffix real
+    releases carry (``1.1.1w``) is not part of the comparison, and an
+    implementation that is not OpenSSL is refused on its name however high its
+    own version runs: LibreSSL 4.1.0 has neither the subcommand nor the
+    option.
     """
 
     assert tsa_module._supported_openssl_version(banner) is supported
@@ -3173,30 +3178,39 @@ def test_refuses_an_openssl_that_is_not_openssl_before_reading_a_bundle(
     with pytest.raises(TsaError) as caught:
         verify_tree(tree)
     assert str(caught.value) == (
-        "receipt requires OpenSSL 1.1.1 or newer as `openssl` on the path; "
+        "receipt requires OpenSSL 3.0 or newer as `openssl` on the path; "
         "found: LibreSSL 3.3.6"
     )
     assert read_roots == []
 
 
-def test_refuses_an_openssl_older_than_the_storeutl_the_count_needs(
+def test_refuses_the_openssl_that_used_to_be_the_documented_minimum(
     tmp_path: pathlib.Path,
     local_anchors: tuple[LocalAnchor, ...],
     monkeypatch: pytest.MonkeyPatch,
     openssl_preflight_uncached: Any,
 ) -> None:
-    """S3-F3: an OpenSSL too old for the count is refused the same way.
+    """S4-F3: the gate admits only what the whole token path can run on.
 
-    The gate is a version floor and not a LibreSSL blocklist: an OpenSSL that
-    predates the behaviour the count and the harness depend on is refused by
-    the same message, naming the banner it found.
+    The gate is a version floor and not a LibreSSL blocklist. It used to sit
+    at 1.1.1, which the README then named as the supported minimum -- but
+    verifying an available token passes ``openssl cms -verify -no-CAstore``,
+    an OpenSSL 3.0 option, so a machine at that documented minimum was
+    admitted here and then refused every valid witness on an unknown option
+    somewhere much deeper. 1.1.1 is now refused by name, before any bundle is
+    read, and by the same message every unusable build gets.
+
+    A substituted banner is all a test can do about a version this machine
+    does not have; what it cannot show is that the accepted floor works. The
+    project's CI job does that instead, running this whole suite against
+    ``ubuntu-latest``'s real OpenSSL 3.0.
     """
 
     tree = build_witness_tree(tmp_path, local_anchors[:1])
-    substitute_openssl_version(monkeypatch, "OpenSSL 1.1.0h  27 Mar 2018\n")
+    substitute_openssl_version(monkeypatch, "OpenSSL 1.1.1w  11 Sep 2023\n")
     with pytest.raises(TsaError) as caught:
         verify_tree(tree)
     assert str(caught.value) == (
-        "receipt requires OpenSSL 1.1.1 or newer as `openssl` on the path; "
-        "found: OpenSSL 1.1.0h  27 Mar 2018"
+        "receipt requires OpenSSL 3.0 or newer as `openssl` on the path; "
+        "found: OpenSSL 1.1.1w  11 Sep 2023"
     )

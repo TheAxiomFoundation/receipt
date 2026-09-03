@@ -92,12 +92,16 @@ first octet of a policy OID as its combined first two arcs, so a first
 subidentifier spanning several octets (2.999.3) decoded wrongly.
 
 And it has a prerequisite the baseline did not: ``openssl`` on the path must
-be OpenSSL 1.1.1 or newer, checked once per process before any trust bundle
-is read, because the certificate count above is OpenSSL's own ``storeutl``
-and LibreSSL -- the stock ``/usr/bin/openssl`` on macOS -- has no such
-subcommand.  A machine that fails the check is refused there rather than told
-that its root PEM cannot be counted; no portable count is offered in its
-place.
+be OpenSSL 3.0 or newer, checked once per process before any trust bundle is
+read.  The certificate count above is OpenSSL's own ``storeutl``, and
+verifying an available token passes ``openssl cms -verify -no-CAstore``,
+whose default CA store arrived in OpenSSL 3.0; LibreSSL -- the stock
+``/usr/bin/openssl`` on macOS -- has neither at any version.  A machine that
+fails the check is refused there, on the banner it reports, rather than told
+that its root PEM cannot be counted or that OpenSSL does not know an option;
+no portable count is offered in its place.  The floor was 1.1.1 until a
+review observed that ``-no-CAstore`` made the documented minimum a version
+which passed the check and then refused every valid witness.
 
 ``tests/test_tsa.py`` binds all of these.  Because every bundle anchor is now
 identity-checked at load, ``_select_anchor``'s own identity refusal can no
@@ -480,18 +484,28 @@ def _run_openssl(
 #: The first line of ``openssl version`` for a build this module can use.
 _OPENSSL_VERSION_RE = re.compile(r"\AOpenSSL ([0-9]+)\.([0-9]+)\.([0-9]+)")
 
-#: ``storeutl`` arrived in OpenSSL 1.1.0; 1.1.1 is the first release with the
-#: ``-attime`` and ``ts`` behaviour the differential harness pins.
-_MINIMUM_OPENSSL = (1, 1, 1)
+#: OpenSSL 3.0 or newer, for two reasons.  Verifying an available token runs
+#: ``openssl cms -verify ... -no-CAstore``, and the default CA store that
+#: option turns off is the OSSL_STORE-backed ``X509_LOOKUP_store`` added in
+#: OpenSSL 3.0 (its own CHANGES file), so an older ``openssl`` has no such
+#: option: with the floor at 1.1.1 this module's documented minimum was a
+#: version that passed the check and then refused every valid witness on an
+#: unknown option (peer review, fourth gate round four).  And
+#: ``_certificate_count`` reads a pinned root through ``openssl storeutl``,
+#: whose answer for a file holding no PEM object this module pins from
+#: behaviour observed on 3.0 and 3.6 and never on 1.1.1.  ``storeutl`` itself
+#: arrived in 1.1.0, so it is not what sets the floor.
+_MINIMUM_OPENSSL = (3, 0, 0)
 
 
 def _supported_openssl_version(line: str) -> bool:
     """Whether ``line`` is an ``openssl version`` banner this module can use.
 
-    True only for OpenSSL 1.1.1 or newer.  LibreSSL -- the stock
+    True only for OpenSSL 3.0 or newer.  LibreSSL -- the stock
     ``/usr/bin/openssl`` on macOS -- announces itself as ``LibreSSL 3.3.6``
     and never matches whatever its version number, because it is a different
-    implementation and has no ``storeutl`` at any version.
+    implementation and has neither ``storeutl`` nor ``-no-CAstore`` at any
+    version.
     """
 
     match = _OPENSSL_VERSION_RE.match(line)
@@ -509,9 +523,14 @@ def _require_supported_openssl() -> None:
     machine whose ``openssl`` is LibreSSL refused a perfectly good
     one-certificate bundle -- and an unavailable witness that verifies no
     token at all -- with a message that blamed the file (peer review, fourth
-    gate round three).  Gated on the version line rather than by probing for
-    ``storeutl``, so the refusal names the real problem, and run before any
-    bundle is trusted rather than at the point a count is wanted.
+    gate round three).  Gated on the version line rather than by probing for a
+    subcommand or an option, so the refusal names the real problem, and run
+    before any bundle is trusted rather than at the point a count is wanted.
+
+    The floor is what ``_MINIMUM_OPENSSL`` says and not what ``storeutl``
+    alone would need: verifying a token also passes ``-no-CAstore``, so a
+    check that admitted 1.1.1 admitted a build that then refused every valid
+    witness on an unknown option (peer review, fourth gate round four).
 
     No portable counting path is offered instead: a pattern of ours miscounted
     three review rounds running, and the count has to be the same parser
@@ -524,6 +543,13 @@ def _require_supported_openssl() -> None:
     anchor's root material.  A missing ``openssl`` raises the ported
     "openssl is required to verify RFC 3161 tokens" from ``_run_openssl``,
     which is left to propagate.
+
+    ``tests/test_tsa.py`` binds the parser one banner at a time by
+    substituting the answer to ``openssl version``, which says what this
+    module accepts but nothing about what the accepted build can do.  The
+    exercise of the floor itself is the project's CI job: it runs the whole
+    offline suite -- every token path in it -- on ``ubuntu-latest``, whose
+    ``openssl`` is a 3.0 release, against a real build at the minimum.
     """
 
     banner = _run_openssl(["version"])
@@ -532,7 +558,7 @@ def _require_supported_openssl() -> None:
     line = lines[0].strip() if lines else ""
     if not _supported_openssl_version(line):
         raise TsaError(
-            "receipt requires OpenSSL 1.1.1 or newer as `openssl` on the path; "
+            "receipt requires OpenSSL 3.0 or newer as `openssl` on the path; "
             f"found: {line}"
         )
 
