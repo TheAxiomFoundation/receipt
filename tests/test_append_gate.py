@@ -81,7 +81,8 @@ for" and tracked as #43 rather than bound by a test here.
 
 Docstrings labelled S5-F1 onward name a fifth gate's first round, numbering
 from one again: S5-F1 the ignored files the surface classification's untracked
-listing excludes.
+listing excludes, S5-F2 the caching settings this verifier read and believed
+rather than overriding on the reads they decide.
 
 The fixture is a local git repository built from scratch, and no network is
 used anywhere here. Most of it holds a README and no manifests, so the gate's
@@ -1512,160 +1513,294 @@ def test_the_push_path_refuses_a_non_authoritative_checkout(
     assert str(refusal.value) == message
 
 
-CLASSIFICATION_SETTINGS = [
-    (
-        "core.fsmonitor",
-        "true",
-        "working-tree changes cannot be classified: core.fsmonitor is enabled "
-        "in this checkout, and git's classification would trust it",
-    ),
-    (
-        "core.trustctime",
-        "false",
-        "working-tree changes cannot be classified: core.trustctime is false "
-        "in this checkout, so git's stat cache can call a rewritten file "
-        "unchanged",
-    ),
-    (
-        "core.checkStat",
-        "minimal",
-        "working-tree changes cannot be classified: core.checkStat is minimal "
-        "in this checkout, so git's stat cache ignores the fields a same-size "
-        "rewrite changes",
-    ),
-    (
-        "core.untrackedCache",
-        "true",
-        "working-tree changes cannot be classified: core.untrackedCache is "
-        "enabled in this checkout, so the untracked listing this "
-        "classification reads would come from a cache",
-    ),
-]
+def a_lying_file_system_monitor(candidate: Candidate) -> None:
+    """Point ``core.fsmonitor`` at a hook that reports nothing ever changes.
 
-CLASSIFICATION_IDS = ["fsmonitor", "trustctime", "checkStat", "untrackedCache"]
+    The v2 hook protocol is one line of output: a token git hands back on the
+    next query, followed by the NUL-separated paths that changed since the
+    token it was given. A hook that prints a token and no paths tells git that
+    nothing has changed, and git keeps ``CE_FSMONITOR_VALID`` on every entry
+    and reports the whole working tree clean without stat-ing any of it. It is
+    the oldest of the four caching arrangements and the most complete: no
+    restored mtime, no matching size, nothing arranged about the file at all.
+
+    One ``git status`` warms it, because the valid bits reach the index when a
+    command writes the index.
+    """
+
+    hook = candidate.root / ".git" / "hooks" / "quiet-monitor"
+    hook.write_text("#!/bin/sh\nprintf '1788400000000000000'\n", encoding="utf-8")
+    hook.chmod(0o755)
+    git(candidate.root, "config", "core.fsmonitor", ".git/hooks/quiet-monitor")
+    git(candidate.root, "status", "--porcelain")
 
 
-@pytest.mark.parametrize(
-    ("key", "value", "message"), CLASSIFICATION_SETTINGS, ids=CLASSIFICATION_IDS
-)
-def test_a_checkout_whose_changes_cannot_be_classified_is_refused(
-    tmp_path: pathlib.Path, key: str, value: str, message: str
+def test_a_lying_file_system_monitor_cannot_hide_a_ledger_rewrite(
+    tmp_path: pathlib.Path,
 ) -> None:
-    """Binds S4R4-F5. Refusing the assume-unchanged and skip-worktree flags
-    covers one entry marked by hand; the surface classification still trusted
-    git's stat cache for every other path, and four checkout settings decide
-    what that cache is allowed to skip.
+    """Binds S5-F2 for the setting the earlier guard refused first. The whole
+    surface classification is ``git diff`` plus ``git ls-files --others``, and
+    a monitor git trusts answers both without looking at the tree: the ledger
+    is rewritten on disk, the gate file is added beside it, and the proposal is
+    gate-only — returning ``DATA_SURFACE unchanged`` before the ledger, the
+    frozen prefix, the row bindings and the release history are read.
 
-    With ``core.fsmonitor`` set, git keeps ``CE_FSMONITOR_VALID`` on a path a
-    monitor did not report and reports it clean whatever the file now holds.
-    With ``core.trustctime`` false the inode change time leaves the stat
-    comparison, and with ``core.checkStat`` minimal everything but size and
-    whole-second mtime does, so a same-size rewrite whose mtime is restored is
-    not a change git will look for. With ``core.untrackedCache`` the untracked
-    half of the changed set — ``git ls-files --others`` — is answered from a
-    cached directory listing. Under any of them a ledger rewritten beside a
-    gate file classifies gate-only, and that exit returns before the frozen
-    prefix, the append-only diff, the row bindings and the release history are
-    read at all.
+    Refusing the setting was the earlier answer and it refused the checkout
+    rather than the proposal. The reads themselves now spell
+    ``core.fsmonitor=false`` on their own command lines, so the monitor is not
+    consulted for them however the checkout is configured, and the tree is
+    classified from the working tree it actually has.
 
-    The tree here is that proposal. Measured at 02fada3 with the guard
-    removed, for all four parameters: against a base it is refused as ``mixed
-    data/gate proposal is forbidden`` — on this checkout, where no monitor and
-    no cache is actually in place to hide the rewrite — and on the push path
-    it is accepted as ``thesis-facts append check OK: 3 rows, immutable prefix
-    1``. The guard's answer comes first, because a checkout whose changes
-    cannot be classified says so before any verdict about what changed in it —
-    the exception the modes guard beside it already has, shared rather than
-    added to. Both paths are covered: the push path has no classification of
-    its own, and the settings are just as unverifiable there."""
+    Measured at 5c2743d with ``WORKING_TREE_SCAN_OPTIONS`` emptied and the
+    guard already gone: ``thesis-facts append check OK: gate-only proposal;
+    DATA_SURFACE unchanged; GATE_SURFACE changes=['scripts/check_append.py']``.
+    """
 
     candidate = base_repository(tmp_path)
+    a_lying_file_system_monitor(candidate)
     append_one_row(candidate)
     add_gate_file(candidate)
-    git(candidate.root, "config", key, value)
 
     with pytest.raises(AppendError) as refusal:
         run_gate(candidate)
-    assert str(refusal.value) == message
+    assert str(refusal.value) == (
+        "mixed data/gate proposal is forbidden: DATA_SURFACE changes="
+        "['ledger/official_observations.jsonl']; GATE_SURFACE changes="
+        f"['{GATE_FILE}']; split them into separate pull requests"
+    )
 
-    with pytest.raises(AppendError) as push:
-        run_push_gate(candidate)
-    assert str(push.value) == message
+
+def rewrite_the_ledger_past_a_minimal_stat_cache(candidate: Candidate) -> None:
+    """A same-size ledger rewrite git's reduced stat comparison will not see.
+
+    ``core.checkStat=minimal`` leaves git comparing an entry's whole-second
+    mtime and its size and nothing else — not the inode, not the change time,
+    which ``core.trustctime=false`` drops as well. So the rewrite is written to
+    a sibling carrying the recorded mtime and renamed over the ledger: same
+    size, same mtime, a different inode, and no change git will look for.
+
+    The recorded mtime is set into the past before the index records it, so
+    that the entry is not racy — a file whose mtime is not older than the index
+    is re-read from content whatever the stat comparison says, which is the one
+    thing that would make this arrangement visible for a reason other than the
+    one under test.
+    """
+
+    ledger = candidate.root / CHAIN_SPEC.state_relative
+    past = 1_600_000_000_000_000_000
+    os.utime(ledger, ns=(past, past))
+    git(candidate.root, "update-index", "--refresh")
+    rows = [observation_row(number) for number in range(1, BASE_ROW_COUNT + 1)]
+    rewritten = ledger.parent / ".rewritten"
+    original = ledger.read_bytes()
+    rows[-1]["value"] = rows[-1]["value"] + 1
+    rows[-1]["assertionVersion"]["id"] = expected_assertion_version_id(
+        rows[-1], GATE_SPEC
+    )
+    payload = "".join(jsonl_line(row) for row in rows).encode("utf-8")
+    payload = payload[: len(original)].ljust(len(original), b" ")
+    assert payload != original and len(payload) == len(original)
+    rewritten.write_bytes(payload)
+    os.utime(rewritten, ns=(past, past))
+    rewritten.rename(ledger)
 
 
-@pytest.mark.parametrize(
-    ("key", "value"),
-    [
-        ("core.fsmonitor", "false"),
-        ("core.trustctime", "true"),
-        ("core.checkStat", "default"),
-        ("core.untrackedCache", "false"),
-    ],
-    ids=CLASSIFICATION_IDS,
-)
-def test_a_setting_that_is_off_leaves_the_classification_alone(
-    tmp_path: pathlib.Path, key: str, value: str
+def test_a_minimal_stat_comparison_cannot_hide_a_ledger_rewrite(
+    tmp_path: pathlib.Path,
 ) -> None:
-    """S4R4-F5's other side. The refusal is about a setting doing something,
-    not about the key appearing in a config file: each of these is the value
-    that leaves git comparing the working tree, and an ordinary proposal under
-    it is accepted exactly as before. An ordinary checkout sets none of them at
-    all, which the assertion below states."""
+    """Binds S5-F2 for the two settings that shrink git's stat comparison.
+    With ``core.trustctime`` false and ``core.checkStat`` minimal, an entry
+    matches on whole-second mtime and size alone, so a same-size rewrite that
+    carries the recorded mtime is not a change ``git diff`` reports — and the
+    ledger rewritten that way beside a gate file is a gate-only proposal that
+    returns before the ledger is read.
+
+    Measured at 5c2743d with ``WORKING_TREE_SCAN_OPTIONS`` emptied: ``git
+    diff --name-only <base>`` answers with nothing at all for this tree, and
+    the gate accepts it as ``thesis-facts append check OK: gate-only proposal;
+    DATA_SURFACE unchanged; GATE_SURFACE changes=['scripts/check_append.py']``.
+    With the options on the command line the same read names
+    ``ledger/official_observations.jsonl`` and the proposal is mixed."""
+
+    candidate = base_repository(tmp_path)
+    git(candidate.root, "config", "core.trustctime", "false")
+    git(candidate.root, "config", "core.checkStat", "minimal")
+    rewrite_the_ledger_past_a_minimal_stat_cache(candidate)
+    add_gate_file(candidate)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "mixed data/gate proposal is forbidden: DATA_SURFACE changes="
+        "['ledger/official_observations.jsonl']; GATE_SURFACE changes="
+        f"['{GATE_FILE}']; split them into separate pull requests"
+    )
+
+
+def test_an_untracked_cache_cannot_hide_a_new_file_on_the_data_surface(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5-F2 for the setting the earlier guard could not have caught by
+    reading configuration at all. ``core.untrackedCache`` is documented as
+    ``keep`` when unset, so an untracked-cache extension written into the index
+    by any earlier command — ``git update-index --untracked-cache``, or
+    ``feature.manyFiles``, which turns the setting on by itself — stays in use
+    in a checkout whose configuration says nothing. The tree here is the one
+    that cache can answer wrongly: a decoy removed and a new ledger sibling
+    created in its place, so the directory keeps its size, with its recorded
+    mtime restored over the change.
+
+    What that costs, measured on this machine (macOS 15, APFS, git 2.53.0):
+    ``git status --porcelain`` in exactly this tree answers ``?? ledger/
+    decoy.jsonl`` beside the gate file's own directory — the stale listing,
+    naming the file that is gone and missing ``ledger/shadow.jsonl``, which is
+    there — while ``git ls-files --others --exclude-standard``, the read this
+    classification actually makes, answers with ``ledger/shadow.jsonl`` and the
+    gate file, with or without the options. ``ls-files`` does not consult the untracked
+    cache on this git (``GIT_TRACE2_PERF`` shows the same directories visited
+    cached and uncached), so this case binds the option's presence on the
+    command line rather than a miss it prevents here — and the option is what
+    keeps the answer independent of which reads a later git decides to serve
+    from that cache.
+
+    Either way the gate's answer is the one asserted below, and it is the same
+    at 5c2743d with ``WORKING_TREE_SCAN_OPTIONS`` emptied."""
+
+    candidate = base_repository(tmp_path)
+    ledger_directory = candidate.root / CHAIN_SPEC.state_relative.parent
+    (ledger_directory / "decoy.jsonl").write_text("{}\n", encoding="utf-8")
+    git(candidate.root, "config", "core.untrackedCache", "true")
+    past = 1_600_000_000_000_000_000
+    for _ in range(3):
+        os.utime(ledger_directory, ns=(past, past))
+        git(candidate.root, "status", "--porcelain")
+
+    size_before = os.stat(ledger_directory).st_size
+    (ledger_directory / "decoy.jsonl").unlink()
+    (ledger_directory / "shadow.jsonl").write_text("{}\n", encoding="utf-8")
+    os.utime(ledger_directory, ns=(past, past))
+    assert os.stat(ledger_directory).st_size == size_before
+    add_gate_file(candidate)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "mixed data/gate proposal is forbidden: DATA_SURFACE changes="
+        "['ledger/shadow.jsonl']; GATE_SURFACE changes="
+        f"['{GATE_FILE}']; split them into separate pull requests"
+    )
+
+
+CLASSIFICATION_READS = ("diff", "ls-files", "diff-index")
+
+
+def test_every_git_read_spells_out_the_cache_settings(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S5-F2's own subject, stated about the command lines rather than about
+    one arrangement each option defends against. Whether a given git read is
+    served from a stat cache, an untracked cache or a monitor is git's business
+    and can change between versions; what this package can say is that no read
+    it makes is allowed to consult one. So every command line is captured over
+    an ordinary verdict and each is required to carry all five options — the
+    three reads the classification is built from named explicitly, since those
+    are the ones the finding is about."""
 
     candidate = base_repository(tmp_path)
     append_one_row(candidate)
-    for setting, _value, _message in CLASSIFICATION_SETTINGS:
-        assert release_chain._git_value(candidate.root, setting) is None
-    git(candidate.root, "config", key, value)
+    seen: list[list[str]] = []
+    real_run = subprocess.run
 
+    def record(arguments: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(arguments, list) and arguments[:1] == ["git"]:
+            seen.append(list(arguments))
+        return real_run(arguments, *args, **kwargs)
+
+    monkeypatch.setattr(append_gate.subprocess, "run", record)
+    monkeypatch.setattr(release_chain.subprocess, "run", record)
     assert run_gate(candidate) == (
         "thesis-facts append check OK: 3 rows, immutable prefix 1, "
         "+1 appended vs base"
     )
 
+    options = list(release_chain.WORKING_TREE_SCAN_OPTIONS)
+    assert options == [
+        "-c",
+        "core.untrackedCache=false",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.trustctime=true",
+        "-c",
+        "core.checkStat=default",
+        "-c",
+        "feature.manyFiles=false",
+    ]
+    subcommands = set()
+    for arguments in seen:
+        # ``git config`` asks what a setting is, so it must NOT be answered
+        # with an override of that setting; every other read carries them.
+        if arguments[1] == "-C" and arguments[3] == "config":
+            assert "-c" not in arguments
+            continue
+        assert arguments[1 : 1 + len(options)] == options, arguments
+        subcommands.add(arguments[1 + len(options)])
+    assert set(CLASSIFICATION_READS) <= subcommands, subcommands
 
-def test_an_untracked_cache_left_in_place_is_refused_as_enabled(
+
+def test_the_classification_reads_leave_an_untracked_cache_alone(
     tmp_path: pathlib.Path,
 ) -> None:
-    """S4R4-F5 for the value that is neither true nor false.
-    ``core.untrackedCache=keep`` tells git to leave whatever cache the index
-    already carries in place, so the untracked listing this classification
-    reads can still come from one. Only an explicitly false or unset setting
-    is off, which is why the two settings that take non-boolean values are
-    read as written rather than through ``git config --bool`` — which fails
-    outright on ``keep`` and would turn the question into a refusal about
-    being unable to read it."""
+    """The one thing ``core.untrackedCache=false`` could have cost, ruled out.
+    Git removes an untracked-cache extension from an index it writes under that
+    setting, and the tree under audit is not this verifier's to modify. None of
+    the reads here writes the index — ``diff``, ``ls-files`` and ``diff-index``
+    do not — so the extension the candidate carried before the verdict is the
+    extension it carries after, byte for byte."""
 
     candidate = base_repository(tmp_path)
     append_one_row(candidate)
-    git(candidate.root, "config", "core.untrackedCache", "keep")
+    git(candidate.root, "update-index", "--untracked-cache")
+    git(candidate.root, "status", "--porcelain")
+    index = candidate.root / ".git" / "index"
+    before = index.read_bytes()
+    assert b"UNTR" in before
 
-    with pytest.raises(AppendError) as refusal:
-        run_gate(candidate)
-    assert str(refusal.value) == (
-        "working-tree changes cannot be classified: core.untrackedCache is "
-        "enabled in this checkout, so the untracked listing this "
-        "classification reads would come from a cache"
+    assert run_gate(candidate) == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 1, "
+        "+1 appended vs base"
     )
+    assert index.read_bytes() == before
 
 
-def test_a_monitor_hook_path_is_the_same_answer_as_true(
+def test_a_checkout_that_configures_every_cache_verifies_normally(
     tmp_path: pathlib.Path,
 ) -> None:
-    """S4R4-F5 for the other non-boolean: ``core.fsmonitor`` names a hook as
-    well as taking ``true``, and a hook is the older form of exactly the same
-    arrangement — git asks it what changed and trusts the answer. The hook
-    need not exist for the setting to be a claim this verifier cannot check."""
+    """S5-F2's other side, and the reason the settings guard had to go rather
+    than be extended. Each of these settings is something a working copy is
+    entitled to configure for its own sake, and a checkout that configures all
+    of them is not thereby a proposal to refuse: the reads answer for the tree
+    regardless, on both paths, and an ordinary append keeps the verdict it has
+    always had. At ccc20b4 each of the four was a refusal naming its setting.
+    """
 
     candidate = base_repository(tmp_path)
     append_one_row(candidate)
-    git(candidate.root, "config", "core.fsmonitor", ".git/hooks/fsmonitor-watchman")
+    a_lying_file_system_monitor(candidate)
+    for key, value in (
+        ("core.trustctime", "false"),
+        ("core.checkStat", "minimal"),
+        ("core.untrackedCache", "keep"),
+        ("feature.manyFiles", "true"),
+    ):
+        git(candidate.root, "config", key, value)
 
-    with pytest.raises(AppendError) as refusal:
-        run_gate(candidate)
-    assert str(refusal.value) == (
-        "working-tree changes cannot be classified: core.fsmonitor is enabled "
-        "in this checkout, and git's classification would trust it"
+    assert run_gate(candidate) == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 1, "
+        "+1 appended vs base"
+    )
+    assert run_push_gate(candidate) == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 1"
     )
 
 
