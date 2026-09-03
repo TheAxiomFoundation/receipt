@@ -2274,22 +2274,40 @@ def _active_anchor_identities(
     trusted_bundles: Mapping[str, dict[str, Any]],
     *,
     spec: TsaSpec,
-) -> tuple[set[tuple[str, str]], set[str]]:
-    """What the active bundles already stand for: authorities, and signers.
+) -> tuple[set[tuple[str, str]], dict[tuple[str, str], set[str]]]:
+    """What the active bundles already stand for: authorities, and whose keys.
 
     Two answers because a pending anchor can be an authority already active
     in two different ways -- under the same name, or under a new one with the
     same signing key.  ``_supplemental_candidates`` says why each is needed.
+
+    The second answer is a mapping and not a set.  Flattening every active
+    anchor's signers into one set loses which authority each key belongs to,
+    and that is the whole of what a rename is: an anchor carrying *one*
+    active authority's keys.  With the ownership gone, an active anchor
+    allowing two keys could be split by a pending bundle into two anchors
+    allowing one each, and two active anchors could be merged into one
+    allowing both -- every key in every case already active, so every case
+    skipped as a rename, and one authority became two or two became one with
+    no supplemental evidence anywhere (peer review, fifth gate round three).
+
+    Keyed by ``(id, root SPKI)``, and the signer sets of anchors sharing that
+    pair are unioned: a rotation leaves both bundle versions active, so one
+    authority is described by two anchors whose keys are both trusted for it,
+    and its equivalence class is both of them together.
     """
 
     active: set[tuple[str, str]] = set()
-    signers: set[str] = set()
+    signers_by_authority: dict[tuple[str, str], set[str]] = {}
     for reference in trusted_bundles.values():
         _path, trust = _load_trust_bundle(records, reference, spec=spec)
         for anchor in trust["anchors"]:
-            active.add(_anchor_authority(anchor))
-            signers.update(_anchor_signer_fingerprints(anchor))
-    return active, signers
+            authority = _anchor_authority(anchor)
+            active.add(authority)
+            signers_by_authority.setdefault(authority, set()).update(
+                _anchor_signer_fingerprints(anchor)
+            )
+    return active, signers_by_authority
 
 
 def _supplemental_candidates(
@@ -2331,22 +2349,48 @@ def _supplemental_candidates(
     supplemental outcome for every one of them.  ``(id, root SPKI)`` alone
     lets a renamed anchor pose as new.
 
-    Which is why the signer half asks whether the anchor's *whole* signer set
-    is already active, and refuses the anchor that is partly one thing and
-    partly another.  Skipping on any overlap took an anchor declaring an
-    active signer beside a new one -- a genuinely new authority with an old
-    key listed beside its own -- for a rename, and it activated with no
-    supplemental evidence at all (peer review, fifth gate round two).  Nor may
-    it simply be treated as new: the supplemental outcome is supposed to show
-    that whoever holds the new key answered, and an anchor that also allows
-    the old key can satisfy it with a stamp by the authority the chain already
-    trusts.  Neither reading is true of such an anchor, so it is refused and
-    the producer is told to split it: a rotation belongs under the active ID
-    and root, and a new authority belongs in an anchor whose signers are its
-    own.  A pending anchor whose (ID, root SPKI) is already active is a
-    rotation and is skipped before any of this, which is what keeps a bundle
-    that legitimately allows a superseded signer beside its replacement from
-    reaching the refusal.
+    Which is why the signer half asks whether the anchor's signer set is one
+    active anchor's set *exactly*, and refuses everything between that and
+    disjoint.  Two rounds found the two ways a looser test goes wrong.
+    Skipping on any overlap took an anchor declaring an active signer beside a
+    new one -- a genuinely new authority with an old key listed beside its own
+    -- for a rename, and it activated with no supplemental evidence at all
+    (peer review, fifth gate round two).  Skipping on a subset of the active
+    signers *flattened into one set* threw away which authority each key
+    belongs to, and that ownership is the whole of what a rename is: an active
+    anchor allowing two keys at once could be split by a pending bundle into
+    two anchors allowing one each, both subsets and both skipped, so two
+    authorities activated where the chain had asked about one and each held a
+    key the other did not; and two active anchors could be merged into one
+    anchor allowing both keys, which either of them can then stamp for, so
+    every outcome it answers thereafter is satisfied by whichever happens to
+    be reachable (fifth gate round three).  A split and a merge are claims
+    about who is who, and nothing here can take a producer's word for one.
+
+    So the classes are kept.  ``_active_anchor_identities`` reports each
+    active authority's own signer set; a pending anchor whose signers touch
+    none of them is a candidate; one whose signers are exactly the class of
+    every active anchor it touches is that authority renamed and is skipped;
+    and anything else -- a piece of one class, several classes together, or a
+    class with a key that is nobody's -- is refused.  One message for all
+    three, because all three have one fix: file the authority so that a
+    pending anchor carries one active anchor's signers exactly, or none of
+    them.  ("Exactly the class of every anchor it touches" rather than "of
+    exactly one anchor" because two active anchors can legitimately carry one
+    class -- an activated rename is precisely that -- and a further rename of
+    such an authority is still a rename.)
+
+    Nor may an anchor that is partly one thing and partly another simply be
+    treated as new: the supplemental outcome is supposed to show that whoever
+    holds the new key answered, and an anchor that also allows an active key
+    can satisfy it with a stamp by the authority the chain already trusts.
+    Neither reading is true of it, so it is refused and the producer is told
+    what to do about it: a rotation belongs under the active ID and root, and
+    a new authority belongs in an anchor whose signers are its own.  A pending
+    anchor whose (ID, root SPKI) is already active is a rotation and is
+    skipped before any of this, which is what keeps a bundle that legitimately
+    allows a superseded signer beside its replacement from reaching the
+    refusal.
 
     All of that measures a pending anchor against the active bundles, and two
     pending bundles were measured against nothing but those -- so one
@@ -2381,7 +2425,7 @@ def _supplemental_candidates(
     view of the pending anchors' signers.
     """
 
-    active_authorities, active_signers = _active_anchor_identities(
+    active_authorities, active_signers_by_authority = _active_anchor_identities(
         records, trusted_bundles, spec=spec
     )
     candidates: dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any]]] = {}
@@ -2421,13 +2465,21 @@ def _supplemental_candidates(
             if authority in active_authorities:
                 continue
             signers = _anchor_signer_fingerprints(anchor)
-            if signers and signers <= active_signers:
-                continue
-            if signers & active_signers:
+            owners = [
+                owner
+                for owner, active in active_signers_by_authority.items()
+                if active & signers
+            ]
+            if owners:
+                if all(
+                    active_signers_by_authority[owner] == signers
+                    for owner in owners
+                ):
+                    continue
                 raise TsaError(
-                    f"pending TSA anchor {anchor_id} mixes an active signer "
-                    "with a new one; a rotation and a new authority cannot "
-                    "share an anchor"
+                    f"pending TSA anchor {anchor_id} splits or merges active "
+                    "authorities' signers; a pending anchor must carry one "
+                    "active anchor's signers exactly, or none of them"
                 )
             refuse_an_equivalent_pending_anchor(
                 authority, signers, f"{bundle_path}/{anchor_id}"

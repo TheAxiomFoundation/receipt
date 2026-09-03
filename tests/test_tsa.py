@@ -4389,6 +4389,13 @@ def test_a_pending_anchor_may_not_mix_an_active_signer_with_a_new_one(
 
     Reverted to "any overlap is a rename", the mixed anchor below is skipped
     and the witness verifies with no supplemental evidence for it.
+
+    S5R3-F2: the words it is refused in are the family's, not this shape's.
+    An anchor allowing an active key beside a new one is one of three ways a
+    pending anchor can carry part of an active authority and not the whole of
+    it -- the others are a split and a merge, in the two tests below -- and
+    all three have one fix, which the message states: a pending anchor carries
+    one active anchor's signers exactly, or none of them.
     """
 
     alpha, beta = local_anchors[0], local_anchors[1]
@@ -4428,8 +4435,9 @@ def test_a_pending_anchor_may_not_mix_an_active_signer_with_a_new_one(
     assert candidates_for(rename) == set()
     assert candidates_for(arrival) == {(arrival["path"], stranger.anchor_id)}
     mixes = (
-        f"pending TSA anchor {mixed.anchor_id} mixes an active signer with a "
-        "new one; a rotation and a new authority cannot share an anchor"
+        f"pending TSA anchor {mixed.anchor_id} splits or merges active "
+        "authorities' signers; a pending anchor must carry one active "
+        "anchor's signers exactly, or none of them"
     )
     with pytest.raises(TsaError) as caught:
         candidates_for(mixture)
@@ -4445,6 +4453,173 @@ def test_a_pending_anchor_may_not_mix_an_active_signer_with_a_new_one(
             transition_bundle_updates=[mixture],
         )
     assert str(whole.value) == mixes
+
+
+def test_a_pending_anchor_carries_one_active_authoritys_signers_or_none(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_alpha: LocalTsa,
+) -> None:
+    """S5R3-F2: a rename carries a whole equivalence class, not a piece of one.
+
+    The skip asked whether a pending anchor's signers were a subset of *the*
+    active signers, flattened into one set. Ownership is exactly what that
+    flattening throws away, and ownership is the whole of what a rename is: an
+    anchor carrying one active authority's keys under a new name, so that
+    stamping again would prove nothing the chain has not already asked about.
+
+    An active anchor may allow more than one signing key at once -- a
+    frozenset with no singleton constraint, which is what
+    ``test_one_bundle_may_allow_several_signers_at_once`` is about -- and a
+    pending bundle could then split it in two, one key each, both anchors
+    subsets of the flattened set and both skipped as renames. Two authorities
+    activate where the chain had asked about one, neither having answered for
+    itself, and each holding a key the other does not: they can sign
+    independently from that point on, which is the difference the supplemental
+    outcome exists to make somebody demonstrate.
+
+    Three shapes over one active authority allowing two keys, because telling
+    them apart is what the rule does: an anchor carrying one of the two keys
+    is a split and is refused; an anchor carrying both is that authority
+    renamed and is skipped; and an authority whose keys are its own is a
+    candidate, which is the mechanism a split must not be able to walk around.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    rotated = certificate_pins(rotated_alpha.signer_pem)
+    tree = build_witness_tree(
+        tmp_path, local_anchors[:1], extra_signers={alpha.anchor_id: rotated_alpha}
+    )
+    assert verify_tree(tree).status == "available"
+    renamed = alias_of(alpha, anchor_id="alpha-renamed-2026")
+    split, spec = add_bundle_version(tree, [renamed], version=2)
+    whole, spec = add_bundle_version(
+        tree,
+        [renamed],
+        version=3,
+        extra_signers={renamed.anchor_id: [rotated]},
+        base=spec,
+    )
+    stranger = alias_of(beta, anchor_id="beta-arriving-2026")
+    arrival, spec = pending_authority(tree, stranger, version=4, base=spec)
+    # The premise: one active anchor allowing two keys, and a pending anchor
+    # over the same root carrying one of them.
+    active = json.loads(tree.bundle.read_text())["anchors"][0]
+    assert {signer["spkiSha256"] for signer in active["allowedSigners"]} == {
+        alpha.signer_pins["spkiSha256"],
+        rotated["spkiSha256"],
+    }
+    halved = json.loads((tree.records / "trust" / "tsa-anchors-v2.json").read_text())
+    assert {
+        signer["spkiSha256"] for signer in halved["anchors"][0]["allowedSigners"]
+    } == {alpha.signer_pins["spkiSha256"]}
+    assert halved["anchors"][0]["rootCertificate"] == active["rootCertificate"]
+
+    def candidates_for(pending: dict[str, Any]) -> set[tuple[str, str]]:
+        return set(
+            tsa_module._supplemental_candidates(
+                tree.records,
+                {BUNDLE_LOGICAL: tree.reference},
+                [pending],
+                spec=spec,
+            )
+        )
+
+    splits = (
+        f"pending TSA anchor {renamed.anchor_id} splits or merges active "
+        "authorities' signers; a pending anchor must carry one active "
+        "anchor's signers exactly, or none of them"
+    )
+    with pytest.raises(TsaError) as caught:
+        candidates_for(split)
+    assert str(caught.value) == splits
+    assert candidates_for(whole) == set()
+    assert candidates_for(arrival) == {(arrival["path"], stranger.anchor_id)}
+    # And the whole witness is refused, rather than verifying with nothing
+    # required of the half-authority that is about to activate.
+    with pytest.raises(TsaError) as witness:
+        verify_witness(
+            tree.record,
+            spec=spec,
+            records=tree.records,
+            trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+            transition_bundle_updates=[split],
+        )
+    assert str(witness.value) == splits
+
+
+def test_a_pending_anchor_may_not_merge_two_active_authorities(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+) -> None:
+    """S5R3-F2: and it may not gather two active authorities into one anchor.
+
+    The inverse of the split, and misclassified for the same reason. With the
+    active signers flattened into one set, an anchor allowing the keys of two
+    different active authorities is a subset of that set and is skipped as a
+    rename -- so two authorities the chain trusts separately become one anchor
+    that either of them can stamp for, and every outcome that anchor answers
+    thereafter is satisfied by whichever of the two happens to be reachable.
+    A merge is a claim about who is who, and nothing here is in a position to
+    take a producer's word for it.
+
+    Both shapes are asserted over the same two active authorities: an anchor
+    carrying one authority's keys entire is that authority renamed and is
+    skipped, and an anchor carrying both authorities' keys is refused.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    tree = build_witness_tree(tmp_path, local_anchors[:2])
+    assert verify_tree(tree).status == "available"
+    merged = alias_of(beta, anchor_id="beta-merged-2026")
+    merger, spec = add_bundle_version(
+        tree,
+        [merged],
+        version=2,
+        extra_signers={merged.anchor_id: [alpha.signer_pins]},
+    )
+    renamed = alias_of(beta, anchor_id="beta-renamed-2026")
+    rename, spec = add_bundle_version(tree, [renamed], version=3, base=spec)
+    # The premise: two active authorities with a key each, and a pending
+    # anchor allowing both keys at once.
+    active = json.loads(tree.bundle.read_text())["anchors"]
+    assert [
+        {signer["spkiSha256"] for signer in entry["allowedSigners"]}
+        for entry in active
+    ] == [{alpha.signer_pins["spkiSha256"]}, {beta.signer_pins["spkiSha256"]}]
+    gathered = json.loads((tree.records / "trust" / "tsa-anchors-v2.json").read_text())
+    assert {
+        signer["spkiSha256"] for signer in gathered["anchors"][0]["allowedSigners"]
+    } == {alpha.signer_pins["spkiSha256"], beta.signer_pins["spkiSha256"]}
+
+    def candidates_for(pending: dict[str, Any]) -> set[tuple[str, str]]:
+        return set(
+            tsa_module._supplemental_candidates(
+                tree.records,
+                {BUNDLE_LOGICAL: tree.reference},
+                [pending],
+                spec=spec,
+            )
+        )
+
+    assert candidates_for(rename) == set()
+    merges = (
+        f"pending TSA anchor {merged.anchor_id} splits or merges active "
+        "authorities' signers; a pending anchor must carry one active "
+        "anchor's signers exactly, or none of them"
+    )
+    with pytest.raises(TsaError) as caught:
+        candidates_for(merger)
+    assert str(caught.value) == merges
+    with pytest.raises(TsaError) as witness:
+        verify_witness(
+            tree.record,
+            spec=spec,
+            records=tree.records,
+            trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+            transition_bundle_updates=[merger],
+        )
+    assert str(witness.value) == merges
 
 
 def test_two_pending_bundles_may_not_introduce_one_authority_twice(
