@@ -119,6 +119,21 @@ is rendered. Each is charged one item at a time and refused at the first
 item that carries the running total over, so no journal makes the parser
 account for more than the cap plus one item.
 
+"Cap plus one item" is a bound on *validation work*, and it means that only
+because the gate charges are made as the rows arrive. Summing after the
+parse loop had finished bounded the verdict and nothing else: a 2,050-gate
+journal reached the cardinality check with all 2,050 gates decoded and
+validated, and a journal costing twice the text budget was validated in
+full before the sum was compared (peer review, Sol round 2). Cardinality is
+counted as the gate rows are met and refused at the declaration that would
+be the cap plus one; the render cost is charged as each gate is validated
+and refused at the first row carrying the total over. One gate's own
+evidence is bounded by ``MAX_EVIDENCE_ENTRIES``, checked against the
+mapping's length before any entry of it is validated. And decoding itself
+is bounded a level above all three: ``MAX_JOURNAL_ROWS`` is checked by
+counting line feeds before any row is parsed, so what a journal can make
+this module allocate is a stated function of its stated size.
+
 The order of the passes is itself load-bearing. Membership is swept, the
 tombstones are looked for, the bound bytes are hashed, membership and per-file
 identity are checked a second time, and the tombstones are looked for once
@@ -332,6 +347,18 @@ INDEPENDENTLY_REPRODUCIBLE_TIERS = frozenset({PUBLIC_TIER})
 #: escape sequence would. A count of characters for the same reason
 #: ``MAX_PATH_TEXT`` is one: this bounds what a refusal quotes.
 MAX_EVIDENCE_TEXT = 1024
+#: The most evidence entries one gate declaration may carry. The per-string
+#: bound above caps each key and value; nothing capped how many pairs one
+#: gate could hold, so a single legal gate row could carry an unbounded
+#: number of short entries and every one of them was validated — screened
+#: for size, for control characters, twice each — before the text budget
+#: below was consulted at all (peer review, Sol round 2). Checked against
+#: ``len(mapping)`` before the first entry is looked at, so the work one
+#: gate can ask for is bounded by this rather than by the row's length.
+#:
+#: Sixty-four is generous for a real declaration, which names a command, a
+#: workflow, a digest or two, and a reason.
+MAX_EVIDENCE_ENTRIES = 64
 #: The most characters of verdict text the effective view's gates may cost
 #: in total. The per-string bound above caps one flood; a journal of a
 #: thousand not-run gates each carrying a bound-length reason still put a
@@ -405,7 +432,40 @@ REMOVED_PATH_RENDER_STRUCTURE = 8
 #: sake — a verdict enumerating thousands of gates is unreadable however
 #: short each line is, and no honest corpus declares them (peer review,
 #: round five). Generous for any real one, which declares tens.
+#:
+#: Counted as the gate rows are met and refused at the declaration that
+#: would be the cap plus one, *before* that row is validated. Comparing
+#: ``len(gates)`` after the parse loop had finished meant a 2,050-gate
+#: journal was decoded and validated in full — every gate id matched
+#: against its pattern, every tier and outcome checked, every evidence
+#: string screened twice — and only then refused for the count that was
+#: knowable at row 2,049 (peer review, Sol round 2).
+#:
+#: Enforcing both budgets in row order makes something plain that checking
+#: this one after the loop hid: it is a backstop and not a live limit. The
+#: cheapest gate the schema admits — a one-character id, the shortest
+#: outcome, one evidence entry with an empty key and an empty value —
+#: costs 130 characters of rendered verdict once ``GATE_RENDER_STRUCTURE``
+#: is charged exactly, which round seven made it, so 2,048 of them cost
+#: 266,240 and ``MAX_GATE_TEXT`` refuses at about the 2,016th. No journal
+#: can reach this cap. It is kept because it states a bound a reader can
+#: check and because it would become live again if either of the other two
+#: constants moved; a test pins the arithmetic so a change to either fails
+#: a test rather than quietly reviving or burying it.
 MAX_GATE_DECLARATIONS = 2048
+#: The most rows one journal may carry, checked by counting line feeds
+#: before any row is parsed. Every other budget here bounds what a *valid*
+#: journal costs; this one bounds what an invalid one can make the parser
+#: allocate before a single row has been decoded, so the memory a journal
+#: can ask for is a stated function of its stated size.
+#:
+#: Derived rather than picked: the gate cap above is 2,048 declarations, and
+#: the other three row kinds — content, attested and removed — get an equal
+#: margin of 2,048 between them, which is 4,096. That margin is the number a
+#: corpus with more bound files than it will have to raise, and it is stated
+#: here rather than left implicit precisely so that raising it is a visible
+#: change to a consumer-facing bound rather than a silent one.
+MAX_JOURNAL_ROWS = 4096
 #: The most characters one journal path may carry. Paths are quoted in
 #: refusals and, for removed paths, rendered in the verdict; the bound is
 #: checked before any other path rule so no refusal quotes a flood. A count
@@ -1340,6 +1400,17 @@ def _validate_gate(row: dict[str, Any], number: int, spec: CorpusSpec) -> GateDe
             f"journal row {number} gate {_quoted(gate_id)} evidence must be "
             "a non-empty object"
         )
+    # Cardinality before content, and before the first entry is looked at:
+    # the per-string bounds cap what one entry costs and capped nothing
+    # about how many of them one gate may carry, so a single legal row could
+    # make this loop screen an unbounded number of short pairs before any
+    # budget was consulted (peer review, Sol round 2).
+    if len(evidence) > MAX_EVIDENCE_ENTRIES:
+        raise CorpusError(
+            f"journal row {number} gate {_quoted(gate_id)} declares "
+            f"{len(evidence)} evidence entries, over the limit of "
+            f"{MAX_EVIDENCE_ENTRIES}"
+        )
     for key, value in evidence.items():
         if type(key) is not str or type(value) is not str:
             raise CorpusError(
@@ -1404,6 +1475,16 @@ def parse_journal(
         raise CorpusError("corpus journal is not UTF-8") from exc
     if not text.endswith("\n"):
         raise CorpusError("corpus journal must end with exactly one LF")
+    # Counted, not split, and checked before the split: ``str.count`` walks
+    # the text without building the list, so the list a journal can make this
+    # function allocate — and everything downstream of it — is bounded by a
+    # stated input size before a single row has been decoded.
+    row_count = text.count("\n")
+    if row_count > MAX_JOURNAL_ROWS:
+        raise CorpusError(
+            f"corpus journal carries {row_count} rows, over the parser "
+            f"budget of {MAX_JOURNAL_ROWS}"
+        )
     lines = text.split("\n")[:-1]
     if not lines:
         raise CorpusError("corpus journal is empty; genesis must bind content")
@@ -1413,6 +1494,7 @@ def parse_journal(
     gates: list[GateDeclaration] = []
     gate_ids: dict[str, int] = {}
     removed: set[str] = set()
+    gate_text_charged = 0
 
     for number, line in enumerate(lines, start=1):
         if not line.strip():
@@ -1423,6 +1505,15 @@ def parse_journal(
         kind = row["kind"]
 
         if kind == GATE_KIND:
+            # Cardinality before validation, so the declaration that would be
+            # the cap plus one is refused rather than checked. Comparing the
+            # total after the loop meant every gate of a 2,050-gate journal
+            # was validated first (peer review, Sol round 2).
+            if len(gates) >= MAX_GATE_DECLARATIONS:
+                raise CorpusError(
+                    f"journal row {number} declares more gates than the "
+                    f"verdict budget of {MAX_GATE_DECLARATIONS} declarations"
+                )
             gate = _validate_gate(row, number, spec)
             # A re-declared gate would let a later row silently downgrade an
             # earlier tier; every gate is stated once per journal.
@@ -1433,6 +1524,31 @@ def parse_journal(
                 )
             gate_ids[gate.gate_id] = number
             gates.append(gate)
+            # And the render cost as the row is validated, refused at the
+            # first gate that carries the running total over. Summing after
+            # the loop bounded the verdict and nothing else: the journal that
+            # cost twice the budget was decoded and validated in full before
+            # the sum was compared. The gate's own evidence is summed whole,
+            # because ``json.loads`` materialised the row before this point
+            # and MAX_EVIDENCE_ENTRIES bounds how many entries that is.
+            gate_text_charged += (
+                GATE_RENDER_STRUCTURE
+                + _rendered_length(gate.gate_id)
+                + _rendered_length(gate.outcome)
+                + sum(
+                    EVIDENCE_RENDER_STRUCTURE
+                    + _rendered_length(key)
+                    + _rendered_length(value)
+                    for key, value in gate.evidence.items()
+                )
+            )
+            if gate_text_charged > MAX_GATE_TEXT:
+                raise CorpusError(
+                    "journal gate declarations cost more than the verdict "
+                    f"budget of {MAX_GATE_TEXT} characters: "
+                    f"{gate_text_charged} charged at declaration "
+                    f"{len(gates)} (journal row {number})"
+                )
             continue
 
         path = _validate_relative_path(row["path"], f"journal row {number} path")
@@ -1482,41 +1598,6 @@ def parse_journal(
                 )
             del target[path]
             removed.add(path)
-
-    # Cardinality first, because it is the cheaper thing to say and the
-    # honest bound on a journal of thirty thousand gates: the count is what
-    # is wrong with it, whatever each declaration costs to render.
-    if len(gates) > MAX_GATE_DECLARATIONS:
-        raise CorpusError(
-            f"journal declares {len(gates)} gates, over the verdict budget of "
-            f"{MAX_GATE_DECLARATIONS} declarations"
-        )
-    # Charged one declaration at a time and refused at the first one that
-    # carries the running total past the cap, rather than summed and then
-    # compared: a journal can now make this loop account for the cap plus one
-    # gate and no more. The gate's own evidence is summed whole, because the
-    # row it came from was materialised by ``json.loads`` before this point —
-    # stopping part-way through one gate's evidence would bound nothing that
-    # is not already bounded.
-    charged = 0
-    for number, gate in enumerate(gates, start=1):
-        charged += (
-            GATE_RENDER_STRUCTURE
-            + _rendered_length(gate.gate_id)
-            + _rendered_length(gate.outcome)
-            + sum(
-                EVIDENCE_RENDER_STRUCTURE
-                + _rendered_length(key)
-                + _rendered_length(value)
-                for key, value in gate.evidence.items()
-            )
-        )
-        if charged > MAX_GATE_TEXT:
-            raise CorpusError(
-                "journal gate declarations cost more than the verdict budget "
-                f"of {MAX_GATE_TEXT} characters: {charged} charged at "
-                f"declaration {number} of {len(gates)}"
-            )
 
     # Sorted first, so which path the refusal names is a property of the
     # journal and not of set iteration order, and so that it is the same
