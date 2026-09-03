@@ -340,10 +340,10 @@ def _bounded(text: str) -> str:
 
     Applied *after* :func:`_terminal_safe` in the text renderer, so what is
     counted is what the terminal receives: an escape sequence is six
-    characters of output and is charged as six. In the JSON renderer it is
-    applied to the payload's string values before ``json.dumps``, which is
-    the same rule one step earlier — the escaping there is the encoder's own
-    and cannot be applied first.
+    characters of output and is charged as six. This is the text renderer's
+    rule and only its: the JSON renderer counts what ``json.dumps`` will
+    emit instead, through :func:`_bounded_encoded`, because a code-point
+    count there bounded a twelvefold larger rendering.
     """
 
     if len(text) <= MAX_RENDERED_FIELD:
@@ -428,7 +428,13 @@ def _bounded_key(key: str) -> str:
 
     So a key is bounded like a value and then made unambiguous: the marker
     carries the first sixteen hex characters of the key's SHA-256, so two
-    keys sharing a bounded prefix differ in the marker and cannot merge.
+    keys sharing a bounded prefix differ in the marker. Sixteen hex
+    characters is sixty-four bits, which is a statement about how hard a
+    merge is rather than a proof there cannot be one: no accident produces
+    a match, and a producer who wanted two evidence keys to render
+    identically would have to search for a sixty-four-bit SHA-256 collision
+    to do it — against a payload whose only reward is dropping one of two
+    fields the reader can already see is truncated.
     The digest is over the key's UTF-8 with ``surrogatepass``, because a key
     that reached here from a filesystem name may carry a lone surrogate and
     a digest that raises would defeat the renderer it protects.
