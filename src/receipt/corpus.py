@@ -349,12 +349,24 @@ missed the spelling it was built for, and the correction introduced the next
 defect. A closed world cannot be closed over a name whose equivalence class
 the verifier is guessing at.
 
-What makes the guessing unnecessary is that no corpus needs those names.
-Every consumer this package verifies was enumerated before the policy was
-adopted — the six ``rulespec-*`` repositories and the four trees pinned under
-``receipt/.extraction`` — and not one carries a filename outside the ASCII
-letters, digits, ``.``, ``_`` and ``-``. So the module refuses the rest by
-name. Inside that repertoire :func:`_path_fold` is ASCII case-insensitivity
+What makes the guessing unnecessary is that the corpora this package is
+built for do not need those names, with one exception that is recorded here
+rather than modelled. The thirty-eight ``rulespec-*`` repositories mirrored
+beside this one were censused at their ``origin/main`` heads on 2026-09-03:
+thirty-seven carry no tracked path outside the ASCII letters, digits, ``.``,
+``_`` and ``-`` — ``rulespec-nz``, the reference consumer, among them — and
+``rulespec-us`` at d58cc0c (2026-08-22) carries 33 of 15,216 that fall
+outside it, every one by character set. Eighteen spell a statute citation
+with a colon (Louisiana Title 47 and New Jersey 54A:
+``us-la/statutes/47:294.yaml`` and their encoding manifests), twelve a New
+Hampshire regulation directory with a space (``He-W 704``), and three a
+section with an en dash (``us/statutes/42/1437c–1.yaml``). A spec that pins
+those trees as content roots refuses the verification until the names are
+respelled, and whether they are respelled or the policy grows a spelling for
+them is that repository's decision rather than this module's guess. An
+earlier revision of this paragraph said no consumer carried such a name; the
+census corrects it. So the module refuses the rest by name. Inside that
+repertoire :func:`_path_fold` is ASCII case-insensitivity
 and nothing else, which is a fact about the repertoire rather than a model of
 a filesystem: every insensitivity a real volume adds — case on APFS and NTFS,
 normalization and default-ignorables on HFS+ — either collapses onto it or
