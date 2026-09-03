@@ -3331,6 +3331,57 @@ def test_a_bound_file_rewritten_in_place_with_its_mtime_restored_refuses(
     )
 
 
+def test_refuses_to_verify_at_all_off_posix(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S4-F3: every concurrency claim here rests on POSIX ctime.
+
+    ``_directory_generation`` treats ``st_ctime_ns`` as the change stamp a
+    writer cannot forge, and the bound-file identity added by S4-F2 does the
+    same for a file. On Windows every supported CPython puts the *creation*
+    time in that field — 3.12 deprecated it and 3.14 still does it — so an
+    entry can be added, removed or renamed and the directory's mtime put
+    back with ``os.utime``, leaving the recorded tuple identical. Every
+    stamp the module compares would then say "unchanged" about a tree that
+    changed, which is worse than not looking.
+
+    So the module refuses there, first thing, on a corpus that otherwise
+    verifies — which is what this pins: the tree, the journal and the spec
+    below are the fixture's own, and the verification is refused for the
+    platform alone. Without the fix it returns a PASS whose central claim
+    the platform cannot support.
+    """
+
+    write_tree(tmp_path)
+    monkeypatch.setattr(os, "name", "nt")
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        "corpus verification requires POSIX change-time semantics (st_ctime "
+        "as the inode change time) to detect a tree changing under it; on "
+        "this platform the verifier refuses rather than trusting a stamp a "
+        "writer can restore"
+    )
+
+
+def test_the_same_corpus_verifies_on_posix(tmp_path: pathlib.Path) -> None:
+    """Binds S4-F3, the control: the refusal above is about the platform.
+
+    The identical tree, journal and spec, with ``os.name`` left alone. If
+    this ever fails alongside the test above passing, the platform screen has
+    become the only reason anything refuses.
+    """
+
+    write_tree(tmp_path)
+    assert os.name == "posix"
+    verification = verify_corpus_binding(
+        tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+    )
+    assert len(verification.content) == len(CONTENT)
+
+
 def test_refuses_a_gate_whose_escaped_evidence_floods_the_verdict(
     tmp_path: pathlib.Path,
 ) -> None:

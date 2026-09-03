@@ -36,7 +36,7 @@ receipt verify --spec path/to/your/spec.py
 
 ## Install
 
-Requires Python 3.11+, `git`, and `openssl` on the path.
+Requires Python 3.11+, `git`, and `openssl` on the path. The corpus sweep's change detection requires POSIX change-time semantics; on Windows it refuses to verify rather than trusting a stamp a writer can restore.
 
 ```bash
 uv pip install receipt
