@@ -4567,8 +4567,14 @@ def test_refuses_a_tree_entry_named_for_a_superscript_com_port(
     ``COM¹``, ``COM²``, ``COM³`` and the ``LPT`` equivalents resolve exactly
     as their ASCII-digit counterparts do, and they are the half of the list
     a from-memory implementation leaves out. Pinned separately because a
-    screen built from ``CON PRN AUX NUL COM0-9 LPT0-9`` alone satisfies
+    screen built from ``CON PRN AUX NUL COM1-9 LPT1-9`` alone satisfies
     every other test here and leaves six device names reachable.
+
+    They are also the one place the two sources genuinely disagree, and the
+    disagreement is resolved by naming which source each entry rests on:
+    Microsoft's page lists the superscripts and says Windows "treats them
+    as valid parts of COM# and LPT# device names", while ``ntdll``'s
+    matcher compares ASCII digits only. The page is what these six rest on.
 
     The name is ASCII-uppercased rather than ``str.upper``-ed, so U+00B9 is
     compared as written; that is why the superscripts are table entries and
@@ -4686,8 +4692,10 @@ def test_the_device_basename_is_derived_the_way_win32_derives_it() -> None:
     spaces as well, or stripped anything but spaces, would fail one of them.
 
     ``CONIN$`` and ``CONOUT$`` are in the table because ``ntdll``'s matcher
-    resolves them, although Microsoft's naming page does not list them; the
-    table takes the union of the two sources, which its own comment states.
+    resolves them, although Microsoft's naming page does not list them. The
+    table's comment attributes every entry to the source it rests on rather
+    than describing itself as a union: S5R2-F10 removed ``COM0`` and
+    ``LPT0``, which no source supports at all.
     """
 
     from receipt.corpus import (
@@ -5380,3 +5388,67 @@ def test_the_short_name_grammar_is_the_one_generation_produces() -> None:
         "long~1name.yaml",
     ):
         assert not _is_short_name(name), name
+
+
+@pytest.mark.parametrize("name", ["COM0.yaml", "LPT0.yaml", "com0.yml", "lpt0"])
+def test_a_zero_numbered_port_is_not_a_reserved_device_name(
+    tmp_path: pathlib.Path, name: str
+) -> None:
+    """Binds S5R2-F10: two entries in the device table rest on no source.
+
+    The table said it took the union of Microsoft's documented list and
+    ``ntdll``'s matcher because they disagree. They do disagree — about
+    ``CONIN$``, ``CONOUT$`` and the superscripts — but not about zero.
+    Microsoft's "Naming Files, Paths, and Namespaces" (fetched 2026-09-03,
+    dated 2024-08-28) lists ``COM1`` through ``COM9`` and ``LPT1`` through
+    ``LPT9`` and no zero; ``RtlIsDosDeviceName_U`` tests the digit with
+    ``if (*end <= '0' || *end > '9') break;`` and so excludes zero as well.
+    ``COM0`` and ``LPT0`` were the fail-closed side of a disagreement that
+    does not exist, and the cost was real: a corpus holding an ordinary
+    ``COM0.yaml`` was refused outright, with a message naming a device
+    Windows does not resolve.
+
+    Every spelling here is checked as a tree entry under a content root, so
+    the screen really runs on it, and the two ``.yaml`` spellings are bound
+    as content so the whole closed world closes over them. Without the fix
+    each raises.
+    """
+
+    content = dict(CONTENT)
+    if name.endswith(".yaml"):
+        content[f"rules/{name}"] = "name: port\nvalue: 0\n"
+    write_tree(tmp_path, content=content)
+    if f"rules/{name}" not in content:
+        (tmp_path / "rules" / name).write_text("scratch\n")
+    verification = verify_corpus_binding(
+        tmp_path, render_journal(journal_rows(content=content)), spec=corpus_spec()
+    )
+    assert len(verification.content) == len(content)
+
+
+def test_the_device_table_is_exactly_what_its_two_sources_say() -> None:
+    """Binds S5R2-F10: the table is stated, and each entry has an owner.
+
+    Microsoft's page supplies CON, PRN, AUX, NUL, COM1-9, LPT1-9 and the
+    six superscript spellings; ``ntdll``'s ``RtlIsDosDeviceName_U`` supplies
+    CONIN$ and CONOUT$, which that page does not list. Nothing else is in
+    the table, and in particular nothing rests on "the union" of sources
+    that were not compared.
+
+    Spelled out here rather than imported from the module, so the shipped
+    table is checked against the sentence quoted beside it rather than
+    against itself. Without S5R2-F10 the module's table has two more
+    entries than this one.
+    """
+
+    from receipt.corpus import WIN32_RESERVED_DEVICE_NAMES
+
+    documented = {"CON", "PRN", "AUX", "NUL"}
+    documented |= {f"COM{digit}" for digit in "123456789"}
+    documented |= {f"LPT{digit}" for digit in "123456789"}
+    documented |= {f"COM{superscript}" for superscript in "¹²³"}
+    documented |= {f"LPT{superscript}" for superscript in "¹²³"}
+    matcher_only = {"CONIN$", "CONOUT$"}
+    assert WIN32_RESERVED_DEVICE_NAMES == documented | matcher_only
+    assert "COM0" not in WIN32_RESERVED_DEVICE_NAMES
+    assert "LPT0" not in WIN32_RESERVED_DEVICE_NAMES

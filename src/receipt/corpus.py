@@ -915,27 +915,47 @@ def _assert_assigned(value: str, label: str) -> str:
 #: The basenames Win32 resolves to a character device instead of to a file,
 #: in every directory and whatever extension follows them: ``rules/NUL.yaml``
 #: opens the null device, not the bytes a journal bound. Pinned here rather
-#: than derived, because it is a Win32 fact and not a Unicode one, and taken
-#: from two sources that are named separately because they do not agree.
+#: than derived, because it is a Win32 fact and not a Unicode one, and every
+#: entry is attributed to the source it rests on rather than to a union of
+#: sources that disagree.
 #:
-#: Microsoft documents CON, PRN, AUX, NUL, COM0-COM9, LPT0-LPT9 and the
-#: superscript COM¹ COM² COM³ and LPT¹ LPT² LPT³ for Windows 11, in "Naming
-#: Files, Paths, and Namespaces"
-#: (learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file).
+#: Microsoft, "Naming Files, Paths, and Namespaces",
+#: learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file, fetched
+#: 2026-09-03 with the page and its docs source both dated 2024-08-28:
 #:
-#: ``ntdll``'s own matcher, ``RtlIsDosDeviceName_U``, resolves two more —
-#: CONIN$ and CONOUT$ — and does *not* resolve COM0 or LPT0 (its digit test
-#: is ``> '0'``) or the superscripts. Wine's implementation of it carries a
-#: conformance table run against real Windows, which is where that reading
-#: comes from. Where the two disagree this table takes the union, because
-#: refusing a name Windows might resolve is the fail-closed side and no
-#: corpus has a reason to carry any of them.
+#:     Do not use the following reserved names for the name of a file:
+#:     CON, PRN, AUX, NUL, COM1, COM2, COM3, COM4, COM5, COM6, COM7, COM8,
+#:     COM9, COM¹, COM², COM³, LPT1, LPT2, LPT3, LPT4, LPT5, LPT6, LPT7,
+#:     LPT8, LPT9, LPT¹, LPT², and LPT³. Also avoid these names followed
+#:     immediately by an extension; for example, NUL.txt and NUL.tar.gz are
+#:     both equivalent to NUL.
+#:
+#: That sentence is the source of every entry below except the two named
+#: next, and of the superscripts in particular, which the same page's note
+#: says Windows "treats [...] as valid parts of COM# and LPT# device names,
+#: making them reserved in every directory".
+#:
+#: CONIN$ and CONOUT$ rest on ``ntdll``'s own matcher instead:
+#: ``RtlIsDosDeviceName_U`` resolves both, and Microsoft's page does not
+#: list them. What was read is Wine's implementation of that function
+#: (dlls/ntdll/path.c, fetched 2026-09-03), which carries a conformance
+#: table run against real Windows.
+#:
+#: COM0 and LPT0 were in this table and are not any more, because neither
+#: source supports them. The sentence above lists COM1 through COM9, and
+#: that matcher's digit test is ``if (*end <= '0' || *end > '9') break;``,
+#: so a zero is not a device there either. The entry was kept as the
+#: fail-closed side of a disagreement that does not exist, and its cost is
+#: real: a corpus holding an ordinary ``COM0.yaml`` was refused outright
+#: (peer review, Sol round 2).
 WIN32_RESERVED_DEVICE_NAMES = frozenset(
-    {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
-    | {f"COM{digit}" for digit in range(10)}
-    | {f"LPT{digit}" for digit in range(10)}
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{digit}" for digit in range(1, 10)}
+    | {f"LPT{digit}" for digit in range(1, 10)}
     | {f"COM{superscript}" for superscript in "\u00b9\u00b2\u00b3"}
     | {f"LPT{superscript}" for superscript in "\u00b9\u00b2\u00b3"}
+    # ntdll's RtlIsDosDeviceName_U, not Microsoft's page.
+    | {"CONIN$", "CONOUT$"}
 )
 
 
