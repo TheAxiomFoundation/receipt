@@ -45,6 +45,9 @@ them, because the checks that would have met a link are all downstream of
 reading through it — with every component of both required to be spelled by
 the directory that holds it, since what a component *is* comes from resolving
 its name and a name-folding filesystem resolves one this package never named,
+and with a directory that folds names and cannot be listed refused rather than
+descended, because its listing was the only thing that could have bound the
+spelling there and making it search-only is all a proposal had to arrange,
 the base is resolved to a commit once and carried to every consumer, every git
 read runs with ``refs/replace`` disabled so a replacement object cannot change
 what the printed OID reads as, each state file is read once — through
@@ -168,7 +171,14 @@ the tree.
 
 And the spelling refusal in either walk pre-empts whatever the content behind
 the folded name would have been refused for, on a filesystem that folds names,
-which is the only kind where it can fire at all. Renaming ``releases`` to
+which is the only kind where it can fire at all. Its fail-closed half — a
+directory that folds names and cannot be listed — pre-empts one more thing on
+such a filesystem, and only there: the descent's own ``is not readable by this
+verifier`` refusal, which a platform offering neither search-only flag would
+otherwise give for the same directory. Both are additions since the
+extraction, so no upstream refusal moves; the walk stands ahead of the
+descent, and the more specific answer for a directory that cannot say which
+spelling it holds is that it cannot say. Renaming ``releases`` to
 ``Releases`` beside a rewritten release file moves the answer from ``existing
 release file bytes changed relative to <commit>`` to the spelling refusal, for
 a single-component root and with no link anywhere; renaming ``ledger`` to
