@@ -56,6 +56,7 @@ import pathlib
 import shutil
 import signal
 import subprocess
+import unicodedata
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from typing import Any
@@ -3262,4 +3263,136 @@ def test_an_intent_to_add_release_path_is_refused_by_the_root_scan(
     assert str(refusal.value) == (
         "index entry for releases/NOTES.md is intent-to-add and records no "
         "content"
+    )
+
+
+def index_a_second_spelling(candidate: Candidate, spelling: str) -> None:
+    """Record a second index entry for one release file, spelled differently.
+
+    Written straight into the index because there is only one file: git
+    cannot be asked to add a name the directory does not hold, and on a
+    case-insensitive filesystem it could not hold both anyway. That is the
+    shape of the case — two committed release objects, one file to answer for
+    them.
+    """
+
+    blob = git(candidate.root, "rev-parse", ":releases/README.md")
+    git(
+        candidate.root,
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        f"100644,{blob},{spelling}",
+    )
+    assert sorted(
+        path.name for path in (candidate.root / "releases").iterdir()
+    ) == ["README.md"]
+
+
+def test_a_second_cased_spelling_of_a_release_entry_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S4-F2: the release root's index was reconciled with the working
+    tree by asking ``is_file()`` about each indexed path, which is a question
+    the *filesystem* answers. On APFS, HFS+ or NTFS it answers about whatever
+    entry it considers the same name, so ``releases/README.MD`` and
+    ``releases/README.md`` — two entries the commit carries, two release
+    objects — were both answered by the one file on disk. One of them was in
+    no enumeration, was never byte- or mode-verified, and the reconciliation
+    reported the index and the working tree in agreement. The walk's own
+    spelling decides instead: it yields ``releases/README.md`` and nothing
+    else, so the other entry is absent under its own spelling.
+
+    On a case-insensitive filesystem this fails without the fix, because
+    ``is_file()`` says yes; on a case-sensitive one the entry was already
+    absent and the same refusal was already given. The refusal is the same
+    sentence on both, which is the point — the verdict does not depend on
+    which filesystem the auditor cloned onto."""
+
+    candidate = base_repository(tmp_path)
+    index_a_second_spelling(candidate, "releases/README.MD")
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate)
+    assert str(refusal.value) == (
+        "release file recorded in the index is absent or not a regular file: "
+        "releases/README.MD"
+    )
+
+
+def test_a_second_normalisation_of_a_release_entry_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S4-F2 for Unicode normalisation, which is the same hole without any
+    change of case: APFS and HFS+ compare names normalisation-insensitively,
+    so an index entry spelled NFD (``e`` + U+0301) resolves to the NFC file
+    on disk and ``is_file()`` says yes. Two entries, two release objects, one
+    file answering for both. The walk spells the file one way, and the entry
+    that is not that spelling is absent.
+
+    As above: without the fix this fails where names are compared
+    insensitively and passes where they are not, and with it the refusal is
+    the same sentence everywhere."""
+
+    candidate = base_repository(tmp_path)
+    composed = "réadme.md"
+    decomposed = unicodedata.normalize("NFD", composed)
+    assert composed != decomposed
+    (candidate.root / "releases" / composed).write_text("r\n", encoding="utf-8")
+    candidate = commit_all(candidate, "a release file with a composed name")
+    # git records the name the directory holds; the decomposed spelling is a
+    # different string, and only the index carries it.
+    tracked = git(candidate.root, "ls-files", "-z").split("\0")
+    assert f"releases/{composed}" in tracked
+    blob = git(candidate.root, "rev-parse", f":releases/{composed}")
+    # ``core.precomposeunicode`` — on by default where the filesystem
+    # decomposes — would rewrite the decomposed pathname on this command line
+    # back to the composed one, so the entry is written with it off. That is
+    # what a history authored where the two names are distinct files looks
+    # like once it is cloned onto a filesystem where they are not: two
+    # entries checked out over one file.
+    git(
+        candidate.root,
+        "-c",
+        "core.precomposeunicode=false",
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        f"100644,{blob},releases/{decomposed}",
+    )
+    assert sorted(
+        entry for entry in git(candidate.root, "ls-files", "-z").split("\0") if entry
+    ) == [
+        "ledger/immutable_prefix.json",
+        "ledger/official_observations.jsonl",
+        "releases/README.md",
+        f"releases/{decomposed}",
+        f"releases/{composed}",
+    ]
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate)
+    assert str(refusal.value) == (
+        "release file recorded in the index is absent or not a regular file: "
+        f"releases/{decomposed}"
+    )
+
+
+def test_a_second_spelling_is_refused_against_a_base_as_well(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S4-F2 on the other path. The release-history pass compares every base
+    release file and finds nothing wrong — the one file on disk is
+    byte-identical and at the base's mode — and the root's scan, which runs
+    after all of it, is where the second entry is named."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    index_a_second_spelling(candidate, "releases/README.MD")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "release file recorded in the index is absent or not a regular file: "
+        "releases/README.MD"
     )

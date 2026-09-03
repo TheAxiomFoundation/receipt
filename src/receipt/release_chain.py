@@ -24,9 +24,11 @@ which include requiring every base release file to still be an entry in the
 candidate index, since both of that pass's comparisons read the working tree
 and ``git rm --cached`` leaves it untouched; the release-root guard, which
 reconciles that root's index entries with the working tree in both
-directions and walks an indexed path's parents before asking what it is,
-because a filesystem traversal does not descend a symlinked directory while
-resolving the whole name does; the state-path guards ``append_gate`` calls;
+directions, by the spelling the traversal returns and after walking an
+indexed path's parents, because a filesystem traversal does not descend a
+symlinked directory while resolving the whole name does — and because a
+case- or normalisation-insensitive filesystem answers one entry's question
+with another entry's file; the state-path guards ``append_gate`` calls;
 the anchor-set digest in the result) run beside the extracted checks without
 altering any of their refusals, and carry their own tests. Every one of those
 index reads names its path as a literal pathspec, so git is asked about the
@@ -2347,10 +2349,11 @@ def assert_release_root_index_regular(root: pathlib.Path, spec: ChainSpec) -> No
     the candidate.
 
     So the index is read directly. Any entry under the release root whose
-    mode is not 100644 or 100755 refuses, as does an unmerged one; and so
-    does a directory the walk does find that the index holds an entry for —
-    a gitlink already populated, or a blob entry standing where a directory
-    is, which the mode scan alone would call supported.
+    mode is not 100644 or 100755 refuses, as does an unmerged one, and as
+    does one that records only an intent to add; and so does a directory the
+    walk does find that the index holds an entry for — a gitlink already
+    populated, or a blob entry standing where a directory is, which the mode
+    scan alone would call supported.
 
     A mode scan is only half of it, though, because it says nothing about
     what is on disk. Two shapes got through. The scan returned early when
@@ -2365,6 +2368,21 @@ def assert_release_root_index_regular(root: pathlib.Path, spec: ChainSpec) -> No
     So the index and the filesystem are reconciled in both directions: with
     any entry under the root, the root must be a directory on disk, and
     every entry must be there as a regular file.
+
+    The second direction is settled by the walk's own spelling, not by the
+    filesystem's resolution of the entry's name. Asking ``is_file()`` about
+    each indexed path lets a case-insensitive or normalisation-insensitive
+    filesystem — APFS, HFS+, NTFS — answer for a differently spelled entry:
+    with ``releases/README.md`` and ``releases/readme.md`` both in the index
+    and one file on disk, one file answered both questions, so one committed
+    release object was in no enumeration and was never verified while the
+    reconciliation called the two sides agreed. The traversal that has to
+    find them all is the authority on what is there: it yields each regular
+    file spelled as the directory spells it, and an index entry has to appear
+    in that set exactly. An entry the walk does not spell is absent *under
+    that spelling*, which is what the refusal says, and it says it on every
+    filesystem — where two names collide only one of them can be the file,
+    and where they do not the other one is simply not on disk.
 
     Both callers run this after every comparison that existed before it, for
     the reason the per-file index check does: an entry that is also a mode or
@@ -2412,29 +2430,37 @@ def assert_release_root_index_regular(root: pathlib.Path, spec: ChainSpec) -> No
             )
         return
     # rglob does not descend through symlinked directories, and a symlink the
-    # walk does reach is the enumeration's own refusal, not this one's.
+    # walk does reach is the enumeration's own refusal, not this one's. The
+    # regular files it reaches are collected here, spelled as the directory
+    # spells them, because that spelling is what the reconciliation below
+    # compares against.
+    walked: set[str] = set()
     for path in sorted(directory.rglob("*")):
-        if path.is_symlink() or not path.is_dir():
+        if path.is_symlink():
             continue
         listed = path.relative_to(root).as_posix()
-        if listed in modes:
-            raise ReleaseChainError(
-                f"release path is a directory with an index entry: "
-                f"{listed} ({modes[listed]})"
-            )
+        if path.is_dir():
+            if listed in modes:
+                raise ReleaseChainError(
+                    f"release path is a directory with an index entry: "
+                    f"{listed} ({modes[listed]})"
+                )
+            continue
+        if path.is_file():
+            walked.add(listed)
     # The other direction, last: an entry the walk cannot find because the
-    # working tree does not hold it as a regular file. A symlink counts as
-    # not holding it — the enumeration refuses one it reaches, and this is
-    # the same fact for an entry it never reaches at all. Its parents are
-    # walked first, because ``is_file()`` resolves the whole name and the
-    # traversal above resolves none of it: ``rglob`` does not descend a
-    # symlinked directory, so a release path served through one was in no
-    # walk and yet answered "regular file" here, from wherever the link
-    # points. The leaf keeps its own refusal, below.
+    # working tree does not hold it as a regular file under that spelling.
+    # A symlink counts as not holding it — the enumeration refuses one it
+    # reaches, and this is the same fact for an entry it never reaches at
+    # all. Its parents are walked first, because a name resolves through
+    # every component while the traversal above resolves none of it:
+    # ``rglob`` does not descend a symlinked directory, so a release path
+    # served through one was in no walk and yet answered "regular file"
+    # here, from wherever the link points. The leaf keeps its own refusal,
+    # below.
     for listed in sorted(modes):
         _assert_no_symlinked_release_component(root, listed)
-        recorded = root / pathlib.PurePosixPath(listed)
-        if recorded.is_symlink() or not recorded.is_file():
+        if listed not in walked:
             raise ReleaseChainError(
                 "release file recorded in the index is absent or not a "
                 f"regular file: {listed}"
