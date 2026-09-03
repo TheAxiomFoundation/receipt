@@ -28,6 +28,16 @@ carries no identity for, or one whose declared root SPKI or allowed signers
 differ from that identity, or whose referenced root material fails the
 ported material checks or carries an SPKI other than the identity's (all
 compared at load for every anchor, not only the one a witness selects); a
+bundle anchor one of whose ``allowedSigners`` entries is not an object
+carrying a 64-character lowercase hexadecimal ``spkiSha256``, asked of each
+entry in the bundle's own order and before any set is built -- the comparison
+just above hashed those values first, so an unhashable one
+(``{"spkiSha256": []}``) raised ``TypeError`` out of the set rather than a
+refusal, and a pinned but malformed bundle crashed the verification instead
+of being refused by it, while the hashable-but-wrong shapes were refused as a
+disagreement about which key the producer picked when what they carry is not
+a key at all; the refusal names the entry's index, because an index is what a
+producer edits (peer review, sixth gate round two); a
 pinned root PEM that OpenSSL's own parser (``openssl storeutl -noout
 -certs``) does not count exactly one certificate in, or whose certificates
 it cannot count at all -- the declared certificate hash and SPKI describe
@@ -181,29 +191,49 @@ supplies the accumulated pending updates of earlier records together with
 this record's own -- so the list was taken entire and the record was not
 consulted at all, which put the evidence and the transition at two different
 instants of one mutable path.  The record's own updates are now always
-derived here, and a supplied list is compared with them: every derived update
-must appear in it, or this refuses.  The comparison is one-way because the
-list is a superset by design, and that bounds what it closes -- a caller
-supplying this record's updates from a second read of *this* record, beside
-the snapshot's own, is indistinguishable from one supplying earlier records',
-since both are extra entries, and the stale one is then evaluated.
+derived here, and the supplied list is compared with them in both
+directions: an update the snapshot carries and the list omits is refused, and
+so is an entry in the list the snapshot does not carry, named.
 
-Which is a property of the one list and not of the machinery, so the two
-kinds of update are separate at the module-level entry point.
-``_verify_witness_with_updates`` takes ``prior_pending_updates`` -- the
-pending updates of *earlier* records and nothing else -- combines them with
-the snapshot's own itself (prior first, then the snapshot's, each mapping
+The second half of that comparison is what a round of review asked for, and
+it closes what the first half left.  The comparison used to be one-way,
+because a list carrying earlier records' pending updates *is* a superset by
+design -- and that is exactly what made a stale extra indistinguishable from
+an honest one.  An honest walker reads record A, finds the bundle update A
+carries, and supplies it; a writer replaces that path with a different,
+validly witnessed record B carrying no update before this call takes its one
+read; the derived set is then empty, is contained in the list, and the
+transition evaluated is A's update against B's evidence.  The chain then
+believes B's witness answered for a transition B never carried (peer review,
+sixth gate round two).  So an entry this call did not derive is refused
+rather than evaluated, and what the one list may now hold is exactly this
+record's own updates.
+
+Which leaves the accumulated shape to the entry point built for it.
+``verify_witness_step`` takes ``prior_pending_updates`` -- the pending
+updates of *earlier* records and nothing else -- combines them with the
+snapshot's own itself (prior first, then the snapshot's, each mapping
 admitted once, since a reference repeated across the two describes one
-bundle), and returns the snapshot-derived list beside the evidence.  A chain
-walker supplies only the earlier records' updates and takes this record's
-from the verification, so no entry in the transition is one this call did not
-either derive or attribute to a record before this one, and there is no stale
-extra to attribute at all.  The two shapes are mutually exclusive; supplying
-both is a ``TypeError`` rather than a refusal, because no call means "these
-are the earlier records' updates" and "these are the earlier records' updates
-and this one's" at once.  ``verify_witness`` keeps the one list, with 0.5.1's
-signature, because the upstream integration this is a port of walks its chain
-that way; what it leaves is said above and said again in its own docstring.
+bundle), and returns the snapshot-derived list beside the evidence in a
+:class:`WitnessStep`.  A chain walker is then written as: for each record in
+order, ``step = verify_witness_step(path, spec=spec, records=records,
+trusted_bundles=active, prior_pending_updates=pending)``; extend ``pending``
+with ``step.trust_bundle_updates``; and where ``step.evidence.status`` is
+``"available"``, activate what has accumulated and clear it.  No entry in any
+transition is one the verification did not either derive from the bytes it
+authenticated or attribute to a record before this one, and no walker ever
+reads a record itself, so there is no second read of one to be stale.
+
+``verify_witness`` keeps the one list and 0.5.1's signature, because the
+upstream integration this is a port of walks its chain that way, and on the
+pinned tree the two agree entry for entry: that walk clears its accumulator
+at every available witness, and the one record carrying an update has an
+available witness, so the list it supplies is exactly the derived set at
+every step and the new refusal is unreachable there.  The two shapes are
+mutually exclusive at the private entry point they share; supplying both is
+a ``TypeError`` rather than a refusal, because no call means "these are the
+earlier records' updates" and "these are the earlier records' updates and
+this one's" at once.
 
 The claimed response is read once for the same reason, and its checked path
 is opened component by component through held descriptors for that read.  Its ``tokenSha256``
@@ -3540,29 +3570,34 @@ def verify_witness(
     supplied list -- by equality of the update mapping, which is the whole of
     what a bundle reference is -- or this refuses.
 
-    Say plainly what that does and does not close.  The comparison is one-way
-    -- every derived update must be in the supplied list, and the supplied
-    list may hold more -- because a supplied list is a superset by design.  So
-    a caller that supplies this record's updates *from an earlier read of this
-    record*, beside the snapshot's own, cannot be told apart from one
-    supplying earlier records' pending updates: both are extra entries, and
-    nothing in this shape says which record an extra entry came from.  A
-    stale extra is therefore evaluated -- the transition the verification
-    weighs is the supplied list -- and what the comparison guarantees is only
-    that nothing the snapshot carries is missing.
+    The comparison runs in both directions, and the second direction is new.
+    It used to be one-way -- every derived update had to appear in the list,
+    and the list could hold more -- because a list carrying earlier records'
+    pending updates is a superset by design.  That is what made a stale entry
+    indistinguishable from an honest one: an honest walker reads record A,
+    supplies the bundle update A carries, and a writer replaces the path with
+    a different but validly witnessed record B carrying none before this call
+    takes its one read.  The derived set is then empty, is contained in the
+    list, and A's update is evaluated against B's evidence -- the chain
+    believing B's witness answered for a transition B never carried (peer
+    review, sixth gate round two).  So an entry this call did not derive is
+    now refused, named, rather than evaluated:
 
-    That residual belongs to this shape and not to the machinery, and it is
-    why the module-level ``_verify_witness_with_updates`` takes
-    ``prior_pending_updates`` instead: the pending updates of *earlier*
-    records only, which it combines with the snapshot's own rather than
-    trusting a list that mixes the two.  It returns the snapshot-derived
-    updates beside the evidence, so a chain walker accumulates this record's
-    from the verification rather than from a read of its own and never has
-    both kinds to hand at once -- and there is then no extra entry to
-    attribute, because the caller supplies no entry that could be this
-    record's.  This shape stays because the upstream integration this module
-    is a port of walks its chain exactly this way, and its signature is
-    0.5.1's.
+        transition bundle updates supplied by the caller omit the witnessed
+        record's own
+        stale transition bundle update supplied for {path}: {path of the entry}
+
+    What this list may therefore hold is exactly this record's own updates.
+    The accumulated shape belongs to :func:`verify_witness_step`, which takes
+    the earlier records' pending updates as ``prior_pending_updates``, derives
+    this record's own from the bytes it authenticates, evaluates the two
+    together, and returns the derived list beside the evidence in a
+    :class:`WitnessStep` -- so a walker carries this record's updates forward
+    from the verification rather than from a read of its own, and never holds
+    both kinds to hand as one list.  New consumers should walk a chain that
+    way; this signature is 0.5.1's and stays for the integration this module
+    is a port of, whose walk supplies exactly the derived set at every step of
+    the pinned tree.
     """
 
     evidence, _updates = _verify_witness_with_updates(
