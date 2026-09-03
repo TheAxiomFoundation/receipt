@@ -132,6 +132,19 @@ def bounded_key(key: str) -> str:
     So a key is bounded like a value and then made unambiguous: the marker
     carries the SHA-256 of the whole key, so two keys sharing a bounded
     prefix differ in the marker.
+
+    The *whole* digest, all sixty-four hex characters. Sixteen of them is
+    sixty-four bits, and sixty-four bits of a digest is not a bound on a
+    collision an adversary is searching for: a same-prefix pair costs about
+    2^32 trials by the birthday bound, which is minutes of ordinary
+    computing, and what it buys is one evidence value silently replacing
+    another in a verdict an auditor reads (peer review, Sol round 3). The
+    marker is thirty-two characters longer for it, against a bound of 4,096.
+
+    A digest is a distinguisher and not a proof, so the collision is checked
+    for rather than argued away: ``receipt.cli._bounded_payload`` refuses a
+    mapping whose keys are not still distinct after this transformation, and
+    that refusal is the fail-closed one the render boundary already has.
     """
 
     split = encoded_split(key)
@@ -139,4 +152,4 @@ def bounded_key(key: str) -> str:
         return key
     prefix, omitted = split
     digest = key_digest(key)
-    return f"{prefix}…[{omitted} more characters; sha256 {digest[:16]}]"
+    return f"{prefix}…[{omitted} more characters; sha256 {digest}]"

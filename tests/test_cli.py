@@ -1441,8 +1441,8 @@ def test_the_json_bound_walks_values_and_leaves_keys_alone() -> None:
     and one would silently replace the other — a real objection with the
     wrong conclusion, since a gate evidence key is 1,024 characters under
     the corpus schema and renders to over twelve thousand. A bounded key
-    carries the first sixteen hex characters of the whole key's SHA-256 in
-    its marker, so the collision the objection named cannot happen.
+    carries the whole key's SHA-256 in its marker, so the collision the
+    objection named cannot happen by accident.
 
     Non-strings pass through unchanged, so a consumer's types do not move.
     """
@@ -1473,7 +1473,7 @@ def test_the_json_bound_walks_values_and_leaves_keys_alone() -> None:
     # whole key, so two keys sharing a bounded prefix stay distinct.
     import hashlib
 
-    digest = hashlib.sha256(flood.encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.sha256(flood.encode("utf-8")).hexdigest()
     bounded_key = f"{'y' * MAX_RENDERED_FIELD}…[7 more characters; sha256 {digest}]"
     assert list(bounded["evidence"]) == [bounded_key]
     assert bounded["evidence"][bounded_key].endswith(marker)
@@ -1527,11 +1527,17 @@ def test_the_json_bound_covers_keys_and_keeps_them_distinct() -> None:
     which is the flood ``MAX_RENDERED_FIELD`` exists to stop.
 
     Keys are bounded the same way values are, and the collision is closed
-    rather than avoided: the marker carries the first sixteen hex characters
-    of the whole key's SHA-256, so two keys sharing a bounded prefix differ
-    in the marker and neither can replace the other. Both halves are
-    asserted. Without the fix the rendered key is over twelve thousand
-    characters.
+    rather than avoided: the marker carries the whole key's SHA-256, so two
+    keys sharing a bounded prefix differ in the marker and neither can
+    replace the other. Both halves are asserted. Without the fix the
+    rendered key is over twelve thousand characters.
+
+    Binds S5R3-F11 for the digest length: sixteen hex characters is
+    sixty-four bits, which is about 2^32 trials by the birthday bound for
+    an adversary who wants two evidence keys to render identically, and
+    what that buys is one value silently replacing another in a verdict an
+    auditor reads. The whole digest is in the marker now, and the assertion
+    below is on all sixty-four characters of it.
     """
 
     from receipt.cli import MAX_RENDERED_FIELD, _bounded_payload
@@ -1546,7 +1552,8 @@ def test_the_json_bound_covers_keys_and_keeps_them_distinct() -> None:
     assert _json_length(rendered_key) <= MAX_RENDERED_FIELD + _json_length(
         "…" + marker
     )
-    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    assert len(digest) == 64
     assert marker.endswith(f"; sha256 {digest}]")
 
     # Two keys sharing every character the bound keeps still render apart.
@@ -1555,6 +1562,94 @@ def test_the_json_bound_covers_keys_and_keeps_them_distinct() -> None:
     walked = _bounded_payload({first: "1", second: "2"})
     assert len(walked) == 2
     assert walked[_bounded_payload({first: ""}).popitem()[0]] == "1"
+    # And they share every character the bound kept, so nothing but the
+    # digest is keeping them apart.
+    heads = [rendered.partition("…")[0] for rendered in walked]
+    assert heads[0] == heads[1]
+
+
+def test_a_key_collision_refuses_instead_of_replacing_a_value() -> None:
+    """Binds S5R3-F11: a digest is a distinguisher, not a proof.
+
+    The marker carries the whole key's SHA-256 now rather than sixteen hex
+    characters of it, which takes a deliberate merge from about 2^32 trials
+    to out of reach. It does not take it to impossible, and what a merge
+    buys is one evidence value silently replacing another in a verdict an
+    auditor reads — a length policy turning into a data-loss policy, which
+    is the objection that kept keys unbounded in the first place.
+
+    So the mapping is checked rather than argued about: two keys that come
+    out of the bound equal refuse. The collision is forced here by
+    replacing the digest with a constant, which is the only way to reach
+    the branch and which is exactly the capability an attacker with a
+    collision would have.
+
+    Without the check the second value replaces the first and the verdict
+    reports one key where the producer wrote two.
+    """
+
+    import receipt._render as render_module
+    from receipt.cli import _bounded_payload
+
+    shared = "\U0001F600" * 400
+    first, second = shared + "a", shared + "b"
+    # The control: with the real digest the two render apart.
+    assert len(_bounded_payload({first: "1", second: "2"})) == 2
+
+    original = render_module.key_digest
+    render_module.key_digest = lambda key: "0" * 64
+    try:
+        with pytest.raises(ValueError) as caught:
+            _bounded_payload({first: "1", second: "2"})
+    finally:
+        render_module.key_digest = original
+    assert str(caught.value).startswith(
+        "two keys in one verdict object render identically once bounded: "
+    )
+
+
+def test_a_key_collision_becomes_the_render_refusal(
+    repo: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Binds S5R3-F11: the refusal has to be the one the contract promises.
+
+    ``_bounded_payload`` raising is only the right answer if it lands where
+    every other unrenderable verdict lands: the render boundary in ``main``,
+    which prints one JSON object bearing a ``verdict`` key and returns the
+    failing exit code. This drives the real command over a real corpus and
+    asserts that.
+
+    Two things are faked and both are named. The digest is replaced by a
+    constant, which is the collision itself and cannot be produced any other
+    way. And a pair of long evidence keys is added to the payload, because
+    the fixture corpus declares only short ones — they are the shape a gate
+    may legitimately carry, 1,024 characters each under
+    ``MAX_EVIDENCE_TEXT``, and the rest of the payload is the real verdict.
+
+    Without the check the run reports PASS with one of the two keys gone.
+    """
+
+    import receipt._render as render_module
+    from receipt.verify import result_to_dict as real_result_to_dict
+
+    shared = "\U0001F600" * 400
+    first, second = shared + "a", shared + "b"
+
+    def with_long_keys(result: object) -> dict[str, object]:
+        payload = real_result_to_dict(result)  # type: ignore[arg-type]
+        payload["forcedEvidence"] = {first: "1", second: "2"}
+        return payload
+
+    monkeypatch.setattr("receipt.cli.result_to_dict", with_long_keys)
+    monkeypatch.setattr(render_module, "key_digest", lambda key: "0" * 64)
+    assert run(repo, "--json") == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
+    assert payload["stage"] == "render"
+    assert "treat the run as unverified" in payload["failure"]
+    assert "ValueError" in payload["failure"]
 
 
 def test_the_text_bound_still_counts_the_characters_it_prints() -> None:
