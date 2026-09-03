@@ -653,6 +653,14 @@ def _emit(text: str, stream: TextIO) -> None:
     detached, which raises rather than being absent — is written through its
     text API with the same already-encoded text, which by construction it
     can encode.
+
+    One residual, stated because the JSON contract is exact: a write that
+    fails *part-way* leaves those bytes on the stream, and the render
+    refusal that follows adds a second object after them. A blocking stream
+    writes the whole payload or raises, so this needs a raw non-blocking
+    one; nothing here can un-write bytes, and the alternative — buffering
+    the verdict to decide whether to emit it at all — would trade a partial
+    verdict for no verdict on the same stream.
     """
 
     encoding = getattr(stream, "encoding", None) or "utf-8"
