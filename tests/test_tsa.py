@@ -4304,60 +4304,74 @@ def test_a_witness_token_path_may_not_traverse_a_symlink(
         beta.anchor_id,
     ]
     original_object = file_identity(shared)
+    # Hold the original object open for the rest of the test. The writer
+    # below unlinks the entry and creates a new file at the name; a filesystem
+    # that hands a freed inode number straight back to the next file it
+    # creates -- ext4 does, APFS does not -- then makes the replacement report
+    # the very identity it replaced, and the object-rule premise asserted after
+    # the run fails on Linux while passing on macOS. Holding the first object
+    # keeps its number allocated, so "a second object at the one entry" is
+    # observable by number wherever the test runs. It is also the honest
+    # statement of the object rule's reach: a number can only be relied on to
+    # tell two objects apart while one of them is held.
+    held_original = os.open(shared, os.O_RDONLY)
+    try:
 
-    linked_day = tree.records.resolve() / "day-alias"
-    linked_day.symlink_to(shared.parent, target_is_directory=True)
-    second_name = linked_day / shared.name
-    declared = logical_path(tree.records, shared)
-    second_spelling = logical_path(tree.records, second_name)
-    first_physical = tsa_module.physical_path(tree.records.resolve(), declared)
-    second_physical = tsa_module.physical_path(
-        tree.records.resolve(), second_spelling
-    )
-    # The premises, one per rule the walk stands in front of. The fold rule:
-    # two spellings no fold joins. The object rule: one object now, and a
-    # different one once the entry is replaced, asserted after the run. The
-    # digest rule: two different declared digests. The timestamp rule: two
-    # genuine issuances by two authorities. And the check that is already
-    # there sees nothing -- the alias is a file, and not a link itself.
-    assert tsa_module._path_fold(second_physical) != tsa_module._path_fold(
-        first_physical
-    )
-    assert file_identity(second_physical) == file_identity(first_physical)
-    assert sha256_bytes(alphas_response) != sha256_bytes(betas_response)
-    assert second_physical.is_file() and not second_physical.is_symlink()
-
-    def point_betas_outcome_through_the_alias(payload: dict[str, Any]) -> None:
-        first, second = payload["anchorOutcomes"]
-        assert (first["tsaAnchorId"], second["tsaAnchorId"]) == (
-            alpha.anchor_id,
-            beta.anchor_id,
+        linked_day = tree.records.resolve() / "day-alias"
+        linked_day.symlink_to(shared.parent, target_is_directory=True)
+        second_name = linked_day / shared.name
+        declared = logical_path(tree.records, shared)
+        second_spelling = logical_path(tree.records, second_name)
+        first_physical = tsa_module.physical_path(tree.records.resolve(), declared)
+        second_physical = tsa_module.physical_path(
+            tree.records.resolve(), second_spelling
         )
-        second["tokenPath"] = second_spelling
-        second["tokenSha256"] = sha256_bytes(betas_response)
+        # The premises, one per rule the walk stands in front of. The fold rule:
+        # two spellings no fold joins. The object rule: one object now, and a
+        # different one once the entry is replaced, asserted after the run. The
+        # digest rule: two different declared digests. The timestamp rule: two
+        # genuine issuances by two authorities. And the check that is already
+        # there sees nothing -- the alias is a file, and not a link itself.
+        assert tsa_module._path_fold(second_physical) != tsa_module._path_fold(
+            first_physical
+        )
+        assert file_identity(second_physical) == file_identity(first_physical)
+        assert sha256_bytes(alphas_response) != sha256_bytes(betas_response)
+        assert second_physical.is_file() and not second_physical.is_symlink()
 
-    rewrite_witness(tree, point_betas_outcome_through_the_alias)
-    writes = replace_the_response_between_the_reads(
-        monkeypatch, shared, betas_response
-    )
-    reads = record_one_reads(monkeypatch)
-    invocations = record_openssl_arguments(monkeypatch)
-    with pytest.raises(TsaError) as caught:
-        verify_tree(tree)
-    assert str(caught.value) == (
-        f"witness token path traverses a symlink at {linked_day}: "
-        f"{second_physical}"
-    )
-    # The writer really did run, and really did put a second object at the
-    # one entry: the object rule would have counted two files.
-    assert writes == [str(shared)]
-    assert shared.read_bytes() == betas_response
-    assert file_identity(shared) != original_object
-    assert file_identity(second_physical) == file_identity(first_physical)
-    # Refused before the aliased outcome is read, and before its verification.
-    assert reads.count(str(first_physical)) == 1
-    assert reads.count(str(second_physical)) == 0
-    assert [arguments[:2] for arguments in invocations].count(["ts", "-reply"]) == 1
+        def point_betas_outcome_through_the_alias(payload: dict[str, Any]) -> None:
+            first, second = payload["anchorOutcomes"]
+            assert (first["tsaAnchorId"], second["tsaAnchorId"]) == (
+                alpha.anchor_id,
+                beta.anchor_id,
+            )
+            second["tokenPath"] = second_spelling
+            second["tokenSha256"] = sha256_bytes(betas_response)
+
+        rewrite_witness(tree, point_betas_outcome_through_the_alias)
+        writes = replace_the_response_between_the_reads(
+            monkeypatch, shared, betas_response
+        )
+        reads = record_one_reads(monkeypatch)
+        invocations = record_openssl_arguments(monkeypatch)
+        with pytest.raises(TsaError) as caught:
+            verify_tree(tree)
+        assert str(caught.value) == (
+            f"witness token path traverses a symlink at {linked_day}: "
+            f"{second_physical}"
+        )
+        # The writer really did run, and really did put a second object at the
+        # one entry: the object rule would have counted two files.
+        assert writes == [str(shared)]
+        assert shared.read_bytes() == betas_response
+        assert file_identity(shared) != original_object
+        assert file_identity(second_physical) == file_identity(first_physical)
+        # Refused before the aliased outcome is read, and before its verification.
+        assert reads.count(str(first_physical)) == 1
+        assert reads.count(str(second_physical)) == 0
+        assert [arguments[:2] for arguments in invocations].count(["ts", "-reply"]) == 1
+    finally:
+        os.close(held_original)
 
 
 @pytest.mark.parametrize("victim", ["record", "root"])
