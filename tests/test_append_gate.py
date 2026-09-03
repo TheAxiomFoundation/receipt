@@ -900,6 +900,7 @@ def test_the_surface_walk_is_bounded(
         "cannot be classified: "
     )
 
+
 class RecordingScandir:
     """``os.scandir`` that records every entry the caller actually consumes.
 
@@ -5219,6 +5220,7 @@ def test_an_ordinary_path_under_a_protected_directory_is_not_an_alias(
         "thesis-facts append check OK: 2 rows, immutable prefix 1"
     )
 
+
 def an_index_entry(candidate: Candidate, listed: str) -> None:
     """Add one real file to the candidate index at exactly ``listed``.
 
@@ -5474,6 +5476,7 @@ def test_a_symlinked_parent_of_a_nested_release_root_is_refused(
     assert str(refusal.value) == (
         "release root path traverses a symlink at 'data': data/releases"
     )
+
 
 def a_nested_base_with_no_release_tree(tmp_path: pathlib.Path) -> Candidate:
     """A base configured for ``data/releases`` with nothing at ``data`` yet.
