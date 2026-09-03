@@ -1439,6 +1439,30 @@ def a_repository_holding(tmp_path: pathlib.Path, *listed: str) -> pathlib.Path:
     return root
 
 
+def test_the_alias_scan_covers_the_manifest_and_anchor_directories(
+    repo: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """Opus peer review, round one on gate g: the scan's own protected set
+    named the release root and the two state paths, but not the manifest and
+    anchor directories this module also reads for itself. An index entry
+    spelled ``releases/Manifests/…`` beside the spec's ``releases/manifests``
+    is one present regular file on a name-folding checkout, which the release
+    root's index scan passes twice, and with no surfaces named nothing else
+    asked about it. Both directories are protected on their own now, so the
+    alias is refused with no ``surfaces`` argument at all."""
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    for alias in ("releases/Manifests/0000-alias.json", "releases/Anchors/root.pem"):
+        scratch = tmp_path / alias.split("/")[1]
+        scratch.mkdir()
+        root = a_repository_holding(scratch, alias)
+        with pytest.raises(ReleaseChainError) as refusal:
+            assert_index_carries_no_protected_alias(root, spec.chain)
+        assert str(refusal.value).startswith(
+            f"index carries an alias of a protected path: {alias} (for "
+        )
+
+
 def test_the_alias_scan_protects_only_what_its_caller_names(
     repo: pathlib.Path, tmp_path: pathlib.Path
 ) -> None:

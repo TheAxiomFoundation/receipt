@@ -3126,9 +3126,10 @@ def assert_index_carries_no_protected_alias(
 
     ``surfaces`` is how a caller with configured surfaces of its own — the
     append gate's gate and data patterns — adds them to that set, and it is
-    the whole of the difference between the two. The three paths a
-    ``ChainSpec`` carries are the ones this module reads for itself, and they
-    were all this scan compared against; a caller that classifies a proposal
+    the whole of the difference between the two. The five paths a
+    ``ChainSpec`` carries — the release root, the two state paths, the
+    manifest directory and the anchor directory — are the ones this module
+    reads for itself, and they are what this scan compares against on its own; a caller that classifies a proposal
     by surface patterns protects more paths than that. An index entry spelled
     ``Scripts/check_append.py`` under a gate pattern of
     ``scripts/check_append.py`` is a second committed object over the gate
@@ -3170,6 +3171,13 @@ def assert_index_carries_no_protected_alias(
                 spec.release_root_relative.as_posix(),
                 spec.state_relative.as_posix(),
                 spec.prefix_relative.as_posix(),
+                # The manifest and anchor directories are read by this module
+                # too, and on a name-folding checkout an index entry spelled
+                # ``releases/Manifests/…`` beside ``releases/manifests/…`` is
+                # one present file the release root's own scan passes twice
+                # (peer review, Opus round one on gate g).
+                spec.manifest_relative.as_posix(),
+                spec.anchor_relative.as_posix(),
                 *_surface_alias_paths(surfaces),
             )
         )
