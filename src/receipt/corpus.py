@@ -178,7 +178,19 @@ unstamped, and replacing ``.axiom/toolchain.toml`` by rename during the second
 tombstone pass moved a generation nothing had recorded (peer review, round
 seven). Every ancestor of
 every bound path, from the tree root down to the file's own parent, is
-therefore stamped as well, before the identity re-check re-states the files.
+therefore stamped as well.
+
+*When* those stamps are taken is load-bearing for the attested half. Taking
+them after the hashing left one window that nothing watched at all: the
+spelling walk and the hash are two separate lookups of the same name, and on
+the volume the spelling check is about, a case-only rename landing between
+them resolves through the declared spelling — the walk had passed, the hash
+took the renamed entry's bytes, and the stamps recorded the tree as the rename
+had left it (peer review, Sol round 3). So the ancestors of every attested
+path are stamped before the first spelling walk reads anything, and the walk
+itself is re-run for attested paths in the closing identity loop. Content
+ancestors are stamped where they were, after the closing membership sweep,
+because a content path's spelling is what that sweep re-derives.
 
 The per-file identity that re-check compares carries the file's own ctime for
 the same reason the directory stamp does. Size and mtime are values a writer
@@ -2475,7 +2487,10 @@ def _regular_file_digest(
     again would answer a question already answered — at a cost of one
     listing per component per file, which for a wide content directory is
     quadratic and unbudgeted in a module that budgets its other walks.
-    Attested paths pass ``True``, because nothing enumerates them.
+    Attested paths pass ``True``, because nothing enumerates them — and for
+    the same reason :func:`verify_corpus_binding` asks the question a second
+    time in its closing identity loop, where a content path again passes
+    ``False``.
     """
 
     path = _assert_no_symlinked_component(root, relative, spelled=spelled)
@@ -2657,6 +2672,17 @@ def verify_corpus_binding(
             "the witnessed journal does not attest a path the pinned spec "
             f"requires: {_quoted(missing_required[0])}"
         )
+    # Stamped before the first spelling walk, not after the hashing, because
+    # the walk and the hash are two separate lookups of the same name and a
+    # case-only rename between them resolves through the declared spelling on
+    # the volume this check is about. The walk passed, the hash captured the
+    # renamed entry, and the ancestor stamps taken afterwards recorded the
+    # tree as the rename had left it — so nothing downstream could see it
+    # (peer review, Sol round 3). ``.axiom`` is stamped before anything reads
+    # it, and the walk's own listing is inside the window the stamps close.
+    generations = _DirectoryGenerations()
+    for path in sorted(attested):
+        generations.record_ancestors(root, path)
     for path in sorted(attested):
         digest, identity = _regular_file_digest(root, path)
         if digest != attested[path].sha256:
@@ -2691,7 +2717,6 @@ def verify_corpus_binding(
     # and ctime and is refused — the check no third re-sweep could give,
     # because a third re-sweep would only move the boundary again (peer
     # review, round six).
-    generations = _DirectoryGenerations()
     if set(_tree_content_paths(root, spec, generations=generations)) != tree_paths:
         raise CorpusError(
             "the content tree changed during verification; the closed-world "
@@ -2711,12 +2736,21 @@ def verify_corpus_binding(
 
     for path in sorted(hashed):
         try:
-            # This walk re-asks the symlink question and not the spelling
-            # one: the spelling of every bound path was established before
-            # it was hashed, and re-establishing it here would cost a
-            # listing per component of every bound file a second time.
+            # The spelling question is re-asked for attested paths and not
+            # for content ones, which is the same split the hashing made and
+            # for the same two reasons. A content path's spelling was proved
+            # by the membership comparison against a set the sweep built out
+            # of listing names, and the closing sweep above has just proved
+            # it again; asking here would cost a listing per component of
+            # every content file for an answer already in hand. An attested
+            # path is enumerated by nothing, so its only proof was the walk
+            # that ran before it was hashed — and a case-only rename landing
+            # between that walk and the hash left the walk's answer stale
+            # with nothing after it to notice (peer review, Sol round 3).
             after = os.lstat(
-                _assert_no_symlinked_component(root, path, spelled=False)
+                _assert_no_symlinked_component(
+                    root, path, spelled=path in attested
+                )
             )
         except OSError as exc:
             raise CorpusError(

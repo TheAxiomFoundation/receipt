@@ -4702,6 +4702,128 @@ def test_refuses_a_directory_holding_two_spellings_of_a_bound_component(
     )
 
 
+def _scandir_reshaped_after(directory_name: str, calls: int, **reshape):
+    """An ``os.scandir`` that reshapes one directory only after ``calls``.
+
+    The spelling of an attested path is walked twice per verification — once
+    before it is hashed and once in the closing identity loop — and the two
+    askings are what S5R3-F4 is about, so a test has to be able to change
+    what the second one sees without touching the first. Every other
+    directory, and the first ``calls`` listings of this one, come back from
+    the host untouched.
+    """
+
+    real = os.scandir
+    seen = [0]
+
+    def scandir(target):
+        if pathlib.PurePath(os.fspath(target)).name != directory_name:
+            return real(target)
+        seen[0] += 1
+        if seen[0] <= calls:
+            return real(target)
+        return _Scan(real(target), **reshape)
+
+    return scandir
+
+
+def test_stamps_an_attested_ancestor_before_its_spelling_is_walked(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S5R3-F4: the attested stamps were taken after the hashing.
+
+    The spelling walk and the hash are two separate lookups of the same
+    name, and on the volume the spelling check is about — one that resolves
+    a case variant — a rename landing between them resolves through the
+    declared spelling. The walk had already passed; the hash took the
+    renamed entry's bytes; and the ancestor generations, recorded after all
+    of that, stamped the tree as the rename had left it. Nothing downstream
+    could see it: the closing membership sweep does not reach ``.axiom``,
+    the identity re-check compares stamps taken after the fact, and the
+    closing walk ran with the spelling question turned off.
+
+    The ancestors of every attested path are stamped before the first
+    spelling walk reads anything now, so a change to ``.axiom`` in that
+    window moves its mtime and ctime past a stamp that already exists.
+
+    The change is injected as a directory mutation rather than as the
+    case-only rename itself, because a rename resolves differently by host —
+    the point of the finding — while what has to be caught is the same on
+    every host: ``.axiom`` moved after the walk had read it. Without the
+    move this verification returns a CorpusVerification.
+    """
+
+    import receipt.corpus as corpus_module
+
+    write_tree(tmp_path)
+    real = corpus_module._assert_spelled_by_its_directory
+    armed = [True]
+
+    def walk_then_mutate(parent: pathlib.Path, component: str, relative: str) -> None:
+        real(parent, component, relative)
+        if armed[0] and component == "toolchain.toml":
+            armed[0] = False
+            scratch = tmp_path / ".axiom" / "scratch.tmp"
+            scratch.write_text("x\n")
+            scratch.unlink()
+
+    monkeypatch.setattr(
+        corpus_module, "_assert_spelled_by_its_directory", walk_then_mutate
+    )
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    assert not armed[0]
+    assert str(caught.value) == (
+        "the tree changed during verification; the closed-world verdict is "
+        "refused"
+    )
+
+
+def test_the_closing_walk_re_asks_an_attested_path_for_its_spelling(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S5R3-F4, the second half: the closing walk had it turned off.
+
+    Every bound path is walked once more at the end of the verification, to
+    re-ask the symlink question over the window the hashing opened. That
+    walk passed ``spelled=False`` for every path, so the spelling of an
+    attested path was established exactly once, before it was hashed, and
+    the last thing to look at it was the walk whose answer the finding says
+    can go stale.
+
+    It asks the question for attested paths now — and still not for content
+    ones, whose spelling the closing membership sweep re-derives out of
+    listing names a few lines earlier. The sibling screen from S5R3-F3 rides
+    along with it.
+
+    The second listing of ``.axiom`` is reshaped to hold ``TOOLCHAIN.TOML``
+    where the first held ``toolchain.toml``, which is what a case-only
+    rename in that window looks like to the walk on a volume that resolves
+    either spelling. The tree itself is untouched, so the generation check
+    cannot be what refuses and this test binds the walk alone. Without it
+    the second listing is never taken and the verification returns.
+    """
+
+    write_tree(tmp_path)
+    monkeypatch.setattr(
+        os,
+        "scandir",
+        _scandir_reshaped_after(
+            ".axiom", 1, hidden={"toolchain.toml"}, extra=["TOOLCHAIN.TOML"]
+        ),
+    )
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        "path component 'toolchain.toml' is not spelled by its directory: "
+        ".axiom/toolchain.toml"
+    )
+
+
 def test_refuses_a_required_attested_path_the_directory_does_not_spell(
     tmp_path: pathlib.Path,
 ) -> None:
