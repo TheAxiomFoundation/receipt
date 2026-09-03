@@ -31,8 +31,12 @@ the whole name does — and because a case- or normalisation-insensitive
 filesystem answers one entry's question with another entry's file; the
 whole-index read that refuses an entry spelled as another spelling of a
 protected path, which every one of those reconciliations is blind to because
-each compares by exact spelling; the content binding, which requires the blob
-the index records for a path to be either the base's — the commit under review
+each compares by exact spelling; the whole-index read's other refusal, for an
+entry marked assume-unchanged or skip-worktree, which tells git to stop
+comparing that path against the working tree and so hides a rewrite from the
+``git diff`` a caller's surface classification is built on; the content
+binding, which requires the blob the index records for a path to be either the
+base's — the commit under review
 does not change it — or the git blob id of the bytes the caller just verified,
 because every comparison here reads the working tree and none of them ever
 looked at what the commit would carry; the release root's own path walk,
@@ -2330,6 +2334,13 @@ def _observed_git_category(path: pathlib.Path) -> str:
 # git's in-memory cache-entry flag for an intent-to-add entry (CE_INTENT_TO_ADD,
 # 1 << 29), as ``git ls-files --debug`` prints it. See _index_entries.
 CE_INTENT_TO_ADD = 0x2000_0000
+# The two flags that tell git to stop comparing an entry against the working
+# tree: CE_VALID (the "assume unchanged" bit, 1 << 15, the low half of the
+# on-disk flag word) and CE_SKIP_WORKTREE (1 << 30). Either one makes ``git
+# diff`` report nothing for a path whose file has been rewritten. See
+# assert_index_carries_no_protected_alias.
+CE_VALID = 0x8000
+CE_SKIP_WORKTREE = 0x4000_0000
 # ``git ls-files --debug`` prints exactly these five lines per entry, in this
 # order, whatever the entry is; the last carries the flag word.
 INDEX_DEBUG_LINES = 5
@@ -2353,6 +2364,7 @@ class _IndexRecord:
     stage: str
     path: str
     intent_to_add: bool
+    hidden: bool
 
 
 def _split_index_debug(chunk: bytes, unparseable: str) -> tuple[bytes, bytes]:
@@ -2414,6 +2426,7 @@ def _parse_index_records(
                 stage=stage,
                 path=listed,
                 intent_to_add=bool(word & CE_INTENT_TO_ADD),
+                hidden=bool(word & (CE_VALID | CE_SKIP_WORKTREE)),
             )
         )
         record = next_record
@@ -2539,7 +2552,29 @@ def _folded_parts(path: str) -> tuple[str, ...]:
 def assert_index_carries_no_protected_alias(
     root: pathlib.Path, spec: ChainSpec
 ) -> None:
-    """Refuse an index entry spelled as another spelling of a protected path.
+    """The whole-index read, and the two facts only it can establish.
+
+    Both are refusals at entry, for the same reason: each says a comparison
+    cannot be made in this repository rather than making one. The second is
+    about every entry rather than the protected ones, so it could not be a
+    check on a path, and the read that answers it is this one.
+
+    An index entry marked *assume-unchanged* (``CE_VALID``) or
+    *skip-worktree* (``CE_SKIP_WORKTREE``) tells git to stop comparing that
+    path against the working tree. ``git diff`` then reports nothing for a
+    file that has been rewritten on disk, and the surface classification is
+    built on ``git diff``: the ledger could be rewritten under an
+    assume-unchanged entry, a gate file added beside it, and the proposal
+    classified as gate-only — which returns before the ledger, the frozen
+    prefix, the row bindings and the release history are read at all. Neither
+    bit is something a proposal can want here: both exist to let a working
+    copy diverge from the index on purpose, and this verifier's whole subject
+    is whether they agree. Any entry carrying either refuses, because the
+    classification ``git diff`` performs covers every path in the tree and not
+    only the protected ones. It shares the tracked-state exception in
+    ``append_gate``'s stated precedence rather than adding another.
+
+    The rest of this is the alias refusal.
 
     Every reconciliation this package makes between the index and the working
     tree is by exact spelling, which is what makes it a comparison at all: the
@@ -2579,9 +2614,10 @@ def assert_index_carries_no_protected_alias(
         spec.prefix_relative.as_posix(),
     )
     folded = {path: _folded_parts(path) for path in protected}
-    for record in sorted(
+    records = sorted(
         _all_index_entries(root), key=lambda entry: (entry.path, entry.stage)
-    ):
+    )
+    for record in records:
         listed = record.path
         parts = listed.split("/")
         listed_folded = _folded_parts(listed)
@@ -2593,6 +2629,15 @@ def assert_index_carries_no_protected_alias(
                 continue
             raise ReleaseChainError(
                 f"index carries an alias of a protected path: {listed} (for {path})"
+            )
+    # A second pass over the same records rather than a second condition in
+    # the loop above, so a tree an alias already refused keeps that refusal
+    # and this adds nothing to a message anyone has seen.
+    for record in records:
+        if record.hidden:
+            raise ReleaseChainError(
+                f"index entry for {record.path} is marked assume-unchanged or "
+                "skip-worktree, which hides working-tree changes from git"
             )
 
 
