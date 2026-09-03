@@ -126,7 +126,16 @@ rather than parse a verdict.
 
 Each renderer counts in the units it emits, which is not the same count.
 The text renderer counts the characters it prints, so an escape sequence is
-charged the six characters a terminal receives. The JSON renderer counts
+charged the six characters a terminal receives — and on a stream whose
+encoding is not UTF-8 those characters are not what it receives, because
+:func:`_emit` falls back to ASCII with ``backslashreplace``: 4,096 emoji
+passed a bound counted in characters and arrived as 40,960 bytes of
+``\\U0001f600``, ten times the bound and out of a field the bound had already
+accepted (peer review, Sol round 4). So the emission encoding is decided in
+:func:`main`, before the verdict is rendered rather than after, and handed to
+:func:`_format_text`; where it will fall back, each non-ASCII character is
+escaped to the spelling the codec produces *before* it is measured. What is
+counted is what the stream is given. The JSON renderer counts
 what ``json.dumps`` will emit: with ``ensure_ascii`` on, a value bounded to
 4,096 code points outside the BMP rendered as 49,152 characters, twelve
 times the bound and out of a string the bound had already accepted (peer
@@ -363,12 +372,30 @@ def _terminal_safe(text: str) -> str:
     return "".join(_escaped_character(character) for character in text)
 
 
-def _rendered(text: str) -> str:
+def _rendered(text: str, *, encoding: str = "utf-8") -> str:
     """Escape a result-derived string and bound it, in one pass over the input.
 
     One function so the two policies cannot be applied to different sets of
     strings. Every string ``_format_text`` and :func:`_refuse` take from a
     result goes through this and nothing else does.
+
+    ``encoding`` is the encoding the verdict will be *written* in, which
+    :func:`_byte_safe_encoding` decides and which is not always the stream's
+    own. It is here because the bound has to be measured in the units the
+    stream receives, and on a stream that is not UTF-8 those units are not
+    the characters this function holds: :func:`_emit` encodes with
+    ``backslashreplace``, so 4,096 emoji passed a bound counted in characters
+    and arrived as 40,960 bytes of ``\\U0001f600`` — ten times the bound, out
+    of a field the bound had already accepted (peer review, Sol round 4). So
+    where the emission will fall back to ASCII, each non-ASCII character is
+    escaped to the spelling ``backslashreplace`` produces *before* it is
+    measured, and what is counted is what the stream receives. On a UTF-8
+    emission nothing changes: a character is a character and the count is the
+    one a terminal draws.
+
+    The default is UTF-8, which is what a caller that is not emitting — a
+    test, or a future caller rendering for something other than a stream —
+    should get: the text as a modern terminal would receive it.
 
     Escaping and bounding are fused rather than sequenced. Escaping the whole
     string first built the escaped copy of an attacker-controlled value
@@ -403,10 +430,18 @@ def _rendered(text: str) -> str:
     count there bounded a twelvefold larger rendering.
     """
 
+    ascii_only = _escapes_non_ascii(encoding)
     escaped: list[str] = []
     total = 0
     for index, character in enumerate(text):
         piece = _escaped_character(character)
+        if ascii_only and not piece.isascii():
+            # The character survived the escaper and will not survive the
+            # codec. ``_python_escape`` is the spelling ``backslashreplace``
+            # produces for it — \xNN, \uXXXX, \UXXXXXXXX — so measuring this
+            # is measuring the bytes, and emitting it is emitting what the
+            # codec would have emitted anyway.
+            piece = _python_escape(ord(character))
         total += len(piece)
         if total > MAX_RENDERED_FIELD:
             omitted = len(text) - index
@@ -461,13 +496,32 @@ def _bounded_payload(value: object) -> object:
     return value
 
 
-def _format_text(result: VerifyResult) -> str:
+def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
+    """The text verdict, rendered for the encoding it will be written in.
+
+    ``encoding`` is what :func:`_byte_safe_encoding` decided for the stream
+    this verdict is going to, threaded from :func:`main` so that every
+    result-derived field is measured in the units the stream receives. It
+    defaults to UTF-8, which is the text as a modern terminal takes it, so a
+    caller that only wants the verdict does not have to know about
+    emissions; :func:`_rendered` says why the two cannot be separated.
+
+    Every such field goes through the local ``rendered`` below, which is
+    :func:`_rendered` with this encoding bound to it. A local binding rather
+    than an argument at each of the fourteen call sites, so that forgetting
+    one is not possible: the escaping, the bound and the units are one
+    decision applied to one set of strings.
+    """
+
+    def rendered(text: str) -> str:
+        return _rendered(text, encoding=encoding)
+
     lines: list[str] = []
-    version = _rendered(result.receipt_version)
-    lines.append(f"receipt {version} — {_rendered(result.spec_name)}")
-    lines.append(f"  root  {_rendered(str(result.root))}")
-    lines.append(f"  spec  {_rendered(str(result.spec_path))}")
-    lines.append(f"        sha256 {_rendered(result.spec_sha256)}")
+    version = rendered(result.receipt_version)
+    lines.append(f"receipt {version} — {rendered(result.spec_name)}")
+    lines.append(f"  root  {rendered(str(result.root))}")
+    lines.append(f"  spec  {rendered(str(result.spec_path))}")
+    lines.append(f"        sha256 {rendered(result.spec_sha256)}")
     lines.append("")
 
     if result.ok:
@@ -476,14 +530,14 @@ def _format_text(result: VerifyResult) -> str:
         lines.append("PASSES")
     for item in result.passes:
         mark = "ok  " if item.ok else "FAIL"
-        lines.append(f"  [{mark}] {_rendered(item.name)}")
+        lines.append(f"  [{mark}] {rendered(item.name)}")
         if item.ok:
-            lines.append(f"         {_rendered(item.detail)}")
+            lines.append(f"         {rendered(item.detail)}")
         else:
             # str(), not "or ''": a failed pass always carries a failure
             # string, and rendering a hypothetical None as "None" is what
             # this line did before the escaping was added to it.
-            lines.append(f"         {_rendered(str(item.failure))}")
+            lines.append(f"         {rendered(str(item.failure))}")
 
     corpus = result.corpus
     if corpus is not None and corpus.gates:
@@ -507,11 +561,11 @@ def _format_text(result: VerifyResult) -> str:
                     # shows sixteen characters of the value rather than
                     # sixteen characters of its escaping.
                     waiver = gate.evidence.get("waiverSetSha256", "")[:16]
-                    suffix = f"  [WAIVED under waiver set {_rendered(waiver)}…]"
+                    suffix = f"  [WAIVED under waiver set {rendered(waiver)}…]"
                 elif gate.outcome == "not-run":
-                    reason = _rendered(gate.evidence.get("reason", ""))
+                    reason = rendered(gate.evidence.get("reason", ""))
                     suffix = f"  [DID NOT RUN — {reason}]"
-                lines.append(f"    - {_rendered(gate.gate_id)}{suffix}")
+                lines.append(f"    - {rendered(gate.gate_id)}{suffix}")
 
     lines.append("")
     if result.ok:
@@ -520,7 +574,7 @@ def _format_text(result: VerifyResult) -> str:
         # The anchor names come from the consumer's committed spec rather
         # than from a producer, but they are result data and the rule here
         # admits no exceptions: nothing reaches a line unescaped.
-        witnesses = [_rendered(name) for name in sorted(result.witness_times())]
+        witnesses = [rendered(name) for name in sorted(result.witness_times())]
         count = len(witnesses)
         noun = "authorities" if count != 1 else "authority"
         # Whether a trusted base reference was verified changes what the
@@ -599,7 +653,7 @@ def _format_text(result: VerifyResult) -> str:
     else:
         failure = next((item for item in result.passes if not item.ok), None)
         detail = failure.failure if failure is not None else "unknown failure"
-        name = _rendered(failure.name) if failure else "verification"
+        name = rendered(failure.name) if failure else "verification"
         # The attacker-derived detail first and the trusted sentinel last,
         # with nothing after it. Printing the sentinel first put bounded but
         # entirely printable text after the one line an auditor keys on, and
@@ -614,7 +668,7 @@ def _format_text(result: VerifyResult) -> str:
         # so the sentinel line is short and cannot wrap. It goes through
         # ``_rendered`` anyway, because the rule here admits no exceptions.
         lines.append(f"FAILED: {name}")
-        lines.append(f"  {_rendered(str(detail))}")
+        lines.append(f"  {rendered(str(detail))}")
         lines.append("")
         lines.append(f"VERDICT: FAIL — {name}")
     return "\n".join(lines)
@@ -629,6 +683,23 @@ def _format_text(result: VerifyResult) -> str:
 #: a printable character onto a terminal-controlling byte defeats it after
 #: the fact. See :func:`_byte_safe_encoding`.
 _TRUSTED_ENCODINGS = frozenset({"utf-8", "utf-8-sig"})
+
+
+def _escapes_non_ascii(encoding: str) -> bool:
+    """Whether :func:`_emit` will spell a non-ASCII character in backslashes.
+
+    True for every encoding but the trusted ones, because :func:`_emit`
+    encodes with ``backslashreplace`` and :func:`_byte_safe_encoding` hands
+    it ASCII wherever the stream's own codec is not UTF-8. :func:`_rendered`
+    asks this so that what it measures is what the stream receives; an
+    unknown spelling answers True, which is the same fail-closed direction
+    :func:`_byte_safe_encoding` takes.
+    """
+
+    try:
+        return codecs.lookup(encoding).name not in _TRUSTED_ENCODINGS
+    except (LookupError, ValueError):
+        return True
 
 
 def _byte_safe_encoding(stream: TextIO) -> str:
@@ -825,10 +896,12 @@ def _refuse(as_json: bool, stage: str, message: str, code: int) -> int:
     The text half is the abort counterpart of :func:`_fail_payload`, and it
     is a verdict line like any other: the message can quote a spec path, an
     exception's text, or a filename that came off the disk, so it is escaped
-    and bounded on its way to the terminal. The JSON half takes the message
-    unescaped — ``json.dumps`` escapes it there — but bounded by the same
-    policy, because an abort message can carry a producer's flood as readily
-    as a completed verdict can.
+    and bounded on its way to the terminal — and bounded in the units the
+    stream will receive, which is the same reason :func:`_format_text` is
+    handed an encoding. The JSON half takes the message unescaped —
+    ``json.dumps`` escapes it there — but bounded by the same policy, because
+    an abort message can carry a producer's flood as readily as a completed
+    verdict can.
 
     And it ends with this module's own text, for the reason
     :func:`_format_text`'s failure branch does: a bounded message is still
@@ -851,7 +924,12 @@ def _refuse(as_json: bool, stage: str, message: str, code: int) -> int:
     """
 
     try:
-        _emit(f"receipt verify: {_rendered(message)}\nreceipt verify: FAIL", sys.stderr)
+        _emit(
+            "receipt verify: "
+            f"{_rendered(message, encoding=_byte_safe_encoding(sys.stderr))}"
+            "\nreceipt verify: FAIL",
+            sys.stderr,
+        )
     except Exception:  # noqa: BLE001 - a refusal that cannot print is still a refusal
         pass
     if as_json:
@@ -951,8 +1029,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
     else:
         try:
-            text = _format_text(result)
-            _emit(text, sys.stdout if result.ok else sys.stderr)
+            stream = sys.stdout if result.ok else sys.stderr
+            # The encoding is decided once, here, and used for both halves of
+            # the emission: what the fields are measured against and what the
+            # bytes are written in. Measuring in characters and then writing
+            # in ASCII let 4,096 emoji pass a bound of 4,096 and arrive as
+            # 40,960 bytes (peer review, Sol round 4).
+            text = _format_text(result, encoding=_byte_safe_encoding(stream))
+            _emit(text, stream)
         except Exception as exc:  # noqa: BLE001 - rendering is inside the contract
             return _refuse(
                 False,
