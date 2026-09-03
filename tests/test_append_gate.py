@@ -2772,9 +2772,9 @@ def test_a_gate_only_proposal_whose_index_changes_the_ledger_is_not_gate_only(
     only the gate script has changed on disk. Without the index's own changed
     set the proposal classifies as gate-only and is accepted with
     ``GATE_SURFACE changes=['scripts/check_append.py']``, carrying a ledger
-    mode change no check ever saw. With it the ledger is a DATA change, this
-    is not a gate-only proposal, and the data path's index comparison answers
-    for it."""
+    mode change no check ever saw. With it the ledger is a DATA change beside
+    a GATE change, which is a mixed proposal, refused in the words the
+    working-tree classification has always used for one."""
 
     candidate = base_repository(tmp_path)
     add_gate_file(candidate)
@@ -2794,8 +2794,45 @@ def test_a_gate_only_proposal_whose_index_changes_the_ledger_is_not_gate_only(
     with pytest.raises(AppendError) as refusal:
         run_gate(candidate)
     assert str(refusal.value) == (
-        "candidate working tree mode for ledger/official_observations.jsonl "
-        "disagrees with its index entry (100755 vs 100644)"
+        "mixed data/gate proposal is forbidden: DATA_SURFACE changes="
+        "['ledger/official_observations.jsonl']; GATE_SURFACE changes="
+        "['scripts/check_append.py']; split them into separate pull requests"
+    )
+
+
+def test_a_data_proposal_whose_index_carries_a_gate_change_is_mixed(
+    tmp_path: pathlib.Path,
+) -> None:
+    """R7-F3 from the other side. The working tree carries an ordinary
+    append and no gate change; the index records the gate script, written
+    straight into it with no file on disk. The commit under review touches
+    both surfaces, which is the mixed proposal the working-tree classification
+    refuses whenever it can see both halves — and here it sees only one. The
+    union sees both, and refuses in the same words, naming the path each side
+    carries. Without the index's changed set this ran the data path and
+    accepted a data verdict over a commit that also changes the gate."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    blob = git(candidate.root, "hash-object", "-w", "--stdin", stdin="# staged gate\n")
+    git(
+        candidate.root,
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        f"100644,{blob},{GATE_FILE}",
+    )
+    assert not (candidate.root / GATE_FILE).exists()
+    assert "official_observations" in git(
+        candidate.root, "diff", "--name-only", candidate.base, "--"
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "mixed data/gate proposal is forbidden: DATA_SURFACE changes="
+        "['ledger/official_observations.jsonl']; GATE_SURFACE changes="
+        "['scripts/check_append.py']; split them into separate pull requests"
     )
 
 

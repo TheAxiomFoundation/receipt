@@ -87,9 +87,11 @@ comparison that passed while the working tree was not carrying what git
 recorded is caught afterwards and nothing pre-existing is pre-empted; the
 differential harness pins the upstream's mode-change refusal for an unstaged
 chmod, which is both. Each order is pinned by a test. Classifying the index's
-changed set alongside the working tree's takes nothing away either: a
-proposal it stops calling gate-only falls through to the data path, so more
-of the pre-existing checks run for it, not fewer.
+changed set alongside the working tree's takes nothing away either: the
+union is held to the rule the working-tree set already met, so a proposal the
+index shows to touch both surfaces is refused as mixed, in the words that
+refusal has always used, and one it shows to be data goes to the data path,
+where more of the pre-existing checks run for it, not fewer.
 
 One refusal here is not about a tree at all, and is stated because it does
 pre-empt everything on every input wherever it applies: where ``os.open``
@@ -1465,51 +1467,60 @@ def verify_append_gate(
         except ReleaseChainError as exc:
             raise AppendError(str(exc)) from exc
     if base is not None:
-        _data_changes, gate_changes, unclassified = check_surface_separation(
+        tree_data, tree_gate, tree_unclassified = check_surface_separation(
             base,
             candidate,
         )
-        if gate_changes:
-            # A gate-only verdict speaks for the whole proposal while reading
-            # none of the ledger, so what it classified had to be the whole
-            # proposal — and it was the working tree's diff against the base,
-            # which is not the commit under review. A ledger staged as
-            # executable, a release file staged and then restored on disk, a
-            # release file dropped from the index while its bytes stayed put:
-            # each is a change this commit records and that diff cannot see,
-            # and each rode a gate-only acceptance. So the index's own changed
-            # set is classified too and the union decides. A DATA path in it
-            # means this is not a gate-only proposal, and the run falls
-            # through to the data path, where the state, mode, and index
-            # checks answer for it — rather than refusing here as mixed, which
-            # would pre-empt every one of them. (A DATA path in the working
-            # tree's own set alongside a GATE one already refused as mixed.)
-            staged_data, _staged_gate, staged_unclassified = _staged_surface_changes(
-                base, candidate
+        # The working tree's diff against the base is what a proposal's files
+        # look like; the index is the commit under review, and the two can
+        # disagree. A ledger staged as executable, a release file staged and
+        # then restored on disk, a release file dropped from the index while
+        # its bytes stayed put: each is a change this commit records that the
+        # working-tree diff cannot see, and each rode a gate-only acceptance
+        # with the ledger, the prefix, the release history, and every mode
+        # and index check unread. So the index's own changed set is
+        # classified too, and the union decides, by the rule the working-tree
+        # set was already held to: both surfaces in it is a mixed proposal,
+        # refused in the words check_surface_separation uses (that check
+        # fired first, in those words, when the working tree alone was
+        # mixed); GATE alone is gate-only, confined over the union's
+        # unclassified remainder and naming every GATE path the commit or the
+        # tree carries; neither is the data path below, where the state,
+        # mode, and index checks answer for whatever the index staged.
+        staged_data, staged_gate, staged_unclassified = _staged_surface_changes(
+            base, candidate
+        )
+        data_changes = tree_data | staged_data
+        gate_changes = tree_gate | staged_gate
+        if data_changes and gate_changes:
+            raise AppendError(
+                "mixed data/gate proposal is forbidden: DATA_SURFACE changes="
+                f"{sorted(data_changes)}; GATE_SURFACE changes="
+                f"{sorted(gate_changes)}; split them into separate pull requests"
             )
-            if not staged_data:
-                reported = check_gate_only_confinement(
-                    unclassified | staged_unclassified, candidate
-                )
-                unclassified_suffix = (
-                    f"; unclassified changes={sorted(reported)}" if reported else ""
-                )
-                # The same rule as the data path below: a base named by
-                # something that can move is quoted with the commit it
-                # resolved to, and a base named by its OID keeps the text the
-                # harness pins. This acceptance path returned before that
-                # suffix existed, so a gate-only verdict against a branch
-                # named no snapshot (peer review).
-                base_suffix = (
-                    f"; base {base.ref} ({base.commit})"
-                    if base.ref != base.commit
-                    else ""
-                )
-                return (
-                    "thesis-facts append check OK: gate-only proposal; "
-                    "DATA_SURFACE unchanged; GATE_SURFACE changes="
-                    f"{sorted(gate_changes)}{unclassified_suffix}{base_suffix}"
-                )
+        if gate_changes:
+            reported = check_gate_only_confinement(
+                tree_unclassified | staged_unclassified, candidate
+            )
+            unclassified_suffix = (
+                f"; unclassified changes={sorted(reported)}" if reported else ""
+            )
+            # The same rule as the data path below: a base named by something
+            # that can move is quoted with the commit it resolved to, and a
+            # base named by its OID keeps the text the harness pins. This
+            # acceptance path returned before that suffix existed, so a
+            # gate-only verdict against a branch named no snapshot (peer
+            # review).
+            base_suffix = (
+                f"; base {base.ref} ({base.commit})"
+                if base.ref != base.commit
+                else ""
+            )
+            return (
+                "thesis-facts append check OK: gate-only proposal; "
+                "DATA_SURFACE unchanged; GATE_SURFACE changes="
+                f"{sorted(gate_changes)}{unclassified_suffix}{base_suffix}"
+            )
 
     # One read of each state file, with its identity recorded, feeding every
     # consumer below: the path was walked and then opened separately, and the
