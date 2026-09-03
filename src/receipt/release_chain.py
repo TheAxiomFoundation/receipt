@@ -1661,7 +1661,19 @@ def hold_release_root(
                 raise unreadable_directory_error(
                     root / spec.release_root_relative, spec.release_root_relative
                 ) from exc
-            raise
+            # Everything else -- ``EACCES`` on a platform whose search-only
+            # flag makes reading unnecessary but searching still required, an
+            # ``EPERM``, an I/O error -- is an open this verifier could not
+            # make, and a verdict cannot be built on a directory it could not
+            # hold. Refused in the verifier's own words rather than escaping
+            # as the platform's exception (a bare ``PermissionError`` reached
+            # the gate's caller from a mode-0o444 release root, measured on
+            # Darwin, where ``O_SEARCH`` exists).
+            raise ReleaseChainError(
+                "cannot open a release root component to hold it: "
+                f"{spec.release_root_relative.as_posix()} "
+                f"({exc.strerror})"
+            ) from exc
         if held is not None:
             os.close(held)
         held = child
