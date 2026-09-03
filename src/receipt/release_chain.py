@@ -23,13 +23,7 @@ harness in tests/test_ledger_equivalence.py. Additions since the extraction
 (the base-ref history pass with its checkout and index guards, which include
 requiring every base release file to still be an entry in the candidate index,
 since both of that pass's comparisons read the working tree and ``git rm
---cached`` leaves it untouched; the checkout guard's sibling, which refuses a
-checkout whose four caching settings — ``core.fsmonitor``,
-``core.trustctime``, ``core.checkStat``, ``core.untrackedCache`` — make ``git
-diff`` and ``git ls-files --others`` a cache rather than a comparison, since a
-caller that classifies a proposal from those is taking git's word for what
-changed and every one of them lets a rewritten file be reported clean; the
-release-root guard, which reconciles that
+--cached`` leaves it untouched; the release-root guard, which reconciles that
 root's index entries with the working tree in both directions, by the spelling
 the traversal returns and after walking an indexed path's parents, because a
 filesystem traversal does not descend a symlinked directory while resolving
@@ -87,7 +81,19 @@ immutability was never compared. What that enumeration returns is now required
 to be the path asked for or to lie under it. Every git read here runs with
 git's four pathspec-mode environment variables dropped, so that literal
 pathspec means what it says instead of whatever an ambient
-``GIT_LITERAL_PATHSPECS`` or ``GIT_ICASE_PATHSPECS`` would make of it. Each
+``GIT_LITERAL_PATHSPECS`` or ``GIT_ICASE_PATHSPECS`` would make of it, and
+with ``WORKING_TREE_SCAN_OPTIONS`` spelled on its own command line, so that no
+read consults a stat cache, an untracked cache or a file-system monitor
+whatever the checkout configures, whatever its ``feature.*`` shorthands imply,
+and whatever extensions its index already carries. That replaces a refusal
+that read those settings and believed them: git keeps an untracked-cache index
+extension in use when ``core.untrackedCache`` is unset, which is its
+documented default, so a cache written by any earlier command was in use in a
+checkout the refusal called clean — and a checkout that names a monitor is not
+thereby a proposal this package has any quarrel with. An option on a command
+line says the same thing about the read itself, on every checkout, and none of
+these reads writes the candidate's index, so an extension already in it is
+left as found. Each
 also reads the entry's own flag word, because mode and object id do not say
 whether an entry records content: an intent-to-add entry (``git add -N``) is
 stage 0 at the working tree's mode with the empty blob's object id, which is
@@ -2336,6 +2342,55 @@ PATHSPEC_ENVIRONMENT = (
 )
 
 
+# Every git read in this package spells these five settings out on its own
+# command line, so that no read of it consults a stat cache, an untracked
+# cache, or a file-system monitor whatever the checkout's configuration, its
+# ``feature.*`` shorthands, or the extensions already written into its index
+# say.
+#
+# A caller that classifies a proposal from ``git diff`` and ``git ls-files
+# --others`` is taking git's answer for what changed, and four settings decide
+# how much of that answer is a cache: ``core.fsmonitor`` names a monitor whose
+# "unchanged" git trusts instead of re-stating a path — a stale daemon, a hook
+# a proposal can point anywhere — and keeps ``CE_FSMONITOR_VALID`` on a file
+# however it was rewritten; ``core.trustctime=false`` drops the inode change
+# time from the stat comparison and ``core.checkStat=minimal`` drops all but
+# size and whole-second mtime, so a same-size rewrite that restores the mtime
+# is not a change git looks for; ``core.untrackedCache`` answers a directory
+# listing from a cached scan. ``feature.manyFiles`` is a fifth, because it
+# turns the untracked cache on by itself.
+#
+# Refusing the settings was the earlier answer and it was the wrong shape
+# twice over. It read the configuration and believed it, while git keeps an
+# untracked-cache index extension in use when ``core.untrackedCache`` is unset
+# — ``keep`` is the documented default — so an extension written by any
+# earlier command was trusted by a checkout the refusal called clean. And it
+# refused checkouts this verifier has no quarrel with: a developer's monitor
+# is not a proposal's, and the reads here are the only thing it could have
+# affected. Overriding says the same thing about the read itself, on every
+# checkout, without asking the checkout anything.
+#
+# They are spelled on every read rather than on the three that scan the
+# working tree, because which reads consult which cache is git's business and
+# not a property of a subcommand's name: a read that gains a cache in a later
+# git is a read this verifier would otherwise silently begin to trust. The one
+# place they are deliberately absent is ``_git_bool`` below, which asks git
+# what a setting *is*: overriding a setting while asking about it would answer
+# with the override.
+WORKING_TREE_SCAN_OPTIONS = (
+    "-c",
+    "core.untrackedCache=false",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.trustctime=true",
+    "-c",
+    "core.checkStat=default",
+    "-c",
+    "feature.manyFiles=false",
+)
+
+
 def _git_environment() -> dict[str, str]:
     """The environment every git read in this package runs under.
 
@@ -2391,7 +2446,7 @@ def _git_run(
     # all, exactly as every read here always has.
     try:
         return subprocess.run(
-            ["git", *arguments],
+            ["git", *WORKING_TREE_SCAN_OPTIONS, *arguments],
             cwd=root,
             check=False,
             capture_output=True,
@@ -2561,44 +2616,6 @@ def _git_bool(root: pathlib.Path, key: str) -> bool | None:
     return result.stdout.strip() == "true"
 
 
-def _git_value(root: pathlib.Path, key: str) -> str | None:
-    """One git setting as written, or ``None`` when unset.
-
-    ``_git_bool`` above cannot ask about the settings below: ``core.fsmonitor``
-    takes a hook path as well as a boolean and ``core.untrackedCache`` takes
-    ``keep``, and ``git config --bool`` fails outright on either, which would
-    turn a setting this verifier means to inspect into a refusal about being
-    unable to read it. The raw value is what the checks want anyway — they ask
-    whether a setting is off, not whether it is a boolean.
-    """
-
-    result = subprocess.run(
-        ["git", "-C", str(root), "config", "--get", key],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=_git_environment(),
-    )
-    if result.returncode == 1 and not result.stdout.strip():
-        return None
-    if result.returncode != 0:
-        raise ReleaseChainError(
-            f"cannot read {key} for {root}: {result.stderr.strip()[-500:]}"
-        )
-    return result.stdout.strip()
-
-
-# The spellings git reads as a false boolean, and the empty value it also
-# treats as unset for these settings. Anything else — ``true``, ``keep``, a
-# hook path — leaves the setting doing something, which is what the checks
-# below ask about.
-GIT_FALSE_VALUES = frozenset({"", "false", "no", "off", "0"})
-
-
-def _git_setting_is_off(value: str | None) -> bool:
-    return value is None or value.strip().lower() in GIT_FALSE_VALUES
-
-
 def assert_file_modes_authoritative(root: pathlib.Path) -> None:
     """Refuse to compare modes and types on a checkout that does not carry them.
 
@@ -2633,77 +2650,6 @@ def assert_file_modes_authoritative(root: pathlib.Path) -> None:
         raise ReleaseChainError(
             "file types cannot be verified: core.symlinks is false in this "
             "checkout, so a symlink entry is materialised as a plain file"
-        )
-
-
-def assert_working_tree_classification_authoritative(root: pathlib.Path) -> None:
-    """Refuse a checkout whose settings let git call a changed file unchanged.
-
-    The sibling above is about what the working tree carries; this is about
-    whether git will look at it. A caller that classifies a proposal from
-    ``git diff`` and ``git ls-files --others`` — ``append_gate``'s surface
-    separation, and the gate-only exit it decides — is taking git's answer for
-    what changed, and four settings make that answer a cache rather than a
-    comparison:
-
-    ``core.fsmonitor`` names a file-system monitor (a hook, or git's own
-    daemon) and git then trusts its "unchanged" verdict for a path instead of
-    re-stating it, so an entry the monitor never saw change — a stale daemon, a
-    monitor a proposal can point anywhere, a rewrite the monitor missed — keeps
-    ``CE_FSMONITOR_VALID`` and is reported clean however the file was rewritten.
-    That is the same fact ``assert_index_carries_no_protected_alias`` refuses
-    an assume-unchanged entry for, arrived at through a setting rather than
-    through a flag on one entry, and it is why refusing the flag alone was not
-    enough.
-
-    ``core.trustctime=false`` drops the inode change time from the stat
-    comparison and ``core.checkStat=minimal`` drops all but size and the whole
-    seconds of mtime, so a rewrite that keeps the file's size and restores its
-    modification time is not a change git will look past the cache for. A
-    ledger rewritten that way beside a gate file is a gate-only proposal, and
-    the ledger is never read.
-
-    ``core.untrackedCache`` answers ``git ls-files --others`` from a cached
-    directory listing, which is the other half of the changed set the
-    classification is built from; a new file under a directory whose cached
-    mtime did not move is not in that listing.
-
-    Each is a property of the checkout rather than of any file, so like the
-    modes guard this runs before any file-level comparison and shares its
-    stated exception: a checkout whose changes cannot be classified says so
-    before any verdict about what changed in it. None of the four is something
-    a proposal under review can want: each exists to make a working copy
-    cheaper to scan, and this verifier's whole subject is what that scan would
-    otherwise find. Read as written rather than as booleans, because
-    ``core.fsmonitor`` takes a hook path and ``core.untrackedCache`` takes
-    ``keep`` — which leaves an existing cache in use, so only an explicitly
-    false or unset setting is off.
-    """
-
-    fsmonitor = _git_value(root, "core.fsmonitor")
-    if not _git_setting_is_off(fsmonitor):
-        raise ReleaseChainError(
-            "working-tree changes cannot be classified: core.fsmonitor is "
-            "enabled in this checkout, and git's classification would trust it"
-        )
-    if _git_bool(root, "core.trustctime") is False:
-        raise ReleaseChainError(
-            "working-tree changes cannot be classified: core.trustctime is "
-            "false in this checkout, so git's stat cache can call a rewritten "
-            "file unchanged"
-        )
-    check_stat = _git_value(root, "core.checkStat")
-    if check_stat is not None and check_stat.strip().lower() == "minimal":
-        raise ReleaseChainError(
-            "working-tree changes cannot be classified: core.checkStat is "
-            "minimal in this checkout, so git's stat cache ignores the fields "
-            "a same-size rewrite changes"
-        )
-    if not _git_setting_is_off(_git_value(root, "core.untrackedCache")):
-        raise ReleaseChainError(
-            "working-tree changes cannot be classified: core.untrackedCache is "
-            "enabled in this checkout, so the untracked listing this "
-            "classification reads would come from a cache"
         )
 
 

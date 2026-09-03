@@ -158,26 +158,41 @@ committed tree object rather than the working tree, which changes what the
 gate verifies rather than adding a check to it; it is tracked as follow-up
 work and is not done here.
 
+None of that is a refusal, because none of it has to be. The classification
+this run is built on is ``git diff``, ``git ls-files --others`` and ``git
+diff-index --cached``, and five settings decide how much of git's answer is a
+cache rather than a comparison: ``core.fsmonitor`` names a monitor whose
+"unchanged" git trusts instead of re-stating a path, ``core.trustctime``
+false and ``core.checkStat`` minimal drop the stat fields a same-size rewrite
+with a restored mtime changes, ``core.untrackedCache`` answers the untracked
+listing from a cached directory scan, and ``feature.manyFiles`` turns that
+cache on by itself. Under any of them a ledger rewritten beside a gate file
+classifies gate-only, which returns before the ledger is read. So every git
+read this package makes spells all five out on its own command line
+(``release_chain.WORKING_TREE_SCAN_OPTIONS``), and none of these reads
+consults a cache or a monitor whatever the checkout says. Reading the
+settings and refusing was the earlier answer, and it was wrong in both
+directions: git keeps an untracked-cache index extension in use when
+``core.untrackedCache`` is unset — ``keep`` is its documented default — so a
+cache written by any earlier command was trusted by a checkout that refusal
+called clean; and it refused checkouts this verifier has no quarrel with,
+since a developer's monitor is not a proposal's and these reads were the only
+thing it could reach. The overrides say the same thing about the read itself,
+on every checkout, without asking the checkout anything, and they change no
+verdict about any tree: they are options on a command line, and the three
+classification reads do not write the candidate's index, so an untracked-cache
+extension already in it is left exactly as it was found.
+
 They run beside the extracted checks without altering any of their refusals,
 and every new refusal runs after every pre-existing file-level refusal — with
 three stated exceptions at entry, all saying that a comparison cannot be made
 here rather than making one, and three further placements stated after them. The
 checkout-level ``release_chain.assert_file_modes_authoritative`` runs ahead of
 the release-history file checks (and after the base ref is resolved, so a
-false setting cannot mask a base that names nothing). Beside it, sharing that
-exception rather than adding another,
-``release_chain.assert_working_tree_classification_authoritative`` refuses a
-checkout in which ``git diff`` and ``git ls-files --others`` are a cache
-rather than a comparison: ``core.fsmonitor`` set to anything but false makes
-git trust a monitor's "unchanged" for a path, ``core.trustctime`` false and
-``core.checkStat`` minimal drop the stat fields a same-size rewrite with a
-restored mtime changes, and ``core.untrackedCache`` answers the untracked
-listing from a cached directory scan. Every one of them lets a ledger
-rewritten beside a gate file classify gate-only, which returns before the
-ledger is read — the same fact the assume-unchanged and skip-worktree refusal
-covers for one entry, reached through a setting instead. All four are
-properties of the checkout rather than of any file, so like the modes guard
-they say a comparison cannot be made here rather than making one. The per-state-path
+false setting cannot mask a base that names nothing). It is about what the
+working tree carries — the executable bit and the file type — which no command
+line can supply, and so it stays a refusal where the caching settings did not.
+The per-state-path
 ``release_chain.assert_state_path_tracked`` runs ahead of everything that
 reads either state file, because an untracked state path, or one under a
 gitlink, is not this commit's content and nothing downstream can be a verdict
@@ -407,11 +422,11 @@ from receipt import release_chain
 from receipt.canonical import canonical_sha256
 from receipt.release_chain import (
     _git_environment,
+    WORKING_TREE_SCAN_OPTIONS,
     assert_file_modes_authoritative,
     assert_index_agrees_with_tree,
     assert_index_carries_no_protected_alias,
     assert_index_content_bound,
-    assert_working_tree_classification_authoritative,
     ChainSpec,
     MANIFEST_RE,
     ReleaseChainError,
@@ -643,10 +658,15 @@ def _assert_root_unchanged(candidate: _CandidateTree) -> None:
 def _git_output(arguments: list[str], candidate: _CandidateTree) -> bytes:
     # Every git read here runs under the shared _git_environment, which turns
     # off refs/replace: a replacement object changes what a commit, tree, or
-    # blob reads as while the OID this verdict prints stays the same.
+    # blob reads as while the OID this verdict prints stays the same. And with
+    # release_chain.WORKING_TREE_SCAN_OPTIONS on the command line, so that the
+    # three reads the surface classification is built from -- ``diff``,
+    # ``ls-files --others`` and ``diff-index --cached`` -- consult no stat
+    # cache, no untracked cache and no file-system monitor, whatever this
+    # checkout's configuration or its index extensions say.
     try:
         completed = subprocess.run(
-            ["git", *arguments],
+            ["git", *WORKING_TREE_SCAN_OPTIONS, *arguments],
             cwd=candidate.root,
             check=False,
             capture_output=True,
@@ -1427,7 +1447,7 @@ def check_append_only(
     relative = candidate.ledger_path.relative_to(candidate.root).as_posix()
     try:
         base_text = subprocess.check_output(
-            ["git", "show", f"{base.commit}:{relative}"],
+            ["git", *WORKING_TREE_SCAN_OPTIONS, "show", f"{base.commit}:{relative}"],
             cwd=candidate.root,
             text=True,
             env=_git_environment(),
@@ -1455,7 +1475,7 @@ def _manifest_at_ref(
     relative = candidate.prefix_path.relative_to(candidate.root).as_posix()
     try:
         text = subprocess.check_output(
-            ["git", "show", f"{base.commit}:{relative}"],
+            ["git", *WORKING_TREE_SCAN_OPTIONS, "show", f"{base.commit}:{relative}"],
             cwd=candidate.root,
             text=True,
             env=_git_environment(),
@@ -2181,18 +2201,6 @@ def _verify_selected_tree(
     # state file is read.
     try:
         assert_file_modes_authoritative(candidate.root)
-    except ReleaseChainError as exc:
-        raise AppendError(str(exc)) from exc
-    # And beside it, about the same checkout and for the same reason: whether
-    # git will look at the working tree at all. The surface classification
-    # below is ``git diff`` plus ``git ls-files --others``, and four settings
-    # turn either into a cache — a file-system monitor whose "unchanged" git
-    # trusts, a stat comparison with the change time or all but size dropped,
-    # a cached untracked listing. Under any of them a ledger rewritten beside
-    # a gate file classifies gate-only and is never read. Checkout-level, so
-    # it stands where the modes guard stands and shares its exception.
-    try:
-        assert_working_tree_classification_authoritative(candidate.root)
     except ReleaseChainError as exc:
         raise AppendError(str(exc)) from exc
     # And the two state files must be files git is tracking here, with no
