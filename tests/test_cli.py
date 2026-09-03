@@ -1781,3 +1781,73 @@ def test_an_emission_that_raises_becomes_the_render_refusal(
     assert "verdict could not be rendered; treat the run as unverified" in error
     assert "OSError" in error
     assert error.rstrip("\n").endswith("receipt verify: FAIL")
+
+
+def test_a_refusal_survives_a_stream_that_will_not_take_bytes(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S5R2-F8, adversarially: `_refuse` is what the boundary calls.
+
+    The render boundary calls ``_refuse`` *after* an emission has already
+    failed, and in ``--json`` mode it handed the refusal the very stream
+    that had just failed. So the one exit path the JSON contract exists for
+    — a verdict that cannot be rendered still prints an object bearing a
+    ``verdict`` key — raised out of ``main`` instead, which is the failure
+    the guarded writer was added to remove.
+
+    Both writes are guarded now, and separately, so a failing stderr cannot
+    suppress the JSON either. A refusal that cannot be written is still a
+    refusal: the exit code carries it. Without the guard this call raises
+    ``OSError``.
+    """
+
+    class _Failing(io.TextIOWrapper):
+        def __init__(self) -> None:
+            super().__init__(io.BytesIO(), encoding="utf-8", newline="")
+
+        def write(self, text: str) -> int:  # type: ignore[override]
+            raise OSError(28, "No space left on device")
+
+        @property
+        def buffer(self):  # type: ignore[override]
+            raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(sys, "stdout", _Failing())
+    monkeypatch.setattr(sys, "stderr", _Failing())
+    assert run(repo, "--json") == EXIT_FAIL
+
+
+def test_the_guarded_writer_survives_a_detached_buffer(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S5R2-F8, adversarially: absent and unusable are not the same.
+
+    ``_emit`` documents a fallback to the stream's text API for a stream
+    with no ``buffer``. A detached ``TextIOWrapper`` *raises* ``ValueError``
+    from that property rather than lacking it, and a ``getattr`` default
+    absorbs only ``AttributeError``, so the documented fallback was
+    unreachable for the one real stream that needs it.
+
+    The lookup catches both now. This drives a verdict through a stream
+    whose buffer raises the way a detached one does and asserts the text
+    arrives through the text API. Without the fix the emission raises and
+    the run becomes a render refusal.
+    """
+
+    written: list[str] = []
+
+    class _Detached(io.TextIOWrapper):
+        def __init__(self) -> None:
+            super().__init__(io.BytesIO(), encoding="utf-8", newline="")
+
+        @property
+        def buffer(self):  # type: ignore[override]
+            raise ValueError("underlying buffer has been detached")
+
+        def write(self, text: str) -> int:  # type: ignore[override]
+            written.append(text)
+            return len(text)
+
+    monkeypatch.setattr(sys, "stdout", _Detached())
+    assert run(repo) == EXIT_OK
+    assert "VERDICT: PASS" in "".join(written)
