@@ -148,6 +148,118 @@ def test_refusal_writes_to_a_redirected_stringio_stderr(
     )
 
 
+def test_a_codecs_stream_writer_is_not_mistaken_for_a_unicode_sink(
+    repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Binds S7-R3-F4: "no codec and no buffer" is a shape, not a guarantee.
+
+    ``codecs.StreamWriter`` forwards attribute lookups to the binary stream it
+    wraps, so ``encoding`` and ``buffer`` are both absent on a writer over a
+    ``BytesIO`` — the exact shape S7-F5 classified as a byte-free Unicode
+    sink. It is not one: it encodes everything written to it with the codec
+    it was built from, so the rendered verdict's U+203A leaves as the single
+    byte 0x9B, which is CSI, and whatever follows it is a control sequence
+    the escaper had no reason to touch.
+
+    Recognising sinks rather than inferring them refuses this stream before
+    the render. Without S7-R3-F4 the run reports PASS and the writer holds
+    cp1252 bytes.
+    """
+
+    import codecs as codecs_module
+
+    from receipt.cli import _stream_encoding
+
+    buffer = io.BytesIO()
+    stream = codecs_module.getwriter("cp1252")(buffer)
+
+    # The shape, and what the shape hides.
+    assert getattr(stream, "encoding", None) is None
+    assert _stream_encoding(stream) == ""
+    stream.write("\u203a[2J")
+    assert buffer.getvalue() == b"\x9b[2J"
+    buffer.seek(0)
+    buffer.truncate()
+
+    monkeypatch.setattr(sys, "stdout", stream)
+    assert run(repo, "--json") == EXIT_FAIL
+    assert buffer.getvalue() == b""
+    error = capsys.readouterr().err
+    assert "verdict could not be rendered; treat the run as unverified" in error
+    assert (
+        "OSError: verdict stream has no binary buffer and its encoding is "
+        "not UTF-8; the verdict cannot be written safely" in error
+    )
+
+
+def test_a_text_io_base_subclass_without_an_encoding_is_refused(
+    repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Binds S7-R3-F4: a counting text stream has a sink's shape too.
+
+    ``io.TextIOBase`` leaves ``encoding`` as ``None`` and defines no buffer,
+    so a subclass that accepts text and returns a count — a progress wrapper,
+    a tee, a stream a host substituted — was classified as a Unicode sink and
+    written to. Whether that is safe depends entirely on what the subclass
+    does with the text, which this module cannot see. Only a recognised sink
+    is treated as one now; this one refuses.
+
+    Without S7-R3-F4 the verdict is written to it and the run reports PASS.
+    """
+
+    from receipt.cli import _stream_encoding
+
+    class _CountingTextStream(io.TextIOBase):
+        def __init__(self) -> None:
+            self.text: list[str] = []
+
+        def write(self, text: str) -> int:  # type: ignore[override]
+            self.text.append(text)
+            return len(text)
+
+    stream = _CountingTextStream()
+    assert stream.encoding is None
+    assert _stream_encoding(stream) == ""
+
+    monkeypatch.setattr(sys, "stdout", stream)
+    assert run(repo, "--json") == EXIT_FAIL
+    assert stream.text == []
+    error = capsys.readouterr().err
+    assert "verdict could not be rendered; treat the run as unverified" in error
+    assert (
+        "OSError: verdict stream has no binary buffer and its encoding is "
+        "not UTF-8; the verdict cannot be written safely" in error
+    )
+
+
+def test_a_string_io_subclass_is_still_a_unicode_sink(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S7-R3-F4, the control: the narrowing must not lose the sink.
+
+    S7-F5 exists because ``redirect_stdout(StringIO())`` is how an
+    application captures this command in memory, and a subclass of it is the
+    same object with a name. Both are recognised by construction rather than
+    by probing ``getvalue``.
+
+    This test passes with S7-R3-F4 disabled, which is the point: it is what
+    keeps the narrowing from turning every bufferless stream back into a
+    refusal.
+    """
+
+    class _NamedCapture(io.StringIO):
+        pass
+
+    captured = _NamedCapture()
+    monkeypatch.setattr(sys, "stdout", captured)
+    assert run(repo, "--json") == EXIT_OK
+    assert json.loads(captured.getvalue())["verdict"] == "PASS"
+
+
 def test_the_verdict_states_what_it_did_not_establish(
     repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

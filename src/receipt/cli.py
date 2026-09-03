@@ -138,10 +138,19 @@ into the refusal it already has for a verdict it cannot render.
 
 A codec-less, bufferless stream is different: ``io.StringIO`` and equivalent
 in-memory sinks produce no bytes and therefore have no codec that can undo the
-sanitiser (peer review, Sol round 7). :func:`_stream_encoding` classifies that
-shape as a Unicode sink, :func:`_byte_safe_encoding` selects UTF-8 units for
-render bounds, and :func:`_emit` writes the already-rendered text directly.
-A bufferless stream that *does* advertise a non-UTF-8 codec still refuses.
+sanitiser (peer review, Sol round 7). :func:`_stream_encoding` classifies a
+*recognised* sink that way, :func:`_byte_safe_encoding` selects UTF-8 units
+for render bounds, and :func:`_emit` writes the already-rendered text
+directly. Recognised, because "no codec and no buffer" is a shape a byte
+stream can have: ``codecs.getwriter("cp1252")(...)`` forwards both lookups to
+the binary stream underneath it and encodes everything written to it, so it
+wore that shape and turned the verdict's U+203A into the single byte 0x9B —
+CSI — followed by the producer's text (peer review, Sol round 7, round 3). So
+:func:`_is_unicode_sink` admits ``io.StringIO`` and its subclasses by
+construction, and anything else only if it offers the ``getvalue`` returning
+``str`` that protocol is and is not a ``codecs.StreamWriter``. A bufferless
+stream that advertises a non-UTF-8 codec, and one no sink test recognises,
+both refuse.
 
 What is written is canonical UTF-8, with no byte-order mark. The stream's
 own spelling used to be handed back to the encoder, and ``utf-8-sig`` is a
@@ -220,6 +229,7 @@ from __future__ import annotations
 
 import argparse
 import codecs
+import io
 import json
 import pathlib
 import sys
@@ -929,6 +939,16 @@ def _escapes_non_ascii(encoding: str) -> bool:
         return True
 
 
+#: The refusal a stream with no binary layer and no codec this module writes
+#: in receives. One spelling, used by :func:`_byte_safe_encoding` when it
+#: refuses such a stream before the render and by :func:`_emit` when it
+#: refuses one at the write, so the two cannot drift.
+_BUFFERLESS_REFUSAL = (
+    "verdict stream has no binary buffer and its encoding is not UTF-8; "
+    "the verdict cannot be written safely"
+)
+
+
 def _stream_buffer(stream: TextIO) -> Any | None:
     """The stream's usable binary layer, or ``None`` when it has none.
 
@@ -944,6 +964,49 @@ def _stream_buffer(stream: TextIO) -> Any | None:
         return None
 
 
+def _is_unicode_sink(stream: TextIO) -> bool:
+    """Whether a codec-less, bufferless stream is an in-memory text sink.
+
+    "No codec and no buffer" is a shape, not a guarantee, and it was read as
+    one. A ``codecs.StreamWriter`` has exactly that shape — its ``encoding``
+    and ``buffer`` attribute lookups are forwarded to the binary stream
+    underneath it, which has neither — and it encodes everything written to
+    it with the codec it was built from. So
+    ``codecs.getwriter("cp1252")(open(path, "wb"))`` was classified as a
+    byte-free sink and handed the rendered verdict as text, where U+203A
+    became the single byte 0x9B: CSI, followed by whatever the producer's
+    filename said (peer review, Sol round 7, round 3). A ``TextIOBase``
+    subclass that counts what it is given has the same shape and the same
+    problem if it encodes.
+
+    So a sink is recognised rather than inferred. ``io.StringIO`` and its
+    subclasses are sinks by construction. Anything else must offer a
+    ``getvalue`` that returns ``str`` — the in-memory-text protocol
+    ``StringIO`` itself defines — and must not be a ``codecs.StreamWriter``,
+    which forwards ``getvalue`` to the binary stream it wraps and would
+    answer with ``bytes`` there anyway. Everything else is not a sink, and
+    :func:`_stream_encoding` reports it as a stream with no usable codec,
+    which refuses.
+
+    ``getvalue`` is called, so this is a probe rather than a type test; it is
+    reached only for a stream that has already answered "no codec" and "no
+    buffer", and a raising or non-``str`` answer means "not a sink" rather
+    than an error. The cost of misclassifying in that direction is a refusal.
+    """
+
+    if isinstance(stream, codecs.StreamWriter):
+        return False
+    if isinstance(stream, io.StringIO):
+        return True
+    getvalue = getattr(stream, "getvalue", None)
+    if getvalue is None:
+        return False
+    try:
+        return isinstance(getvalue(), str)
+    except Exception:  # noqa: BLE001 - a stream that will not answer is not a sink
+        return False
+
+
 def _stream_encoding(stream: TextIO) -> str | None:
     """The canonical codec, ``None`` for a Unicode sink, or ``""`` if unknown.
 
@@ -952,18 +1015,25 @@ def _stream_encoding(stream: TextIO) -> str | None:
     codec is. ``codecs.lookup`` is what canonicalises the spelling, turning
     ``UTF_8`` and ``utf8`` into ``utf-8``.
 
-    A stream whose ``encoding`` is absent or ``None`` *and* whose binary
-    buffer is absent is an in-memory Unicode sink: writing text to it produces
-    no bytes for a codec to reinterpret, so ``None`` is a positive
-    classification rather than an unknown value (peer review, Sol round 7).
-    The same missing codec on a stream that has a buffer, a non-string codec,
-    and an unknown spelling answer ``""`` and fail closed. A bufferless stream
-    with an actual non-UTF-8 codec keeps its name and keeps the refusal.
+    A stream whose ``encoding`` is absent or ``None``, whose binary buffer is
+    absent, *and* which :func:`_is_unicode_sink` recognises is an in-memory
+    Unicode sink: writing text to it produces no bytes for a codec to
+    reinterpret, so ``None`` is a positive classification rather than an
+    unknown value (peer review, Sol round 7). All three conditions are
+    required, because the first two are a shape a byte stream can have: a
+    ``codecs.StreamWriter`` forwards both lookups to the binary stream it
+    wraps and still encodes what it is given (peer review, Sol round 7,
+    round 3). The same missing codec on a stream that has a buffer, on one no
+    sink test recognises, a non-string codec, and an unknown spelling all
+    answer ``""`` and fail closed. A bufferless stream with an actual
+    non-UTF-8 codec keeps its name and keeps the refusal.
     """
 
     encoding = getattr(stream, "encoding", None)
     if encoding is None:
-        return None if _stream_buffer(stream) is None else ""
+        if _stream_buffer(stream) is not None:
+            return ""
+        return None if _is_unicode_sink(stream) else ""
     if not isinstance(encoding, str):
         return ""
     try:
@@ -1088,6 +1158,17 @@ def _byte_safe_encoding(
         return "utf-8"
     if name in _ASCII_TRANSPARENT_CODECS and _ascii_is_literal(name):
         return "ascii"
+    if not name:
+        # A stream that advertises no usable codec. The buffer question is
+        # asked once more here, and only to choose which sentence the refusal
+        # carries: a bufferless one is the shape the emission guard names, and
+        # quoting an empty codec name would say nothing. Both branches refuse.
+        raise OSError(
+            _BUFFERLESS_REFUSAL
+            if _stream_buffer(stream) is None
+            else "verdict stream advertises no usable codec; the verdict "
+            "cannot be written safely"
+        )
     raise OSError(
         f"verdict stream codec {name} does not carry ASCII literally; "
         "the verdict cannot be written safely"
@@ -1279,10 +1360,7 @@ def _emit(
             stream.flush()
             return
         if own_encoding not in _TRUSTED_ENCODINGS:
-            raise OSError(
-                "verdict stream has no binary buffer and its encoding is not "
-                "UTF-8; the verdict cannot be written safely"
-            )
+            raise OSError(_BUFFERLESS_REFUSAL)
         data = (text + "\n").encode(encoding, errors="backslashreplace")
         _write_all(stream, data.decode(encoding, errors="replace"))
         stream.flush()
