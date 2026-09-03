@@ -70,6 +70,17 @@ exception; both emissions sit inside the render boundary, so anything else
 about the write becomes the render refusal, and :func:`_refuse` emits the
 same way so the refusal itself cannot raise.
 
+*Which* encoding it uses is the command's decision and not the stream's,
+because escaping characters and then handing them to an arbitrary codec
+leaves the escaping to be undone by the encoder. Under cp1252 the
+perfectly printable U+203A encodes to the single byte 0x9B, which is CSI,
+so a filename carrying it could begin a control sequence through a
+character :func:`_terminal_safe` had no reason to touch; ISO-2022-JP emits
+ESC to switch character sets, so ordinary Japanese text carries 0x1B (peer
+review, Sol round 3). :func:`_byte_safe_encoding` uses the stream's own
+codec only when it is a UTF and ASCII with ``backslashreplace`` otherwise,
+so every byte written is one the escaper approved.
+
 The JSON renderer needs nothing of the kind. ``json.dumps`` with
 ``ensure_ascii`` at its default escapes every non-ASCII code point into a
 ``\\uXXXX`` sequence inside the quoted string — lone surrogates and format
@@ -104,6 +115,7 @@ two keys sharing a prefix stay distinct.
 from __future__ import annotations
 
 import argparse
+import codecs
 import hashlib
 import json
 import json.encoder
@@ -628,6 +640,71 @@ def _format_text(result: VerifyResult) -> str:
     return "\n".join(lines)
 
 
+#: The canonical names of the codecs whose bytes a reader decodes back to
+#: exactly the characters this module escaped. Everything else — a legacy
+#: code page, a stateful ISO-2022 encoding, UTF-7 — is a mapping this module
+#: does not model, and the escaping :func:`_terminal_safe` performs is over
+#: *characters*, so a codec that maps a printable character onto a
+#: terminal-controlling byte defeats it after the fact. See
+#: :func:`_byte_safe_encoding`.
+_UTF_ENCODINGS = frozenset({"utf-8", "utf-8-sig"})
+
+
+def _byte_safe_encoding(stream: TextIO) -> str:
+    """The encoding to write this stream in, which is not always its own.
+
+    :func:`_terminal_safe` escapes every code point that can move a cursor
+    or begin an escape sequence, and then the result is encoded. That order
+    is only safe if the encoding maps the characters it kept onto bytes a
+    reader decodes back to those characters — which is what a Unicode
+    transformation format is, and what a legacy code page is not. Under
+    cp1252 the perfectly printable U+203A SINGLE RIGHT-POINTING ANGLE
+    QUOTATION MARK encodes to the single byte 0x9B, which is CSI: an
+    8-bit-clean terminal reads it as the start of a control sequence, so a
+    producer's filename could redraw the verdict through a character the
+    escaper had no reason to touch (peer review, Sol round 3). ISO-2022-JP
+    is worse in kind rather than in degree: it emits ESC to switch
+    character sets, so ordinary Japanese text carries 0x1B.
+
+    So the stream's own encoding is used only when it is a UTF —
+    ``utf-8``, ``utf-8-sig``, or any ``utf-16``/``utf-32`` variant, compared
+    after ``codecs.lookup`` has canonicalised the spelling, which is what
+    turns ``UTF_8`` and ``utf8`` into ``utf-8``. Anything else, and anything
+    unknown, is encoded as ASCII with ``backslashreplace``, so no character
+    outside ASCII can produce a byte at all and every byte written is one
+    the escaper approved.
+
+    UTF-8 needs the argument stated rather than assumed, because it is the
+    case that matters: a multi-byte sequence is a lead byte of 0xC2 or
+    above followed by continuation bytes of 0x80 through 0xBF, and those
+    ranges are disjoint from C0 and from ASCII. A UTF-8 reader decodes them
+    back to the code point they came from and never to a C1 control; a byte
+    in 0x80..0x9F reaching a UTF-8 terminal as a *control* would have to
+    have been the code point U+0080..U+009F in the text, which
+    :func:`_terminal_safe` has already escaped. UTF-16 and UTF-32 are the
+    same argument with wider units.
+
+    The cost is that a UTF-8 verdict read through a terminal set to a
+    legacy code page shows mojibake, which is what it already showed. The
+    gain is that no encoding this command does not model can turn printable
+    text into a control sequence.
+    """
+
+    encoding = getattr(stream, "encoding", None)
+    if isinstance(encoding, str):
+        try:
+            canonical = codecs.lookup(encoding).name
+        except (LookupError, ValueError):
+            canonical = ""
+        if (
+            canonical in _UTF_ENCODINGS
+            or canonical.startswith("utf-16")
+            or canonical.startswith("utf-32")
+        ):
+            return encoding
+    return "ascii"
+
+
 def _emit(text: str, stream: TextIO) -> None:
     """Write one rendered verdict to a stream that may not accept every character.
 
@@ -647,6 +724,13 @@ def _emit(text: str, stream: TextIO) -> None:
     exception, which is the same bargain :func:`_terminal_safe` makes: the
     reader sees what was meant, spelled in what the terminal can show.
 
+    Which encoding that is, is :func:`_byte_safe_encoding`'s decision and
+    not the stream's: the stream's own codec is used only when it is a UTF,
+    and every other one is replaced by ASCII, because escaping code points
+    and then handing them to an arbitrary codec left the escaping to be
+    undone by the encoder — cp1252 spells the printable U+203A as the
+    single byte 0x9B, which is CSI (peer review, Sol round 3).
+
     The text stream is flushed before the buffer is written so the two
     layers cannot reorder, and a stream with no usable ``buffer`` — a
     wrapper some host has substituted, or a wrapper whose buffer has been
@@ -663,7 +747,7 @@ def _emit(text: str, stream: TextIO) -> None:
     verdict for no verdict on the same stream.
     """
 
-    encoding = getattr(stream, "encoding", None) or "utf-8"
+    encoding = _byte_safe_encoding(stream)
     data = (text + "\n").encode(encoding, errors="backslashreplace")
     try:
         # Not ``getattr(..., None)``: a detached ``TextIOWrapper`` raises

@@ -1691,6 +1691,99 @@ class _StrictAsciiStdout(io.TextIOWrapper):
         return self.buffer.getvalue().decode("ascii")
 
 
+class _CodecStdout(io.TextIOWrapper):
+    """A stdout whose ``encoding`` is whatever a host's locale happens to be.
+
+    ``sys.stdout.encoding`` follows the locale, so a verdict printed on a
+    Windows console under a Western European code page, or into a Japanese
+    terminal, is encoded by a codec this command does not model.
+    """
+
+    def __init__(self, encoding: str) -> None:
+        super().__init__(io.BytesIO(), encoding=encoding, errors="strict", newline="")
+
+    def written(self) -> bytes:
+        self.flush()
+        return self.buffer.getvalue()
+
+
+@pytest.mark.parametrize(
+    "encoding, payload",
+    [
+        # U+203A is cp1252's 0x9B, which is CSI.
+        ("cp1252", "FAILED: binding \u203a rules/x.yaml"),
+        # ISO-2022-JP switches character sets with ESC, so ordinary Japanese
+        # text carries 0x1b whatever the characters are.
+        ("iso2022_jp", "FAILED: binding \u30c6\u30b9\u30c8.yaml"),
+    ],
+)
+def test_a_legacy_codec_cannot_turn_the_verdict_into_a_control_sequence(
+    encoding: str, payload: str
+) -> None:
+    """Binds S5R3-F6: escaping ran before an unmodelled codec encoded it.
+
+    ``_terminal_safe`` escapes every code point that can move a cursor or
+    begin an escape sequence, and then ``_emit`` encoded the result with the
+    stream's own codec. That order leaves the escaping to be undone by the
+    encoder: cp1252 spells the perfectly printable U+203A as the single byte
+    0x9B, which is CSI, so a filename carrying it began a control sequence
+    through a character the escaper had no reason to touch. ISO-2022-JP is
+    worse in kind — it emits ESC to switch character sets, so ordinary
+    Japanese text carries 0x1B and the verdict is full of escape sequences
+    with no adversary at all.
+
+    The stream's codec is used now only when it is a UTF; everything else is
+    encoded as ASCII with ``backslashreplace``, so no character outside
+    ASCII can produce a byte and every byte written is one the escaper
+    approved. Without the fix each of these payloads puts 0x9b or 0x1b on
+    the stream.
+    """
+
+    from receipt.cli import _emit
+
+    # What the stream's own codec would have made of it, which is the
+    # finding: a byte the terminal reads as a control, out of text that
+    # carries no control character at all.
+    assert any(byte in (0x1B, 0x9B) for byte in payload.encode(encoding))
+    assert all(ord(character) not in (0x1B, 0x9B) for character in payload)
+
+    stream = _CodecStdout(encoding)
+    _emit(payload, stream)
+    data = stream.written()
+    assert data.isascii()
+    assert b"\x1b" not in data and b"\x9b" not in data
+    assert data.startswith(b"FAILED: binding ")
+    assert data.endswith(b"\n")
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "UTF_8", "utf-16", "utf-32-le"])
+def test_a_utf_stream_still_carries_the_characters_themselves(encoding: str) -> None:
+    """Binds S5R3-F6, the control: a UTF is what the escaping was built on.
+
+    A UTF maps the characters ``_terminal_safe`` kept onto bytes a reader
+    decodes back to those characters, which is the property the escaping
+    needs and the property a code page does not have. A UTF-8 multi-byte
+    sequence is a lead byte of 0xC2 or above followed by continuation bytes
+    of 0x80 through 0xBF, disjoint from C0 and from ASCII, so a UTF-8
+    terminal never decodes one as a C1 control.
+
+    So a UTF stream keeps its own codec and a verdict printed to a modern
+    terminal is unchanged. The spellings are canonicalised through
+    ``codecs.lookup``, which is why ``UTF_8`` is here beside ``utf-8``.
+
+    This test passes with the S5R3-F6 change disabled, which is the point:
+    it is the control that keeps the fix from flattening every verdict to
+    ASCII.
+    """
+
+    from receipt.cli import _emit
+
+    payload = "FAILED: binding \u203a \u30c6\u30b9\u30c8.yaml"
+    stream = _CodecStdout(encoding)
+    _emit(payload, stream)
+    assert stream.written().decode(encoding) == payload + "\n"
+
+
 def test_a_strict_ascii_stdout_still_gets_the_text_verdict(
     repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
