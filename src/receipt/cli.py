@@ -75,7 +75,11 @@ all or raises, but a raw or unbuffered stream returns a count instead, and
 the count was discarded — so the verdict was truncated wherever the
 operating system stopped and ``main`` returned the passing exit code over
 it (peer review, Sol round 3). A zero-length write is a failure, not
-something to spin on, and it becomes the render refusal.
+something to spin on, and it becomes the render refusal. The remainder is
+tracked as an offset into one ``memoryview`` rather than by re-slicing the
+payload, because re-slicing copied what was left after every call and made
+the loop quadratic on precisely the streams it exists for (peer review, Sol
+round 5).
 
 *Which* encoding it uses is the command's decision and not the stream's,
 because escaping characters and then handing them to an arbitrary codec
@@ -868,19 +872,40 @@ def _write_all(target: Any, payload: Any) -> None:
     :func:`main` turns into the refusal, and what :func:`_refuse` guards
     against separately.
 
-    Written over slicing so the same loop serves both layers: ``payload`` is
-    ``bytes`` for the buffer and ``str`` for the text fallback, and the
+    Written over an offset so the same loop serves both layers: ``payload``
+    is ``bytes`` for the buffer and ``str`` for the text fallback, and the
     counts each ``write`` returns are in the units of what it was handed.
+
+    The offset is what makes the loop linear. Rebinding ``payload`` to
+    ``payload[written:]`` after every call copied the whole remainder each
+    time, so a writer that takes one unit per call copied N + (N−1) + … + 1
+    units to write N — quadratic in the length of a verdict on exactly the
+    streams this loop exists for, since a ``BufferedWriter`` never short-
+    writes and a raw or unbuffered one is where the counts come from (peer
+    review, Sol round 5). A ``memoryview`` over the bytes slices in constant
+    time and copies nothing, so what is offered on each call is a window on
+    the one buffer.
+
+    The text fallback keeps the same offset over the string itself, which is
+    a copy per short write in CPython — ``str`` has no buffer protocol to
+    take a view of. What that costs is bounded twice over: the path is
+    reachable only for a stream with no binary buffer whose own codec is the
+    trusted UTF-8, and what it writes is a verdict every field of which the
+    render policy has already bounded. The bytes path — every stream that
+    has a buffer, which is every stream this command normally meets — copies
+    nothing at all.
     """
 
-    while payload:
-        written = target.write(payload)
+    window = memoryview(payload) if isinstance(payload, bytes) else payload
+    offset = 0
+    while offset < len(payload):
+        written = target.write(window[offset:])
         if not written:
             raise OSError(
                 "the verdict stream accepted none of the bytes offered; "
                 "the verdict cannot be written"
             )
-        payload = payload[written:]
+        offset += written
 
 
 def _emit(text: str, stream: TextIO, *, encoding: str) -> None:
