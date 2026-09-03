@@ -5824,18 +5824,22 @@ def test_a_release_root_the_verifier_cannot_hold_is_refused_in_its_own_words(
     tmp_path: pathlib.Path, witnesses: Witnesses
 ) -> None:
     """S5-R2 follow-up to F2's third fact, reached through the gate this time:
-    a release root at mode 0o444 is readable, so every spelling binds and the
-    manifest type decision has nothing to say, and then
-    ``hold_release_root``'s search-only open of that root fails with
-    ``EACCES``. On a platform with a search-only flag that open used to
-    re-raise the platform's own ``PermissionError`` (measured on Darwin at
-    1a857c3: ``PermissionError: [Errno 13] Permission denied: 'releases'``
-    escaped ``run_push_gate``), so a caller saw a traceback where every other
-    unholdable directory gets a refusal. It is now a ``ReleaseChainError`` in
-    the verifier's words on every platform; where the platform has no
-    search-only flag the pre-existing ``unreadable_directory_error`` sentence
-    still answers first, so the test accepts either sentence but never a bare
-    ``OSError``."""
+    a release root at mode 0o444 is readable, so every spelling binds, and
+    then either the search-only hold of that root or the manifest type
+    decision's ``lstat`` beneath it meets ``EACCES``. On a platform with a
+    search-only flag the hold used to re-raise the platform's own
+    ``PermissionError`` (measured on Darwin at 1a857c3: ``PermissionError:
+    [Errno 13] Permission denied: 'releases'`` escaped ``run_push_gate``), so
+    a caller saw a traceback where every other unholdable directory gets a
+    refusal. It is now a ``ReleaseChainError`` in the verifier's words, and
+    which sentence answers is the platform's: on Darwin ``O_SEARCH`` needs
+    search permission, so the hold refuses first with this commit's
+    sentence; on Linux ``O_PATH`` opens a directory with no permission check,
+    the hold succeeds, and the type decision's ``lstat`` under the
+    unsearchable root refuses with S5-R2-F2's own sentence (measured on CI
+    at 8ba3147); a platform with no search-only flag answers with the
+    pre-existing ``unreadable_directory_error`` sentence. The test accepts
+    each of the three and never a bare ``OSError``."""
 
     if os.geteuid() == 0:
         pytest.skip("root ignores directory permission bits")
@@ -5846,8 +5850,12 @@ def test_a_release_root_the_verifier_cannot_hold_is_refused_in_its_own_words(
         with pytest.raises(AppendError) as refusal:
             run_push_gate(candidate)
         message = str(refusal.value)
-        assert message.startswith("cannot open a release root component to hold it: releases (") or (
-            "cannot be read" in message
+        assert (
+            message.startswith(
+                "cannot open a release root component to hold it: releases ("
+            )
+            or message.startswith("cannot stat release manifest path: releases/")
+            or "cannot be read" in message
         )
     finally:
         releases.chmod(0o755)
