@@ -983,14 +983,61 @@ def test_a_root_divergent_maximum_depth_layout_is_counted_and_not_held(
     # that makes them equal: 2,093,056 of each, inside the shared budget.
     assert work.work == 2 * nodes == 4186112
     assert work.work <= MAX_PATH_COMPONENTS_TOTAL
-    # The derived ceiling refuses no journal the default capacity admits:
-    # distinct first components cost two characters, which caps such a path
-    # at 511 components.
+    # Under the ceiling, which this layout does not reach: diverging at the
+    # root costs three characters to spell 4,096 first components, which caps
+    # such a path at 511 rather than 512. The layout that does come closest
+    # is the neighbouring test's arithmetic.
     assert nodes < MAX_ALIAS_INDEX_NODES == 2097152
     # Measured at 9.0 MB on CPython 3.14 and 3.11; the bound is stated with
     # room for an interpreter that lays strings out differently, and is a
     # quarter of the 64 MiB the review asked the worst case to stay under.
     assert peak < 16 * 1024 * 1024
+
+
+def test_the_alias_index_ceiling_is_above_the_widest_default_journal() -> None:
+    """Binds S7-R3-F1: the review's proposed ceiling refuses a valid journal.
+
+    The ceiling exists to refuse a declared set whose distinct prefixes the
+    generations recorder could not hold, so it has to sit above the most a
+    default-capacity journal can name — and the review's 2,093,056 does not.
+    That number is the worst case for what the old trie *allocated*: paths
+    that diverge at the root need three characters to spell 4,096 first
+    components, so they carry 511 components rather than 512. Cardinality
+    peaks elsewhere. Paths of 512 one-character components must share a
+    first component, because the repertoire spells only 64 one-character
+    names — its 65 characters less the bare period, which ends in one — but
+    64 × 64 = 4,096 second components are enough to separate every path from
+    every other, so 4,096 of them name 64 + 4,096 + 4,096 × 510 = 2,093,120
+    prefixes, 64 above the proposed ceiling.
+
+    Without S7-R3-F1 there is no constant here to compare against; with the
+    proposed one this fails, which is why the ceiling is the product of the
+    two caps instead.
+    """
+
+    from receipt.corpus import (
+        MAX_ALIAS_INDEX_NODES,
+        MAX_PATH_COMPONENTS,
+        PORTABLE_NAME_RE,
+    )
+
+    one_character_names = [
+        chr(point)
+        for point in range(128)
+        if PORTABLE_NAME_RE.fullmatch(chr(point)) is not None
+        and not chr(point).endswith(".")
+    ]
+    assert len(one_character_names) == 64
+    assert len(one_character_names) ** 2 >= MAX_JOURNAL_ROWS
+
+    widest = (
+        len(one_character_names)
+        + MAX_JOURNAL_ROWS
+        + MAX_JOURNAL_ROWS * (MAX_PATH_COMPONENTS - 2)
+    )
+    assert widest == 2093120
+    assert MAX_ALIAS_INDEX_NODES == MAX_JOURNAL_ROWS * MAX_PATH_COMPONENTS
+    assert MAX_ALIAS_INDEX_NODES - widest == 4032
 
 
 def test_the_alias_index_refuses_more_prefixes_than_its_ceiling(
