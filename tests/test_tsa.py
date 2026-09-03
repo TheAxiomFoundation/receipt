@@ -311,8 +311,12 @@ def test_token_evidence_is_the_released_dataclass_unchanged() -> None:
     rather than inside it. Nothing public moved: this pins the field names
     and their order against 0.5.1's, builds the dataclass by keyword without
     the field that was added, and checks the entry point still returns a
-    ``TokenEvidence`` -- with 0.5.1's parameters, plus the keyword-only
-    ``record`` this branch added with a default, which is additive.
+    ``TokenEvidence`` -- with 0.5.1's parameters and no others.
+
+    S5R3-F5: "and no others" is the second half. This branch briefly added a
+    keyword-only ``record`` here, which let a caller supply bytes that were
+    not what ``path`` held; it is gone, and the parameter list pinned below
+    is 0.5.1's exactly.
     """
 
     names = tuple(field.name for field in dataclasses.fields(TokenEvidence))
@@ -335,7 +339,6 @@ def test_token_evidence_is_the_released_dataclass_unchanged() -> None:
         ("spec", "KEYWORD_ONLY", True),
         ("records", "KEYWORD_ONLY", True),
         ("now", "KEYWORD_ONLY", False),
-        ("record", "KEYWORD_ONLY", False),
     ]
     # The identity exists, privately, and carries what the rule counts.
     assert tuple(
@@ -2715,14 +2718,24 @@ def test_a_record_swapped_at_the_data_read_is_not_what_the_token_covered(
 def test_a_direct_token_caller_takes_the_one_read_itself(
     tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
 ) -> None:
-    """S4-F1: ``record=`` is the witness path's read, not a new requirement.
+    """S4-F1: a direct caller has no read to hand down, so this takes one.
 
     ``verify_witness`` reads the record once and hands the bytes down, so the
     digest it publishes and the imprint OpenSSL recomputes are the same read.
     A caller that verifies one token on its own has no such read to pass, and
-    gets exactly the same evidence: the keyword is where the one read comes
-    from, never a second contract. Without it there would be nothing for a
-    direct caller to verify against at all.
+    gets exactly the same evidence: the public function takes that one read
+    itself, from the ``path`` it was given. Without it there would be nothing
+    for a direct caller to verify against at all.
+
+    S5R3-F5: and there is no way to hand it other bytes. The hand-down was a
+    ``record=`` keyword on this function for two rounds, which let a caller
+    supply bytes that were not what ``path`` held -- the evidence naming one
+    record while the imprint was checked against another. The keyword is gone
+    from the public function (it was added on this branch, so no release
+    carried it) and lives on the private one, whose only callers are in this
+    module and pass their own read of ``path``. Asserted here as the
+    ``TypeError`` a call with it now gets: a keyword silently ignored would
+    be the same defect wearing a different failure.
     """
 
     alpha = local_anchors[0]
@@ -2735,7 +2748,18 @@ def test_a_direct_token_caller_takes_the_one_read_itself(
     assert evidence.token_sha256 == sha256_bytes(
         tree.tokens[alpha.anchor_id].read_bytes()
     )
-    assert evidence == verify_timestamp_token(
+    with pytest.raises(TypeError):
+        verify_timestamp_token(
+            tree.record,
+            claim,
+            tree.reference,
+            spec=tree.spec,
+            records=tree.records,
+            record=tree.record.read_bytes(),
+        )
+    # The private entry point still takes it, and returns what the public one
+    # returns: the keyword moved, and nothing about the verification did.
+    private, _identity = tsa_module._verify_timestamp_token(
         tree.record,
         claim,
         tree.reference,
@@ -2743,6 +2767,7 @@ def test_a_direct_token_caller_takes_the_one_read_itself(
         records=tree.records,
         record=tree.record.read_bytes(),
     )
+    assert private == evidence
     # And the read is a read: a record that is not there is refused by name.
     absent = tree.records / RECORD_DAY / "record-9999.json"
     with pytest.raises(TsaError) as caught:
@@ -2752,6 +2777,85 @@ def test_a_direct_token_caller_takes_the_one_read_itself(
     assert str(caught.value) == (
         f"witnessed record is missing or not a regular file: {absent}"
     )
+
+
+def test_the_public_token_verifier_measures_the_token_against_its_own_path(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """S5R3-F5: the bytes a token is checked against are ``path``'s bytes.
+
+    The released ``verify_timestamp_token`` bound the token to the record it
+    was given: it read ``path``, and ``openssl ts -verify -data`` recomputed
+    the imprint over that read. The ``record=`` keyword this branch added for
+    the hand-down took that binding away, because nothing compared the bytes
+    supplied with the bytes at ``path`` -- a caller passing a record the token
+    really is over, while naming a record it is not, got evidence for a
+    timestamp over a file this call never looked at.
+
+    The keyword is gone from the public function, which takes its own read.
+    The token below is a genuine stamp over another record entirely, asked of
+    OpenSSL directly in both directions, and the call naming the witnessed
+    record is refused on the imprint. What the keyword bought is then shown
+    through the private door it now lives behind: the same claim, with the
+    other record's bytes supplied, returns evidence -- which is exactly the
+    call a public keyword let any caller make.
+    """
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_bytes(
+        canonical_bytes(
+            {
+                "schemaVersion": "receipt_test_record_v1",
+                "recordedAt": (datetime.now(UTC) - timedelta(seconds=90)).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                ),
+                "observation": "the record the token is really over",
+            }
+        )
+        + b"\n"
+    )
+    other = elsewhere.read_bytes()
+    token = tree.records / RECORD_DAY / "record-0001.elsewhere.tsr"
+    alpha.tsa.stamp(sha256_bytes(other), token)
+    claim = claim_against(tree, tree.reference, alpha, token)
+    # The premise, from OpenSSL directly: one record, and not the other.
+    assert openssl_ts_verifies(elsewhere, token, alpha.tsa.root_pem)
+    assert not openssl_ts_verifies(tree.record, token, alpha.tsa.root_pem)
+
+    with pytest.raises(TsaError) as caught:
+        verify_timestamp_token(
+            tree.record, claim, tree.reference, spec=tree.spec, records=tree.records
+        )
+    message = str(caught.value)
+    assert message.startswith(f"OpenSSL command failed ({TS_VERIFY_COMMAND} ")
+    assert "ts_check_imprints:message imprint mismatch" in message
+    # And nothing restores it: the keyword that used to accept the other
+    # record's bytes here is gone, so that refusal is the only answer this
+    # function has for this claim.
+    assert "record" not in inspect.signature(verify_timestamp_token).parameters
+    with pytest.raises(TypeError):
+        verify_timestamp_token(
+            tree.record,
+            claim,
+            tree.reference,
+            spec=tree.spec,
+            records=tree.records,
+            record=other,
+        )
+
+    # And the call the removed keyword allowed, made where it now lives.
+    evidence, _identity = tsa_module._verify_timestamp_token(
+        tree.record,
+        claim,
+        tree.reference,
+        spec=tree.spec,
+        records=tree.records,
+        record=other,
+    )
+    assert evidence.token_sha256 == sha256_bytes(token.read_bytes())
+    assert tree.record.read_bytes() != other
 
 
 def test_the_witness_digest_and_the_verified_imprint_come_from_one_read(
@@ -2766,8 +2870,10 @@ def test_the_witness_digest_and_the_verified_imprint_come_from_one_read(
     snapshot. What closes the finding is the hand-down: the bytes
     ``verify_witness`` hashed for the sidecar's ``digestSha256`` are the bytes
     the imprint is checked against, so the two cannot describe different
-    files. Nothing binds that without this test -- ``record=`` can be dropped
-    from every call site and the rest of the suite stays green.
+    files. Nothing binds that without this test: the private verifier requires
+    the bytes, but nothing about requiring them says they are the bytes the
+    digest was taken over -- hand it a fresh ``_read_witnessed_record(path)``
+    at either call site and the rest of the suite stays green.
 
     The witness here is exactly what a producer would write to exploit that:
     its ``digestSha256`` is the real record's, its declared token is a genuine
@@ -3250,9 +3356,10 @@ def record_token_verifications(
     """Watch every token a witness actually puts to OpenSSL.
 
     Interposed on the private ``_verify_timestamp_token``, which is where the
-    body lives and which the public function delegates to, so one recorder
-    sees the v2 path (which calls it for the timestamp identity beside the
-    evidence) and the v1 path (which goes through the public function) alike.
+    body lives and which every caller reaches -- the v2 path for the
+    timestamp identity beside the evidence, the v1 path for the record
+    snapshot it has already read, and the public function by delegation -- so
+    one recorder sees all three.
     """
 
     original = tsa_module._verify_timestamp_token
@@ -4537,7 +4644,12 @@ def test_a_token_swapped_after_its_hash_check_is_not_what_gets_verified(
 
     def verified(against: dict[str, Any]) -> tuple[TokenEvidence, Any]:
         return tsa_module._verify_timestamp_token(
-            tree.record, against, tree.reference, spec=tree.spec, records=tree.records
+            tree.record,
+            against,
+            tree.reference,
+            spec=tree.spec,
+            records=tree.records,
+            record=tree.record.read_bytes(),
         )
 
     unswapped, unswapped_identity = verified(claim)

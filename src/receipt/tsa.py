@@ -1679,16 +1679,21 @@ def verify_timestamp_token(
     spec: TsaSpec,
     records: Path,
     now: datetime | None = None,
-    record: bytes | None = None,
 ) -> TokenEvidence:
     """Verify one claimed RFC 3161 token against one consumer-pinned anchor.
 
-    ``record`` is the one read of ``path`` the caller has already taken and
-    judged -- ``verify_witness`` derives the witness digest from it and passes
-    it down here, so that the bytes the sidecar's ``digestSha256`` describes
-    are the bytes OpenSSL recomputes the token's imprint over.  A direct
-    caller may leave it out, in which case this takes that one read itself;
-    either way ``path`` is read at most once and never again.
+    ``path`` is the record the token has to be over, and this takes the one
+    read of it itself: the bytes it hashes for the creation claims and the
+    bytes ``openssl ts -verify -data`` recomputes the imprint over are that
+    read and nothing else.  A ``record`` keyword briefly let a caller supply
+    those bytes here, and a caller supplying bytes that are not what ``path``
+    holds undid the binding the released function had -- the evidence named
+    one record and the imprint was checked against another, which is the
+    substitution the one read exists to prevent, offered as a parameter
+    (peer review, fifth gate round three).  The keyword was added on this
+    branch and is gone again; the witness flow hands its snapshot to the
+    private ``_verify_timestamp_token`` instead, where the caller is this
+    module and the bytes are the ones its own read of ``path`` produced.
 
     Signature and return are the package's 0.5.1 ones exactly.  The work is
     ``_verify_timestamp_token``, which returns the same evidence and, beside
@@ -1705,7 +1710,7 @@ def verify_timestamp_token(
         spec=spec,
         records=records,
         now=now,
-        record=record,
+        record=_read_witnessed_record(path),
     )
     return evidence
 
@@ -1718,7 +1723,7 @@ def _verify_timestamp_token(
     spec: TsaSpec,
     records: Path,
     now: datetime | None = None,
-    record: bytes | None = None,
+    record: bytes,
     on_token_read: Callable[[Path, tuple[int, int]], None] | None = None,
 ) -> tuple[TokenEvidence, _TimestampIdentity]:
     """``verify_timestamp_token``, and which timestamp it verified.
@@ -1727,6 +1732,16 @@ def _verify_timestamp_token(
     function; this is where its body lives, so that the one caller who needs
     to tell two outcomes' timestamps apart can have that answer without it
     appearing in :class:`TokenEvidence`.
+
+    ``record`` is required, and is the one read of ``path`` its caller has
+    already taken and judged: ``verify_witness`` derives the witness digest
+    from it and hands it down, so that the bytes the sidecar's
+    ``digestSha256`` describes are the bytes OpenSSL recomputes the imprint
+    over, and the public function above hands down the read it takes itself.
+    There is no default, because there is no caller of this that has not read
+    ``path`` already, and a caller that could omit the bytes is a caller that
+    could substitute them -- which is why the keyword is here and not on the
+    public function (peer review, fifth gate round three).
 
     ``on_token_read`` is given the resolved response path and the identity of
     the object that read actually opened, at the moment the read returns.  A
@@ -1738,8 +1753,6 @@ def _verify_timestamp_token(
     is how it does that, so this must not swallow one.
     """
 
-    if record is None:
-        record = _read_witnessed_record(path)
     bundle_path = str(bundle_reference["path"])
     expected_bundle_claims = {
         "trustBundleId": bundle_reference["bundleId"],
@@ -2119,7 +2132,11 @@ def _v1_witness_evidence(
     # every active bundle stays selectable here, so counting only the newest
     # one let a witness name an older, wider bundle and pass.
     _require_single_anchor(trust)
-    token = verify_timestamp_token(
+    # The private entry point, because the public one takes its own read of
+    # the record and this path already has the read verify_witness hashed;
+    # every refusal and every check's place is the public function's either
+    # way, since that is where its body lives.
+    token, _identity = _verify_timestamp_token(
         path,
         witness,
         bundle_reference,
