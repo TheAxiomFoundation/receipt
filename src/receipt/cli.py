@@ -124,8 +124,14 @@ review, Sol round 2). And it bounds object *keys*, which it did not: a gate
 evidence key is 1,024 characters under the corpus schema, so a key alone
 rendered over twelve thousand. A truncated key could collide with another
 truncated key and silently replace its value, so a bounded key carries the
-first sixteen hex characters of the whole key's SHA-256 in its marker and
-two keys sharing a prefix stay distinct.
+whole key's SHA-256 in its marker and two keys sharing a prefix stay
+distinct. Sixteen hex characters of it was the round-2 answer, and sixteen
+is sixty-four bits — about 2^32 trials by the birthday bound, which is
+minutes of ordinary computing for an attacker who wants one evidence value
+to replace another (peer review, Sol round 3). The marker carries all
+sixty-four characters now, and because a digest is a distinguisher rather
+than a proof, :func:`_bounded_payload` refuses outright if two keys in one
+object come out of the bound equal.
 """
 
 from __future__ import annotations
@@ -374,14 +380,36 @@ def _bounded_payload(value: object) -> object:
     ``json.dumps`` will emit rather than what Python holds — and both of
     which live in ``receipt._render`` so that ``receipt.corpus`` charges its
     budgets against the same transformation this applies.
+
+    Two keys that come out of that transformation equal would leave one
+    value silently replacing the other, which is a length policy turning
+    into a data-loss policy. The digest in a bounded key's marker makes
+    that impossible by accident and expensive on purpose; it does not make
+    it impossible, so the mapping is checked and a collision raises. The
+    render boundary in :func:`main` turns that into the refusal it already
+    has for a verdict it cannot render.
     """
 
     if isinstance(value, str):
         return bounded_encoded(value)
     if isinstance(value, dict):
-        return {
-            bounded_key(key): _bounded_payload(item) for key, item in value.items()
-        }
+        bounded: dict[str, object] = {}
+        for key, item in value.items():
+            rendered = bounded_key(key)
+            if rendered in bounded:
+                # A digest in the marker makes an accidental merge
+                # impossible and a deliberate one expensive; it does not
+                # make one impossible, and this is a length policy that
+                # must not become a data-loss policy. Refusing raises out
+                # of the render boundary, which is the fail-closed answer
+                # the command already has for a verdict it cannot render
+                # (peer review, Sol round 3).
+                raise ValueError(
+                    "two keys in one verdict object render identically once "
+                    f"bounded: {rendered!r}"
+                )
+            bounded[rendered] = _bounded_payload(item)
+        return bounded
     if isinstance(value, list):
         return [_bounded_payload(item) for item in value]
     return value
