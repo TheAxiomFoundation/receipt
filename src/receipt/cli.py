@@ -15,6 +15,24 @@ With ``--json``, every exit path after argument parsing prints exactly one
 JSON object bearing a ``verdict`` key — a refused spec, an unusable root, an
 aborted run, and a result that cannot be rendered all included. A machine
 consumer that keys on ``verdict`` therefore fails closed with the command.
+
+The text renderer is the verdict's last boundary, so every string it takes
+from the result goes through :func:`_terminal_safe` before it reaches a line.
+Not every string in a verdict is written by someone the verdict is about, but
+enough of them are: a filename in the release manifest directory, a path under
+a content root, a pass failure quoting either. One carrying
+``\\x1b[A\\r\\x1b[2K  VERDICT: PASS`` redraws the line the command has just
+printed to say FAIL, on any terminal that honours the sequences (peer review,
+round seven). The library's own messages are left exactly as they are —
+``receipt.release_chain``'s wording is pinned byte for byte by a differential
+harness — so the escaping lives here, at the one place the bytes reach a
+terminal.
+
+The JSON renderer needs nothing of the kind. ``json.dumps`` with
+``ensure_ascii`` at its default already escapes every code point
+:func:`_terminal_safe` covers — the C0 block, DEL, C1, and U+2028/U+2029 —
+into ``\\uXXXX`` sequences inside the quoted string, so a machine consumer
+receives them as data and no terminal ever sees them raw.
 """
 
 from __future__ import annotations
@@ -101,12 +119,51 @@ def _default_root(spec_path: pathlib.Path) -> pathlib.Path:
     return current
 
 
+#: Every code point that can move a cursor, clear a line, or split one line
+#: into two on a terminal: the C0 block, DEL, the C1 block (which an
+#: 8-bit-clean terminal decodes as the two-character ESC sequences), and the
+#: Unicode line and paragraph separators. Nothing else is touched — the
+#: verdict is meant to be read, and mangling ordinary text to defend against
+#: characters that cannot redraw it would cost legibility for nothing.
+_TERMINAL_UNSAFE = (
+    *range(0x00, 0x20),
+    0x7F,
+    *range(0x80, 0xA0),
+    0x2028,
+    0x2029,
+)
+#: Each of them mapped to the escape Python's own ``repr`` writes for it —
+#: ``\r``, ``\x1b``, ``\u2028``. Using ``repr``'s spelling is not a shortcut:
+#: it is the same escaping ``receipt.corpus._quoted`` applies to the paths it
+#: names, so a tree-derived name reads identically wherever it appears.
+_TERMINAL_ESCAPES = {chr(code): repr(chr(code))[1:-1] for code in _TERMINAL_UNSAFE}
+
+
+def _terminal_safe(text: str) -> str:
+    """Replace every terminal-controlling code point with its Python escape.
+
+    Applied to every string the text verdict takes from the result — pass
+    names, details and failures, the spec's name and path, the root, gate
+    ids, evidence keys and values, and the abort message ``_refuse`` prints —
+    and to nothing else. The fixed lines of the verdict are literals in this
+    module and carry none of these characters, so they are left alone.
+
+    The replacement is one code point for its escape, so the escaped text is
+    longer but nothing else about it changes: no truncation, no reordering,
+    no substitution of anything printable. What an auditor reads is still the
+    filename the producer chose, in a spelling that cannot move the cursor.
+    """
+
+    return "".join(_TERMINAL_ESCAPES.get(character, character) for character in text)
+
+
 def _format_text(result: VerifyResult) -> str:
     lines: list[str] = []
-    lines.append(f"receipt {result.receipt_version} — {result.spec_name}")
-    lines.append(f"  root  {result.root}")
-    lines.append(f"  spec  {result.spec_path}")
-    lines.append(f"        sha256 {result.spec_sha256}")
+    version = _terminal_safe(result.receipt_version)
+    lines.append(f"receipt {version} — {_terminal_safe(result.spec_name)}")
+    lines.append(f"  root  {_terminal_safe(str(result.root))}")
+    lines.append(f"  spec  {_terminal_safe(str(result.spec_path))}")
+    lines.append(f"        sha256 {_terminal_safe(result.spec_sha256)}")
     lines.append("")
 
     if result.ok:
@@ -115,11 +172,14 @@ def _format_text(result: VerifyResult) -> str:
         lines.append("PASSES")
     for item in result.passes:
         mark = "ok  " if item.ok else "FAIL"
-        lines.append(f"  [{mark}] {item.name}")
+        lines.append(f"  [{mark}] {_terminal_safe(item.name)}")
         if item.ok:
-            lines.append(f"         {item.detail}")
+            lines.append(f"         {_terminal_safe(item.detail)}")
         else:
-            lines.append(f"         {item.failure}")
+            # str(), not "or ''": a failed pass always carries a failure
+            # string, and rendering a hypothetical None as "None" is what
+            # this line did before the escaping was added to it.
+            lines.append(f"         {_terminal_safe(str(item.failure))}")
 
     corpus = result.corpus
     if corpus is not None and corpus.gates:
@@ -139,17 +199,24 @@ def _format_text(result: VerifyResult) -> str:
             for gate in gates:
                 suffix = ""
                 if gate.outcome == "waived":
-                    waiver = gate.evidence.get("waiverSetSha256", "")
-                    suffix = f"  [WAIVED under waiver set {waiver[:16]}…]"
+                    # Truncated first and escaped after, so the line still
+                    # shows sixteen characters of the value rather than
+                    # sixteen characters of its escaping.
+                    waiver = gate.evidence.get("waiverSetSha256", "")[:16]
+                    suffix = f"  [WAIVED under waiver set {_terminal_safe(waiver)}…]"
                 elif gate.outcome == "not-run":
-                    suffix = f"  [DID NOT RUN — {gate.evidence.get('reason', '')}]"
-                lines.append(f"    - {gate.gate_id}{suffix}")
+                    reason = _terminal_safe(gate.evidence.get("reason", ""))
+                    suffix = f"  [DID NOT RUN — {reason}]"
+                lines.append(f"    - {_terminal_safe(gate.gate_id)}{suffix}")
 
     lines.append("")
     if result.ok:
         # The witness clause is derived from what was actually verified, not
         # asserted: a spec pinning one anchor must not be described as two.
-        witnesses = sorted(result.witness_times())
+        # The anchor names come from the consumer's committed spec rather
+        # than from a producer, but they are result data and the rule here
+        # admits no exceptions: nothing reaches a line unescaped.
+        witnesses = [_terminal_safe(name) for name in sorted(result.witness_times())]
         count = len(witnesses)
         noun = "authorities" if count != 1 else "authority"
         # Whether a trusted base reference was verified changes what the
@@ -228,8 +295,9 @@ def _format_text(result: VerifyResult) -> str:
     else:
         failure = next((item for item in result.passes if not item.ok), None)
         detail = failure.failure if failure is not None else "unknown failure"
-        lines.append(f"VERDICT: FAIL — {failure.name if failure else 'verification'}")
-        lines.append(f"  {detail}")
+        name = _terminal_safe(failure.name) if failure else "verification"
+        lines.append(f"VERDICT: FAIL — {name}")
+        lines.append(f"  {_terminal_safe(str(detail))}")
     return "\n".join(lines)
 
 
@@ -252,9 +320,17 @@ def _fail_payload(stage: str, message: str) -> dict[str, object]:
 
 
 def _refuse(as_json: bool, stage: str, message: str, code: int) -> int:
-    """Print a refusal, honoring the JSON contract, and return the exit code."""
+    """Print a refusal, honoring the JSON contract, and return the exit code.
 
-    print(f"receipt verify: {message}", file=sys.stderr)
+    The text half is the abort counterpart of :func:`_fail_payload`, and it
+    is a verdict line like any other: the message can quote a spec path, an
+    exception's text, or a filename that came off the disk, so it is escaped
+    on its way to the terminal. The JSON half takes the message unescaped —
+    ``json.dumps`` escapes it there — so a machine consumer still receives
+    exactly what the exception said.
+    """
+
+    print(f"receipt verify: {_terminal_safe(message)}", file=sys.stderr)
     if as_json:
         print(json.dumps(_fail_payload(stage, message), indent=2, sort_keys=True))
     return code
