@@ -62,11 +62,18 @@ state-path guards
 requires each component to be spelled by the directory holding it, because
 what a component *is* is learned by resolving its name and a name-folding
 filesystem resolves a name this package never wrote, and refuses a directory
-that folds names and cannot be listed rather than descending it, since the
-listing was the only thing that could have bound the spelling and a
-search-only mode is all it takes to withhold it — where names are compared
-exactly, resolution and listing agree and the search-only descent stays
-allowed; the anchor-set digest in
+that cannot be listed rather than descending it, since the listing was the
+only thing that could have bound the spelling and a search-only mode — 0o111,
+traversable and not listable — is all it takes to withhold it. That last is a
+requirement about every directory above a protected path rather than a
+property of one, and it is stated in ``README.md``: this verifier must be
+able to list them. It was once narrowed to directories that could be *shown*
+to fold the name, by probing a whole-string swapcase and the other of NFC and
+NFD, which is not the set of names a filesystem may fold — one that folds
+part of a mixed-case name answers no to every probe and folds the name all
+the same — so it fails closed instead, and the search-only descent below is
+no longer reached with such a parent through either reader; the anchor-set
+digest in
 the result) run beside the extracted checks without altering any of their
 refusals, and carry their own tests. Every one of those index reads names its
 path as a literal pathspec, so git is asked about the exact path rather than
@@ -102,10 +109,13 @@ verdict, so the identity it records is a directory it still has rather than a
 number the filesystem may hand to the next directory created in that root's
 place. It opens each directory component with search rights alone where the
 platform offers them (``O_PATH`` on Linux, ``O_SEARCH`` on Darwin), which is
-all it uses them for, so a POSIX search-only directory above a readable state
-file is descended as the pathname open used to descend it; where the platform
-offers neither, the read permission the descent then needs is stated in the
-refusal rather than escaping as a bare ``PermissionError``.
+all it uses them for and all it asks for; where the platform offers neither,
+the read permission the descent then needs is stated in the refusal rather
+than escaping as a bare ``PermissionError``. (A search-only directory above a
+state file was once descended this way as the pathname open used to descend
+it. The component walk refuses one now — its listing was the only thing
+binding the spelling — so what the flags buy is the right rights for this
+open rather than that acceptance.)
 ``assert_index_agrees_with_tree`` likewise accepts a category the caller has
 already observed, so a caller holding the file open need not resolve its name
 again. ``verify_release_chain`` takes an optional ``state_bytes`` mapping that
@@ -1157,51 +1167,6 @@ def _is_reparse_point(path: pathlib.Path) -> bool:
     return stat.S_ISLNK(entry.st_mode) or bool(getattr(entry, "st_reparse_tag", 0))
 
 
-def _folds_a_spelling(parent: pathlib.Path, segment: str) -> bool:
-    """Whether a directory answers to a spelling of ``segment`` it was not given.
-
-    Asked only where the parent cannot be listed, and it is the question that
-    decides whether that matters. The probe is the same fold the index alias
-    check compares by, narrowed to what a filesystem can actually be shown to
-    do: for a component carrying cased letters, ``segment.swapcase()``; for one
-    whose NFC and NFD forms differ, the other form. If any of those resolves to
-    the same ``(st_dev, st_ino)`` as the component itself, then two spellings
-    reach one file here and the directory's listing was the only thing that
-    could have said which one it holds.
-
-    Where none of them resolves, the directory does not fold *this* name, and
-    that is what the caller needs: resolution and listing agree for a component
-    the filesystem compares exactly, so the component that resolved is the
-    component the directory holds and the walk may descend a search-only
-    directory as it always has. Answering ``False`` for a component that is not
-    there at all is the same answer for the same reason — there is no file for
-    two spellings to reach.
-
-    Each probe is an ``lstat``, which needs search rights on the parent and no
-    read rights, so this asks nothing the descent itself does not already need.
-    """
-
-    try:
-        target = os.lstat(parent / segment)
-    except OSError:
-        return False
-    identity = (target.st_dev, target.st_ino)
-    variants = {
-        segment.swapcase(),
-        unicodedata.normalize("NFC", segment),
-        unicodedata.normalize("NFD", segment),
-    }
-    variants.discard(segment)
-    for variant in sorted(variants):
-        try:
-            probe = os.lstat(parent / variant)
-        except OSError:
-            continue
-        if (probe.st_dev, probe.st_ino) == identity:
-            return True
-    return False
-
-
 def _assert_component_spelled(
     parent: pathlib.Path,
     segment: str,
@@ -1226,41 +1191,46 @@ def _assert_component_spelled(
     refusal — so it returns and lets the check after the walk say so.
 
     A directory this verifier cannot list cannot answer the question, which is
-    a different thing from answering it favourably. Where names are compared
-    exactly nothing is lost by descending anyway: resolution and listing agree
-    there, so the component that resolved is the component the directory
-    holds, and the search-only descent ``confined_state_descriptor`` exists to
-    allow — a directory above a state file that is traversable and
-    deliberately not listable — stays allowed, with
-    ``assert_index_carries_no_protected_alias`` answering for the index side
-    on every filesystem because it compares spellings and reads no directory
-    at all. Where names fold, the listing was the *only* way to bind the
-    spelling: the index can hold the canonical path while the file on disk is
-    spelled some other way, the alias check sees nothing because the index
-    spelling is right, and making the parent search-only is all it takes to
-    turn this check off. So the two are separated by asking whether the parent
-    folds this name (``_folds_a_spelling``), and a parent that does and cannot
-    be listed refuses.
+    a different thing from answering it favourably, so it refuses. That is a
+    requirement about every directory above a protected path — the two state
+    paths, the release root, and the configured paths under it — and it is
+    stated as one in ``README.md`` and in both module docstrings: this
+    verifier must be able to list them.
 
-    On a filesystem that compares names exactly this refusal is unreachable by
-    construction: a name that resolves is a name the directory lists. It is
-    the fold-insensitive case it exists for — and there, because both walks
-    stand ahead of the read they guard, this refusal stands where a
-    pre-existing refusal about the content behind the folded name would have.
-    ``append_gate``'s module docstring states that with the two cases
-    measured.
+    It was once separated from the listable case by asking whether the parent
+    folded this name, on the reasoning that where names are compared exactly
+    resolution and listing agree, so nothing is lost by descending. Two things
+    are wrong with that. The probe could only ask about the spellings a
+    filesystem can be *shown* to conflate — a whole-string swapcase, the other
+    of NFC and NFD — and a filesystem that folds part of a mixed-case name, or
+    by any rule those two do not spell, answers no to all of them while
+    folding the name all the same; the test that reproduced the case
+    reproduced the probe's own assumption along with it. And the cost of
+    asking is paid by the verifier, while the cost of not asking is paid by
+    the verdict: making a parent search-only — mode 0o111, traversable and not
+    listable — is all a proposal has to arrange to turn the one check that
+    binds a spelling off. So this fails closed. What it takes back is the
+    round-one allowance of a search-only directory above a state file, which
+    is measured in ``append_gate``'s module docstring; the descent's
+    search-only flags stay, because they are still the right rights for the
+    open it makes.
+
+    On a filesystem that compares names exactly the *misspelling* refusal
+    below is unreachable by construction — a name that resolves is a name the
+    directory lists — while this one is reachable everywhere, which is what
+    gives the check regression protection on every runner. Both walks stand
+    ahead of the read they guard, so either refusal stands where a pre-existing
+    refusal about the content behind that name would have; ``append_gate``'s
+    module docstring states that with the cases measured.
     """
 
     try:
         names = os.listdir(parent)
     except OSError:
-        if _folds_a_spelling(parent, segment):
-            raise ReleaseChainError(
-                f"cannot bind the spelling of {'/'.join(walked)}: its "
-                "directory folds names and cannot be listed: "
-                f"{relative.as_posix()}"
-            ) from None
-        return
+        raise ReleaseChainError(
+            f"cannot bind the spelling of {'/'.join(walked)}: its directory "
+            f"cannot be listed: {relative.as_posix()}"
+        ) from None
     if segment in names:
         return
     try:
@@ -1443,6 +1413,16 @@ STATE_OPEN_FLAGS = (
 # neither exists the open has to ask for read, and a POSIX search-only
 # directory — mode 0o111, traversable but not listable — above a perfectly
 # readable state file then fails with EACCES; see confined_state_descriptor.
+#
+# What these flags no longer buy is that search-only directory itself: the
+# component walk requires every directory above a protected path to be
+# listable, and both readers run it before descending, so a state file under
+# such a directory is refused by the walk on every platform now. They stay
+# because they are still the rights this open needs — it does ``openat`` and
+# ``fstat``, nothing more, and asking for read permission it does not use is
+# a claim on the checkout this package has no reason to make — and because
+# the two opens no walk precedes still meet the fact: ``append_gate._set_root``
+# on the candidate root, and hold_release_root on the release root.
 SEARCH_ONLY_DIRECTORY_FLAG = getattr(os, "O_PATH", 0) or getattr(os, "O_SEARCH", 0)
 DIRECTORY_OPEN_FLAGS = (
     (SEARCH_ONLY_DIRECTORY_FLAG or os.O_RDONLY)
@@ -1680,7 +1660,13 @@ def confined_state_descriptor(
     replaced never needed: a POSIX search-only directory — mode 0o111,
     traversable but not listable, which is how a directory above a published
     state file is often locked down — was read from happily before and fails
-    with ``EACCES`` here. Where neither flag exists the requirement is stated
+    with ``EACCES`` here. Both readers in this package now refuse such a
+    directory in the component walk before reaching this open, because a
+    directory that cannot be listed cannot bind the spelling of what it
+    holds; the flags stay because asking for permission this open does not
+    use is a claim on the checkout with nothing behind it, and because
+    ``append_gate._set_root``'s open of the candidate root precedes every
+    walk. Where neither flag exists the requirement is stated
     rather than raised as a bare ``PermissionError``: the component is named,
     and the refusal says that secure descent needs read permission on every
     directory above a state file on this platform. That covers the root as

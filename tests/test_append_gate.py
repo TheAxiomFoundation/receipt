@@ -206,56 +206,6 @@ def a_folded_spelling(parent: pathlib.Path, spelled: str) -> bool:
     return True
 
 
-def a_folding_directory(parent: pathlib.Path, segment: str) -> bool:
-    """Whether one file under ``parent`` is reached by two spellings of a name.
-
-    The fact ``release_chain._folds_a_spelling`` asks the filesystem about when
-    a parent cannot be listed, asked here of the fixture that was built. It is
-    a property of the mount rather than of the checkout — APFS and HFS+ answer
-    yes by default, ext4 answers no — so the cases below branch on it rather
-    than on the platform's name.
-    """
-
-    try:
-        exact = os.lstat(parent / segment)
-        folded = os.lstat(parent / segment.swapcase())
-    except OSError:
-        return False
-    return (exact.st_dev, exact.st_ino) == (folded.st_dev, folded.st_ino)
-
-
-def a_directory_that_compares_names_exactly(
-    monkeypatch: pytest.MonkeyPatch, parent: pathlib.Path
-) -> None:
-    """Present a ``parent`` that reaches its files by the spellings it holds.
-
-    Which is what ext4 — and so CI — really is, and what a case- and
-    normalisation-insensitive mount is not. The cases that need it are the ones
-    about a directory this verifier may traverse and not list, where a folding
-    filesystem is answered by the spelling check before the descent is reached
-    at all: pinning the descent's own refusal there means presenting the
-    filesystem that does not fold. The names the directory holds are captured
-    before it is locked down, and an ``lstat`` of anything else under it says
-    the name is not there.
-    """
-
-    held = set(os.listdir(parent))
-    real_lstat = os.lstat
-
-    def lstat(where: Any, *arguments: Any, **keywords: Any) -> os.stat_result:
-        try:
-            path = pathlib.Path(os.fspath(where))
-        except TypeError:
-            return real_lstat(where, *arguments, **keywords)
-        if path.parent == parent and path.name not in held:
-            raise FileNotFoundError(
-                errno.ENOENT, "No such file or directory", str(path)
-            )
-        return real_lstat(where, *arguments, **keywords)
-
-    monkeypatch.setattr(os, "lstat", lstat)
-
-
 @dataclass(frozen=True)
 class Candidate:
     """One fixture repository and the commit its proposal is measured against."""
@@ -3846,71 +3796,123 @@ def test_the_classification_is_bound_to_the_recorded_root_too(
 @pytest.mark.skipif(
     os.getuid() == 0, reason="root traverses a directory it has no rights on"
 )
-def test_a_search_only_state_directory_is_descended_where_the_platform_allows(
+def test_a_search_only_state_directory_is_refused_by_the_walk(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds S4-F5: the descriptor walk opened every directory above a state
-    file with ``O_RDONLY | O_DIRECTORY``, which asks for read permission the
-    pathname open it replaced never needed. A POSIX search-only directory —
-    mode 0o111, traversable but not listable, which is how a directory above
-    a published state file is often locked down — was read from happily
-    before and failed with a bare ``PermissionError`` afterwards. All the
-    walk does with a directory descriptor is ``openat`` and ``fstat`` through
-    it, and ``O_PATH`` and ``O_SEARCH`` both give exactly that without asking
-    for read.
+    """Binds S4R4-F7, and states what it takes back. S4-F5 made the descent
+    open every directory above a state file with search rights alone where the
+    platform offers them, so a POSIX search-only directory — mode 0o111,
+    traversable and not listable, which is how a directory above a published
+    state file is often locked down — was read through as the pathname open it
+    replaced always had been. That acceptance is the hole: the directory's
+    listing is the only thing that binds the spelling of what it holds, so
+    making a parent search-only is all a proposal has to arrange to turn the
+    one check that could say the ledger on disk is not the ledger the index
+    names off.
 
-    So where the platform offers search rights the file is read and the
-    ordinary verdict stands; where it offers neither the requirement is
-    stated instead of raised. Linux has ``O_PATH`` and Darwin has
-    ``O_SEARCH``, so every platform this is tested on takes the first branch
-    — the assertion follows the module's own answer rather than the
-    platform's name, and the test below forces the second branch so its
-    refusal is bound too. Without the flag change this is a
-    ``PermissionError`` escaping the gate.
+    S4R3-F5 narrowed the refusal to parents that could be *shown* to fold the
+    name, by probing a whole-string swapcase and the other of NFC and NFD.
+    That is not the set of names a filesystem may fold: one that folds part of
+    a mixed-case name, or a component carrying no cased letters at all and no
+    normalisation difference, answers no to every probe while the fold is
+    still available. So the probe is gone and the walk fails closed.
 
-    S4R3-F5 narrows the acceptance to the filesystems where it means
-    something. A directory that cannot be listed cannot say which spelling it
-    holds, and where names fold that listing was the only thing that could
-    have: two spellings reach one file, so the search-only descent there is
-    refused rather than allowed. This test therefore has three answers, and
-    which one it asserts follows the fixture it built — on APFS the third."""
+    The ledger's own directory is refused here on every filesystem and every
+    platform. Measured at 4d8039f: on this APFS checkout the tree was refused
+    with the probe's own sentence (``cannot bind the spelling of
+    ledger/official_observations.jsonl: its directory folds names and cannot
+    be listed: ...``), and with the probe answering False — which is what ext4
+    gives, and what any uncased component gives anywhere — it was accepted as
+    ``thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs
+    base``. The same tree with a rewritten frozen prefix line, measured the
+    same way, was refused as ``immutable prefix line 1
+    (fixture.series.observation_1) was rewritten``: that is the refusal this
+    one now pre-empts, and the module docstring says so. The release-root case
+    below is one no probe could have answered on any filesystem, and it was
+    accepted here."""
 
     candidate = base_repository(tmp_path)
     append_one_row(candidate)
     ledger_directory = candidate.root / "ledger"
-    folds = a_folding_directory(
-        ledger_directory, CHAIN_SPEC.state_relative.name
-    )
     ledger_directory.chmod(0o111)
     try:
         # Search-only, and the state file inside it is readable: the walk is
         # the only thing standing between the gate and those bytes.
         assert (candidate.root / CHAIN_SPEC.state_relative).read_bytes()
-        if folds:
-            with pytest.raises(AppendError) as folded:
-                run_gate(candidate)
-            assert str(folded.value) == (
-                "cannot bind the spelling of "
-                f"{CHAIN_SPEC.state_relative.as_posix()}: its directory folds "
-                "names and cannot be listed: "
-                f"{CHAIN_SPEC.state_relative.as_posix()}"
-            )
-        elif release_chain.DESCENT_REQUIRES_DIRECTORY_READ:
-            with pytest.raises(AppendError) as refusal:
-                run_gate(candidate)
-            assert str(refusal.value) == (
-                "state path component ledger is not readable by this "
-                "verifier; secure descent requires read permission on every "
-                "directory above a state file on this platform: "
-                "ledger/official_observations.jsonl"
-            )
-        else:
-            assert run_gate(candidate) == (
-                "thesis-facts append check OK: 3 rows, immutable prefix 1, "
-                "+1 appended vs base"
-            )
+
+        with pytest.raises(AppendError) as refusal:
+            run_gate(candidate)
+        assert str(refusal.value) == (
+            "cannot bind the spelling of "
+            f"{CHAIN_SPEC.state_relative.as_posix()}: its directory cannot be "
+            f"listed: {CHAIN_SPEC.state_relative.as_posix()}"
+        )
     finally:
         ledger_directory.chmod(0o755)
+
+
+@pytest.mark.skipif(
+    os.getuid() == 0, reason="root traverses a directory it has no rights on"
+)
+def test_an_uncased_component_no_probe_could_answer_for_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S4R4-F7 where the probe it replaces could not fire at all, which is the
+    finding rather than a stronger statement of it. ``_folds_a_spelling``
+    asked whether a second spelling of the component reached the same file,
+    and its spellings were the swapcase and the other normal form. ``2026``
+    has neither: swapcasing it returns the same string and its NFC and NFD
+    forms are equal, so the probe had nothing to try and answered no on every
+    filesystem — including the ones that do fold, by rules those two spellings
+    do not enumerate.
+
+    So a release root of ``data/2026`` under a search-only ``data`` was
+    accepted at 4d8039f on this APFS checkout, measured: ``thesis-facts append
+    check OK: 2 rows, immutable prefix 1`` — with no simulation anywhere, on
+    the filesystem the probe was meant to protect against. It is the release
+    root's walk rather than the state path's, so both call sites of the check
+    are bound by a real checkout here."""
+
+    spec = spec_with_release_root("data/2026")
+    candidate = base_repository(tmp_path, "data/2026")
+    parent = candidate.root / "data"
+    parent.chmod(0o111)
+    try:
+        with pytest.raises(AppendError) as refusal:
+            run_push_gate(candidate, spec=spec)
+        assert str(refusal.value) == (
+            "cannot bind the spelling of data/2026: its directory cannot be "
+            "listed: data/2026"
+        )
+    finally:
+        parent.chmod(0o755)
+
+
+@pytest.mark.skipif(
+    os.getuid() == 0, reason="root traverses a directory it has no rights on"
+)
+def test_a_candidate_root_that_cannot_be_listed_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S4R4-F7 at the top of the walk. The candidate root is the parent of the
+    first component of every protected path, so it has to be listable for the
+    same reason each directory below it does — and, unlike them, it is opened
+    by ``_set_root`` before any walk runs. Where the platform has a
+    search-only flag that open succeeds on a 0o111 root and the walk is what
+    answers; where it has neither, ``_set_root`` answers first, in the
+    descent's own words, which the test below pins."""
+
+    candidate = base_repository(tmp_path)
+    candidate.root.chmod(0o111)
+    try:
+        with pytest.raises(AppendError) as refusal:
+            run_push_gate(candidate)
+        assert str(refusal.value) == (
+            "cannot bind the spelling of ledger: its directory cannot be "
+            "listed: ledger/official_observations.jsonl"
+        )
+    finally:
+        candidate.root.chmod(0o755)
 
 
 @pytest.mark.skipif(
@@ -3919,56 +3921,48 @@ def test_a_search_only_state_directory_is_descended_where_the_platform_allows(
 def test_the_shared_state_reader_answers_the_same_way(
     tmp_path: pathlib.Path,
 ) -> None:
-    """S4-F5 through ``release_chain``'s own reader, which is the one
+    """S4R4-F7 through ``release_chain``'s own reader, which is the one
     ``verify_release_chain`` — and so ``receipt verify``'s custody pass —
-    uses. Both readers go through the same descent, so both gained the same
-    requirement and both state it the same way — and both are answered by
-    S4R3-F5's spelling refusal first where the directory folds names, which
-    is the same three answers the test above has."""
+    uses. ``_regular_file_bytes`` runs the same component walk before its
+    descent, so the requirement is the package's rather than the gate's and
+    both readers state it the same way. That is why ``README.md`` says it
+    where a consumer looks. Measured at 4d8039f with the fold probe answering
+    False: this reader returns the ledger's bytes for a directory that cannot
+    be listed."""
 
     candidate = base_repository(tmp_path)
     ledger_directory = candidate.root / "ledger"
     expected = (candidate.root / CHAIN_SPEC.state_relative).read_bytes()
-    folds = a_folding_directory(
-        ledger_directory, CHAIN_SPEC.state_relative.name
-    )
+    assert expected
     ledger_directory.chmod(0o111)
     try:
-        if folds:
-            with pytest.raises(ReleaseChainError) as folded:
-                _regular_file_bytes(candidate.root, CHAIN_SPEC.state_relative)
-            assert str(folded.value) == (
-                "cannot bind the spelling of "
-                f"{CHAIN_SPEC.state_relative.as_posix()}: its directory folds "
-                "names and cannot be listed: "
-                f"{CHAIN_SPEC.state_relative.as_posix()}"
-            )
-        elif release_chain.DESCENT_REQUIRES_DIRECTORY_READ:
-            with pytest.raises(ReleaseChainError) as refusal:
-                _regular_file_bytes(candidate.root, CHAIN_SPEC.state_relative)
-            assert str(refusal.value) == (
-                "state path component ledger is not readable by this "
-                "verifier; secure descent requires read permission on every "
-                "directory above a state file on this platform: "
-                "ledger/official_observations.jsonl"
-            )
-        else:
-            assert (
-                _regular_file_bytes(candidate.root, CHAIN_SPEC.state_relative)
-                == expected
-            )
+        with pytest.raises(ReleaseChainError) as refusal:
+            _regular_file_bytes(candidate.root, CHAIN_SPEC.state_relative)
+        assert str(refusal.value) == (
+            "cannot bind the spelling of "
+            f"{CHAIN_SPEC.state_relative.as_posix()}: its directory cannot be "
+            f"listed: {CHAIN_SPEC.state_relative.as_posix()}"
+        )
     finally:
         ledger_directory.chmod(0o755)
+    assert _regular_file_bytes(candidate.root, CHAIN_SPEC.state_relative) == expected
 
 
 def test_the_descent_asks_for_no_more_than_it_uses(tmp_path: pathlib.Path) -> None:
     """S4-F5's flag choice, stated rather than implied. Where the platform
     has a search-only flag the walk uses it and asks for no read permission;
     where it does not the walk falls back to ``O_RDONLY`` and says so through
-    ``DESCENT_REQUIRES_DIRECTORY_READ``, which is what the two tests above
-    branch on. ``O_DIRECTORY`` and ``O_NOFOLLOW`` are in the set either way,
+    ``DESCENT_REQUIRES_DIRECTORY_READ``, which is what the test below
+    branches on. ``O_DIRECTORY`` and ``O_NOFOLLOW`` are in the set either way,
     because a component that became a file or a link must fail rather than be
-    followed."""
+    followed.
+
+    S4R4-F7 changed what the flags buy rather than which they are: the walk
+    refuses a directory it cannot list, so no state read reaches this descent
+    through a search-only parent any more. They stay because they are still
+    the rights this open uses — ``openat`` and ``fstat``, nothing else — and
+    asking a checkout for read permission this open never uses is a claim with
+    nothing behind it."""
 
     flags = release_chain.DIRECTORY_OPEN_FLAGS
     assert flags & os.O_DIRECTORY
@@ -4020,23 +4014,26 @@ def test_the_descent_states_the_read_it_needs_where_it_has_no_search_flag(
     3.9 to 3.14), so ``DESCENT_REQUIRES_DIRECTORY_READ`` is false everywhere
     the suite runs and the refusal that branch gives would otherwise be
     asserted by nothing. Forcing the fallback flags binds it. Both the
-    candidate root and an intermediate component are covered, because the
-    root is opened before the component walk and would otherwise answer
-    ``candidate root changed during verification`` — which would be false:
-    the root did not change, it cannot be read.
+    candidate root and an intermediate component are covered.
 
-    The directory is also presented as one that compares names exactly, which
-    is what ext4 and so CI really is. S4R3-F5 refuses an unlistable directory
-    that *folds* names before the descent is reached at all — two spellings
-    reach one file there and the listing was the only thing that could have
-    said which one the directory holds — so on APFS that refusal, not this
-    one, is what a tree like this gets. Pinning the descent's own sentence
-    means presenting the filesystem it belongs to."""
+    S4R4-F7 moved where each of the two readers meets this, and the unlistable
+    root itself is the case above (accepted at 4d8039f with the probe
+    answering False, as ``thesis-facts append check OK: 2 rows, immutable
+    prefix 1``). Both run the
+    component walk before descending, and the walk now refuses a directory it
+    cannot list — which a directory it cannot read is — so the descent's own
+    sentence is no longer what either reader answers with for a component
+    below the root. It is still the answer for the two opens no walk precedes:
+    ``confined_state_descriptor`` called on its own, which is what this drives
+    directly, and ``_set_root``'s open of the candidate root, which happens
+    before any walk and is what the gate answers with for a root this verifier
+    may traverse and not read. For an intermediate component the gate answers
+    in the walk's words instead, and this pins that too, so the order between
+    the two refusals is bound rather than assumed."""
 
     candidate = base_repository(tmp_path)
     without_a_search_only_flag(monkeypatch)
     directory = candidate.root / unreadable if unreadable else candidate.root
-    a_directory_that_compares_names_exactly(monkeypatch, directory)
     expected = (
         f"state path component {directory if not unreadable else unreadable} "
         "is not readable by this verifier; secure descent requires read "
@@ -4045,12 +4042,23 @@ def test_the_descent_states_the_read_it_needs_where_it_has_no_search_flag(
     )
     directory.chmod(0o111)
     try:
+        # The descent itself, which no walk precedes: this is the reader's
+        # own open, asked for directly.
         with pytest.raises(ReleaseChainError) as read:
-            _regular_file_bytes(candidate.root, CHAIN_SPEC.state_relative)
+            release_chain.confined_state_descriptor(
+                candidate.root, CHAIN_SPEC.state_relative
+            )
         assert str(read.value) == expected
         with pytest.raises(AppendError) as refusal:
             run_push_gate(candidate)
-        assert str(refusal.value) == expected
+        if unreadable:
+            assert str(refusal.value) == (
+                "cannot bind the spelling of "
+                "ledger/official_observations.jsonl: its directory cannot be "
+                "listed: ledger/official_observations.jsonl"
+            )
+        else:
+            assert str(refusal.value) == expected
     finally:
         directory.chmod(0o755)
 
@@ -5304,127 +5312,29 @@ def test_a_folded_component_is_refused_on_any_filesystem(
     )
 
 
-def a_directory_that_folds_and_cannot_be_listed(
-    monkeypatch: pytest.MonkeyPatch, parent: pathlib.Path, segment: str
-) -> None:
-    """Present the exact pair of facts S4R3-F5 is about, on any filesystem.
-
-    A name-folding filesystem whose directory is search-only answers two
-    questions this way: the listing is refused, and an ``lstat`` of a second
-    spelling reaches the same file as the first. Both are simulated here —
-    one ``os.listdir`` of ``parent`` raises, and one ``os.lstat``, of the
-    swapcased spelling under it, answers with the file the exact spelling
-    names. Everything else delegates. That is the whole of what
-    ``release_chain._folds_a_spelling`` reads, so the refusal, its message and
-    its placement are bound on ext4 as well as on APFS.
-    """
-
-    real_listdir = os.listdir
-    real_lstat = os.lstat
-    exact = parent / segment
-    folded = parent / segment.swapcase()
-
-    def listing(where: Any, *arguments: Any, **keywords: Any) -> list[str]:
-        try:
-            path = pathlib.Path(os.fspath(where))
-        except TypeError:
-            return real_listdir(where, *arguments, **keywords)
-        if path == parent:
-            raise PermissionError(errno.EACCES, "Permission denied", str(path))
-        return real_listdir(where, *arguments, **keywords)
-
-    def lstat(where: Any, *arguments: Any, **keywords: Any) -> os.stat_result:
-        try:
-            path = pathlib.Path(os.fspath(where))
-        except TypeError:
-            return real_lstat(where, *arguments, **keywords)
-        if path == folded:
-            return real_lstat(exact)
-        return real_lstat(where, *arguments, **keywords)
-
-    monkeypatch.setattr(os, "listdir", listing)
-    monkeypatch.setattr(os, "lstat", lstat)
-
-
-@pytest.mark.parametrize(
-    "release_root, parent_relative, segment, path",
-    [
-        (
-            None,
-            "ledger",
-            "official_observations.jsonl",
-            "ledger/official_observations.jsonl",
-        ),
-        ("data/releases", "data", "releases", "data/releases"),
-    ],
-    ids=["state-path", "release-root"],
-)
-def test_an_unlistable_directory_that_folds_names_cannot_bind_a_spelling(
-    tmp_path: pathlib.Path,
-    monkeypatch: pytest.MonkeyPatch,
-    release_root: str | None,
-    parent_relative: str,
-    segment: str,
-    path: str,
-) -> None:
-    """Binds S4R3-F5. The spelling check failed open when the parent could not
-    be listed, and that was the whole of what a proposal had to arrange. On a
-    filesystem that folds names the index can hold the canonical path while
-    the file on disk is spelled another way; the alias check sees nothing,
-    because the index spelling is exactly right; and making the parent
-    search-only — mode 0o111, which nothing else here refuses, since the
-    descent is deliberately allowed to traverse such a directory — turned the
-    one check that could have said so off.
-
-    Failing open there was right for a filesystem that compares names exactly:
-    resolution and listing agree, so a component that resolved is a component
-    its directory holds, and refusing would take back S4-F5's search-only
-    descent for nothing. It is only where names fold that the listing was the
-    only way to bind the spelling. So the two cases are separated by asking
-    the directory whether it folds this name, with the ``lstat`` probes the
-    descent's own rights already allow.
-
-    Both call sites are covered, because they are two walks: the release
-    root's own, whose case uses a nested root so the unlistable directory is
-    not the candidate root the state walk starts from, and the walk every
-    state read performs. Without the probe both trees are accepted —
-    ``thesis-facts append check OK: 2 rows, immutable prefix 1``."""
-
-    spec = GATE_SPEC if release_root is None else spec_with_release_root(release_root)
-    candidate = base_repository(
-        tmp_path, "releases" if release_root is None else release_root
-    )
-    a_directory_that_folds_and_cannot_be_listed(
-        monkeypatch, candidate.root / parent_relative, segment
-    )
-
-    with pytest.raises(AppendError) as refusal:
-        run_push_gate(candidate, spec=spec)
-    assert str(refusal.value) == (
-        f"cannot bind the spelling of {path}: its directory folds names and "
-        f"cannot be listed: {path}"
-    )
-
-
 @pytest.mark.skipif(
     os.getuid() == 0, reason="root lists a directory it has no rights on"
 )
-def test_a_search_only_directory_over_a_folded_state_file_is_refused(
+def test_a_folded_state_file_is_refused_listable_and_unlistable_alike(
     tmp_path: pathlib.Path,
 ) -> None:
-    """S4R3-F5 with nothing simulated, which only a name-folding filesystem
-    can carry: a checkout that holds one spelling and answers to another
-    cannot be built where names are compared exactly, so on ext4 — and so on
-    CI — this skips and the simulated case above is what binds the refusal
-    there. It also skips as root, who lists a directory it has no rights on.
+    """The substitution S4R2-F2b is about, on a real checkout, answered both
+    ways. Only a name-folding filesystem can carry it — a checkout that holds
+    one spelling and answers to another cannot be built where names are
+    compared exactly — so on ext4, and so on CI, this skips and the simulated
+    case above binds the misspelling refusal there. It also skips as root, who
+    lists a directory it has no rights on.
 
-    The two runs are the finding. Listable, the spelling check answers and the
-    substitution is refused. Made search-only — a mode this package
-    deliberately allows above a state file, and one a proposal can set — the
-    same tree used to be accepted with the ledger read out of a file the index
-    does not name — ``thesis-facts append check OK: 2 rows, immutable prefix
-    1``, measured with the probe removed. Now the parent is asked whether it
-    folds, and one that does and cannot be listed refuses instead."""
+    Listable, the directory says which spelling it holds and the substitution
+    is refused for that. Made search-only — mode 0o111, which the descent can
+    still traverse — the same tree used to be accepted, with the ledger read
+    out of a file the index does not name: ``thesis-facts append check OK: 2
+    rows, immutable prefix 1``, measured before the check existed. S4R4-F7 is
+    why the second half no longer depends on the filesystem: the directory is
+    refused for not being listable at all, rather than for being shown to
+    fold, so this half of the case is bound on every filesystem by the tests
+    below and this one keeps it end to end where a real checkout can carry
+    the first half."""
 
     candidate = base_repository(tmp_path)
     ledger_directory = candidate.root / "ledger"
@@ -5447,7 +5357,7 @@ def test_a_search_only_directory_over_a_folded_state_file_is_refused(
             run_push_gate(candidate)
         assert str(refusal.value) == (
             "cannot bind the spelling of ledger/official_observations.jsonl: "
-            "its directory folds names and cannot be listed: "
+            "its directory cannot be listed: "
             "ledger/official_observations.jsonl"
         )
     finally:
