@@ -4513,6 +4513,41 @@ def test_a_release_root_swapped_after_its_walk_is_refused(
     assert str(refusal.value) == refusal_text
 
 
+def test_a_release_root_spelled_as_the_candidate_root_holds_that_directory(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S4R3-F3's degenerate spec, found by re-reading the round's own diff. A
+    ``ChainSpec`` whose release root is the candidate root — ``.``, or the
+    empty path, both of which ``PurePosixPath`` reports as no components at
+    all — gives the hold nothing to walk, and the first draft fell off the end
+    of that loop holding nothing and asserted its way out of the gate. No spec
+    in this repository is that one and no consumer's is either, but an
+    ``AssertionError`` escaping a verifier is not an answer, and under ``-O``
+    it would have been a ``TypeError`` instead.
+
+    The loop is seeded with the candidate root's own directory now, so such a
+    spec holds the directory it actually names and the closing re-check
+    compares that root against itself, which is the true answer for it."""
+
+    candidate = base_repository(tmp_path)
+    chain = replace(CHAIN_SPEC, release_root_relative=pathlib.PurePosixPath("."))
+    with selected_tree(candidate) as tree:
+        held = release_chain.hold_release_root(
+            tree.root, chain, root_descriptor=tree.root_descriptor
+        )
+        assert held is not None
+        try:
+            recorded = os.fstat(held)
+            observed = os.stat(tree.root)
+            assert (recorded.st_dev, recorded.st_ino) == (
+                observed.st_dev,
+                observed.st_ino,
+            )
+            release_chain.assert_release_root_unchanged(tree.root, chain, held)
+        finally:
+            os.close(held)
+
+
 def test_the_chain_inside_a_walked_root_is_what_the_verdict_reads(
     tmp_path: pathlib.Path, witnesses: Witnesses
 ) -> None:
