@@ -82,9 +82,9 @@ counting files counts encodings.  The signer is half of that last identity
 because a ``TSTInfo`` need not say whose it is: RFC 3161 makes its serial
 unique within one TSA and no further, and its nonce and its ``tsa`` name
 optional, so two independent pinned authorities can sign byte-identical
-``TSTInfo``s with no forgery at all.  All three are admissible because no
-witness in the pinned tree names one path twice or offers one authority's
-timestamp twice.
+``TSTInfo``s with no forgery at all.  All four are admissible because no
+witness in the pinned tree names one path twice, reaches one file by two
+paths, or offers one authority's timestamp twice.
 
 The pinned root behind the two counting refusals is read from the repository
 exactly once, and every check runs on those bytes: the PEM hash over the
@@ -190,12 +190,14 @@ from within this module, and both texts are kept as defence in depth.
 ``_select_anchor``'s own identity refusal is one: every bundle anchor is
 identity-checked at load, so the selection never finds a disagreement, and
 its text is kept verbatim as ported.  The duplicate-timestamp refusal is the
-other, and it became unreachable in this round: two outcomes rest on one
-authority's signature only if two anchors both pin the certificate that
-response was signed with, and every pairing of anchors that could is now
-refused before an outcome is read -- inside one bundle at load, across an
-active and a pending bundle by the rename and mixed-signer rules, and across
-two pending bundles by the alias rule.  Its tests reach it by blinding
+other, and what closed it is the pending-authority rules above: two outcomes
+rest on one authority's signature only if two anchors both pin the
+certificate that response was signed with, and every pairing of anchors that
+could is refused before an outcome is read -- inside one bundle at load,
+across an active and a pending bundle by the rename and mixed-signer rules,
+and across two pending bundles by the alias rule.  Its text is new to this
+branch rather than ported, and it is kept because it is the last thing
+standing if one of those rules is lost; its tests reach it by blinding
 ``_anchor_signer_fingerprints``, and say so.
 """
 
