@@ -247,6 +247,14 @@ read the null device instead of the witnessed bytes (peer review, round
 eight). The list is Microsoft's own, pinned in this module, matched per
 component on the text before the first period and case-insensitively.
 
+The same screen refuses a colon in any name it is handed, for a second
+Win32 reason with the same shape. A declared path has refused one since
+round three; an enumerated name had not, so a file emitted as
+``rules/smuggled.yaml:payload.txt`` was skipped as non-content while a
+Win32 open of it reads an alternate data stream of the bound
+``rules/smuggled.yaml`` — a producer's bytes inside the tree and outside
+the closed world (peer review, Sol round 2).
+
 Every trust anchor arrives from the consumer's committed :class:`CorpusSpec`.
 The module ships no defaults: not a content root, not a required gate, not an
 accepted tier.
@@ -913,7 +921,7 @@ def _assert_foldable(value: str, label: str) -> str:
     "these are exactly the files" would be false on the host that matters
     without being false on the host that checked (peer review, round eight).
 
-    Five refusals, each with its own message, each checked over the whole
+    Six refusals, each with its own message, each checked over the whole
     string before the next one is asked — so which class a name is refused
     under is a property of the name and not of where in it the offending
     character sits. The first four are about single code points:
@@ -957,6 +965,18 @@ def _assert_foldable(value: str, label: str) -> str:
     because taking the text before the first period alone let ``NUL .yaml``
     through.
 
+    The sixth is a colon, and it is the same kind of fact: Win32 reads one
+    as a stream or a drive separator rather than as a character in a name.
+    A declared path has refused a colon since round three, and an
+    *enumerated* name did not, so ``rules/smuggled.yaml:payload.txt`` passed
+    every screen and was skipped as non-content — while a Win32 open of it
+    reads an alternate data stream of ``rules/smuggled.yaml``, a bound file,
+    and a producer's bytes ride into the tree beside witnessed ones without
+    appearing anywhere in the closed world (peer review, Sol round 2). It is
+    asked last so that a device name carrying a colon keeps the more
+    specific message, since Win32's matcher truncates at the colon and
+    resolves ``CON:stream.yml`` to the console.
+
     ``value`` may be a whole relative path or a single component; every
     message quotes it whole through :func:`_quoted`, so a refusal names what
     was screened. The component split is over ``/``, so a value that is
@@ -993,6 +1013,14 @@ def _assert_foldable(value: str, label: str) -> str:
                 f"{label} carries a Win32 reserved device name in a "
                 f"component: {_quoted(value)}"
             )
+    # Last of the six, so that a device name carrying a colon keeps the more
+    # specific message: _win32_device_basename truncates at the colon, so
+    # "CON:stream.yml" is the console before it is a stream.
+    if ":" in value:
+        raise CorpusError(
+            f"{label} contains a colon, which Win32 reads as a stream or "
+            f"drive separator: {_quoted(value)}"
+        )
     return value
 
 
@@ -1199,13 +1227,18 @@ def _validate_relative_path(value: Any, label: str) -> str:
                 f"{label} has a component Windows would alias: {_quoted(value)}"
             )
     _reject_control_characters(value, label)
-    _assert_foldable(value, label)
     if ":" in value:
         # On Windows, "C:/x" survives every relative-path check above yet
         # joins drive-absolute under pathlib, letting a row reference a file
         # outside the root. No path in this schema legitimately contains a
         # colon; refuse rather than special-case the platform.
+        #
+        # Asked here rather than after the screen below, which now refuses a
+        # colon in every name it sees. Both say the same thing; a declared
+        # path keeps the words the schema has used since round three, and
+        # the screen's own message is what an enumerated name gets.
         raise CorpusError(f"{label} contains ':': {_quoted(value)}")
+    _assert_foldable(value, label)
     return value
 
 

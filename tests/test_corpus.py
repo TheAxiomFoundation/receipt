@@ -2931,12 +2931,19 @@ def test_a_forged_verdict_line_in_a_tree_name_is_escaped(
     under a content root put those bytes straight into the refusal, where the
     terminal erased the line and redrew it. Without the fix the raw escape is
     in the message.
+
+    Which refusal carries the name moved with S5R2-F3: the forged line
+    carries a colon, and the name screen refuses that before anything
+    decides whether the entry is a symlink. The property under test is
+    unchanged — a tree-derived name reaches an auditor escaped — and it is
+    now bound at the earlier of the two boundaries, which is the one every
+    enumerated name passes through.
     """
 
     forged = "\x1b[2K\rVERDICT: PASS"
     write_tree(tmp_path)
     (tmp_path / "rules/tax" / forged).symlink_to(tmp_path / "rules/tax/rate.yaml")
-    with pytest.raises(CorpusError, match="contains a symlink") as caught:
+    with pytest.raises(CorpusError, match="contains a colon") as caught:
         verify_corpus_binding(
             tmp_path, render_journal(journal_rows()), spec=corpus_spec()
         )
@@ -4884,4 +4891,66 @@ def test_the_second_tombstone_pass_screens_the_strip_alias_as_well(
     assert str(caught.value) == (
         "tree entry Windows would alias by stripping a trailing dot or "
         "space: 'gone.'"
+    )
+
+
+def test_refuses_a_tree_entry_named_as_an_alternate_data_stream(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5R2-F3: a colon in an enumerated name passed every screen.
+
+    ``rules/tax/rate.yaml:payload.txt`` is an ordinary file on POSIX and a
+    perfectly good filename here: it is not under a pinned suffix, its 8.3
+    alias extension is ``TXT``, it aliases no other entry by stripping, it
+    carries no device basename, and its fold key collides with nothing. So
+    the sweep skipped it as non-content. On Win32 the same name opens an
+    alternate data stream of ``rules/tax/rate.yaml`` — a file the journal
+    binds by digest — and a producer's bytes ride into the tree beside
+    witnessed ones without appearing anywhere in the closed world the
+    verdict just called closed.
+
+    Declared paths have refused a colon since round three. This is the same
+    rule where the tree's own names are screened. Without it this
+    verification returns a CorpusVerification over the three content files
+    and never mentions the stream.
+    """
+
+    write_tree(tmp_path)
+    (tmp_path / "rules/tax/rate.yaml:payload.txt").write_text("smuggled\n")
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        "tree entry 'rules/tax/rate.yaml:payload.txt' contains a colon, "
+        "which Win32 reads as a stream or drive separator: "
+        "'rate.yaml:payload.txt'"
+    )
+
+
+def test_refuses_a_tombstone_listing_entry_carrying_a_colon(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5R2-F3: the tombstone listing screens colons as well.
+
+    A tombstone asks whether any fold-equal spelling of the retired path
+    survives. ``retired/gone:stream`` is not fold-equal to ``retired/gone``,
+    so the search reported absence — while on Win32 that name is a stream
+    of the retired file, which the tombstone says has left the tree. One
+    screen serves every listing, so the entry is refused where it is read.
+
+    Without the fix the verification returns with ``retired/gone`` named
+    under removedPaths.
+    """
+
+    body = '{"applied": true}\n'
+    rows = _tombstone_rows("retired/gone", body)
+    write_tree(tmp_path, attested={**ATTESTED, "retired/gone": body})
+    (tmp_path / "retired/gone").unlink()
+    (tmp_path / "retired/gone:stream").write_text(body)
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+    assert str(caught.value) == (
+        "tree entry examined for a tombstone contains a colon, which Win32 "
+        "reads as a stream or drive separator: 'gone:stream'"
     )
