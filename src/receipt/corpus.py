@@ -2177,6 +2177,26 @@ def _directory_generation(
     return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
 
 
+class _AncestorPrefix:
+    """One directory prefix the by-name ancestor walk has already built.
+
+    A node holds what building the prefix cost — the ``pathlib.Path`` and the
+    root-relative spelling — so that the next declared path sharing it pays a
+    dictionary lookup instead. ``is_directory`` is what
+    :meth:`_DirectoryGenerations.record` answered when the prefix was
+    stamped, and it is what stops the walk: nothing below a prefix that is
+    not a directory can exist.
+    """
+
+    __slots__ = ("children", "directory", "is_directory", "relative")
+
+    def __init__(self, directory: pathlib.Path, relative: str) -> None:
+        self.directory = directory
+        self.relative = relative
+        self.is_directory = True
+        self.children: dict[str, _AncestorPrefix] = {}
+
+
 class _DirectoryGenerations:
     """What every directory the run reads looked like the first time it read it.
 
@@ -2241,6 +2261,7 @@ class _DirectoryGenerations:
         ] = {}
         self._prefix_work = prefix_work
         self._ancestor_paths: set[str] = set()
+        self._ancestor_root: _AncestorPrefix | None = None
 
     def record(self, directory: pathlib.Path, relative: str) -> bool:
         """Stamp this directory once; return whether it is a directory."""
@@ -2270,6 +2291,32 @@ class _DirectoryGenerations:
         non-root prefix is charged against the same budget as the alias
         index. A path is walked at most once even though callers ask before
         both identity passes; the earliest stamps remain in ``_seen``.
+
+        Prefixes are deduplicated *before* a string is built, which is where
+        the cost was. ``_seen`` deduplicates by the relative spelling, so
+        every prefix of every path had its ``pathlib.Path`` and its
+        ``"/".join`` built first and discarded after: 4,096 paths sharing 510
+        existing ancestors constructed about 2.09 million ``Path`` objects
+        and joined 1,065,369,600 characters to stamp 510 directories (peer
+        review, Sol round 7, round 3). The prefixes are a trie now — one node
+        per distinct ancestor, holding the ``Path`` and the relative spelling
+        it was built with once — so a prefix a previous path already walked
+        costs a dictionary lookup and nothing else, and the same layout joins
+        260,100 characters over 510 nodes.
+
+        The trie is keyed by the component's exact spelling rather than by
+        its fold key, although :func:`_reject_aliasing_paths` keys the
+        prefixes it counts by the fold. Within a verification the two
+        partition identically, because that function has already refused any
+        two declared paths whose prefixes fold equal and are spelled
+        differently. Keying by the spelling is what makes that a convenience
+        rather than a dependency — this walk is reachable from callers that
+        did not run the alias pass — and it saves folding every component of
+        every path a second time.
+
+        One recorder serves one tree root, which is what ``_seen``'s
+        root-relative keys already assume; the trie's root node is built from
+        the first ``root`` it is given.
         """
 
         if relative in self._ancestor_paths:
@@ -2277,14 +2324,23 @@ class _DirectoryGenerations:
         self._ancestor_paths.add(relative)
         if not self.record(root, ""):
             return
-        directory = root
-        walked: list[str] = []
+        node = self._ancestor_root
+        if node is None:
+            node = self._ancestor_root = _AncestorPrefix(root, "")
         for segment in relative.split("/")[:-1]:
             self._prefix_work.charge()
-            directory = directory / segment
-            walked.append(segment)
-            if not self.record(directory, "/".join(walked)):
+            child = node.children.get(segment)
+            if child is None:
+                # The one place a prefix's Path and spelling are built, and
+                # only for a prefix no earlier path reached.
+                directory = node.directory / segment
+                spelled = _under(node.relative, segment)
+                child = _AncestorPrefix(directory, spelled)
+                child.is_directory = self.record(directory, spelled)
+                node.children[segment] = child
+            if not child.is_directory:
                 break
+            node = child
 
     def assert_unchanged(self) -> None:
         """Refuse if any stamped directory is not what it was when it was read.
@@ -2744,8 +2800,8 @@ def _reject_aliasing_paths(
     never the choice worth making; holding one at all was.
 
     So the pass sorts instead. Each path is folded a component at a time and
-    the folded components are joined by ``\x00`` — a character no portable
-    name can hold and one that sorts below every character one can — so
+    the folded components are joined by a NUL — a character no portable name
+    can hold and one that sorts below every character one can — so
     ordering the keys as strings orders the paths by their folded component
     *sequences*. Two facts make neighbour comparison sufficient:
 
