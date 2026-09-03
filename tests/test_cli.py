@@ -1691,6 +1691,99 @@ class _StrictAsciiStdout(io.TextIOWrapper):
         return self.buffer.getvalue().decode("ascii")
 
 
+class _PartialBuffer:
+    """A binary layer that takes at most ``limit`` bytes per call.
+
+    What ``RawIOBase.write`` is allowed to do, and what ``BufferedWriter``
+    never does — which is why a discarded return value went unnoticed. A
+    ``python -u`` run, or a host that substitutes its own stream, gets this
+    behaviour rather than the buffered one.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.data = bytearray()
+        self.calls = 0
+
+    def write(self, payload) -> int:
+        self.calls += 1
+        chunk = bytes(payload[: self.limit])
+        self.data += chunk
+        return len(chunk)
+
+    def flush(self) -> None:
+        return None
+
+
+class _PartialStdout(io.TextIOWrapper):
+    """A stdout whose binary layer accepts only part of what it is offered."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(io.BytesIO(), encoding="utf-8", newline="")
+        self._partial = _PartialBuffer(limit)
+
+    @property
+    def buffer(self) -> _PartialBuffer:  # type: ignore[override]
+        return self._partial
+
+
+def test_a_short_write_does_not_truncate_the_verdict() -> None:
+    """Binds S5R3-F7: the count ``write`` returns was discarded.
+
+    ``write`` is not obliged to take everything it is offered. A
+    ``BufferedWriter`` writes it all or raises, which is why this went
+    unnoticed, but a raw or unbuffered stream returns the number of bytes it
+    actually took, and returning a short count is not an error. The verdict
+    was therefore truncated wherever the operating system stopped, and
+    ``main`` returned the passing exit code over it — in ``--json`` mode,
+    half an object to a machine consumer.
+
+    ``_write_all`` repeats the write until the payload is gone. Seven bytes
+    a call is enough to prove the loop: the payload here needs more than
+    forty of them.
+
+    Without the loop the stream holds the first seven bytes and nothing
+    else.
+    """
+
+    from receipt.cli import _emit
+
+    payload = "VERDICT: FAIL \u2014 binding\nreceipt verify: FAIL"
+    stream = _PartialStdout(7)
+    _emit(payload, stream)
+    assert bytes(stream.buffer.data) == (payload + "\n").encode("utf-8")
+    assert stream.buffer.calls > 6
+
+
+def test_a_stream_that_takes_no_bytes_becomes_the_render_refusal(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Binds S5R3-F7: a writer that accepts nothing is not a success either.
+
+    A zero-length write is the degenerate short write, and the one a spin
+    loop would hang on. It is a failure here: this is a one-shot verdict on
+    a stream the command does not own, so a writer that will take nothing is
+    a writer the exit code has to carry. ``_write_all`` raises ``OSError``,
+    which is exactly what the render boundary in ``main`` already turns into
+    the refusal — the same stage, the same exit code, and ``_refuse``
+    writing to a stderr that still works.
+
+    Without the check the write loop is a spin, or — with the count
+    discarded, which is the head this finding is against — the run reports
+    PASS with nothing at all on stdout.
+    """
+
+    stream = _PartialStdout(0)
+    monkeypatch.setattr(sys, "stdout", stream)
+    assert run(repo) == EXIT_FAIL
+    assert bytes(stream.buffer.data) == b""
+    error = capsys.readouterr().err
+    assert "verdict could not be rendered; treat the run as unverified" in error
+    assert "OSError" in error
+    assert error.rstrip("\n").endswith("receipt verify: FAIL")
+
+
 class _CodecStdout(io.TextIOWrapper):
     """A stdout whose ``encoding`` is whatever a host's locale happens to be.
 
