@@ -397,12 +397,13 @@ repertoire and by nothing else — a pin carrying a character no portable name
 can hold could never match one, and a pin is compared only against names the
 screen has already passed. A grammar of one to sixteen ASCII letters or
 digits was tried instead and was a compatibility break for no gain: it
-refused ``.tar.gz``, ``.a-b`` and ``._``, and it capped a length nothing here
-depends on (peer review, Sol round 4). What that grammar was protecting is
-the 8.3 comparison, which is well defined only for a pin that is
-structurally an extension — a single period and one to three characters —
-so that comparison asks :data:`ALIAS_CAPABLE_SUFFIX_RE` which pins it may be
-made of, and every other pin is answered by "ends in this suffix" alone.
+refused ``.tar.gz``, ``.ssxx``, ``.a-b`` and ``._``, and it capped a length
+nothing here depends on (peer review, Sol round 4). All four are admitted by
+:data:`CONTENT_SUFFIX_RE`. The 8.3 question is separate: pins structurally
+shaped as an extension — one period and one to three letters, digits, ``_`` or
+``-`` — are selected by :data:`ALIAS_CAPABLE_SUFFIX_RE`. Thus ``.a-b`` and
+``._`` are alias-capable and screened, while the four-character ``.ssxx``
+cannot be an 8.3 extension and is not (peer review, Sol round 7).
 
 The journal-side alias check is bounded and linear in those declared names.
 It used to join and fold a fresh cumulative string for every prefix and keep
@@ -493,13 +494,14 @@ PORTABLE_NAME_RE = re.compile(r"[A-Za-z0-9._-]+\Z")
 #: passed that screen, so a character outside the repertoire could never
 #: match one, and a character inside it always can.
 #:
-#: The released ``CorpusSpec`` accepted any dot-prefixed suffix, and a
-#: grammar of one to sixteen ASCII letters or digits was a compatibility
-#: break for no gain: it refused ``.tar.gz``, ``.a-b`` and ``._``, none of
-#: which can be an 8.3 extension and two of which are spelled out of
-#: characters the repertoire already holds, and it capped a length nothing
-#: about this module depends on (peer review, Sol round 4). Interior periods
-#: and a length past sixteen are admitted again.
+#: The released ``CorpusSpec`` accepted any dot-prefixed portable suffix, and
+#: a grammar of one to sixteen ASCII letters or digits was a compatibility
+#: break for no gain: it refused ``.tar.gz``, ``.ssxx``, ``.a-b`` and ``._``
+#: and capped a length nothing about this module depends on (peer review, Sol
+#: round 4). All four are content-suffix syntax. Alias capability is the
+#: separate regex below: ``.a-b`` and ``._`` are structurally 8.3 extensions
+#: and are screened, while ``.ssxx`` and ``.tar.gz`` are not (peer review,
+#: Sol round 7).
 #:
 #: The two questions asked of a pin stay separate, and the separation is
 #: where the old grammar was trying to help. ``_has_pinned_suffix`` asks
