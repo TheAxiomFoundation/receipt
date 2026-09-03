@@ -992,3 +992,166 @@ def test_a_tree_name_cannot_forge_a_verdict_line(
     assert captured.out == ""
     assert "VERDICT: FAIL" in captured.err
     assert "\\x1b[2K\\rVERDICT: PASS" in captured.err
+
+
+# --- fourth round: the verdict boundary escapes what it renders --------------
+
+
+FORGED_TERMINAL_NAME = "\x1b[A\r\x1b[2K  VERDICT: PASS"
+ESCAPED_TERMINAL_NAME = "\\x1b[A\\r\\x1b[2K  VERDICT: PASS"
+
+
+def test_a_release_manifest_name_cannot_forge_a_verdict_line(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Binds S4-F4: the custody half of the verdict rendered filenames raw.
+
+    ``receipt.release_chain`` refuses an unknown file in the closed release
+    manifest directory and names it, and that message reaches the text
+    verdict as the custody pass's failure. Nothing screened it: the name is
+    whatever the filesystem holds. One spelled ``ESC [ A`` (cursor up),
+    ``CR``, ``ESC [ 2 K`` (erase line) and then ``VERDICT: PASS`` overwrites
+    the line the command has just printed to say FAIL — the auditor reads a
+    pass off a run that failed.
+
+    The library's message is not the place to fix it: those strings are
+    pinned byte for byte by a differential harness against the source
+    verifier, and an unknown file in the manifest directory is exactly the
+    kind of mutation that harness presents. So the escaping is at the
+    renderer, and this asserts what the terminal receives: no raw code point
+    from any class that can move a cursor, exactly one line beginning
+    ``VERDICT``, and the forged name visible in its escaped spelling.
+
+    Without the fix the raw ESC and CR are in the output and a second line
+    reading ``VERDICT: PASS`` is painted over the first.
+    """
+
+    (repo / "releases/manifests" / FORGED_TERMINAL_NAME).write_text("{}\n")
+    assert run(repo) == EXIT_FAIL
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert not _terminal_controls(captured.err)
+    verdict_lines = [
+        line for line in captured.err.splitlines() if line.startswith("VERDICT")
+    ]
+    assert verdict_lines == ["VERDICT: FAIL — custody"]
+    assert ESCAPED_TERMINAL_NAME in captured.err
+
+
+def test_a_content_path_in_a_corpus_refusal_is_escaped_exactly_once(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Binds S4-F4: the binding half was already escaped, and stays so once.
+
+    ``receipt.corpus`` quotes every path it names through ``_quoted``, which
+    is ``repr`` under the length bound, so a tree name arrives at the
+    renderer already carrying ``\\x1b`` and ``\\r`` as text rather than as
+    code points. ``_terminal_safe`` maps code points and nothing else, so it
+    finds nothing left to escape and the name appears escaped once, not
+    twice — which is what an auditor has to be able to read back as the name
+    that is really on disk.
+
+    Pinned deliberately rather than left to whichever the renderer happened
+    to produce: a helper that escaped backslashes as well would turn every
+    such refusal into an unreadable ladder, and one that escaped nothing
+    would depend on the library's quoting for the CLI's own guarantee. This
+    is the boundary between the two, stated.
+
+    This test passes without the S4-F4 fix, and says so rather than
+    pretending otherwise: ``_quoted`` was already covering this path, which
+    is precisely why the finding is about the *other* one. It is here so
+    that the renderer's escaping cannot be strengthened into double-escaping
+    without something failing.
+    """
+
+    forged = FORGED_TERMINAL_NAME + ".yaml"
+    (repo / "rules/tax" / forged).write_text("name: smuggled\n")
+    assert run(repo) == EXIT_FAIL
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert not _terminal_controls(captured.err)
+    verdict_lines = [
+        line for line in captured.err.splitlines() if line.startswith("VERDICT")
+    ]
+    assert verdict_lines == ["VERDICT: FAIL — binding"]
+    assert f"rules/tax/{ESCAPED_TERMINAL_NAME}.yaml" in captured.err
+    # Escaped once: the library quoted it, the renderer found no code point
+    # left to map, and neither doubled the other's backslashes.
+    assert "\\\\x1b" not in captured.err
+
+
+def _terminal_controls(text: str) -> list[int]:
+    """Every code point in ``text`` that can move a cursor or split a line."""
+
+    return sorted(
+        {
+            ord(character)
+            for character in text
+            if ord(character) < 0x20
+            or ord(character) == 0x7F
+            or 0x80 <= ord(character) <= 0x9F
+            or ord(character) in (0x2028, 0x2029)
+        }
+        - {0x0A}  # the renderer's own line breaks
+    )
+
+
+def test_terminal_safe_escapes_every_class_and_nothing_else() -> None:
+    """Binds S4-F4: the helper's coverage is the CLI's whole guarantee.
+
+    Four classes, each of which can change what a terminal shows without
+    printing a visible character: the C0 controls, DEL, the C1 controls
+    (which an 8-bit-clean terminal decodes as two-character ESC sequences),
+    and the Unicode line and paragraph separators, which split one verdict
+    line into two in any renderer that honours them.
+
+    Every one of them must leave as its Python escape and everything else
+    must survive untouched — the verdict is meant to be read, and a helper
+    that mangled ordinary text would cost legibility for nothing. Without
+    the helper the CLI has no screen at all and every assertion below fails
+    on the first class.
+    """
+
+    from receipt.cli import _terminal_safe
+
+    covered = [*range(0x00, 0x20), 0x7F, *range(0x80, 0xA0), 0x2028, 0x2029]
+    for code in covered:
+        escaped = _terminal_safe(chr(code))
+        assert escaped == repr(chr(code))[1:-1]
+        assert not _terminal_controls(escaped)
+        assert chr(code) not in escaped
+    assert _terminal_safe("\x1b") == "\\x1b"
+    assert _terminal_safe("\r") == "\\r"
+    assert _terminal_safe("\n") == "\\n"
+    assert _terminal_safe("\x7f") == "\\x7f"
+    assert _terminal_safe("\x9b") == "\\x9b"
+    assert _terminal_safe(chr(0x2028)) == "\\u2028"
+    assert _terminal_safe(chr(0x2029)) == "\\u2029"
+    # Untouched: printable ASCII, punctuation the escaping could have been
+    # tempted to double, and text outside the BMP.
+    for text in ("rules/tax/rate.yaml", "a\\b", "café", "中文", "\U0001F600", ""):
+        assert _terminal_safe(text) == text
+    assert _terminal_safe("a\x1bb\rc") == "a\\x1bb\\rc"
+
+
+def test_the_json_renderer_escapes_the_same_classes_by_itself() -> None:
+    """Binds S4-F4, the other renderer: ``--json`` needs no helper.
+
+    The JSON verdict is written by ``json.dumps`` with ``ensure_ascii`` at
+    its default, which spells every code point above as ``\\uXXXX`` inside
+    the quoted string. So a machine consumer receives them as data and no
+    terminal downstream of ``--json`` sees them raw. Pinned here because the
+    CLI's module docstring makes that claim, and a claim about a mechanism
+    is worth exactly as much as the test under it.
+
+    Passes without the S4-F4 fix, necessarily — it is about ``json.dumps``
+    and not about anything this round changed. Its job is to keep the
+    docstring's reason for leaving the JSON renderer alone true.
+    """
+
+    covered = "".join(
+        chr(code)
+        for code in (*range(0x00, 0x20), 0x7F, *range(0x80, 0xA0), 0x2028, 0x2029)
+    )
+    rendered = json.dumps({"failure": covered}, indent=2, sort_keys=True)
+    assert not _terminal_controls(rendered)
