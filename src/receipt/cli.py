@@ -70,6 +70,14 @@ exception; both emissions sit inside the render boundary, so anything else
 about the write becomes the render refusal, and :func:`_refuse` emits the
 same way so the refusal itself cannot raise.
 
+Each write is repeated until the payload is gone. ``write`` is not
+obliged to take everything it is offered: a ``BufferedWriter`` writes it
+all or raises, but a raw or unbuffered stream returns a count instead, and
+the count was discarded — so the verdict was truncated wherever the
+operating system stopped and ``main`` returned the passing exit code over
+it (peer review, Sol round 3). A zero-length write is a failure, not
+something to spin on, and it becomes the render refusal.
+
 *Which* encoding it uses is the command's decision and not the stream's,
 because escaping characters and then handing them to an arbitrary codec
 leaves the escaping to be undone by the encoder. Under cp1252 the
@@ -122,7 +130,7 @@ import json.encoder
 import pathlib
 import sys
 import unicodedata
-from typing import Sequence, TextIO
+from typing import Any, Sequence, TextIO
 
 from receipt import __version__
 from receipt._unicode_repertoire import FORMAT_CONTROL_RANGES
@@ -705,6 +713,43 @@ def _byte_safe_encoding(stream: TextIO) -> str:
     return "ascii"
 
 
+def _write_all(target: Any, payload: Any) -> None:
+    """Write the whole payload, or raise; a short write is not a success.
+
+    ``write`` is not obliged to take everything it is offered. A
+    ``BufferedWriter`` writes it all or raises, which is why this went
+    unnoticed, but a raw or unbuffered stream returns the number of bytes it
+    actually took — ``python -u``, a stream a host has substituted, a pipe
+    that took a partial write — and returning that count is not an error.
+    Discarding it truncated the verdict wherever the operating system
+    stopped and left :func:`main` to return the passing exit code over it;
+    in ``--json`` mode a consumer was handed half an object, which is the
+    one thing the JSON contract exists to prevent (peer review, Sol
+    round 3).
+
+    A zero return, and the ``None`` a non-blocking ``RawIOBase.write``
+    returns when it would block, are both failures rather than something to
+    spin on: this is a one-shot verdict on a stream the command does not
+    own, and a writer that will take nothing is a writer the exit code has
+    to carry. The ``OSError`` raised here is what the render boundary in
+    :func:`main` turns into the refusal, and what :func:`_refuse` guards
+    against separately.
+
+    Written over slicing so the same loop serves both layers: ``payload`` is
+    ``bytes`` for the buffer and ``str`` for the text fallback, and the
+    counts each ``write`` returns are in the units of what it was handed.
+    """
+
+    while payload:
+        written = target.write(payload)
+        if not written:
+            raise OSError(
+                "the verdict stream accepted none of the bytes offered; "
+                "the verdict cannot be written"
+            )
+        payload = payload[written:]
+
+
 def _emit(text: str, stream: TextIO) -> None:
     """Write one rendered verdict to a stream that may not accept every character.
 
@@ -738,13 +783,22 @@ def _emit(text: str, stream: TextIO) -> None:
     text API with the same already-encoded text, which by construction it
     can encode.
 
+    A write is repeated until the whole payload is gone, through
+    :func:`_write_all`, because a single call is not obliged to take all of
+    it. ``BufferedWriter`` writes everything or raises, but a raw or
+    unbuffered stream — ``python -u``, a stream some host has substituted,
+    a pipe under a partial write — returns a *count* instead, and the count
+    was discarded. The verdict was then truncated wherever the operating
+    system stopped, ``main`` returned the passing exit code over it, and in
+    ``--json`` mode a machine consumer was handed half an object (peer
+    review, Sol round 3).
+
     One residual, stated because the JSON contract is exact: a write that
     fails *part-way* leaves those bytes on the stream, and the render
-    refusal that follows adds a second object after them. A blocking stream
-    writes the whole payload or raises, so this needs a raw non-blocking
-    one; nothing here can un-write bytes, and the alternative — buffering
-    the verdict to decide whether to emit it at all — would trade a partial
-    verdict for no verdict on the same stream.
+    refusal that follows adds a second object after them. Nothing here can
+    un-write bytes, and the alternative — buffering the verdict to decide
+    whether to emit it at all — would trade a partial verdict for no
+    verdict on the same stream.
     """
 
     encoding = _byte_safe_encoding(stream)
@@ -757,11 +811,11 @@ def _emit(text: str, stream: TextIO) -> None:
     except (AttributeError, ValueError):
         buffer = None
     if buffer is None:
-        stream.write(data.decode(encoding, errors="replace"))
+        _write_all(stream, data.decode(encoding, errors="replace"))
         stream.flush()
         return
     stream.flush()
-    buffer.write(data)
+    _write_all(buffer, data)
     buffer.flush()
 
 
