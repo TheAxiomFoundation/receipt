@@ -9,7 +9,7 @@ through a frozen :class:`TsaSpec` supplied by consumer code.  This module
 ships no repository-specific trust defaults and performs no chain walk or
 producer signature verification.
 
-The port is stricter than the baseline in sixteen places, each refusing an
+The port is stricter than the baseline in seventeen places, each refusing an
 input the pinned tree never presents and so each outside the differential
 contract: a record under witness that is not a readable regular file, which
 the baseline let raise out of the hash; a legacy witness over a bundle
@@ -43,8 +43,12 @@ a bundle may not allow one signer under two of its anchors; a pending anchor
 that allows an active signer beside a new one, which is neither of those and
 so is refused rather than skipped or admitted -- skipping it activates a new
 authority with no supplemental evidence, and admitting it lets the active
-authority produce the very token the new key is supposed to prove; an
-unavailable
+authority produce the very token the new key is supposed to prove; two
+pending bundles that introduce one authority under two anchors, sharing an
+ID and root or a signer, which is one new authority demanding and receiving
+two supplemental outcomes and so counted twice -- every equivalence above is
+computed against the active bundles, and each candidate the walk admits now
+joins the sets the next is measured against; an unavailable
 witness of either schema whose reason is not a string, or that carries token
 evidence at the witness level (the v2 per-anchor outcome has always refused
 both); an unavailable legacy witness that names a bundle by any of its three
@@ -160,10 +164,18 @@ no portable count is offered in its place.  The floor was 1.1.1 until a
 review observed that ``-no-CAstore`` made the documented minimum a version
 which passed the check and then refused every valid witness.
 
-``tests/test_tsa.py`` binds all of these.  Because every bundle anchor is now
-identity-checked at load, ``_select_anchor``'s own identity refusal can no
-longer fire from within this module; its text is kept verbatim, as ported,
-and as defence in depth.
+``tests/test_tsa.py`` binds all of these.  Two of them can no longer fire
+from within this module, and both texts are kept as defence in depth.
+``_select_anchor``'s own identity refusal is one: every bundle anchor is
+identity-checked at load, so the selection never finds a disagreement, and
+its text is kept verbatim as ported.  The duplicate-timestamp refusal is the
+other, and it became unreachable in this round: two outcomes rest on one
+authority's signature only if two anchors both pin the certificate that
+response was signed with, and every pairing of anchors that could is now
+refused before an outcome is read -- inside one bundle at load, across an
+active and a pending bundle by the rename and mixed-signer rules, and across
+two pending bundles by the alias rule.  Its tests reach it by blinding
+``_anchor_signer_fingerprints``, and say so.
 """
 
 from __future__ import annotations
@@ -2215,12 +2227,69 @@ def _supplemental_candidates(
     rotation and is skipped before any of this, which is what keeps a bundle
     that legitimately allows a superseded signer beside its replacement from
     reaching the refusal.
+
+    All of that measures a pending anchor against the active bundles, and two
+    pending bundles were measured against nothing but those -- so one
+    authority introduced under two IDs by two pending bundles was two
+    candidates, each demanding and receiving a supplemental outcome of its
+    own, and the transition counted one new authority twice (peer review,
+    fifth gate round two).  What the second outcome shows is that the holder
+    of a key the chain has already asked about can stamp twice, which is what
+    the rename rule refuses when the key is an active one and is no more
+    evidence when it is a pending one.  So each candidate admitted here joins
+    the sets the next is measured against: a later pending anchor carrying an
+    admitted anchor's ``(ID, root SPKI)``, or sharing a signer with one, is
+    refused.  Any overlap and not a subset, because two pending anchors have
+    no rotation relationship to preserve -- neither is active, so neither
+    supersedes the other, and a bundle that means to rotate a pending
+    anchor's key can say so under that anchor's own ID and root once it is
+    active.
+
+    The refusal names both anchors, because the producer's fix is to decide
+    which of the two the authority is filed under.  A pending bundle already
+    active is skipped before any of this (it is in ``trusted_bundles``), and
+    an anchor skipped as a rename is admitted to nothing, so neither can make
+    a later bundle collide.
+
+    Between them these rules leave no shape in which two outcomes of one
+    witness rest on one authority's signature, which is why
+    ``_v2_witness_evidence``'s duplicate-timestamp refusal is now defence in
+    depth: to reach it, two outcomes would have to select two anchors that
+    both pin the certificate one response was signed with, and every pairing
+    of anchors that could is refused before an outcome is read.  Its text is
+    kept, and the tests that bind it reach it by blinding this function's
+    view of the pending anchors' signers.
     """
 
     active_authorities, active_signers = _active_anchor_identities(
         records, trusted_bundles, spec=spec
     )
     candidates: dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any]]] = {}
+    admitted_authorities: dict[tuple[str, str], str] = {}
+    admitted_signers: dict[str, str] = {}
+
+    def refuse_an_equivalent_pending_anchor(
+        authority: tuple[str, str], signers: set[str], here: str
+    ) -> None:
+        earlier = admitted_authorities.get(authority)
+        if earlier is None:
+            earlier = next(
+                (
+                    admitted_signers[fingerprint]
+                    for fingerprint in sorted(signers)
+                    if fingerprint in admitted_signers
+                ),
+                None,
+            )
+        if earlier is not None:
+            raise TsaError(
+                "pending TSA bundles introduce one authority under two "
+                f"anchors: {earlier} and {here}"
+            )
+        admitted_authorities[authority] = here
+        for fingerprint in signers:
+            admitted_signers[fingerprint] = here
+
     for reference in transition_bundle_updates:
         bundle_path = str(reference["path"])
         if bundle_path in trusted_bundles:
@@ -2228,7 +2297,8 @@ def _supplemental_candidates(
         _path, trust = _load_trust_bundle(records, reference, spec=spec)
         for anchor in trust["anchors"]:
             anchor_id = str(anchor["id"])
-            if _anchor_authority(anchor) in active_authorities:
+            authority = _anchor_authority(anchor)
+            if authority in active_authorities:
                 continue
             signers = _anchor_signer_fingerprints(anchor)
             if signers and signers <= active_signers:
@@ -2239,6 +2309,9 @@ def _supplemental_candidates(
                     "with a new one; a rotation and a new authority cannot "
                     "share an anchor"
                 )
+            refuse_an_equivalent_pending_anchor(
+                authority, signers, f"{bundle_path}/{anchor_id}"
+            )
             candidates[(bundle_path, anchor_id)] = (reference, anchor)
     return candidates
 

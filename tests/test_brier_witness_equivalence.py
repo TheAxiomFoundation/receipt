@@ -179,12 +179,18 @@ Deliberately outside the mutation contract:
   prove by stamping again (peer review, fifth gate round one).  A pending
   anchor allowing an active signer beside a new one is refused instead of
   skipped, being neither a rename nor a new authority (fifth gate round two).
+  Each candidate the walk admits also joins the sets the next is measured
+  against, so two pending bundles introducing one authority under two anchors
+  -- one new authority demanding two supplemental outcomes -- are refused too
+  (same round).
   ``tsa-anchors-v2`` reuses ``freetsa-root-2016`` under the same root SPKI as
   ``tsa-anchors-v1`` (``52c54ba3...``) and the same allowed signer
   (``fa02bd55...``), so both halves skip it, and introduces
   ``digicert-trusted-root-g4`` under a new ID, a new root and a signer
   (``7abda95e...``) no active anchor allows, so neither half skips it and
-  neither anchor's signer set is partly active.  The
+  neither anchor's signer set is partly active.  The pinned chain carries one
+  pending bundle at a time, so no two pending anchors are ever walked
+  together here either.  The
   candidate set at the pinned transition is therefore identical under all
   three keyings and no refusal here changes;
 - the baseline ignores bundle-claim fields on an unavailable v1 witness;

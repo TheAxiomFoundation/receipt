@@ -3987,6 +3987,150 @@ def test_a_pending_anchor_may_not_mix_an_active_signer_with_a_new_one(
     assert str(whole.value) == mixes
 
 
+def test_two_pending_bundles_may_not_introduce_one_authority_twice(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_alpha: LocalTsa,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S5R2-F5: the candidate walk has to remember what it has admitted.
+
+    Every equivalence the walk computed was against the *active* bundles, so
+    two pending bundles were measured against nothing but those and against
+    nothing at all with respect to each other. One authority introduced under
+    two ids by two pending bundles was therefore two candidates: the
+    transition demanded a supplemental outcome from each, and the authority
+    satisfied both by stamping twice. Two genuine, distinct issuances -- no
+    reuse for any duplicate rule to see -- and a transition that counted one
+    new authority twice, which is the thing supplemental outcomes exist to
+    count.
+
+    The witness below is exactly that, and the harm is asserted rather than
+    assumed: with the walk's view of the pending signers blinded, it verifies
+    and reports two supplemental tokens whose signing certificate is one
+    certificate. With the rule, the second anchor is refused where it is
+    admitted, before either supplemental outcome is read, and the message
+    names both anchors because the producer has to decide which one the
+    authority is filed under.
+
+    The control is the case the rule must not touch: two pending bundles
+    introducing two genuinely different authorities -- a stranger with a root
+    and a key of its own, and a new id over the active root with a signing
+    key no active anchor allows -- are still two candidates when walked
+    together.
+    """
+
+    beta = local_anchors[1]
+    tree = build_witness_tree(tmp_path / "one-authority", local_anchors[:1])
+    pending_first, first, pending_second, second, spec = two_pending_authorities(
+        tree, beta
+    )
+    digest = sha256_bytes(tree.record.read_bytes())
+    responses = {}
+    for alias in (first, second):
+        response = tree.records / RECORD_DAY / f"record-0001.{alias.anchor_id}.tsr"
+        beta.tsa.stamp(digest, response)
+        responses[alias.anchor_id] = response
+    # The premise: two genuine issuances, distinct by every identity the
+    # duplicate rules count, so nothing but the walk can refuse this.
+    assert sha256_bytes(responses[first.anchor_id].read_bytes()) != sha256_bytes(
+        responses[second.anchor_id].read_bytes()
+    )
+    assert signed_timestamp_of(
+        tmp_path, responses[first.anchor_id]
+    ) != signed_timestamp_of(tmp_path, responses[second.anchor_id])
+
+    rewrite_witness(
+        tree,
+        lambda payload: payload.__setitem__(
+            "supplementalOutcomes",
+            [
+                supplemental_outcome(
+                    tree, pending_first, first, responses[first.anchor_id]
+                ),
+                supplemental_outcome(
+                    tree, pending_second, second, responses[second.anchor_id]
+                ),
+            ],
+        ),
+    )
+
+    def transition() -> WitnessEvidence:
+        return verify_witness(
+            tree.record,
+            spec=spec,
+            records=tree.records,
+            trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+            transition_bundle_updates=[pending_first, pending_second],
+        )
+
+    verified = record_token_verifications(monkeypatch)
+    with pytest.raises(TsaError) as caught:
+        transition()
+    assert str(caught.value) == (
+        "pending TSA bundles introduce one authority under two anchors: "
+        f"{pending_first['path']}/{first.anchor_id} and "
+        f"{pending_second['path']}/{second.anchor_id}"
+    )
+    # Refused where the second anchor is admitted: neither supplemental
+    # outcome was read.
+    assert [claim["tsaAnchorId"] for claim in verified] == [
+        local_anchors[0].anchor_id
+    ]
+
+    # The harm, with the rule's input taken away: one authority, counted twice.
+    blind_the_pending_signer_reader(monkeypatch)
+    evidence = transition()
+    assert evidence.status == "available"
+    assert [token.anchor_id for token in evidence.supplemental_tokens] == [
+        first.anchor_id,
+        second.anchor_id,
+    ]
+    assert len(
+        {token.tsa_certificate_sha256 for token in evidence.supplemental_tokens}
+    ) == 1
+
+
+def test_two_pending_bundles_may_introduce_two_authorities(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_alpha: LocalTsa,
+) -> None:
+    """S5R2-F5: the walk's memory refuses aliases and nothing else.
+
+    The rule above compares each admitted candidate with the ones after it, so
+    the case it must not reach is two pending bundles that introduce two
+    authorities. A stranger with a root and a signing key of its own shares
+    nothing with anything; a new id over the *active* root with a rotated
+    signing key shares its root certificate with the active anchor and its id
+    with nobody, and its key is one no active anchor allows. Neither is the
+    other, and walked together both are candidates.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    rotated = certificate_pins(rotated_alpha.signer_pem)
+    tree = build_witness_tree(tmp_path / "two-authorities", local_anchors[:1])
+    stranger = alias_of(beta, anchor_id="beta-arriving-2026")
+    arrival, spec = pending_authority(tree, stranger, version=2)
+    renamed_and_rotated, spec = add_bundle_version(
+        tree,
+        [alias_of(alpha, anchor_id="alpha-renamed-2026")],
+        version=3,
+        signers={"alpha-renamed-2026": rotated},
+        base=spec,
+    )
+    walked = tsa_module._supplemental_candidates(
+        tree.records,
+        {BUNDLE_LOGICAL: tree.reference},
+        [arrival, renamed_and_rotated],
+        spec=spec,
+    )
+    assert set(walked) == {
+        (arrival["path"], stranger.anchor_id),
+        (renamed_and_rotated["path"], "alpha-renamed-2026"),
+    }
+
+
 def swap_the_token_at_the_first_read(
     monkeypatch: pytest.MonkeyPatch, target: pathlib.Path, content: bytes
 ) -> list[str]:
@@ -4234,14 +4378,19 @@ def two_pending_authorities(
 ) -> tuple[dict[str, Any], LocalAnchor, dict[str, Any], LocalAnchor, TsaSpec]:
     """Two pending bundles, each introducing ``anchor`` under its own id.
 
-    The one shape in which two outcomes of one witness can both be satisfied
-    by one response and both verify. A bundle may not allow one signer under
-    two of its anchors, and a pending anchor whose signer an active anchor
+    The shape in which two outcomes of one witness could both be satisfied by
+    one response and both verify. A bundle may not allow one signer under two
+    of its anchors, and a pending anchor whose signers an active anchor
     already allows is that authority renamed and never becomes a candidate at
-    all (S5-F2) -- so the two outcomes that can share a signer are two
+    all (S5-F2) -- so the two outcomes that could share a signer were two
     *supplemental* ones, introduced by two separate pending bundles, neither
-    of which the active chain knows. Both are candidates, both demand their
-    own response, and whether they get two is what the duplicate rules decide.
+    of which the active chain knows.
+
+    That shape is itself refused now: the candidate walk carries what it has
+    admitted, and the second bundle's anchor shares a signer with the first's
+    (S5R2-F5). So this builds a witness whose verdict is that refusal, and the
+    two tests that bind the duplicate-timestamp rule reach it by blinding the
+    walk's view of the pending signers -- see ``blind_the_pending_signer_reader``.
     """
 
     first = alias_of(anchor, anchor_id=f"{anchor.anchor_id}-first")
@@ -4249,6 +4398,31 @@ def two_pending_authorities(
     pending_first, spec = pending_authority(tree, first, version=2)
     pending_second, spec = pending_authority(tree, second, version=3, base=spec)
     return pending_first, first, pending_second, second, spec
+
+
+def blind_the_pending_signer_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every anchor look as though it allowed no signer at all.
+
+    ``_anchor_signer_fingerprints`` is what ``_active_anchor_identities`` and
+    ``_supplemental_candidates`` read an anchor's signers through, and nothing
+    else in the module uses it: the bundle load computes its own set inline,
+    and the ported allowed-signer check reads ``allowedSigners`` off the
+    anchor directly. So blinding it removes exactly the three signer rules --
+    the rename skip, the mixed-anchor refusal, and the pending-alias refusal
+    -- and leaves every verification of a token as it was.
+
+    Which is the only way left to reach the duplicate-timestamp rule. Two
+    outcomes rest on one authority's signature only if two anchors both pin
+    the certificate that response was signed with, and every pairing of
+    anchors that could is now refused before an outcome is read: inside one
+    bundle at load, across an active and a pending bundle by the rename and
+    mixed rules, and across two pending bundles by the alias rule. The
+    timestamp rule is therefore defence in depth, kept for the same reason
+    ``_select_anchor``'s identity refusal is kept, and these two tests say
+    what it would catch if one of the rules in front of it were lost.
+    """
+
+    monkeypatch.setattr(tsa_module, "_anchor_signer_fingerprints", lambda anchor: set())
 
 
 def test_refuses_a_re_wrapped_response_offered_as_a_second_token(
@@ -4274,6 +4448,12 @@ def test_refuses_a_re_wrapped_response_offered_as_a_second_token(
     with it the second is refused by the digest of what was actually signed,
     after its token is verified because that is the earliest the identity is
     known -- the recorder shows all three verifications ran.
+
+    S5R2-F5 put a rule in front of this one: two pending bundles introducing
+    one authority under two anchors are now refused at the candidate walk,
+    which is this witness's actual verdict and is asserted first. The
+    timestamp rule is what remains if that rule is lost, so the second half
+    reaches it through ``blind_the_pending_signer_reader``.
     """
 
     beta = local_anchors[1]
@@ -4307,20 +4487,36 @@ def test_refuses_a_re_wrapped_response_offered_as_a_second_token(
             ],
         ),
     )
-    verified = record_token_verifications(monkeypatch)
-    with pytest.raises(TsaError) as caught:
-        verify_witness(
+
+    def transition() -> WitnessEvidence:
+        return verify_witness(
             tree.record,
             spec=spec,
             records=tree.records,
             trusted_bundles={BUNDLE_LOGICAL: tree.reference},
             transition_bundle_updates=[pending_first, pending_second],
         )
+
+    # The rule in front: two pending bundles, one authority, and no outcome
+    # of either read.
+    with pytest.raises(TsaError) as first_refusal:
+        transition()
+    assert str(first_refusal.value) == (
+        "pending TSA bundles introduce one authority under two anchors: "
+        f"{pending_first['path']}/{first.anchor_id} and "
+        f"{pending_second['path']}/{second.anchor_id}"
+    )
+
+    blind_the_pending_signer_reader(monkeypatch)
+    verified = record_token_verifications(monkeypatch)
+    with pytest.raises(TsaError) as caught:
+        transition()
     assert str(caught.value) == (
         "duplicate TSA timestamp across anchor outcomes: signer "
         f"{beta.signer_pins['certificateSha256']}, timestamp {sha256_bytes(signed)}"
     )
-    # Neither earlier rule can see this one: two paths, two file digests.
+    # Neither earlier rule can see this one: two paths, two file digests, and
+    # two objects.
     assert [claim["tsaAnchorId"] for claim in verified] == [
         local_anchors[0].anchor_id,
         first.anchor_id,
@@ -4442,6 +4638,12 @@ def test_refuses_a_re_bagged_token_offered_as_a_second_timestamp(
     directly below -- different file, different extracted token, identical
     ``TSTInfo``, and both files still verifying against the pinned root --
     and the refusal names the digest of what the authority signed.
+
+    As with the re-wrapping above, S5R2-F5 refuses this witness's two pending
+    bundles before either supplemental outcome is read, and that is asserted
+    first; the timestamp rule is reached through
+    ``blind_the_pending_signer_reader``, which is what is left of the defence
+    if the rule in front of it is lost.
     """
 
     alpha, beta = local_anchors[0], local_anchors[1]
@@ -4478,15 +4680,28 @@ def test_refuses_a_re_bagged_token_offered_as_a_second_timestamp(
             ],
         ),
     )
-    verified = record_token_verifications(monkeypatch)
-    with pytest.raises(TsaError) as caught:
-        verify_witness(
+
+    def transition() -> WitnessEvidence:
+        return verify_witness(
             tree.record,
             spec=spec,
             records=tree.records,
             trusted_bundles={BUNDLE_LOGICAL: tree.reference},
             transition_bundle_updates=[pending_first, pending_second],
         )
+
+    with pytest.raises(TsaError) as first_refusal:
+        transition()
+    assert str(first_refusal.value) == (
+        "pending TSA bundles introduce one authority under two anchors: "
+        f"{pending_first['path']}/{first.anchor_id} and "
+        f"{pending_second['path']}/{second.anchor_id}"
+    )
+
+    blind_the_pending_signer_reader(monkeypatch)
+    verified = record_token_verifications(monkeypatch)
+    with pytest.raises(TsaError) as caught:
+        transition()
     assert str(caught.value) == (
         "duplicate TSA timestamp across anchor outcomes: signer "
         f"{beta.signer_pins['certificateSha256']}, timestamp {sha256_bytes(signed)}"
