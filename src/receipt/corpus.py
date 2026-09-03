@@ -171,26 +171,43 @@ and refused at the first row carrying the total over. One gate's own
 evidence is bounded by ``MAX_EVIDENCE_ENTRIES``, checked against the
 mapping's length before any entry of it is validated.
 
-Decoding is bounded a level above all three, and in three steps rather than
-one. ``MAX_JOURNAL_BYTES`` is checked on the raw bytes before the decode,
-because the decode is the allocation every later bound is measured against;
-``MAX_JOURNAL_ROWS`` is checked by counting line feeds before the split; and
-``MAX_JOURNAL_ROW_BYTES`` is checked on each row's own bytes before
-``json.loads`` is asked to build an object graph out of it. Counting rows
-bounded how many there were and nothing about how large one of them was, so
-a single row of arbitrary size was decoded, split out and parsed with no
-budget consulted (peer review, Sol round 3). Each constant is derived from
-the one below it and the arithmetic is written out beside it, so what a
-journal can make this module allocate is a stated function of its stated
-size.
+Decoding is bounded a level above all three, and every step of it happens on
+the bytes rather than on text. ``MAX_JOURNAL_BYTES`` is checked on the raw
+payload first; ``MAX_JOURNAL_ROWS`` is checked by counting line feeds in it,
+which walks the payload without building a list; the rows are then found by
+splitting the raw bytes, which finds exactly the rows splitting the decoded
+text would because a line feed cannot occur inside a UTF-8 multi-byte
+sequence; and ``MAX_JOURNAL_ROW_BYTES`` is checked on each row's own bytes
+before that row is decoded, let alone handed to ``json.loads`` to build an
+object graph out of. Counting rows bounded how many there were and nothing
+about how large one of them was, so a single row of arbitrary size was
+decoded, split out and parsed with no budget consulted (peer review, Sol
+round 3); and checking the row cap on decoded *text* left the allocation it
+exists to stop already made, because the payload was decoded whole and split
+whole before the first row was measured (peer review, Sol round 4).
+
+Two of those three are derived and the third is stated, which is the
+difference between a bound and a number. ``MAX_JOURNAL_ROWS`` comes from the
+gate cap plus an equal margin for the other row kinds, and
+``MAX_JOURNAL_ROW_BYTES`` from the largest row this schema admits; both
+arithmetics are written out beside the constants and pinned by a test.
+``MAX_JOURNAL_BYTES`` is neither derived nor derived from: it is a stated
+ceiling of 64 MiB on what a corpus journal may be at all, and nothing here
+computes anything from it. It was the product of the other two — eight
+gibibytes, the product of two worst cases no journal reaches at once — which
+is not a ceiling on the one input it exists for, an input that is not a
+journal (peer review, Sol round 4). A real corpus journal is kilobytes: one
+row per bound path per revision, plus its gates and tombstones.
 
 One residual is outside this module and is stated rather than fixed:
 ``receipt.release_chain.jsonl_line_offsets`` splits the whole journal before
 this function is reached, so the release-chain half of a verification meets
-an oversized journal first and with none of these bounds. That module is
-pinned byte for byte by a differential harness against the source verifier
-it was extracted from, so it cannot be changed here; bounding it is its own
-change, against its own harness.
+an oversized journal first and with none of these bounds — including the
+64 MiB total, which bounds this function and everything downstream of it and
+not the custody pass that runs before it. That module is pinned byte for
+byte by a differential harness against the source verifier it was extracted
+from, so it cannot be changed here; bounding it is its own change, against
+its own harness.
 
 The order of the passes is itself load-bearing. Membership is swept, the
 tombstones are looked for, the bound bytes are hashed, membership and per-file
@@ -603,13 +620,20 @@ MAX_GATE_DECLARATIONS = 2048
 #: consumer-facing bound rather than a silent one.
 MAX_JOURNAL_ROWS = 4096
 #: The most bytes one journal row may occupy, checked on the row's own bytes
-#: before ``json.loads`` is asked to build anything out of it.
+#: before the row is decoded and before ``json.loads`` is asked to build
+#: anything out of it.
 #:
 #: ``MAX_JOURNAL_ROWS`` bounds how many rows a journal may carry and says
 #: nothing about how large one of them is, so a single row of arbitrary size
 #: was decoded, split out, and handed to ``json.loads`` — which materialises
 #: the whole object graph — before any budget had been consulted (peer
-#: review, Sol round 3).
+#: review, Sol round 3). Checking it on the *decoded* text then left the
+#: allocation this bound exists to stop already made: the journal was decoded
+#: whole and split whole before the first row was measured, so the row bound
+#: bounded ``json.loads`` and nothing else (peer review, Sol round 4). The
+#: rows are found by splitting the raw bytes on ``b"\n"`` — which is exact,
+#: because a line feed cannot occur inside a UTF-8 multi-byte sequence — and
+#: each row is measured as bytes before it is turned into text.
 #:
 #: Derived from the largest row this schema admits, which is a gate
 #: declaration. Its evidence may carry ``MAX_EVIDENCE_ENTRIES`` = 64 entries
@@ -627,22 +651,28 @@ MAX_JOURNAL_ROWS = 4096
 #: one term here that is not bounded by this module. A consumer whose schema
 #: version is half a megabyte long has to raise this, and would know it.
 MAX_JOURNAL_ROW_BYTES = 2097152
-#: The most bytes one journal may occupy in total, checked before it is
-#: decoded. ``MAX_JOURNAL_ROWS`` is counted after the decode, which is the
-#: allocation that bounds every later one: a journal of arbitrary size became
-#: a ``str`` of arbitrary size before anything looked at it.
+#: The most bytes one journal may occupy in total, checked on the raw bytes
+#: before anything else looks at them. Every other budget here bounds what a
+#: journal *shaped like a journal* costs; this one bounds an input that is
+#: not one at all, whose size is the only thing about it knowable before it
+#: is decoded.
 #:
-#: Derived rather than picked, and generous by construction: it is
-#: ``MAX_JOURNAL_ROWS`` × ``MAX_JOURNAL_ROW_BYTES``, the product of two worst
-#: cases no journal reaches at once — 4,096 rows each of them a maximal gate
-#: declaration is refused by ``MAX_GATE_TEXT`` at about the second row. What
-#: this bound is for is the case with no other answer: an input that is not a
-#: journal at all, whose size is the only thing about it that is knowable
-#: before it is decoded. The bytes are already in the caller's hand by then —
+#: Stated rather than derived, and nothing derives from it. It was the
+#: product of the two constants above — 4,096 rows times two megabytes, or
+#: eight gibibytes — which is the product of two worst cases no journal
+#: reaches at once, and a ceiling of eight gibibytes on the one input this
+#: module cannot recognise is not a ceiling (peer review, Sol round 4).
+#: Sixty-four mebibytes is a statement about what a corpus journal may be at
+#: all: a real one is kilobytes, because it carries one row per bound path
+#: per revision plus its gates and tombstones, and a corpus large enough to
+#: approach this has outgrown ``MAX_JOURNAL_ROWS`` many times over. Raising
+#: it is a visible change to a consumer-facing bound.
+#:
+#: The bytes are already in the caller's hand by then —
 #: :func:`verify_corpus_binding` is passed the same bytes the release chain
 #: verified — so what this bounds is the decode and everything downstream of
 #: it, not the read.
-MAX_JOURNAL_BYTES = MAX_JOURNAL_ROWS * MAX_JOURNAL_ROW_BYTES
+MAX_JOURNAL_BYTES = 64 * 1024 * 1024
 #: The most characters one journal path may carry. Paths are quoted in
 #: refusals and, for removed paths, rendered in the verdict; the bound is
 #: checked before any other path rule so no refusal quotes a flood. A count
@@ -1562,24 +1592,27 @@ def parse_journal(
             f"corpus journal is {len(journal_bytes)} bytes, over the parser "
             f"budget of {MAX_JOURNAL_BYTES}"
         )
-    try:
-        text = journal_bytes.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise CorpusError("corpus journal is not UTF-8") from exc
-    if not text.endswith("\n"):
+    if not journal_bytes.endswith(b"\n"):
         raise CorpusError("corpus journal must end with exactly one LF")
-    # Counted, not split, and checked before the split: ``str.count`` walks
-    # the text without building the list, so the list a journal can make this
-    # function allocate — and everything downstream of it — is bounded by a
-    # stated input size before a single row has been decoded.
-    row_count = text.count("\n")
+    # Counted, not split, and checked before the split: ``bytes.count`` walks
+    # the payload without building the list, so the list a journal can make
+    # this function allocate — and everything downstream of it — is bounded
+    # by a stated input size before a single row has been read.
+    row_count = journal_bytes.count(b"\n")
     if row_count > MAX_JOURNAL_ROWS:
         raise CorpusError(
             f"corpus journal carries {row_count} rows, over the parser "
             f"budget of {MAX_JOURNAL_ROWS}"
         )
-    lines = text.split("\n")[:-1]
-    if not lines:
+    # Split on the raw bytes, and every question below asked of a row before
+    # it becomes text. A line feed cannot occur inside a UTF-8 multi-byte
+    # sequence, so splitting the encoded form finds exactly the rows
+    # splitting the decoded form would, and it finds them without decoding
+    # anything: the row bound below is measured on what arrived rather than
+    # on what an allocation the bound exists to stop has already produced
+    # (peer review, Sol round 4).
+    raw_rows = journal_bytes.split(b"\n")[:-1]
+    if not raw_rows:
         raise CorpusError("corpus journal is empty; genesis must bind content")
 
     content: dict[str, FileBinding] = {}
@@ -1589,19 +1622,22 @@ def parse_journal(
     removed: set[str] = set()
     gate_text_charged = 0
 
-    for number, line in enumerate(lines, start=1):
-        # First, so that nothing else in this loop — not ``strip``, and
-        # certainly not ``json.loads``, which materialises the whole object
-        # graph — is asked to work on a row of unbounded size. The row is
-        # re-encoded to measure it, which is one linear pass over text the
-        # decode above has already paid for once, and it is what makes the
-        # bound exact rather than a character count standing in for one.
-        row_bytes = len(line.encode("utf-8"))
-        if row_bytes > MAX_JOURNAL_ROW_BYTES:
+    for number, raw_row in enumerate(raw_rows, start=1):
+        # First, so that nothing else in this loop — not the decode, not
+        # ``strip``, and certainly not ``json.loads``, which materialises the
+        # whole object graph — is asked to work on a row of unbounded size.
+        # Measured on the bytes the row arrived as, which is what makes the
+        # bound exact and what makes it bind before the allocation rather
+        # than after it.
+        if len(raw_row) > MAX_JOURNAL_ROW_BYTES:
             raise CorpusError(
-                f"journal row {number} is {row_bytes} bytes, over the parser "
-                f"budget of {MAX_JOURNAL_ROW_BYTES}"
+                f"journal row {number} is {len(raw_row)} bytes, over the "
+                f"parser budget of {MAX_JOURNAL_ROW_BYTES}"
             )
+        try:
+            line = raw_row.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise CorpusError("corpus journal is not UTF-8") from exc
         if not line.strip():
             raise CorpusError(f"journal row {number} is blank")
         if line.endswith("\r"):
