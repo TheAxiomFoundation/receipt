@@ -52,7 +52,8 @@ is bound in tests/test_release_chain.py, where the public custody path and
 ``receipt verify`` itself are driven.
 
 Docstrings labelled S4R2-F1 onward name that fourth gate's second round,
-numbering from one again: S4R2-F3 the root identity that was two numbers a
+numbering from one again: S4R2-F2 the protected path an index entry could
+spell another way, S4R2-F3 the root identity that was two numbers a
 filesystem may hand to another directory, S4R2-F4 the configured path handed
 to ``git ls-tree`` as a pathspec rather than as a name.
 
@@ -4048,3 +4049,100 @@ def test_the_root_descriptor_does_not_outlive_the_verdict(
     with pytest.raises(OSError) as after:
         os.fstat(tree.root_descriptor)
     assert after.value.errno == errno.EBADF
+
+
+def index_an_alias(candidate: Candidate, tracked: str, alias: str) -> None:
+    """Add ``alias`` to the index with the blob ``tracked`` already carries.
+
+    What a commit authored where the two names are distinct files looks like:
+    two entries, and — on a filesystem that folds names — one file on disk
+    once it is checked out. ``update-index --cacheinfo`` is the only way to
+    write the second entry from here, because ``git add`` would go through the
+    working tree and find the one file.
+    """
+
+    blob = git(candidate.root, "rev-parse", f":{tracked}")
+    git(
+        candidate.root,
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        f"100644,{blob},{alias}",
+    )
+
+
+def test_an_index_alias_of_the_release_root_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S4R2-F2a: the exact-spelling reconciliation the release root's
+    scan makes covers the entries *under* that root, and the root's own
+    component was never anybody's question. ``:(literal)releases`` does not
+    match ``Releases/README.md``, so that entry is in no ``modes`` mapping, no
+    walk compares it, and nothing in the gate reads it at all — while the
+    commit under review carries it as a second release object and, on a
+    case-insensitive filesystem, a checkout materializes it over the same
+    file the protected entry names.
+
+    The whole index is read once at entry to say so. Nothing about this
+    depends on how the filesystem compares names: the entry is an alias by its
+    spelling, and it is refused on every filesystem. Without the check the
+    push path accepts this tree outright."""
+
+    candidate = base_repository(tmp_path)
+    index_an_alias(candidate, "releases/README.md", "Releases/README.md")
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate)
+    assert str(refusal.value) == (
+        "index carries an alias of a protected path: Releases/README.md "
+        "(for releases)"
+    )
+
+
+def test_an_index_alias_of_a_state_path_is_refused(tmp_path: pathlib.Path) -> None:
+    """S4R2-F2a for the two paths the whole verdict is about, where the leaf's
+    own spelling can differ too. ``assert_state_path_tracked`` and
+    ``assert_index_agrees_with_tree`` both look the state path up in the index
+    by the name the spec pins and are answered correctly, because that entry
+    is there and is exactly what they asked for. Neither can see a second
+    entry beside it that a name-folding filesystem resolves to the same file —
+    a ledger this commit also carries, under a name no check here reads, whose
+    bytes are whatever that entry's blob holds rather than the bytes this
+    verdict read.
+
+    Without the check this tree is accepted with the alias in the commit."""
+
+    candidate = base_repository(tmp_path)
+    index_an_alias(
+        candidate,
+        "ledger/official_observations.jsonl",
+        "Ledger/official_observations.jsonl",
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate)
+    assert str(refusal.value) == (
+        "index carries an alias of a protected path: "
+        "Ledger/official_observations.jsonl (for ledger/official_observations.jsonl)"
+    )
+
+
+def test_an_index_alias_is_refused_against_a_base_as_well(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S4R2-F2a on the other path. The check runs once, at entry, before the
+    surface classification decides which path the run takes, so a proposal
+    that carries an alias is refused whether or not it names a base — and
+    before the classification could report the alias as an unclassified change
+    and accept it as gate-only."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    index_an_alias(candidate, "releases/README.md", "Releases/README.md")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "index carries an alias of a protected path: Releases/README.md "
+        "(for releases)"
+    )
