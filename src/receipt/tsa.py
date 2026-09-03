@@ -234,9 +234,9 @@ one counted above.
 
 The bundle asks more of its file than the other two, and asked it of the
 path.  ``_load_json_once`` captured its bytes and parsed them, and the load
-then opened the pathname three more times: ``read_bytes`` for the
-canonical-JSON comparison, ``sha256_file`` for the commitment hash, and a
-``stat`` for the size.  So the anchor set came from one instant of a mutable
+then went back to the pathname three more times -- two further opens and a
+``stat``: ``read_bytes`` for the canonical-JSON comparison, ``sha256_file``
+for the commitment hash, and ``Path.stat`` for the size.  So the anchor set came from one instant of a mutable
 file and the three commitments that are supposed to describe that anchor set
 from three later ones -- and a writer replacing the bundle with a FIFO after
 the guarded read had those re-reads waiting for a writer with no timeout,

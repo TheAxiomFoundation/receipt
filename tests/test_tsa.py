@@ -3171,9 +3171,9 @@ def test_the_bundle_load_asks_nothing_of_its_path_after_the_one_read(
     """S6-F2: the canonicality, the hash and the size come from the one read.
 
     ``_load_json_once`` captured the bundle's bytes and parsed them, and then
-    the load opened the repository path three more times: ``read_bytes`` for
-    the canonical-JSON comparison, ``sha256_file`` for the commitment hash and
-    a ``stat`` for the size. So the anchor set came from one instant of a
+    the load went back to the repository path three more times -- two further
+    opens and a ``stat``: ``read_bytes`` for the canonical-JSON comparison,
+    ``sha256_file`` for the commitment hash and ``Path.stat`` for the size. So the anchor set came from one instant of a
     mutable file and its three commitments from three later ones -- and a
     writer replacing the bundle with a FIFO in any of those windows had the
     re-reads waiting for a writer with no timeout, which is the hang the
@@ -3500,12 +3500,12 @@ def test_one_verification_opens_each_judged_file_exactly_as_often_as_it_judges_i
     judged the bytes used. A refactor that changes the seven should recount
     it here rather than loosen the equality beside it.
 
-    S6R1-F2 brings the trust bundle under the same equality. It opened four
+    S6R1-F2 brings the trust bundle under the same equality. It opened three
     times per load -- ``_load_json_once`` for the payload, ``read_bytes`` for
-    the canonical comparison, ``sha256_file`` for the commitment hash and a
-    ``stat`` for the size -- so the anchors came from one instant of the file
-    and its three commitments from three others. Five loads here, and now
-    five opens.
+    the canonical comparison and ``sha256_file`` for the commitment hash, with
+    a ``Path.stat`` beside them for the size -- so the anchors came from one
+    instant of the file and its three commitments from three others. Five
+    loads here, and now five opens.
     """
 
     tree = build_witness_tree(tmp_path, local_anchors[:2])
@@ -3546,9 +3546,9 @@ def test_one_verification_opens_each_judged_file_exactly_as_often_as_it_judges_i
     }
     assert set(validated) == roots
     assert {validated[root] for root in roots} == {7}
-    # S6R1-F2: and the bundle, which used to open four times per load -- once
-    # for the payload, once for the canonical comparison, once for the
-    # commitment hash and a ``stat`` for the size -- opens once per load.
+    # S6R1-F2: and the bundle, which used to open three times per load -- for
+    # the payload, for the canonical comparison and for the commitment hash,
+    # with a ``stat`` beside them for the size -- opens once per load.
     assert set(loaded) == {bundle}
     assert loaded[bundle] == 5
     assert opens[bundle] == loaded[bundle]
