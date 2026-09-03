@@ -405,14 +405,26 @@ shaped as an extension — one period and one to three letters, digits, ``_`` or
 ``._`` are alias-capable and screened, while the four-character ``.ssxx``
 cannot be an 8.3 extension and is not (peer review, Sol round 7).
 
-The journal-side alias check is bounded and linear in those declared names.
-It used to join and fold a fresh cumulative string for every prefix and keep
-both spellings: 4,096 portable paths at 1,023 characters and 511 components
-made about 2.1 million dictionary entries and about two gibibytes of strings
-before any budget applied (peer review, Sol round 7). A component trie now
-represents each folded prefix once and stores each spelling once. Every
-path-prefix visit and every by-name ancestor visit charges one shared
-:data:`MAX_PATH_COMPONENTS_TOTAL` counter before allocation or ``lstat``.
+The journal-side alias check is bounded and linear in those declared names,
+and it holds no index. It used to join and fold a fresh cumulative string for
+every prefix and keep both spellings: 4,096 portable paths at 1,023
+characters and 511 components made about 2.1 million dictionary entries and
+about two gibibytes of strings before any budget applied (peer review, Sol
+round 7). A component trie replaced that and was measured at 594 MB for the
+same journal, because a trie's size is the thing the journal chooses and a
+compact Python node still costs about 150 bytes (peer review, Sol round 7,
+round 3). So the prefix comparison sorts the folded component sequences and
+compares neighbours instead: every path sharing a folded prefix is contiguous
+in that order, and agreement between neighbours is transitive, so a
+disagreement anywhere is a disagreement between some adjacent pair. What is
+held is one key per declared path — a small multiple of the path text the
+journal already carries, 9.0 MB for that worst case. The distinct prefixes
+are still *counted*, because that count is the number of directories the
+declared set names and therefore the number of stamps the run may end up
+holding: :data:`MAX_ALIAS_INDEX_NODES` bounds it before anything is stat-ed.
+Every path-prefix visit, every counted prefix and every by-name ancestor
+visit charges one shared :data:`MAX_PATH_COMPONENTS_TOTAL` counter before
+allocation or ``lstat``.
 
 Two Win32 facts survive the policy rather than being subsumed by it, and both
 are screens rather than models. ``CON``, ``PRN``, ``AUX``, ``NUL`` and the
@@ -754,27 +766,67 @@ MAX_JOURNAL_ROWS_CEILING = MAX_JOURNAL_BYTES // 116
 #: quotes back, not the JSON a verdict renders, and the total the verdict
 #: renders is bounded by ``MAX_REMOVED_TEXT`` instead.
 MAX_PATH_TEXT = 1024
+#: The most components any single path can have. A path with ``n`` non-empty
+#: components carries at least ``2n - 1`` characters — ``n`` one-character
+#: names and ``n - 1`` separators — so ``MAX_PATH_TEXT`` admits no path deeper
+#: than this. Written as the arithmetic rather than as 512 because it is a
+#: consequence of the path-text bound and moves with it.
+MAX_PATH_COMPONENTS = (MAX_PATH_TEXT + 1) // 2
 #: The most declared path prefixes the alias index and by-name ancestor
-#: recorder may visit together. One counter is shared by both jobs and by
+#: recorder may charge together. One counter is shared by both jobs and by
 #: every call in a verification, just as the two closed-world sweeps share
 #: ``MAX_SWEEP_WORK``: repeating a pass cannot buy another budget.
 #:
+#: Three things charge it, and the third is the one this bound exists for.
+#: The alias index charges one unit per ``(path, prefix)`` it *visits* and one
+#: more per distinct folded prefix it *counts*, and the ancestor recorder
+#: charges one unit per non-root prefix it visits. Charging only visits
+#: bounded the walking and not the holding: 4,096 portable 1,023-character
+#: paths with distinct first components visit 2,093,056 prefixes, half of this
+#: budget, and name 2,093,056 distinct directories — every one of which the
+#: generations recorder stamps with a ``pathlib.Path``, a relative spelling
+#: and a stat tuple that live until the verdict (peer review, Sol round 7,
+#: round 3). What is counted is now what is held.
+#:
 #: Derived from the default journal capacity and the path-text bound rather
-#: than picked. A path with ``n`` non-empty components has at least ``2n - 1``
-#: characters: ``n`` one-character names and ``n - 1`` separators. The alias
-#: index visits ``n`` prefixes and the ancestor recorder visits at most the
-#: ``n - 1`` non-root parents, once per effective path, so together they cost
-#: at most the path's text length. A default journal can contribute at most
-#: ``MAX_JOURNAL_ROWS`` effective paths, hence 4,096 × 1,024 = 4,194,304.
+#: than picked. A default journal contributes at most ``MAX_JOURNAL_ROWS``
+#: effective paths, and ``MAX_PATH_TEXT`` characters each, hence
+#: 4,096 × 1,024 = 4,194,304. What that no longer is, is unreachable: a path
+#: of ``n`` components costs ``n`` visits, at most ``n`` counted prefixes and
+#: at most ``n - 1`` ancestor visits — about ``3n``, against the ``2n - 1``
+#: characters it must carry — so a 4,096-row journal at the maximum depth
+#: spends 6,275,072 units and is refused, deliberately, because that is the
+#: journal whose directory stamps would be counted in gibibytes. An ordinary
+#: corpus is nowhere near it: paths of four to eight components spend twelve
+#: to twenty-four units a row, so 4,096 rows spend under 100,000.
 #: A consumer that pins a larger journal capacity still meets this independent
 #: traversal ceiling rather than silently multiplying it.
 #:
-#: The package fixture spends eighteen visits: eleven component prefixes in
-#: its three content paths and one attested path, then seven non-root ancestor
-#: prefixes. The maximum-depth regression spends 2,093,056 visits on 4,096
-#: paths with 511 components each, while their shared-prefix trie holds only
-#: 4,606 nodes rather than one cumulative string per visit.
+#: The package fixture spends twenty-six units: eleven component prefixes in
+#: its three content paths and one attested path, the eight distinct folded
+#: prefixes those name, and seven non-root ancestor prefixes.
 MAX_PATH_COMPONENTS_TOTAL = MAX_JOURNAL_ROWS * MAX_PATH_TEXT
+#: The most distinct folded prefixes the declared-path alias index may count,
+#: which is the most distinct directories the declared set may name.
+#:
+#: The index itself no longer allocates per prefix — see
+#: :func:`_reject_aliasing_paths` — but what it counts is what the rest of the
+#: run allocates for: every distinct declared prefix that exists on disk
+#: becomes one entry in :class:`_DirectoryGenerations`, held from the first
+#: read to ``assert_unchanged``. So the cardinality is bounded here, once,
+#: before any of it is stat-ed, and the refusal names the index rather than
+#: the pass that would have run out of memory.
+#:
+#: Derived, not picked: no path within ``MAX_PATH_TEXT`` has more than
+#: ``MAX_PATH_COMPONENTS`` components, and a default-capacity journal declares
+#: at most ``MAX_JOURNAL_ROWS`` paths, so no valid default-capacity journal can
+#: need more than 4,096 × 512 = 2,097,152 of them. The largest layout that
+#: actually reaches it is smaller still — distinct first components cost two
+#: characters each, which caps such a path at 511 components and 4,096 of them
+#: at 2,093,056 prefixes — so this ceiling refuses no journal the default
+#: capacity admits. A spec that pins a larger ``journal_row_capacity`` can
+#: exceed it and is refused here.
+MAX_ALIAS_INDEX_NODES = MAX_JOURNAL_ROWS * MAX_PATH_COMPONENTS
 #: The most characters the verdict's removedPaths may carry in total; the
 #: gate budget's counterpart for the other producer-controlled list the
 #: verdict renders verbatim (peer review, round two). Counted the same way
@@ -1924,6 +1976,12 @@ class _PathPrefixWork:
     work before any existing tree-walk budget applied. Charging the same
     counter means parsing the path once in each role cannot multiply the
     hard bound; see :data:`MAX_PATH_COMPONENTS_TOTAL` for the derivation.
+
+    Units are charged in batches of at most one path's depth, so that a
+    2.1-million-visit walk does not pay 2.1 million calls to arrive at the
+    same total. The overshoot that buys is bounded by
+    :data:`MAX_PATH_COMPONENTS` — one path's worth — and every batch is
+    charged before the work it pays for, which is what the bound needs.
     """
 
     def __init__(self) -> None:
@@ -1931,14 +1989,14 @@ class _PathPrefixWork:
 
     @property
     def work(self) -> int:
-        """Path-prefix visits charged so far."""
+        """Path-prefix units charged so far."""
 
         return self._work
 
-    def charge(self) -> None:
-        """Charge one path-prefix visit before it allocates or stats."""
+    def charge(self, units: int = 1) -> None:
+        """Charge path-prefix work before it allocates or stats."""
 
-        self._work += 1
+        self._work += units
         if self._work > MAX_PATH_COMPONENTS_TOTAL:
             raise CorpusError(
                 "declared paths visit more than "
@@ -2630,33 +2688,6 @@ def _has_pinned_suffix(relative: str, suffixes: tuple[str, ...]) -> bool:
     return any(folded.endswith(_path_fold(suffix)) for suffix in suffixes)
 
 
-class _AliasPrefix:
-    """One component in the folded declared-path trie.
-
-    The parent link reconstructs a spelling only for a refusal. Ordinary
-    insertion never builds a cumulative prefix string, and ``children`` is
-    allocated only when a node actually gains a child.
-    """
-
-    __slots__ = ("children", "component", "parent")
-
-    def __init__(self, component: str, parent: "_AliasPrefix | None") -> None:
-        self.component = component
-        self.parent = parent
-        self.children: dict[str, _AliasPrefix] | None = None
-
-    def spelled_path(self) -> str:
-        """Reconstruct this node's declared spelling for a refusal."""
-
-        components: list[str] = []
-        node: _AliasPrefix | None = self
-        while node is not None and node.parent is not None:
-            components.append(node.component)
-            node = node.parent
-        components.reverse()
-        return "/".join(components)
-
-
 def _reject_aliasing_paths(
     relatives: list[str], *, work: _PathPrefixWork
 ) -> int:
@@ -2686,17 +2717,57 @@ def _reject_aliasing_paths(
     ASCII case-insensitivity, so what both passes are asking is whether two
     spellings differ only in case.
 
-    Prefixes are represented by a trie, not cumulative strings. Each node's
-    child dictionary is already scoped by the folded parent, so its key is
-    only the folded component; the node stores that component's spelling
-    once and links to its parent. A spelling is joined only when a collision
-    must be quoted. The returned node count exists so the maximum-depth
-    allocation regression can assert the representation rather than time it.
+    **The prefix pass holds no index.** It used to build one — first a
+    cumulative string per visit, then a component trie of one node per
+    distinct prefix — and a trie is an index whose size is the thing an
+    adversary chooses. 4,096 portable 1,023-character paths with distinct
+    three-character first components and 510 one-character descendants are
+    inside ``MAX_JOURNAL_ROWS``, inside ``MAX_PATH_TEXT`` and inside half of
+    :data:`MAX_PATH_COMPONENTS_TOTAL`, and they name 2,093,056 distinct
+    prefixes: 594 MB of trie nodes and 4.8 seconds, measured, for a journal
+    the budget waved through (peer review, Sol round 7, round 3). Compacting
+    the node — ``__slots__``, one shared child dictionary, interned spellings
+    — cannot fix that. A Python object plus its dictionary entry is on the
+    order of 150 bytes whatever is done to it, so the *representation* was
+    never the choice worth making; holding one at all was.
 
-    Every ``(path, prefix)`` visit charges ``work`` before looking in the
-    trie. The same counter is handed to
+    So the pass sorts instead. Each path is folded a component at a time and
+    the folded components are joined by ``\x00`` — a character no portable
+    name can hold and one that sorts below every character one can — so
+    ordering the keys as strings orders the paths by their folded component
+    *sequences*. Two facts make neighbour comparison sufficient:
+
+    - every path sharing a folded prefix occupies a contiguous run of that
+      order, which is what sorting by a sequence means;
+    - so if two paths in such a run disagree about the spelling of a
+      component inside their shared prefix, then some *adjacent* pair in the
+      run disagrees about it too — agreement between neighbours is
+      transitive along the chain that joins them, and every neighbour in the
+      run shares at least that prefix.
+
+    Each adjacent pair is therefore compared for as many components as their
+    folded keys agree on, and the first disagreement in spelling is the
+    refusal. What is live at any moment is two paths' components and one
+    string key per declared path, so the pass allocates a small multiple of
+    the declared path text — the text the journal already carries — instead
+    of a structure whose size is the adversary's to choose. The same 4,096
+    maximum-depth paths now peak at 9.0 MB and 0.6 seconds.
+
+    Counting survives the index. The number of distinct folded prefixes is
+    the number of components the first path contributes plus, for every
+    later path, the components below what it shares with its predecessor —
+    exactly the node count the trie would have held, computed without
+    holding it. That count is what :data:`MAX_ALIAS_INDEX_NODES` bounds and
+    what this returns, because it is also the number of directories the
+    declared set names and therefore the number of stamps
+    :class:`_DirectoryGenerations` may end up holding.
+
+    Every ``(path, prefix)`` visit and every counted prefix charges ``work``,
+    a path's depth at a time and before the components it pays for are
+    folded or compared. The same counter is handed to
     :meth:`_DirectoryGenerations.record_ancestors`; see
-    :data:`MAX_PATH_COMPONENTS_TOTAL` for why both jobs fit its derived bound.
+    :data:`MAX_PATH_COMPONENTS_TOTAL` for why all three fit its derived
+    bound.
 
     The whole-path pass runs first and completely, so a journal with both
     kinds of collision keeps the message that names the more specific one.
@@ -2712,31 +2783,42 @@ def _reject_aliasing_paths(
                 f"is ambiguous: {_quoted(seen[key])} and {_quoted(relative)}"
             )
         seen[key] = relative
-    root = _AliasPrefix("", None)
-    entries = 0
+
+    keys: list[str] = []
     for relative in relatives:
         components = relative.split("/")
-        parent = root
-        for depth, component in enumerate(components, start=1):
-            work.charge()
-            key = _path_fold(component)
-            children = parent.children
-            child = children.get(key) if children is not None else None
-            if child is not None and child.component != component:
-                prefix = "/".join(components[:depth])
+        # Charged before the components are folded, so the fold work and the
+        # key it builds are both inside the budget rather than beside it.
+        work.charge(len(components))
+        keys.append("\x00".join(_path_fold(component) for component in components))
+
+    nodes = 0
+    previous_folded: list[str] = []
+    previous_spelled: list[str] = []
+    for index in sorted(range(len(relatives)), key=keys.__getitem__):
+        folded = keys[index].split("\x00")
+        spelled = relatives[index].split("/")
+        shared = 0
+        limit = min(len(folded), len(previous_folded))
+        while shared < limit and folded[shared] == previous_folded[shared]:
+            shared += 1
+        for depth in range(shared):
+            if spelled[depth] != previous_spelled[depth]:
                 raise CorpusError(
                     "two declared paths would alias at a directory: "
-                    f"{_quoted(child.spelled_path())} and {_quoted(prefix)}"
+                    f"{_quoted('/'.join(previous_spelled[: depth + 1]))} and "
+                    f"{_quoted('/'.join(spelled[: depth + 1]))}"
                 )
-            if child is None:
-                if children is None:
-                    children = {}
-                    parent.children = children
-                child = _AliasPrefix(component, parent)
-                children[key] = child
-                entries += 1
-            parent = child
-    return entries
+        work.charge(len(folded) - shared)
+        nodes += len(folded) - shared
+        if nodes > MAX_ALIAS_INDEX_NODES:
+            raise CorpusError(
+                f"declared paths name more than {MAX_ALIAS_INDEX_NODES} "
+                "distinct directories; declared paths exceed the alias index "
+                "budget"
+            )
+        previous_folded, previous_spelled = folded, spelled
+    return nodes
 
 
 def _tree_content_paths(
@@ -3424,10 +3506,11 @@ def verify_corpus_binding(
     # the directory that carried it was first stamped after the mutation, so
     # its stamp matched too (peer review, Sol round 5).
     # One component-prefix budget for both consumers of declared path depth:
-    # the alias trie and the by-name ancestor stamps. For a path with ``n``
-    # components they visit ``n`` and at most ``n - 1`` prefixes respectively,
-    # which fits the path's own text length and is why the shared bound is
-    # derived from the journal and path-text caps.
+    # the alias index and the by-name ancestor stamps. For a path with ``n``
+    # components they charge ``n`` visits, at most ``n`` counted prefixes and
+    # at most ``n - 1`` ancestor visits, which is why the shared bound is
+    # derived from the journal and path-text caps — and why what it bounds is
+    # what the run holds and not only what it walks.
     prefix_work = _PathPrefixWork()
     generations = _DirectoryGenerations(prefix_work)
     # One sweep budget for the whole verification, charged by both membership

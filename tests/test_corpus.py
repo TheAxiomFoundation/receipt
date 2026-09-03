@@ -922,18 +922,123 @@ def test_two_declared_paths_under_distinct_ancestors_still_verify(
     assert [entry.path for entry in verification.content] == sorted(content)
 
 
-def test_maximum_rows_at_maximum_portable_depth_use_a_shared_prefix_trie(
+def _root_divergent_maximum_depth_paths(count: int) -> list[str]:
+    """The review's worst case: distinct first components, no shared prefix.
+
+    Each path is 1,023 characters and 511 components — a three-character
+    first component, then 510 one-character descendants — so ``count`` of
+    them name ``count`` × 511 distinct prefixes and share none of them.
+    """
+
+    paths = ["/".join((f"{index:03x}", *(["x"] * 510))) for index in range(count)]
+    assert len(paths[0]) == 1023
+    assert len(paths[0].split("/")) == 511
+    return paths
+
+
+def test_a_root_divergent_maximum_depth_layout_is_counted_and_not_held(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Binds S7-R3-F1: the visit budget bounded walking, not holding.
+
+    These 4,096 paths are portable, 1,023 characters each, and inside every
+    bound the module states: ``MAX_JOURNAL_ROWS`` rows, ``MAX_PATH_TEXT``
+    characters, and 2,093,056 prefix visits against a budget of 4,194,304.
+    They share no prefix at all, so the component trie S7-F1 introduced held
+    one node per visit: measured on this interpreter, 594.2 MB and 4.8
+    seconds for a journal every guard waved through, and 74.3 MB for the
+    review's own 512-path reproduction.
+
+    The prefix pass now sorts the folded component sequences and compares
+    neighbours, so what it holds is one key per declared path — a small
+    multiple of the path text the journal already carries — and the peak
+    asserted here is a fifty-fifth of what the trie allocated. The node
+    count is still computed, because it is what
+    ``MAX_ALIAS_INDEX_NODES`` bounds and what the generations recorder will
+    be asked to stamp; it is simply not materialised.
+
+    Without S7-R3-F1 this test fails on memory rather than on logic: the
+    trie's peak is two orders of magnitude above the bound asserted here.
+    """
+
+    import tracemalloc
+
+    from receipt.corpus import (
+        MAX_ALIAS_INDEX_NODES,
+        _PathPrefixWork,
+        _reject_aliasing_paths,
+    )
+
+    paths = _root_divergent_maximum_depth_paths(MAX_JOURNAL_ROWS)
+    work = _PathPrefixWork()
+    tracemalloc.start()
+    try:
+        nodes = _reject_aliasing_paths(paths, work=work)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert nodes == MAX_JOURNAL_ROWS * 511 == 2093056
+    # Visits and counted prefixes both charge, and this layout is the one
+    # that makes them equal: 2,093,056 of each, inside the shared budget.
+    assert work.work == 2 * nodes == 4186112
+    assert work.work <= MAX_PATH_COMPONENTS_TOTAL
+    # The derived ceiling refuses no journal the default capacity admits:
+    # distinct first components cost two characters, which caps such a path
+    # at 511 components.
+    assert nodes < MAX_ALIAS_INDEX_NODES == 2097152
+    # Measured at 9.0 MB on CPython 3.14 and 3.11; the bound is stated with
+    # room for an interpreter that lays strings out differently, and is a
+    # quarter of the 64 MiB the review asked the worst case to stay under.
+    assert peak < 16 * 1024 * 1024
+
+
+def test_the_alias_index_refuses_more_prefixes_than_its_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Binds S7-R3-F1: nothing bounded the size of the declared-prefix set.
+
+    The count is what the rest of the run allocates for — every distinct
+    declared prefix that exists on disk becomes one stamp
+    ``_DirectoryGenerations`` holds until the verdict — so it is refused
+    before it is stat-ed rather than after. The ceiling itself is derived
+    from the default capacity and cannot be reached by a default-capacity
+    journal, so what is bound here is the refusal: the same maximum-depth
+    layout passes with the ceiling at its own node count and refuses one
+    node below it.
+
+    Without S7-R3-F1 there is no ceiling to move and no refusal at all: the
+    layout is accepted at any cardinality the visit budget allows.
+    """
+
+    from receipt.corpus import _PathPrefixWork, _reject_aliasing_paths
+
+    paths = _root_divergent_maximum_depth_paths(MAX_JOURNAL_ROWS)
+
+    monkeypatch.setattr("receipt.corpus.MAX_ALIAS_INDEX_NODES", 2093056)
+    assert _reject_aliasing_paths(paths, work=_PathPrefixWork()) == 2093056
+
+    monkeypatch.setattr("receipt.corpus.MAX_ALIAS_INDEX_NODES", 2093055)
+    with pytest.raises(CorpusError) as caught:
+        _reject_aliasing_paths(paths, work=_PathPrefixWork())
+    assert str(caught.value) == (
+        "declared paths name more than 2093055 distinct directories; "
+        "declared paths exceed the alias index budget"
+    )
+
+
+def test_maximum_rows_at_maximum_portable_depth_share_their_counted_prefixes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Binds S7-F1: cumulative prefix strings made depth times rows allocations.
 
     These 4,096 paths are each 1,023 characters and 511 components, the
     review's maximum-depth fixture. They make 2,093,056 prefix visits, but
-    share their first 510 components, so a component trie needs exactly
-    4,606 nodes. The old slice/join/fold loop instead materialised and
-    re-folded one cumulative string per visit, and had no allocation count
-    or budget for the test to assert; paths with distinct prefixes retained
-    that same 2.1-million cardinality in its dictionary.
+    share their first 510 components, so exactly 4,606 distinct folded
+    prefixes are counted. The old slice/join/fold loop instead materialised
+    and re-folded one cumulative string per visit, and had no allocation
+    count or budget for the test to assert; paths with distinct prefixes
+    retained that same 2.1-million cardinality in its dictionary.
 
     What the folded-character recorder measures is the finding's own number.
     Every prefix reaches ``_path_fold`` exactly once per visit either way, so
@@ -980,7 +1085,9 @@ def test_maximum_rows_at_maximum_portable_depth_use_a_shared_prefix_trie(
         == MAX_JOURNAL_ROWS * MAX_PATH_TEXT
         == 4194304
     )
-    assert work.work == MAX_JOURNAL_ROWS * 511 == 2093056
+    # 2,093,056 visits and, since S7-R3-F1 charges what is counted as well
+    # as what is walked, 4,606 more for the prefixes they name.
+    assert work.work == MAX_JOURNAL_ROWS * 511 + 4606 == 2097662
     assert entries == 510 + MAX_JOURNAL_ROWS == 4606
     # The whole-path pass folds each path once and is unchanged; the prefix
     # pass folds one component per visit rather than one joined prefix.
@@ -994,31 +1101,33 @@ def test_maximum_rows_at_maximum_portable_depth_use_a_shared_prefix_trie(
     assert folded[0] < 8 * 1024 * 1024 < joined
 
 
-def test_the_fixture_spends_eighteen_visits_from_one_shared_prefix_budget(
+def test_the_fixture_spends_twenty_six_units_from_one_shared_prefix_budget(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Binds S7-F1: the alias and ancestor walks previously had no shared cap.
+    """Binds S7-F1 and S7-R3-F1: one cap over walking and over holding.
 
-    The fixture has eleven declared component prefixes and seven non-root
-    ancestor prefixes. At eighteen the whole verification completes; at
-    seventeen the final visit refuses in the budget's single sentence.
-    Without S7-F1 both runs complete because neither old walk charges a
-    prefix budget shared with the other.
+    The fixture has eleven declared component prefixes, which name eight
+    distinct folded ones, and seven non-root ancestor prefixes. At
+    twenty-six the whole verification completes; at twenty-five the last
+    unit refuses in the budget's single sentence. Without S7-F1 both runs
+    complete because neither old walk charges a prefix budget shared with
+    the other, and without S7-R3-F1 the total is eighteen rather than
+    twenty-six because the prefixes the index counts are free.
     """
 
     write_tree(tmp_path)
-    monkeypatch.setattr("receipt.corpus.MAX_PATH_COMPONENTS_TOTAL", 18)
+    monkeypatch.setattr("receipt.corpus.MAX_PATH_COMPONENTS_TOTAL", 26)
     verify_corpus_binding(
         tmp_path, render_journal(journal_rows()), spec=corpus_spec()
     )
 
-    monkeypatch.setattr("receipt.corpus.MAX_PATH_COMPONENTS_TOTAL", 17)
+    monkeypatch.setattr("receipt.corpus.MAX_PATH_COMPONENTS_TOTAL", 25)
     with pytest.raises(CorpusError) as caught:
         verify_corpus_binding(
             tmp_path, render_journal(journal_rows()), spec=corpus_spec()
         )
     assert str(caught.value) == (
-        "declared paths visit more than 17 prefixes; the corpus cannot be "
+        "declared paths visit more than 25 prefixes; the corpus cannot be "
         "bound safely"
     )
 
