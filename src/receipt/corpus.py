@@ -97,10 +97,11 @@ Three row kinds, one journal:
     ``retired/gone`` on Win32, which strips a trailing dot or space before
     the lookup, while the exact ``lstat`` misses it on POSIX and its fold
     key differs from the tombstone's. Both askings screen for it, as the
-    content sweep already does under a content root. The pair is asked twice per verification, for
-    the reason the paragraph on pass order below gives, and the second asking
-    shares no listing between one tombstone and the next, so a directory read
-    for an earlier tombstone cannot answer for a later one. The second
+    content sweep already does under a content root. The pair is asked twice
+    per verification, for the reason the paragraph on pass order below
+    gives, and the second asking shares no listing between one tombstone
+    and the next, so a directory read for an earlier tombstone cannot
+    answer for a later one. The second
     question walks the tree, so it is bounded: every entry taken from a
     listing and every candidate a search visits is charged against one budget
     for both askings together, and a listing wider than what is left of that
