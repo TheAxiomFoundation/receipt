@@ -23,55 +23,41 @@ Three row kinds, one journal:
     suffix. These are swept closed-world: the effective present set must equal
     the tree's set exactly, in both membership and digest. Membership is
     decided after folding — root and suffix alike are compared under Unicode
-    NFC plus case folding — so neither a case- or normalization-varied
-    spelling of a pinned suffix nor one of a pinned root can sit outside the
-    closed world on a filesystem that treats it as the same file. A tree
-    entry that aliases a root's own spelling is refused by name rather than
-    merged, and an entry that is a symlink or any other reparse point is
-    refused rather than followed — a junction is not a symlink on Windows,
-    and descending one would sweep a directory outside the clone.
+    NFC plus case folding, which over the portable repertoire below is ASCII
+    case-insensitivity — so a case-varied spelling of a pinned suffix, or of a
+    pinned root, cannot sit outside the closed world on a filesystem that
+    treats it as the same file. A tree entry that aliases a root's own
+    spelling is refused by name rather than merged, and an entry that is a
+    symlink or any other reparse point is refused rather than followed — a
+    junction is not a symlink on Windows, and descending one would sweep a
+    directory outside the clone.
 
-    Two spellings decide membership that no listing emits, so the sweep
-    screens the names it is handed for both. A trailing dot or space is
-    stripped by Win32 before a lookup, so the entry carrying it *is* the
-    entry beside it. And an NTFS volume generating 8.3 short names gives a
-    long name a second, addressable spelling whose extension may be a pinned
-    suffix although the written one is not. That extension is modelled the
-    way 8.3 generation derives it — spaces removed, leading periods removed,
-    the text after the last remaining period mapped into the 8.3 character
-    set and truncated to three — because deriving it from the written name
-    instead read an embedded space as a character and let ``smuggled.y mlx``
-    through while its alias ``SMUGGL~1.YML`` opened the same bytes (peer
-    review, round seven). The stem is not modelled, nor is whether the
-    volume generates short names at all; the extension is what decides
-    membership.
+    One spelling decides membership that no listing emits, and the sweep
+    screens the names it is handed for it. An NTFS volume generating 8.3
+    short names gives a long name a second, addressable spelling whose
+    extension may be a pinned suffix although the written one is not: with
+    ``.yml`` pinned, a file emitted as ``smuggled.ymlx`` is not content
+    under the name the listing emitted, while the ``SMUGGL~1.YML`` that
+    opens the same bytes is content and sits outside a closed world the
+    sweep just called closed (peer review, round six). The extension is
+    modelled the way 8.3 generation derives it — the text after the last
+    remaining period, truncated to three characters and mapped into the 8.3
+    character set — because deriving it from the written name instead read
+    an embedded space as a character (peer review, round seven). The stem is
+    not modelled, nor is whether the volume generates short names at all;
+    the extension is what decides membership.
 
-    That model is bounded at both ends, because it was unsound at both.
-    A character the 8.3 namespace cannot hold becomes an underscore — but
-    the namespace is an OEM code page rather than ASCII, so which non-ASCII
-    characters it *can* hold is the volume's decision and not this
-    verifier's: with ``.éml`` pinned, ``smuggled.émlx`` is aliased ``.ÉML``
-    on a code page 850 volume while the underscore model read ``._ML`` and
-    skipped the file. So an extension carrying a non-ASCII character is
-    refused as underivable rather than guessed at, and an alias-capable
-    pinned content suffix must be ASCII. At the other end, an alias
-    extension is at most three characters, so a pin longer than that cannot
-    be carried by any alias; comparing the first three characters of a
-    longer pin refused an ordinary ``notes.yam`` under a ``.yaml``
-    configuration although no alias can end ``.yaml``. Only a pin an alias
-    could carry is compared, and it is compared exactly (peer review, round
-    eight).
-
-    Both of those bounds are applied before the model is asked anything,
-    because applying them afterwards refused names over questions nobody
-    had put. The alias-capable pins are selected first, so a configuration
-    pinning only ``.yaml`` derives no extension at all and ``notes.é`` is
-    an ordinary non-content file rather than an underivable one; the
-    extension source is truncated to three characters first, so the code
-    page decides only about characters that reach the alias and ``x.ymlé``
-    yields ``YML`` rather than a refusal; and the ASCII rule on a pin is
-    asked only of pins an alias could carry, so ``.éyaml`` is a legal
-    configuration and ``.éml`` is still refused (peer review, Sol round 2).
+    Only a pin an alias could carry is compared, and it is compared exactly.
+    An 8.3 extension is at most three characters, so a pin whose own
+    extension is longer is carried by no alias; comparing the first three
+    characters of a longer pin refused an ordinary ``notes.yam`` under a
+    ``.yaml`` configuration although no alias can end ``.yaml`` (peer
+    review, round eight). What the model no longer has to answer is which
+    *characters* survive into an alias, because every name it is asked about
+    is ASCII: the 8.3 namespace is an OEM code page rather than ASCII, and
+    two rounds of review were spent bounding a derivation over characters
+    the volume decides about. The portable-name policy below removes the
+    question instead.
 
 ``attested``
     An exact path bound by digest without a sweep — the toolchain pin, the
@@ -92,22 +78,21 @@ Three row kinds, one journal:
     it was. Two questions are asked about a tombstone, in this order — does
     the host resolve the exact spelling, and does any fold-equal spelling
     survive in a listing — because a filesystem resolves names its own
-    enumeration does not emit. A third spelling answers to neither
-    question and is refused where the listing is read instead: a surviving
-    ``retired/gone.`` or ``retired/gone `` is the tombstoned
-    ``retired/gone`` on Win32, which strips a trailing dot or space before
-    the lookup, while the exact ``lstat`` misses it on POSIX and its fold
-    key differs from the tombstone's. Both askings screen for it, as the
-    content sweep already does under a content root. The pair is asked twice
-    per verification, for the reason the paragraph on pass order below
-    gives, and the second asking shares no listing between one tombstone
-    and the next, so a directory read for an earlier tombstone cannot
-    answer for a later one. The second
-    question walks the tree, so it is bounded: every entry taken from a
-    listing and every candidate a search visits is charged against one budget
-    for both askings together, and a listing wider than what is left of that
-    budget is abandoned part-way — unread past the batch in hand — rather
-    than fetched, sorted and indexed whole.
+    enumeration does not emit. A third class of spelling used to answer to
+    neither, and the portable-name policy below removes it rather than
+    modelling it: a surviving ``retired/gone.`` is the tombstoned
+    ``retired/gone`` on Win32, which strips a trailing dot before the
+    lookup, while the exact ``lstat`` misses it on POSIX and its fold key
+    differs from the tombstone's — and it is refused as a non-portable name
+    wherever a listing emits it. The pair is asked twice per verification,
+    for the reason the paragraph on pass order below gives, and the second
+    asking shares no listing between one tombstone and the next, so a
+    directory read for an earlier tombstone cannot answer for a later one.
+    The second question walks the tree, so it is bounded: every entry taken
+    from a listing and every candidate a search visits is charged against
+    one budget for both askings together, and a listing wider than what is
+    left of that budget is abandoned part-way — unread past the batch in
+    hand — rather than fetched, sorted and indexed whole.
 
 ``gate``
     A declaration that some verification gate ran, carrying a reproducibility
@@ -229,88 +214,73 @@ support. Nothing platform-specific is attempted in its place: NTFS keeps a
 real ChangeTime, but it is reachable only through ``ctypes`` and cannot be
 exercised here, so reading it is a follow-up and not part of what ships.
 
-The Windows *naming* rules this module implements are a separate matter and
-they stay on. A trailing dot or space, and an 8.3 short-name alias, describe
-spellings a corpus may carry and a consumer may one day resolve; they are
-facts about the names in the tree, not about the host the verifier is
-running on, and screening for them on POSIX is exactly the point.
+Every name in a corpus is a *portable name*, and that policy stands in place
+of the filesystem modelling this module used to carry. Each component of a
+declared path, of a pinned content root, of a required attested path, of a
+tree entry the closed-world sweep meets, and of an entry a tombstone search
+reads must be spelled with ASCII letters, digits, ``.``, ``_`` and ``-``; it
+must not end in a period; and it must not present a Win32 reserved device
+basename. One screen asks all three — :func:`_assert_portable_name` — and it
+refuses with one message.
 
-A *declared* path spelled like a short name is refused outright, and what
-counts as that spelling is the grammar 8.3 generation produces: one to six
-characters from the short-name repertoire, a tilde, one to six digits, the
-stem at most eight characters in all, then at most a three-character
-extension. The repertoire there is the 8.3 punctuation, the ASCII letters
-and digits, and every non-ASCII character, because the 8.3 namespace is an
-OEM code page and ``SMUGGL~1.ÉML`` is a spelling NTFS hands out. Accepting
-a tilde-digit anywhere in any run of non-period characters was much wider,
-and it refused ``A~1B.TXT``, ``~1foo.txt`` and ``a ~1.txt`` — names no
-collision counter produces and a corpus may legitimately hold (peer
-review, Sol round 2).
+The policy is what nine rounds of review argued this module into. Each round
+found another way a name a POSIX verifier accepts is resolved differently
+somewhere else: an OEM code page decides which characters survive into an 8.3
+alias; an NTFS upcase table built from Unicode's simple uppercase mappings
+folds the dotless ı onto ``I``; HFS+ ignores default-ignorable code points
+when it compares names; Win32 reads a colon as a stream separator and a
+backslash as a path separator, and strips a trailing dot or space before a
+lookup; and a tilde-digit grammar says which names could have been generated
+as aliases. Modelling each of them was wrong twice for every time it was
+right — the model refused ordinary names a corpus may legitimately hold, or
+missed the spelling it was built for, and the correction introduced the next
+defect. A closed world cannot be closed over a name whose equivalence class
+the verifier is guessing at.
 
-Every name this module folds is screened first against a *pinned* Unicode
-repertoire, not the running interpreter's. Folding is only stable for
-characters the standard has already encoded, so text carrying an unassigned
-code point is refused — but asking the running table which those are made
-the refusal itself version-dependent, and in the direction that matters:
-U+A7CB is unassigned on Python 3.11 through 3.13 and assigned on 3.14, so
-the same bytes were refused by one supported interpreter and accepted by the
-next. The repertoire is therefore Unicode 14.0, the table the oldest
-supported interpreter ships, carried as sorted ranges in
-:mod:`receipt._unicode_repertoire`. Unicode never unassigns, so that set is
-a superset of every later table's, and the stability policies fix folding and
-normalization for everything 14.0 encoded: identical text is accepted or
-refused identically on every supported interpreter (peer review, round
-seven).
+What makes the guessing unnecessary is that no corpus needs those names.
+Every consumer this package verifies was enumerated before the policy was
+adopted — the six ``rulespec-*`` repositories and the four trees pinned under
+``receipt/.extraction`` — and not one carries a filename outside the ASCII
+letters, digits, ``.``, ``_`` and ``-``. So the module refuses the rest by
+name. Inside that repertoire :func:`_path_fold` is ASCII case-insensitivity
+and nothing else, which is a fact about the repertoire rather than a model of
+a filesystem: every insensitivity a real volume adds — case on APFS and NTFS,
+normalization and default-ignorables on HFS+ — either collapses onto it or
+cannot arise at all, because the characters it would act on are not in the
+repertoire.
 
-That screen is one function, ``_assert_foldable``, and the repertoire is
-only the first of the questions it asks. The fold key is this module's
-model of when two names are one name, and it is not a proof about the
-filesystem a consumer will resolve the tree on. Two real filesystems
-disagree with it in ways that open the closed world: HFS+ ignores
-default-ignorable code points when it compares names, so ``evil.y\u200dml``
-escapes a ``.yml`` sweep and a tombstone's fold bucket here while opening
-``evil.yml`` there; and an upcase table built from Unicode's simple
-uppercase mappings folds U+0131 DOTLESS SMALL I onto ``I``, so ``evıl.yml``
-and ``evil.yml`` are one name under it and two under ``casefold`` (peer
-review, round eight). Which table a given NTFS volume carries in
-``$UpCase`` is not something a clone reports, and the two that can be read
-disagree: Unicode 14.0 gives U+0131 the uppercase mapping U+0049, while
-ntfs-3g's reconstruction of the Windows XP through 7 tables maps it to
-itself. The dotted U+0130 is a different case and is no longer refused —
-it is already uppercase, has no simple uppercase mapping, and neither
-table maps it, so no table available to read merges it with ``i`` the way
-one merges the dotless half. What ``casefold`` does to it is a separate
-matter and points the safe way: the two-character key ``i\u0307`` merges
-it with a *sequence* those tables keep apart, which over-refuses rather
-than under-refuses and which the declared-path alias check already answers
-(peer review, Sol round 2). Neither of the two that remain is modelled,
-because the module cannot know which filesystem is coming. Both are
-refused, along with an unassigned code point and a Unicode format control,
-by one screen run everywhere a name is folded — declared paths, the spec's
-own roots and suffixes, the entry names the sweep judges, and the entry
-names the tombstone search buckets — with a distinct message for each
-class.
+A pinned content suffix is bound one step tighter, by :class:`CorpusSpec` at
+construction: a period followed by one to sixteen ASCII letters or digits. A
+suffix carrying a separator, or a second period, would make "ends in this
+suffix" a different question from "has this extension", and the 8.3
+comparison below needs the second one.
 
-One more Win32 spelling is refused by that same screen, and it is not an
-aliasing question at all. ``CON``, ``PRN``, ``AUX``, ``NUL`` and the
-``COM``/``LPT`` series name character devices in every directory, whatever
-extension follows them, so a journal and a POSIX file both spelling
-``rules/NUL.yaml`` verified here while an ordinary Win32 open of that path
-read the null device instead of the witnessed bytes (peer review, round
-eight). The list is pinned in this module with every entry attributed to
-the source it rests on — Microsoft's naming page for all but two,
-``ntdll``'s own matcher for ``CONIN$`` and ``CONOUT$`` — and matched per
-component, case-insensitively, against the basename that matcher compares:
-the text before the first period *or colon*, with trailing spaces then
-removed.
+Two Win32 facts survive the policy rather than being subsumed by it, and both
+are screens rather than models. ``CON``, ``PRN``, ``AUX``, ``NUL`` and the
+``COM``/``LPT`` series are portable spellings that Win32 resolves to a
+character device instead of to a file, so an ordinary open of
+``rules/NUL.yaml`` reads the null device rather than the bytes a journal
+bound and a digest witnessed. The table is pinned in this module with every
+entry attributed to the source it rests on — Microsoft's naming page for all
+but two, ``ntdll``'s own matcher for ``CONIN$`` and ``CONOUT$`` — and what is
+matched against it is what that matcher compares, which
+:func:`_win32_device_basename` derives. And 8.3 *generation* still hands a
+long name a second addressable spelling, so with ``.yml`` pinned a file
+emitted as ``smuggled.ymlx`` still aliases ``.YML`` and is still refused. What
+the policy removes there is the other half of that question: no name in a
+corpus can be *spelled* like an alias, because ``~`` is outside the
+repertoire, so the tilde grammar that decided which declared paths looked
+generated is gone with the modelling it needed.
 
-The same screen refuses a colon in any name it is handed, for a second
-Win32 reason with the same shape. A declared path has refused one since
-round three; an enumerated name had not, so a file emitted as
-``rules/smuggled.yaml:payload.txt`` was skipped as non-content while a
-Win32 open of it reads an alternate data stream of the bound
-``rules/smuggled.yaml`` — a producer's bytes inside the tree and outside
-the closed world (peer review, Sol round 2).
+The cost is real and is stated rather than hidden. A stray editor backup
+``notes.yaml~`` under a content root refuses the verification, and so does a
+name carrying a space, a rule file named in any script but Latin, and — since
+every entry beside a component of a pinned content root is screened too — any
+such name in the repository root. That is the trade the policy makes: every
+name a corpus carries means the same thing on every filesystem, and where it
+would not the verifier says so rather than modelling what it cannot see.
+Widening the repertoire is a change to one screen; modelling a filesystem was
+a change to five.
 
 Every trust anchor arrives from the consumer's committed :class:`CorpusSpec`.
 The module ships no defaults: not a content root, not a required gate, not an
@@ -331,12 +301,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
-from receipt._unicode_repertoire import (
-    FORMAT_CONTROL_RANGES,
-    UNICODE_VERSION,
-    is_default_ignorable,
-    is_unassigned,
-)
+from receipt._unicode_repertoire import FORMAT_CONTROL_RANGES
 
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 GATE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._/-]{0,127}\Z")
@@ -346,21 +311,29 @@ GATE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._/-]{0,127}\Z")
 #: removed rather than replaced, and which is why
 #: :func:`_short_name_extension` strips spaces before it maps anything.
 SHORT_NAME_PUNCTUATION = frozenset("$%'-_@~`!(){}^#&")
-#: Every *ASCII* character an 8.3 short name may carry, which is that
-#: punctuation plus the ASCII letters and digits. An ASCII character outside
-#: this set is one 8.3 generation removes or replaces, so a name carrying one
-#: is not a generated short name. See :func:`_short_name_character`, which is
-#: the question the recognizer actually asks, and which is wider than this
-#: set in the one direction that matters.
-SHORT_NAME_CHARACTERS = (
-    frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
-    | SHORT_NAME_PUNCTUATION
-)
-#: The most characters an 8.3 short name's stem may carry, tilde and numeric
-#: tail included. It is the ``8`` of 8.3, so it is a definition rather than a
-#: choice: Microsoft's "Naming Files, Paths, and Namespaces" calls the alias
-#: "the short MS-DOS (also called *8.3*) style naming convention".
-SHORT_NAME_STEM_LIMIT = 8
+#: Every name this module screens, as one path component. The whole of the
+#: portability model is here: ASCII letters, digits, ``.``, ``_`` and ``-``.
+#: :func:`_assert_portable_name` asks two more questions of a component that
+#: matches — that it does not end in a period, and that it does not present a
+#: Win32 device basename — and the module docstring says why the three
+#: together replaced five filesystem models.
+#:
+#: The pattern admits a leading period, because ``.axiom`` is the directory
+#: every consumer corpus keeps its attested toolchain pin in and a rule that
+#: refused it would refuse every corpus this package exists to verify. It
+#: does not admit an empty component, nor ``.`` or ``..``, both of which end
+#: in a period.
+PORTABLE_NAME_RE = re.compile(r"[A-Za-z0-9._-]+\Z")
+#: A pinned content suffix: a period and one to sixteen ASCII letters or
+#: digits, refused by :class:`CorpusSpec` at construction if it is anything
+#: else. Tighter than a portable name by exactly what the two questions asked
+#: of a suffix need. ``_has_pinned_suffix`` asks whether a path *ends in* the
+#: pin, and :func:`_short_name_carries_pinned_suffix` asks whether an alias's
+#: three-character extension *is* the pin; a suffix carrying a separator or a
+#: second period makes those two different questions, and a suffix carrying a
+#: character outside the repertoire cannot be compared against a name that is
+#: inside it. Sixteen is generous for a real one, which is three or four.
+CONTENT_SUFFIX_RE = re.compile(r"\.[A-Za-z0-9]{1,16}\Z")
 
 CONTENT_KIND = "content"
 ATTESTED_KIND = "attested"
@@ -616,53 +589,27 @@ class CorpusSpec:
         for root in self.content_roots:
             if not isinstance(root, pathlib.PurePosixPath):
                 raise CorpusError("CorpusSpec content_roots must be PurePosixPath")
-            # The spec's own two fold inputs are screened here, before the
-            # path rules, so a refusal names the committed spec that carries
-            # the fault rather than a path. A root also reaches
-            # _validate_relative_path below, which screens it again; a suffix
-            # reached nothing, which is the hole (see the suffix loop).
+            # The spec's own name input is screened here, before the path
+            # rules, so a refusal names the committed spec that carries the
+            # fault rather than a path. A root also reaches
+            # _validate_relative_path below, which screens it again.
             for component in root.as_posix().split("/"):
-                _assert_foldable(component, "CorpusSpec content root")
+                _assert_portable_name(component, "CorpusSpec content root")
             _validate_relative_path(root.as_posix(), "content root")
         if type(self.content_suffixes) is not tuple or not self.content_suffixes:
             raise CorpusError("CorpusSpec must declare at least one content suffix")
         for suffix in self.content_suffixes:
-            if type(suffix) is not str or not suffix.startswith("."):
+            # One rule, CONTENT_SUFFIX_RE, in place of four screens that grew
+            # one review round at a time: a leading dot, a foldability screen,
+            # an ASCII rule asked only of alias-capable pins, and a
+            # fold-key length test to decide which those were. What a pin has
+            # to be is a period and one to sixteen ASCII letters or digits;
+            # the constant says why each half of that is needed, and the
+            # module docstring says why the repertoire is ASCII at all.
+            if type(suffix) is not str or CONTENT_SUFFIX_RE.fullmatch(suffix) is None:
                 raise CorpusError(
-                    f"CorpusSpec content suffix must start with '.': {_quoted(suffix)}"
-                )
-            # A suffix was checked for its leading dot and nothing else, while
-            # _has_pinned_suffix folds it against every path in the tree and
-            # against every entry name the sweep sees. An unassigned code
-            # point in one folds differently under each supported table, so
-            # which files the closed world contained depended on the
-            # verifier's interpreter — the same defect _assert_foldable closes
-            # everywhere else this module folds (peer review, round four).
-            _assert_foldable(suffix, "CorpusSpec content suffix")
-            # And ASCII, because the 8.3 screen below cannot derive an alias
-            # extension for a non-ASCII one: which characters survive into a
-            # short name is the volume's OEM code page's decision, and an
-            # auditor's clone does not report it. A pin the screen cannot
-            # judge against would leave the sweep unable to answer the
-            # question the pin exists to ask (peer review, round eight).
-            #
-            # Asked of alias-capable pins only, for the reason
-            # _short_name_carries_pinned_suffix gives: an extension of more
-            # than three characters is carried by no alias, so ".éyaml" asks
-            # the screen nothing and refusing it refused a legal
-            # configuration over a question that is never put (peer review,
-            # Sol round 2). ".éml" is still refused, because that one is a
-            # pin an alias could carry and the derivation cannot be made —
-            # and so is its NFD spelling, because _alias_capable_suffix
-            # measures the fold key that every comparison here uses rather
-            # than the written pin.
-            if _alias_capable_suffix(suffix) and any(
-                ord(character) > 0x7F for character in suffix
-            ):
-                raise CorpusError(
-                    "CorpusSpec content suffix must be ASCII, because an 8.3 "
-                    "alias extension cannot be derived against a non-ASCII "
-                    f"one: {_quoted(suffix)}"
+                    "CorpusSpec content suffix must be '.' followed by one to "
+                    f"sixteen ASCII letters or digits: {_quoted(suffix)}"
                 )
         if type(self.required_attested_paths) is not frozenset:
             raise CorpusError("CorpusSpec required_attested_paths must be a frozenset")
@@ -803,7 +750,14 @@ def _is_format_control(code: int, category: str) -> bool:
 def _reject_control_characters(value: str, label: str) -> str:
     """Refuse control, format, and line-separator code points in producer text.
 
-    Every string in this schema is written by a producer and later rendered to
+    Asked of gate evidence — the keys and the values — and of nothing else.
+    It used to screen declared paths as well, and does not now: a path is a
+    name, so :func:`_assert_portable_name` decides what it may carry, and
+    every class refused here is outside the portable repertoire. Evidence is
+    not a name and cannot be constrained that way; it is prose a producer
+    writes for a reader.
+
+    Every string this sees is written by a producer and later rendered to
     a terminal. A carriage return, an ESC, or a line feed inside one lets the
     producer redraw the verdict: a witnessed "reason" carrying
     ``\\x1b[2K\\r  VERDICT: PASS`` overwrites the line that was about to say the
@@ -824,15 +778,16 @@ def _reject_control_characters(value: str, label: str) -> str:
       evidence string into as many verdict lines as the producer wants in any
       renderer that honours them.
     - Every code point in category Cs, a lone surrogate. JSON spells one as
-      ``\\ud800`` inside otherwise valid UTF-8, so it survives the decode; no
-      filesystem call accepts it (``os.lstat`` raises ``UnicodeEncodeError``,
-      a ``ValueError`` no ``OSError`` handler sees); and no legitimate path or
-      reason carries one.
+      ``\\ud800`` inside otherwise valid UTF-8, so it survives the decode, and
+      no legitimate reason carries one. The other half of why it was refused
+      belonged to paths — ``os.lstat`` raises ``UnicodeEncodeError`` on one,
+      a ``ValueError`` no ``OSError`` handler sees — and that half is the
+      portable-name screen's now.
 
     Taking the Cf class whole has a cost, accepted deliberately: U+200C and
     U+200D are required spelling in Persian, Hindi and Sinhala, and U+061C
-    appears in ordinary Arabic text, so a rule file named in those scripts,
-    or a not-run reason written in them, refuses here. The verdict quotes
+    appears in ordinary Arabic text, so a not-run reason written in them
+    refuses here. The verdict quotes
     these strings to a reader, and a reader cannot tell apart two spellings
     that differ only in an invisible code point; a narrower list would have
     to be maintained against exactly that threat. Refusing is the fail-closed
@@ -908,47 +863,6 @@ def _reject_oversized_text(value: str, label: str) -> str:
             f"{label} is longer than {MAX_EVIDENCE_TEXT} characters: "
             f"{len(value)} characters"
         )
-    return value
-
-
-def _assert_assigned(value: str, label: str) -> str:
-    """Refuse text carrying a code point outside the pinned Unicode repertoire.
-
-    The fold key (see :func:`_path_fold`) is only stable across Unicode tables
-    for assigned characters: the standard's stability policies fix case
-    folding and normalization once a character is encoded, and say nothing
-    before. An unassigned code point folded one way on Unicode 15 and another
-    on 16 (U+10D50, peer review), so text carrying one could alias under one
-    interpreter and not another.
-
-    Declared paths were screened here from the start. Filesystem entry names
-    were not, and they are folded by the sweep, by the suffix predicate, and
-    by the tombstone search — U+A7CB folds to U+0264 on Unicode 16 and to
-    itself before it, so which files a closed-world sweep considers the same
-    file depended on the verifier's interpreter (peer review, round three).
-    Every name this module folds passes through here first.
-
-    Which table decides that is now pinned rather than inherited. Asking the
-    *running* interpreter left the screen with the defect it exists to close,
-    facing the other way: U+A7CB is ``Cn`` on 3.11 through 3.13 and assigned
-    on 3.14, so the same bytes were refused by one supported interpreter and
-    accepted by the next, and the acceptance the screen promises to make
-    stable was itself version-dependent (peer review, round seven). The
-    repertoire is Unicode 14.0, the table the oldest supported interpreter
-    ships; :mod:`receipt._unicode_repertoire` carries it and says why that
-    direction is the safe one — Unicode never unassigns, so the pinned set is
-    a superset of every later table's, and the stability policies fix folding
-    and normalization for everything 14.0 assigned. Identical text is
-    therefore accepted or refused identically from 3.11 onward.
-    """
-
-    for character in value:
-        code = ord(character)
-        if is_unassigned(code):
-            raise CorpusError(
-                f"{label} contains a code point outside the pinned Unicode "
-                f"{UNICODE_VERSION} repertoire ({code:#06x}): {_quoted(value)}"
-            )
     return value
 
 
@@ -1029,18 +943,21 @@ def _win32_device_basename(component: str) -> str:
     ``NUL .yaml``, ``nul  ....``, ``NUL:stream`` and a bare ``nul`` all
     present ``NUL`` to the table.
 
-    Taking the text before the first period and nothing else was not enough,
-    and the module already held both halves of the rule without composing
-    them: :func:`_strips_to_another_name` exists because Win32 strips
-    trailing spaces, but it only fires when the space is at the end of the
-    *component*, and ``NUL .yaml`` ends in ``l``. One space was therefore
-    enough to walk a bound path past the device screen (peer review, round
-    eight). The composition here is ``ntdll``'s ``RtlIsDosDeviceName_U``,
-    which truncates at ``.`` or ``:`` and then removes trailing spaces
-    before it matches.
+    Taking the text before the first period and nothing else was not enough:
+    ``NUL .yaml`` ends in ``l``, so nothing about a trailing space fired, and
+    one space was enough to walk a bound path past the device screen (peer
+    review, round eight). The composition here is ``ntdll``'s
+    ``RtlIsDosDeviceName_U``, which truncates at ``.`` or ``:`` and then
+    removes trailing spaces before it matches.
 
     Leading spaces are *not* removed, because that matcher does not remove
     them: `` NUL.yaml`` is an ordinary name on Win32 and is one here.
+
+    Both of the characters this composes over — the space and the colon — are
+    outside the portable repertoire, so the only names that reach the table
+    through :func:`_assert_portable_name` are the plain ones. The two rules
+    stay because what they encode is the matcher's, not the repertoire's, and
+    because a caller may reasonably ask this question of an unscreened name.
     """
 
     head = component
@@ -1051,199 +968,82 @@ def _win32_device_basename(component: str) -> str:
     return _ascii_upper(head.rstrip(" "))
 
 
-#: The Turkic dotless small i. Unicode gives it the simple uppercase mapping
-#: U+0049 — ``0131;LATIN SMALL LETTER DOTLESS I;Ll;0;L;;;;;N;;;0049;;0049``
-#: in Unicode 14.0's ``UnicodeData.txt`` — so an upcase table built from
-#: those mappings folds ``evıl.yml`` and ``evil.yml`` together, while
-#: ``str.casefold`` and this module's fold key keep them apart. Refused by
-#: :func:`_assert_foldable` rather than modelled, for the reason stated
-#: there.
-#:
-#: Its dotted counterpart U+0130 was here and is not any more. It is already
-#: uppercase, it has *no* simple uppercase mapping —
-#: ``0130;LATIN CAPITAL LETTER I WITH DOT ABOVE;Lu;0;L;0049 0307;;;;N;LATIN
-#: CAPITAL LETTER I DOT;;;0069;``, an empty field 12 — and no upcase table
-#: this module could read maps it onto ``I``. It was refused on the premise
-#: that NTFS folds it there, which the sources do not support (peer review,
-#: Sol round 2). What ``casefold`` does to it — the two-character key
-#: ``i\u0307`` — merges it with a sequence a real table keeps apart, which
-#: is over-refusal rather than under-refusal, and
-#: :func:`_reject_aliasing_paths` already answers that.
-TURKIC_DOTLESS_I = "\u0131"
+def _assert_portable_name(value: str, label: str) -> str:
+    """Refuse a name outside the repertoire every filesystem agrees about.
 
+    One screen, run everywhere this module takes a name: declared paths, the
+    spec's own content roots, the tree entry names the closed-world sweep
+    judges, the entry names beside a pinned root's components, and the entry
+    names a tombstone search reads out of a listing. What it asks is not "is
+    this name legal" but "does this module know what this name means on the
+    filesystem a consumer will resolve the tree on".
 
-def _assert_foldable(value: str, label: str) -> str:
-    """Refuse a name whose equivalence class this module cannot compute.
+    Three questions, one refusal, one message. The component must be spelled
+    with ASCII letters, digits, ``.``, ``_`` and ``-``
+    (:data:`PORTABLE_NAME_RE`); it must not end in a period, which Win32
+    strips before a lookup, so that the entry carrying one is the entry
+    beside it; and its Win32 device basename must not be in
+    :data:`WIN32_RESERVED_DEVICE_NAMES`, because ``rules/NUL.yaml`` opens the
+    null device there rather than the bytes a journal bound. The three are
+    asked over the whole value before it is quoted back, so which of them a
+    name fails is a property of the name and not of where in it the offending
+    character sits.
 
-    One screen, run everywhere this module folds a name: declared paths, the
-    spec's own roots and suffixes, the tree entry names the closed-world
-    sweep judges, and the entry names the tombstone search buckets. What it
-    asks is not "is this name legal" but "does :func:`_path_fold` decide the
-    same question a real filesystem will decide". Where the answer is no, the
-    name is refused.
+    The module docstring says why this replaced the modelling that used to
+    live here — a pinned Unicode repertoire, a default-ignorable table, the
+    Turkic dotless i, a colon, a backslash, a trailing space, and an 8.3
+    tilde grammar, each of them a guess at a filesystem this module cannot
+    identify. The short version is that every corpus this package verifies
+    was already inside the portable repertoire, so refusing the rest costs
+    nothing that a real corpus carries and removes five models that were
+    wrong more often than they were right.
 
-    Refusal is the honest answer here because the alternative is to model a
-    filesystem this module cannot identify. A verifier runs on the auditor's
-    clone; the tree may be resolved later on APFS, HFS+, ext4, NTFS or
-    something else, and each has its own idea of when two names are one
-    name. The fold key is one such idea — NFC plus case folding — and it is
-    the one every other check in this module is built on. A name whose
-    equivalence class differs between that key and a real filesystem is a
-    name the closed world cannot be closed over: the sweep and the tombstone
-    search would put it in one bucket and the filesystem in another, so
-    "these are exactly the files" would be false on the host that matters
-    without being false on the host that checked (peer review, round eight).
+    What that buys is stated as an equality rather than as a hope: inside the
+    repertoire :func:`_path_fold` is ASCII case-insensitivity, and ASCII case
+    is the one insensitivity every filesystem in question actually has. There
+    is no second equivalence class left to model.
 
-    Six refusals, each with its own message, each checked over the whole
-    string before the next one is asked — so which class a name is refused
-    under is a property of the name and not of where in it the offending
-    character sits. The first four are about single code points:
-
-    - a code point outside the pinned Unicode 14.0 repertoire, which is
-      :func:`_assert_assigned` and the oldest of the four;
-    - a Unicode format control. This is the ``Cf`` screen
-      :func:`_reject_control_characters` has always applied to *producer*
-      text, now applied to filesystem names as well. Asked before the
-      default-ignorable question although the two sets overlap heavily,
-      because a format control is refused for two independent reasons — it
-      changes what a reader sees and it may be ignored by a name comparison
-      — and this is the message a declared path carrying one already gets,
-      so U+200D reads the same wherever it turns up;
-    - a default-ignorable code point. HFS+ ignores these when it compares
-      names, so ``evil.y\u200dml`` and ``evil.yml`` are one file there: the
-      first escapes a ``.yml`` sweep and a tombstone's fold bucket here
-      while opening the second one there. The table is Unicode 14.0's, in
-      :mod:`receipt._unicode_repertoire`;
-    - U+0131, the Turkic dotless small i. Unicode gives it the simple
-      uppercase mapping U+0049, so an upcase table built from those
-      mappings — which is what ``str.upper`` implements, and what an NTFS
-      volume's ``$UpCase`` may carry — folds ``evıl.yml`` and
-      ``evil.yml`` together, while ``casefold`` and this fold key keep them
-      apart. That is the unsafe direction: two names this module calls
-      distinct are one file there. Refusing it is the only answer that does
-      not require choosing whose case-folding this module implements,
-      because adopting the mapping would break every POSIX host that holds
-      the two names apart. Its dotted counterpart U+0130 is *not* refused:
-      it is already uppercase, has no simple uppercase mapping at all, and
-      no readable upcase table maps it onto ``I``, so the premise it was
-      refused on was wrong (peer review, Sol round 2).
-
-    The fifth is about a whole component rather than a character in one: a
-    Win32 reserved device name. ``CON``, ``PRN``, ``AUX``, ``NUL``, the
-    ``COM`` and ``LPT`` series and their superscript spellings resolve to a
-    character device in every directory and whatever extension follows
-    them, so an ordinary Win32 open of ``rules/NUL.yaml`` reads the null
-    device rather than the bytes a journal bound and a digest witnessed
-    (peer review, round eight). This is not an aliasing question — the name
-    does not resolve to some *other* file — but it has the same shape and
-    the same answer: the spelling means one thing to this verifier and
-    another to the host that will use it. What is matched against
-    :data:`WIN32_RESERVED_DEVICE_NAMES` is what Win32's own matcher
-    compares, which :func:`_win32_device_basename` derives — the text
-    before the first period or colon, with trailing spaces then removed —
-    because taking the text before the first period alone let ``NUL .yaml``
-    through.
-
-    The sixth is a colon, and it is the same kind of fact: Win32 reads one
-    as a stream or a drive separator rather than as a character in a name.
-    A declared path has refused a colon since round three, and an
-    *enumerated* name did not, so ``rules/smuggled.yaml:payload.txt`` passed
-    every screen and was skipped as non-content — while a Win32 open of it
-    reads an alternate data stream of ``rules/smuggled.yaml``, a bound file,
-    and a producer's bytes ride into the tree beside witnessed ones without
-    appearing anywhere in the closed world (peer review, Sol round 2). It is
-    asked last so that a device name carrying a colon keeps the more
-    specific message, since Win32's matcher truncates at the colon and
-    resolves ``CON:stream.yml`` to the console.
-
-    ``value`` may be a whole relative path or a single component; every
-    message quotes it whole through :func:`_quoted`, so a refusal names what
-    was screened. The component split is over ``/``, so a value that is
-    already one component is screened as one.
+    ``value`` may be a whole relative path or a single component; the split
+    is over ``/``, so a value that is already one component is screened as
+    one, and every message quotes the value whole through :func:`_quoted`.
     """
 
-    _assert_assigned(value, label)
-    for character in value:
-        code = ord(character)
-        if _is_format_control(code, unicodedata.category(character)):
-            raise CorpusError(
-                f"{label} contains a Unicode format control "
-                f"({code:#04x}): {_quoted(value)}"
-            )
-    for character in value:
-        if is_default_ignorable(ord(character)):
-            raise CorpusError(
-                f"{label} contains a code point a target filesystem may ignore "
-                f"when comparing names ({ord(character):#06x}): {_quoted(value)}"
-            )
-    for character in value:
-        if character == TURKIC_DOTLESS_I:
-            raise CorpusError(
-                f"{label} contains the Turkic dotless i "
-                f"({ord(character):#06x}), which an upcase table built from "
-                "Unicode's simple uppercase mappings folds onto I while this "
-                f"fold key keeps it distinct: {_quoted(value)}"
-            )
     for component in value.split("/"):
-        # The basename is what Win32's own matcher compares, which is not
-        # simply the text before the first period; _win32_device_basename
-        # composes both of its rules.
-        if _win32_device_basename(component) in WIN32_RESERVED_DEVICE_NAMES:
+        if (
+            PORTABLE_NAME_RE.fullmatch(component) is None
+            or component.endswith(".")
+            or _win32_device_basename(component) in WIN32_RESERVED_DEVICE_NAMES
+        ):
             raise CorpusError(
-                f"{label} carries a Win32 reserved device name in a "
-                f"component: {_quoted(value)}"
+                f"{label} is not a portable name (ASCII letters, digits, "
+                "'.', '_' and '-', not ending in '.', not a Win32 device "
+                f"name): {_quoted(value)}"
             )
-    # Last of the six, so that a device name carrying a colon keeps the more
-    # specific message: _win32_device_basename truncates at the colon, so
-    # "CON:stream.yml" is the console before it is a stream.
-    if ":" in value:
-        raise CorpusError(
-            f"{label} contains a colon, which Win32 reads as a stream or "
-            f"drive separator: {_quoted(value)}"
-        )
     return value
-
-
-def _strips_to_another_name(segment: str) -> bool:
-    """Whether Win32 lookup strips this component down to a different name.
-
-    Trailing dots and spaces are removed from a component before the lookup,
-    so ``"x.yaml."`` and ``"x.yaml "`` open ``"x.yaml"``. No directory listing
-    emits the stripped spelling alongside the written one, and the two are not
-    fold-equal, so nothing built on fold keys can pair them.
-
-    Asked of *declared* paths by :func:`_aliases_natively` and of *tree entry
-    names* by the sweep, which is the half that was missing: the declared side
-    was screened from round three while the filesystem names that decide
-    closed-world membership were not (peer review, round six).
-    """
-
-    return segment != segment.rstrip(". ")
 
 
 def _alias_capable_suffix(suffix: str) -> bool:
     """Whether an 8.3 alias extension could ever be this pinned suffix.
 
     An alias extension is one to three characters, so a carryable pin is a
-    dot and one to three characters — a folded length of two to four. Both
-    ends matter. A pin longer than that can be the extension of no alias; a
-    bare ``"."``, which the schema accepts, can be the extension of no alias
-    either, because a derived extension is never empty, and counting it
-    capable made ``notes.é`` raise the OEM refusal for a configuration whose
-    answer is False on every code page — the exact over-refusal S5R2-F5 set
-    out to remove.
+    period and one to three more, which is a length of two to four. A pin
+    longer than that is the extension of no alias, and comparing the first
+    three characters of one refused an ordinary ``notes.yam`` under a
+    ``.yaml`` configuration although no alias can end ``.yaml`` (peer review,
+    round eight).
 
-    What is measured is the *fold key*, not the written pin, because the
-    fold key is what every comparison in this module uses: the NFD spelling
-    of ``.éml`` is five characters written and four folded, so a raw-length
-    test called it incapable, skipped the ASCII rule that would have refused
-    it at construction, and then skipped the alias comparison too — leaving
-    ``smuggled.émlx`` non-content here while its alias ends ``.ÉML`` on a
-    code page 850 volume and folds onto that very pin (adversarial review of
-    the Sol round 2 fix).
+    The written length is the measurement, and under the portable-name policy
+    that is not a shortcut: :data:`CONTENT_SUFFIX_RE` admits only ASCII
+    letters and digits after the period, and NFC plus case folding changes
+    neither the length nor the character count of ASCII. Measuring the fold
+    key instead was necessary while a pin could be an NFD spelling of
+    something non-ASCII, which is a state the schema no longer admits.
+
+    The low end is a statement rather than a guard: the shortest pin the
+    schema admits is two characters, so nothing reaching here is shorter.
     """
 
-    return 2 <= len(_path_fold(suffix)) <= 4
+    return 2 <= len(suffix) <= 4
 
 
 def _short_name_extension(name: str) -> str | None:
@@ -1256,7 +1056,10 @@ def _short_name_extension(name: str) -> str | None:
       it truncates, so ``"smuggled.y mlx"`` yields ``YML`` and not ``Y M``
       (peer review, round seven: truncating the raw extension read the space
       as a character and the helper answered false for a name whose alias
-      really would carry the pinned suffix);
+      really would carry the pinned suffix). No name the sweep hands this
+      function can carry a space any more — the portable repertoire holds
+      none — so this rule is unreachable from there and is kept because it
+      is Win32's rule and because the function is asked directly;
     - leading periods are then removed, so ``".yml"`` has no extension here
       at all, exactly as it has none in the short name Win32 hands out;
     - what follows the last remaining period is the extension. If no period
@@ -1269,28 +1072,15 @@ def _short_name_extension(name: str) -> str | None:
       becomes an underscore, which is what Win32 substitutes for a character
       the 8.3 namespace cannot hold.
 
-    A *non-ASCII* character among those three is not mapped at all: the name
-    is refused. Mapping it to an underscore was wrong in the direction that
-    matters. The 8.3 namespace is an OEM code page, not ASCII, so a
-    character the volume's code page can represent survives into the short
-    name and is uppercased there — with ``.éml`` pinned, ``smuggled.émlx``
-    is handed an alias ending ``.ÉML`` on a code page 850 volume, and the
-    underscore model answered ``._ML`` and let the file be skipped as
-    non-content (peer review, round eight). Which code page a volume uses is
-    not something an auditor's clone reports, and guessing wrong in either
-    direction is a wrong answer about closed-world membership, so the
-    verifier says it cannot derive the alias rather than deriving one it
-    cannot stand behind. That refusal is why an alias-capable pinned content
-    suffix must be ASCII: :class:`CorpusSpec` refuses a non-ASCII one at
-    construction, so a corpus cannot be configured into a state where no
-    name can be judged.
-
-    "Among those three" is the whole of the uncertainty and the whole of the
-    refusal. The truncation happens before the question is asked, because a
-    character past the third cannot reach the derived extension and no code
-    page decides anything about it: ``x.ymlé`` yields ``YML`` on every
-    volume there is, and refusing it as underivable refused an ordinary name
-    over a question nobody had put (peer review, Sol round 2).
+    A *non-ASCII* character cannot reach any of that, because every name
+    this is asked about has already passed :func:`_assert_portable_name`.
+    That is the whole of what the portable-name policy does for this
+    function, and it is a great deal: the 8.3 namespace is an OEM code page
+    rather than ASCII, so which non-ASCII characters survive into an alias is
+    the volume's decision and not this verifier's, and two review rounds went
+    on bounding a derivation over characters no clone reports. With the names
+    ASCII the derivation is exact rather than bounded, and the refusal it
+    used to raise — "cannot be derived" — is gone with the question.
 
     What is modelled is the extension and nothing else. The *stem* is not:
     it depends on collisions with names this verifier cannot see, so the
@@ -1305,19 +1095,9 @@ def _short_name_extension(name: str) -> str | None:
     _, dot, extension = stripped.rpartition(".")
     if not dot:
         return None
-    # Truncation comes first, because the uncertainty this function refuses
-    # over is only about characters that reach the alias. An 8.3 extension is
-    # three characters, so the fourth and later characters of the extension
-    # source are dropped whatever they are: refusing ``x.ymlé`` because of a
-    # code page that cannot decide anything about ``YML`` was a refusal with
-    # no question behind it (peer review, Sol round 2).
+    # An 8.3 extension is three characters; the fourth and later characters
+    # of the extension source are dropped whatever they are.
     source = extension[:3]
-    if any(ord(character) > 0x7F for character in source):
-        raise CorpusError(
-            "8.3 alias extension cannot be derived for a name whose extension "
-            "carries non-ASCII characters (the volume's OEM code page decides "
-            f"it): {_quoted(name)}"
-        )
     return (
         "".join(
             character.upper()
@@ -1352,8 +1132,7 @@ def _short_name_carries_pinned_suffix(name: str, suffixes: tuple[str, ...]) -> b
     An 8.3 extension is at most three characters, so a pin whose own
     extension is longer than three cannot be the extension of any alias, and
     such a pin is ignored here entirely; :func:`_alias_capable_suffix`
-    decides that on the fold key rather than on the written pin, for the
-    reason given there. Truncating the pin instead and
+    decides that. Truncating the pin instead and
     comparing the first three characters was unsound the other way: with
     ``.yaml`` pinned, an ordinary ``notes.yam`` was refused as though its
     alias carried the pin, although no alias of anything can end ``.yaml``
@@ -1361,29 +1140,15 @@ def _short_name_carries_pinned_suffix(name: str, suffixes: tuple[str, ...]) -> b
     left is an exact comparison between the derived alias extension and a
     pin short enough to be one.
 
-    The pins are filtered *before* the name is touched, and the order is
-    load-bearing rather than tidy. Deriving first meant a name was refused
-    as underivable for a configuration that had no alias-capable pin at all:
-    with only ``.yaml`` pinned, ``notes.é`` raised the OEM refusal although
-    the answer this function would have given is False whatever the code
-    page decides (peer review, Sol round 2). Where no pin can be carried by
-    an alias, there is no question, and no name is asked one.
+    The pins are filtered before the name is touched, which costs nothing
+    and keeps the two halves in the order they belong: where no pin can be
+    carried by an alias there is no question, and no name is asked one.
 
     Compared through :func:`_path_fold`, the key by which membership is
     decided everywhere else in this module, so ``.YML`` and ``.yml`` are one
     suffix here exactly as they are there.
-
-    A name whose alias extension cannot be derived does not reach the
-    comparison: :func:`_short_name_extension` refuses it, and that refusal
-    surfaces where the sweep meets the entry.
     """
 
-    # The pins are filtered before the name is touched, which is the order
-    # the two halves have to run in. An 8.3 extension is at most three
-    # characters, so a pin longer than that can be carried by no alias and
-    # asks nothing of this name; deriving first meant a configuration with
-    # only such pins still refused ``notes.é`` as underivable, over a
-    # question no pin could have asked (peer review, Sol round 2).
     capable = [suffix for suffix in suffixes if _alias_capable_suffix(suffix)]
     if not capable:
         return False
@@ -1396,108 +1161,25 @@ def _short_name_carries_pinned_suffix(name: str, suffixes: tuple[str, ...]) -> b
     return any(_path_fold(alias) == _path_fold(suffix) for suffix in capable)
 
 
-def _short_name_character(character: str) -> bool:
-    """Whether 8.3 generation could emit this character into a short name.
-
-    The ASCII half is :data:`SHORT_NAME_CHARACTERS`: the letters, the digits
-    and the punctuation 8.3 keeps. Everything else in ASCII is removed (a
-    space) or replaced by an underscore, so a name carrying one is not a
-    name generation produced.
-
-    Every *non-ASCII* character is allowed, and that is not laxity. The 8.3
-    namespace is an OEM code page rather than ASCII — the premise
-    :func:`_short_name_extension` refuses on from the other side — so a
-    character the volume's code page can represent survives into the short
-    name and is uppercased there. ``SMUGGL~1.ÉML`` is a spelling NTFS really
-    hands out, and an ASCII-only repertoire accepted it as an ordinary
-    declared path (adversarial review of the Sol round 2 fix).
-    """
-
-    return character in SHORT_NAME_CHARACTERS or ord(character) > 0x7F
-
-
-def _is_short_name(segment: str) -> bool:
-    """Whether this component is shaped like a name 8.3 generation hands out.
-
-    The grammar is what generation produces, not everything that resembles
-    it: one to six characters from the short-name repertoire, a tilde, one
-    to six digits, the whole stem at most eight characters, then optionally
-    a period and one to three more repertoire characters.
-
-    Accepting a tilde-digit *anywhere* inside any run of non-period
-    characters was much wider than that, and it refused ordinary names for
-    no benefit: ``A~1B.TXT`` has a tilde-digit but no numeric tail, so no
-    collision counter produced it; ``~1foo.txt`` has nothing before the
-    tilde to have been shortened; ``a ~1.txt`` carries a space, which
-    generation replaces with an underscore rather than emitting (peer
-    review, Sol round 2). Each was a declared path a real corpus may hold
-    and this module refused outright.
-
-    The tail is taken from the *last* tilde, because the collision counter
-    is a suffix and the shortened prefix may itself contain one:
-    ``A~1FOO~1.TXT`` is what generation gives a long name beginning
-    ``A~1foo``, and splitting at the first tilde would not recognise it.
-    """
-
-    stem, dot, extension = segment.partition(".")
-    if dot:
-        if not 1 <= len(extension) <= 3:
-            return False
-        if any(not _short_name_character(character) for character in extension):
-            return False
-    if not 1 <= len(stem) <= SHORT_NAME_STEM_LIMIT:
-        return False
-    prefix, tilde, digits = stem.rpartition("~")
-    if not tilde:
-        return False
-    if not 1 <= len(prefix) <= 6:
-        return False
-    if any(not _short_name_character(character) for character in prefix):
-        return False
-    if not 1 <= len(digits) <= 6:
-        return False
-    return all("0" <= character <= "9" for character in digits)
-
-
-def _aliases_natively(segment: str) -> bool:
-    """Whether Win32 resolves this component under a spelling nothing emits.
-
-    Two shapes, both of which open a file the fold model would call a
-    different name. Win32 strips trailing dots and spaces from a component
-    before the lookup, so ``"x.yaml."`` and ``"x.yaml "`` open ``"x.yaml"``;
-    and an NTFS volume with 8.3 generation on hands out a short name such as
-    ``"RULESF~1.YAM"`` that opens the long name's file. Neither spelling is
-    ever emitted by a directory listing, so no fold key can catch it.
-
-    Which components count as the second shape is :func:`_is_short_name`,
-    and it is the grammar generation produces rather than everything that
-    resembles it — ``A~1B.TXT``, ``~1foo.txt`` and ``a ~1.txt`` are
-    ordinary names no collision counter could have produced, and refusing
-    them cost a corpus paths it may legitimately hold (peer review, Sol
-    round 2).
-
-    This is the *declared* side. A path a journal names is refused outright
-    if it is spelled either way. What a tree entry may be named is a separate
-    question, answered by :func:`_strips_to_another_name` and
-    :func:`_short_name_carries_pinned_suffix` where the sweep meets it: a
-    file really named ``RULESF~1.YAM`` on a POSIX host is an ordinary file,
-    not an alias of anything, so the tilde shape is not refused there.
-
-    A third Win32 spelling is *not* here, deliberately: a reserved device
-    basename such as ``NUL`` or ``COM1``. It belongs to the same family —
-    a name Win32 resolves to something other than the bytes on disk — but
-    it is not an alias of another entry, and the question has to be asked
-    of tree entries and tombstone survivors as well as of declared paths.
-    :func:`_assert_foldable` asks it once, for all of them.
-    """
-
-    if _strips_to_another_name(segment):
-        return True
-    return _is_short_name(segment)
-
-
 def _validate_relative_path(value: Any, label: str) -> str:
-    """Reject anything that could escape the root or alias another entry."""
+    """Reject anything that could escape the root or mean two things at once.
+
+    Four shape rules and then the name screen. The shape rules are about the
+    path — it must be a bounded non-empty string, relative, with no empty
+    and no ``.``/``..`` segment — and they run first so that a path with one
+    of those faults is told what is wrong with it as a path.
+
+    :func:`_assert_portable_name` is the rest, and it is now the whole of the
+    rest. It subsumes four screens this function used to carry separately: a
+    backslash (not in the repertoire), a colon (not in the repertoire, which
+    is what kept ``C:/x`` from joining drive-absolute under ``pathlib``), the
+    control, format-control, surrogate and line-separator classes
+    :func:`_reject_control_characters` refuses in producer text (none of them
+    in the repertoire), and the two Win32 alias shapes — a trailing dot or
+    space, and the 8.3 tilde grammar — which the repertoire and the
+    trailing-period rule between them make unspellable. One screen and one
+    message in place of five, and the module docstring says why.
+    """
 
     if type(value) is not str or not value:
         raise CorpusError(f"{label} must be a non-empty string")
@@ -1506,44 +1188,16 @@ def _validate_relative_path(value: Any, label: str) -> str:
         raise CorpusError(
             f"{label} is longer than {MAX_PATH_TEXT} characters ({len(value)})"
         )
-    if "\\" in value:
-        raise CorpusError(f"{label} must use POSIX separators: {_quoted(value)}")
     if value.startswith("/") or value.endswith("/"):
         raise CorpusError(
             f"{label} must be relative with no trailing slash: {_quoted(value)}"
         )
-    segments = value.split("/")
-    for segment in segments:
+    for segment in value.split("/"):
         if not segment:
             raise CorpusError(f"{label} has an empty path segment: {_quoted(value)}")
         if segment in (".", ".."):
             raise CorpusError(f"{label} contains a relative segment: {_quoted(value)}")
-        if _aliases_natively(segment):
-            # Two spellings Win32 resolves that no enumeration emits, so the
-            # fold model cannot see them and a tombstone or a closed-world
-            # sweep would call the file absent while it still opens (peer
-            # review, round three). "rules.yaml." and "rules.yaml " are the
-            # same file as "rules.yaml" — the lookup strips trailing dots and
-            # spaces — and "RULESF~1.YAM" is the 8.3 short name NTFS hands
-            # out for a long one. A declared path spelled either way aliases
-            # a path this module cannot enumerate, so it is refused rather
-            # than modelled.
-            raise CorpusError(
-                f"{label} has a component Windows would alias: {_quoted(value)}"
-            )
-    _reject_control_characters(value, label)
-    if ":" in value:
-        # On Windows, "C:/x" survives every relative-path check above yet
-        # joins drive-absolute under pathlib, letting a row reference a file
-        # outside the root. No path in this schema legitimately contains a
-        # colon; refuse rather than special-case the platform.
-        #
-        # Asked here rather than after the screen below, which now refuses a
-        # colon in every name it sees. Both say the same thing; a declared
-        # path keeps the words the schema has used since round three, and
-        # the screen's own message is what an enumerated name gets.
-        raise CorpusError(f"{label} contains ':': {_quoted(value)}")
-    _assert_foldable(value, label)
+    _assert_portable_name(value, label)
     return value
 
 
@@ -2183,25 +1837,18 @@ class _TombstoneIndex:
         # directory: the order a bucket is tried in does not depend on which
         # tombstone is asking, only which spelling comes first does.
         for name in sorted(names):
-            # Screened before it is folded, for the reason _assert_foldable
-            # gives: a name whose equivalence class the fold key gets wrong
-            # lands in one bucket here and another on the filesystem that
-            # resolves it, which decides whether a tombstone is honoured.
-            _assert_foldable(name, "tree entry examined for a tombstone")
-            # And the other spelling no fold key can pair, asked here rather
-            # than only under a content root. Win32 strips a trailing dot or
-            # space before a lookup, so a surviving "retired/gone." *is* the
-            # tombstoned "retired/gone" there — while the exact lstat misses
-            # it on POSIX and its fold key differs, so both questions this
-            # pass asks answered "absent" and the verdict named the path
-            # removed with the file still openable. No host catches it in
-            # passing either: the verifier refuses to run on Windows (peer
-            # review, Sol round 2). Every listing screens the same way now.
-            if _strips_to_another_name(name):
-                raise CorpusError(
-                    "tree entry Windows would alias by stripping a trailing "
-                    f"dot or space: {_quoted(name)}"
-                )
+            # Screened before it is folded, for the reason
+            # _assert_portable_name gives: a name outside the portable
+            # repertoire lands in one bucket here and another on the
+            # filesystem that resolves it, which decides whether a tombstone
+            # is honoured. The trailing-period half of that screen is what
+            # answers the spelling no fold key can pair — a surviving
+            # "retired/gone." *is* the tombstoned "retired/gone" on Win32,
+            # while the exact lstat misses it on POSIX and its fold key
+            # differs, so both questions this pass asks used to answer
+            # "absent" with the file still openable (peer review, Sol
+            # round 2).
+            _assert_portable_name(name, "tree entry examined for a tombstone")
             folded.setdefault(_path_fold(name), []).append(directory / name)
         if self._cache:
             self._directories[key] = folded
@@ -2227,9 +1874,10 @@ def _fold_survivor(index: _TombstoneIndex, relative: str) -> str | None:
     emits — Win32 strips trailing dots and spaces before a lookup, and NTFS
     answers to 8.3 short names. Those are handled outside this function, from
     three sides. A *declared* path spelled that way is refused at the schema
-    boundary by :func:`_aliases_natively`, so no tombstone names one. A *tree
-    entry* that answers to the tombstoned spelling on the running host is
-    caught by the native ``os.lstat`` of the exact path in
+    boundary by :func:`_assert_portable_name`, which admits neither a
+    trailing period nor a tilde, so no tombstone names one. A *tree entry*
+    that answers to the tombstoned spelling on the running host is caught by
+    the native ``os.lstat`` of the exact path in
     :func:`verify_corpus_binding`, which runs before this search and lets the
     host that is actually running decide what its own lookup resolves. And a
     tree entry that would answer to it on a host that is *not* running is
@@ -2372,18 +2020,24 @@ def _path_fold(relative: str) -> str:
     case together. Two distinct declared paths sharing a fold key would alias on
     some real filesystem, so the fold key is what closed-world uniqueness is
     checked over.
+
+    Over the portable repertoire this is exactly ASCII case-insensitivity:
+    NFC is the identity on ASCII, ``casefold`` lowercases the letters and
+    leaves the digits, ``.``, ``_`` and ``-`` alone, and the second NFC has
+    nothing to compose. It is written as the general fold rather than as
+    ``str.lower`` because it is also asked of names that have *not* been
+    screened — the siblings of an attested path's components, which are
+    someone else's files — and because what it means is "the same name on
+    some real filesystem", which is not a claim about ASCII.
     """
 
-    # Stable across interpreters only for assigned characters: the Unicode
-    # stability policies fix case folding and normalization once a character
-    # is encoded, so _validate_relative_path refuses code points outside the
-    # pinned Unicode 14.0 repertoire and this key means the same thing under
-    # every supported table.
     # Normalized again after folding, deliberately: casefold itself can
     # produce decomposed text (U+00DF followed by U+0301 folds to s, s,
     # U+0301, whose composed form is s, U+015B), so a variant that differs
     # in case AND normalization at once produced an unequal key and the
-    # suffix predicate let it out of the sweep (peer review).
+    # suffix predicate let it out of the sweep (peer review). That pair is
+    # outside the portable repertoire now; the key is still computed this
+    # way because it is asked of unscreened names too.
     return unicodedata.normalize(
         "NFC", unicodedata.normalize("NFC", relative).casefold()
     )
@@ -2414,26 +2068,6 @@ def _reject_aliasing_paths(relatives: list[str]) -> None:
                 f"is ambiguous: {_quoted(seen[key])} and {_quoted(relative)}"
             )
         seen[key] = relative
-
-
-def _assert_no_stripping_alias(name: str, relative: str) -> None:
-    """Refuse a tree entry Win32 lookup would strip down to another name.
-
-    One function so the refusal is byte-identical wherever the sweep meets
-    such a name: under a content root, and beside a component of one. The
-    two are the same hazard — on the filesystem this models, the entry
-    spelled with the trailing dot or space *is* the entry without it, so
-    which of the two an auditor's clone holds is not a question the tree can
-    answer.
-
-    Directories are screened as well as files: ``rules /x.yaml`` and
-    ``rules/x.yaml`` are one path there, and only one of them is swept here.
-    """
-
-    if _strips_to_another_name(name):
-        raise CorpusError(
-            f"content root contains an entry Windows would alias: {_quoted(relative)}"
-        )
 
 
 def _tree_content_paths(
@@ -2497,17 +2131,15 @@ def _tree_content_paths(
             ):
                 relative = candidate.relative_to(root).as_posix()
                 # Before the suffix predicate folds this name, and before
-                # the 8.3 model below reads its extension. A name the fold
-                # key and a real filesystem disagree about — an unassigned
-                # code point, a format control, a code point HFS+ ignores, a
-                # Turkic dotless i an upcase table folds onto I — would
-                # decide membership one
-                # way here and another on the host that resolves the tree.
-                _assert_foldable(candidate.name, f"tree entry {_quoted(relative)}")
-                # And before anything decides what kind of entry it is: a
-                # trailing dot or space aliases a directory as readily as a
-                # file, and the name is all this question needs.
-                _assert_no_stripping_alias(candidate.name, relative)
+                # the 8.3 model below reads its extension, and before
+                # anything decides what kind of entry it is — a name whose
+                # equivalence class this module would have to guess at
+                # decides membership one way here and another on the host
+                # that resolves the tree, and it aliases a directory as
+                # readily as a file.
+                _assert_portable_name(
+                    candidate.name, f"tree entry {_quoted(relative)}"
+                )
                 try:
                     info = candidate.lstat()
                 except OSError as exc:
@@ -2602,15 +2234,16 @@ def _assert_no_aliasing_root_component(
         for entry in _list_directory(
             current, "/".join(walked), generations=generations
         ):
-            _assert_foldable(entry.name, f"tree entry beside {_quoted(relative)}")
-            # The trailing-dot/space rule reaches here too, and it is not a
-            # detail of tidiness: an entry named "rules " beside the pinned
-            # "rules" is that root on Windows, holding whatever a producer
-            # put in it, while a POSIX verifier sweeps only the spelling the
-            # spec pinned. The fold check below cannot pair them — the two
-            # names are not fold-equal — so the strip has to be asked
-            # separately (peer review, round six).
-            _assert_no_stripping_alias(entry.name, "/".join([*walked, entry.name]))
+            # Screened, and not only for the fold question below: an entry
+            # named "rules." beside the pinned "rules" is that root on
+            # Windows, holding whatever a producer put in it, while a POSIX
+            # verifier sweeps only the spelling the spec pinned — and the two
+            # names are not fold-equal, so the fold check cannot pair them
+            # (peer review, round six). The trailing-period half of the
+            # portable-name screen is what answers it.
+            _assert_portable_name(
+                entry.name, f"tree entry beside {_quoted(relative)}"
+            )
             if entry.name != component and _path_fold(entry.name) == _path_fold(
                 component
             ):
