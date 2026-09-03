@@ -3221,6 +3221,132 @@ def test_the_aliasing_root_component_refusal_names_the_entry(
     )
 
 
+def _iterdir_with(target: pathlib.Path, extra: pathlib.Path):
+    """A ``Path.iterdir`` that adds one entry to exactly one directory.
+
+    The sweep lists through ``iterdir``, and the collisions these tests are
+    about cannot be written on a case-insensitive host — which is the host
+    the collision is dangerous on. Injecting the entry the case-sensitive
+    host would emit makes the test say the same thing everywhere.
+    """
+
+    real = pathlib.Path.iterdir
+
+    def iterdir(self: pathlib.Path):
+        entries = list(real(self))
+        if self == target:
+            entries.append(extra)
+        return iter(entries)
+
+    return iterdir
+
+
+def test_refuses_two_directories_a_case_insensitive_checkout_would_merge(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S5R4-F2: the sweep screened entries, never pairs of them.
+
+    Every screen the sweep runs judges one entry at a time — the portable
+    repertoire, the symlink, the kind, the suffix — and none of them can see
+    that two entries of one directory are one entry somewhere else. A
+    declared ``rules/tax/rate.yaml`` beside an undeclared ``rules/TAX/`` is
+    two directories on the auditor's case-sensitive checkout, where the sweep
+    descends the declared one, finds the declared file, and calls the world
+    closed; a case-insensitive checkout of the same commit holds one merged
+    directory carrying both, so the closed world is open by exactly the files
+    the undeclared spelling brought with it.
+
+    ``_reject_aliasing_paths`` cannot answer this. It compares the paths the
+    *journal* declares, and only one of these two is declared — the other
+    exists only in the listing.
+
+    Without the pair check this tree verifies. The refusal names both
+    entries, with the directory they sit in, because an auditor has to find
+    them.
+    """
+
+    write_tree(tmp_path)
+    monkeypatch.setattr(
+        pathlib.Path,
+        "iterdir",
+        _iterdir_with(tmp_path / "rules", tmp_path / "rules" / "TAX"),
+    )
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        "directory holds two entries a case-insensitive filesystem would "
+        "merge: 'rules/TAX' and 'rules/tax'"
+    )
+
+
+def test_refuses_a_directory_that_would_merge_with_a_content_file(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S5R4-F2, the other shape: the pair need not be two directories.
+
+    What merges on a case-insensitive volume is the name, whatever it names,
+    so a directory whose name folds onto a bound content file is the same
+    ambiguity: the consumer's checkout holds one of them and cannot say
+    which. The check therefore runs before either entry is classified, and
+    the entry injected here is a real directory — created out of the way and
+    listed in place — beside the real file ``rules/tax/rate.yaml``.
+
+    Without the pair check the sweep classifies the directory as a directory,
+    descends it, finds nothing, and verifies the corpus.
+    """
+
+    write_tree(tmp_path)
+    intruder = tmp_path / "spare" / "Rate.yaml"
+    intruder.mkdir(parents=True)
+    monkeypatch.setattr(
+        pathlib.Path, "iterdir", _iterdir_with(tmp_path / "rules" / "tax", intruder)
+    )
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        "directory holds two entries a case-insensitive filesystem would "
+        "merge: 'rules/tax/Rate.yaml' and 'rules/tax/rate.yaml'"
+    )
+
+
+def test_refuses_two_merging_entries_beside_a_pinned_root_component(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S5R4-F2, beside a root component: the same listing, same pair.
+
+    The walk that guards a pinned content root already reads every entry of
+    every parent of the root, and it asked one question of each: does this
+    entry alias the pinned component. Two entries that merge with *each
+    other* went unremarked, although the directory they merge in is the one
+    holding the content root, and on the consumer's volume it is a different
+    directory from the one the auditor listed.
+
+    The root-component refusal keeps its precedence, which the test below
+    this one pins: it names the component a consumer's spec pins, and this
+    refusal could only name two entries.
+
+    Without the pair check this tree verifies.
+    """
+
+    write_tree(tmp_path)
+    (tmp_path / "notes").mkdir()
+    monkeypatch.setattr(
+        pathlib.Path, "iterdir", _iterdir_with(tmp_path, tmp_path / "NOTES")
+    )
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        "directory holds two entries a case-insensitive filesystem would "
+        "merge: 'NOTES' and 'notes'"
+    )
+
+
 def test_refuses_a_tree_file_whose_short_name_alias_would_be_content(
     tmp_path: pathlib.Path,
 ) -> None:
