@@ -21,6 +21,8 @@ from receipt.corpus import (
     MAX_EVIDENCE_TEXT,
     MAX_GATE_DECLARATIONS,
     MAX_GATE_TEXT,
+    MAX_JOURNAL_BYTES,
+    MAX_JOURNAL_ROW_BYTES,
     MAX_JOURNAL_ROWS,
     MAX_REMOVED_TEXT,
     REMOVED_PATH_RENDER_STRUCTURE,
@@ -5117,6 +5119,106 @@ def test_refuses_a_gate_declaring_more_evidence_entries_than_the_limit(
         f"journal row {row} gate 'g' declares {len(evidence)} evidence "
         f"entries, over the limit of {MAX_EVIDENCE_ENTRIES}"
     )
+
+
+def test_refuses_a_row_larger_than_the_parser_budget_before_parsing_it(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S5R3-F8: the row cap bounded how many, never how large.
+
+    ``MAX_JOURNAL_ROWS`` counts line feeds before the split, which bounds the
+    number of rows and says nothing about the size of one of them. So a
+    single row of arbitrary size was decoded, split out, and handed to
+    ``json.loads`` — which materialises the whole object graph the row
+    describes — with no budget consulted anywhere on the way.
+
+    ``MAX_JOURNAL_ROW_BYTES`` is checked on the row's own bytes first,
+    before ``strip`` and before the parse. The oversized row is placed
+    first, so the recorder on ``_parse_row`` can assert what matters: not
+    that this row was refused before it was parsed, but that *nothing* was
+    parsed at all.
+
+    Without it ``_parse_row`` is called and ``json.loads`` runs on a row of
+    whatever size the producer chose.
+    """
+
+    import receipt.corpus as corpus_module
+
+    parsed: list[int] = []
+    real = corpus_module._parse_row
+
+    def recorder(line: str, number: int, spec: object):
+        parsed.append(number)
+        return real(line, number, spec)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(corpus_module, "_parse_row", recorder)
+
+    filler = "x" * (MAX_JOURNAL_ROW_BYTES + 1)
+    huge = json.dumps({"kind": "content", "path": filler}).encode("utf-8")
+    assert len(huge) > MAX_JOURNAL_ROW_BYTES
+    write_tree(tmp_path)
+    journal = huge + b"\n" + render_journal(journal_rows())
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, journal, spec=corpus_spec())
+    assert parsed == []
+    assert str(caught.value) == (
+        f"journal row 1 is {len(huge)} bytes, over the parser budget of "
+        f"{MAX_JOURNAL_ROW_BYTES}"
+    )
+
+
+def test_refuses_a_journal_larger_than_the_parser_budget_before_decoding_it(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S5R3-F8, one level up: the decode was the first allocation.
+
+    Every other budget here is measured after ``journal_bytes.decode``, and
+    that decode is itself unbounded: a journal of arbitrary size became a
+    ``str`` of arbitrary size before the line feeds could be counted.
+    ``MAX_JOURNAL_BYTES`` is checked on the raw bytes first.
+
+    The ordering is what this asserts, and it is asserted by handing the
+    parser bytes that are *not* valid UTF-8: if the size check runs first the
+    refusal names the size, and if it does not the refusal names the
+    encoding. The real budget is eight gibibytes — the product of the row cap
+    and the per-row byte cap — so it is lowered here rather than met, which
+    is the only way to test a bound whose whole point is that reaching it
+    honestly is out of reach.
+
+    Without the check this raises "corpus journal is not UTF-8", after
+    decoding whatever it was given.
+    """
+
+    monkeypatch.setattr("receipt.corpus.MAX_JOURNAL_BYTES", 64)
+    write_tree(tmp_path)
+    journal = b"\xff" * 200
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, journal, spec=corpus_spec())
+    assert str(caught.value) == (
+        "corpus journal is 200 bytes, over the parser budget of 64"
+    )
+
+
+def test_the_journal_byte_budget_is_the_product_of_the_two_below_it() -> None:
+    """Binds S5R3-F8: the derivation is arithmetic, so it is pinned.
+
+    ``MAX_JOURNAL_ROW_BYTES`` is derived from the largest row the schema
+    admits — a gate declaration carrying ``MAX_EVIDENCE_ENTRIES`` entries
+    whose key and value are each ``MAX_EVIDENCE_TEXT`` characters, with JSON
+    free to spell one character in twelve bytes — and ``MAX_JOURNAL_BYTES``
+    is that times ``MAX_JOURNAL_ROWS``. Both are written out beside the
+    constants; this asserts the numbers rather than leaving the prose to be
+    believed, so raising ``MAX_EVIDENCE_TEXT`` or ``MAX_EVIDENCE_ENTRIES``
+    without re-deriving the row cap fails a test.
+    """
+
+    string = 12 * MAX_EVIDENCE_TEXT + 2
+    entry = 2 * string + 4
+    assert entry == 24584
+    assert MAX_EVIDENCE_ENTRIES * entry == 1573376
+    assert MAX_JOURNAL_ROW_BYTES == 2097152
+    assert MAX_EVIDENCE_ENTRIES * entry <= MAX_JOURNAL_ROW_BYTES
+    assert MAX_JOURNAL_BYTES == MAX_JOURNAL_ROWS * MAX_JOURNAL_ROW_BYTES
 
 
 def test_refuses_a_journal_with_more_rows_than_the_parser_budget(
