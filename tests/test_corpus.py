@@ -606,7 +606,7 @@ def test_spec_refuses_a_content_suffix_carrying_an_unassigned_code_point() -> No
     import unicodedata
 
     assert unicodedata.category("\u0378") == "Cn"
-    with pytest.raises(CorpusError, match="unassigned in Unicode") as caught:
+    with pytest.raises(CorpusError, match="outside the pinned Unicode") as caught:
         corpus_spec(content_suffixes=(".yaml\u0378",))
     assert str(caught.value).startswith("CorpusSpec content suffix contains")
 
@@ -622,7 +622,7 @@ def test_spec_refuses_a_content_root_carrying_an_unassigned_code_point() -> None
     Without the fix the refusal is the path-shaped one.
     """
 
-    with pytest.raises(CorpusError, match="unassigned in Unicode") as caught:
+    with pytest.raises(CorpusError, match="outside the pinned Unicode") as caught:
         corpus_spec(content_roots=(pathlib.PurePosixPath("ru\u0378les"),))
     assert str(caught.value).startswith("CorpusSpec content root contains")
 
@@ -1662,7 +1662,7 @@ def test_refuses_a_path_carrying_an_unassigned_code_point(
     write_tree(tmp_path)
     rows = journal_rows()
     rows[0]["path"] = "rules/benefit/amo\u0378unt.yaml"
-    with pytest.raises(CorpusError, match="unassigned in Unicode"):
+    with pytest.raises(CorpusError, match="outside the pinned Unicode"):
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
 
 
@@ -2581,7 +2581,7 @@ def test_refuses_a_tree_entry_carrying_an_unassigned_code_point(
     assert unicodedata.category("͸") == "Cn"
     write_tree(tmp_path)
     monkeypatch.setattr(pathlib.Path, "iterdir", _listing_with("tax", "notes͸"))
-    with pytest.raises(CorpusError, match="unassigned in Unicode") as caught:
+    with pytest.raises(CorpusError, match="outside the pinned Unicode") as caught:
         verify_corpus_binding(
             tmp_path, render_journal(journal_rows()), spec=corpus_spec()
         )
@@ -2607,9 +2607,175 @@ def test_refuses_an_unassigned_code_point_in_a_tombstone_listing(
     (tmp_path / "retired").mkdir()
     rows = _tombstone_rows("retired/apply-manifest.json", body)
     monkeypatch.setattr(os, "scandir", _scandir("retired", extra=["sibling͸"]))
-    with pytest.raises(CorpusError, match="unassigned in Unicode") as caught:
+    with pytest.raises(CorpusError, match="outside the pinned Unicode") as caught:
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
     assert "tree entry examined for a tombstone" in str(caught.value)
+
+
+def test_refuses_a_path_carrying_a_code_point_the_pinned_table_lacks(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S4-F5: the screen consulted the running table, so it moved.
+
+    ``_assert_assigned`` exists to make the fold key mean one thing on every
+    supported interpreter. Deciding "assigned" from the *running* table gave
+    it the same defect facing the other way: U+A7CB is unassigned in Unicode
+    14.0 and 15.1 — Python 3.11 through 3.13 — and assigned in 16.0, which
+    3.14 ships, where it folds to U+0264. So a journal carrying it was
+    refused on three supported interpreters and accepted on the fourth, and
+    the acceptance the screen promises to make stable was itself a function
+    of which Python the auditor happened to run.
+
+    The repertoire is pinned to Unicode 14.0 now, so this refuses everywhere.
+    Without the fix this test fails on 3.14 — the path verifies and folds to
+    a key three of the four supported interpreters would not produce — and
+    passes on 3.11 through 3.13 for the wrong reason, which is the finding.
+    """
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+    rows[0]["path"] = "rules/benefit/amo\ua7cbunt.yaml"
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+    # The quoted spelling is not pinned: ``_quoted`` is ``repr``, and repr
+    # prints a character the *running* table calls assigned and escapes one
+    # it does not — so the same path reads back differently on 3.13 and
+    # 3.14. What is pinned is the refusal, which no longer does.
+    assert str(caught.value).startswith(
+        "journal row 1 path contains a code point outside the pinned "
+        "Unicode 14.0 repertoire (0xa7cb): "
+    )
+    assert "amo" in str(caught.value) and "unt.yaml" in str(caught.value)
+
+
+def test_a_character_assigned_in_the_pinned_table_still_verifies(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S4-F5, the other side: the pin must not shrink the repertoire.
+
+    U+1FAF6 HEART HANDS was encoded in Unicode 14.0, which is the pinned
+    table, so it is inside the repertoire on every supported interpreter and
+    a corpus may name a file with it. A pin taken from a table *older* than
+    the oldest supported interpreter, or a generator that mistook an
+    assigned block for an unassigned one, would refuse this and every
+    refusal test above would still pass.
+
+    The file is real, so the name goes through the sweep's screen as well as
+    the journal's. This test passes on the head too — it is a control, not a
+    regression.
+    """
+
+    content = dict(CONTENT)
+    content["rules/tax/\U0001faf6.yaml"] = "name: hands\nvalue: 1\n"
+    write_tree(tmp_path, content=content)
+    verification = verify_corpus_binding(
+        tmp_path, render_journal(journal_rows(content=content)), spec=corpus_spec()
+    )
+    assert "rules/tax/\U0001faf6.yaml" in [entry.path for entry in verification.content]
+
+
+def test_the_pinned_repertoire_decides_each_class_of_code_point() -> None:
+    """Binds S4-F5: the three answers the pin has to give, stated together.
+
+    A code point no table has ever assigned (U+0378) refuses. One assigned
+    after the pinned table (U+A7CB, Unicode 16.0) refuses, because the
+    question is what Unicode 14.0 knew and not what this interpreter knows.
+    One assigned by the pinned table (U+1FAF6, Unicode 14.0) is accepted.
+
+    Without the fix the middle answer is whatever the running interpreter
+    says, which is the whole finding: on 3.14 it is "accepted".
+    """
+
+    import unicodedata
+
+    from receipt.corpus import _assert_assigned
+
+    for code in (0x0378, 0xA7CB):
+        with pytest.raises(CorpusError) as caught:
+            _assert_assigned(f"x{chr(code)}y", "label")
+        assert str(caught.value).startswith(
+            f"label contains a code point outside the pinned Unicode 14.0 "
+            f"repertoire ({code:#06x})"
+        )
+    assert _assert_assigned("x\U0001faf6y", "label") == "x\U0001faf6y"
+    # The running table's own answer, recorded so the reason the middle case
+    # exists stays legible when the table moves again: U+A7CB is Cn until
+    # Unicode 16.0, which is what the old screen consulted.
+    running = tuple(int(part) for part in unicodedata.unidata_version.split("."))
+    assert (unicodedata.category(chr(0xA7CB)) == "Cn") == (running < (16,))
+
+
+def test_the_shipped_repertoire_is_what_its_generator_produces() -> None:
+    """Binds S4-F5: the pinned data must be checkable, not merely asserted.
+
+    ``generate_unassigned_ranges`` is the script that produced the shipped
+    tuple, kept in the module so this test can re-run it. On an interpreter
+    carrying Unicode 14.0 — CI's 3.11 job — the two must be equal. On any
+    later table the generator returns a strict subset, which is the superset
+    property the pin relies on rather than a disagreement, so the comparison
+    is skipped there with that reason.
+    """
+
+    import unicodedata
+
+    from receipt._unicode_repertoire import (
+        UNASSIGNED_RANGES,
+        UNIDATA_VERSION,
+        generate_unassigned_ranges,
+    )
+
+    running = unicodedata.unidata_version
+    if running != UNIDATA_VERSION:
+        regenerated = generate_unassigned_ranges()
+        pinned = {
+            code
+            for first, last in UNASSIGNED_RANGES
+            for code in range(first, last + 1)
+        }
+        running_set = {
+            code for first, last in regenerated for code in range(first, last + 1)
+        }
+        # The property that makes pinning safe, checked on the interpreter
+        # that is actually running: nothing this table calls unassigned is
+        # outside the pinned set.
+        assert running_set <= pinned
+        pytest.skip(
+            f"the running Unicode table is {running}, not {UNIDATA_VERSION}; "
+            "the generator reproduces the shipped tuple only on the pinned "
+            "table, and the superset property was checked instead"
+        )
+    assert generate_unassigned_ranges() == UNASSIGNED_RANGES
+
+
+def test_the_shipped_repertoire_is_sorted_disjoint_and_in_range() -> None:
+    """Binds S4-F5: the bisect in ``is_unassigned`` assumes all three.
+
+    ``is_unassigned`` finds the last range starting at or below a code point
+    and looks no further, which is only correct for ranges that are sorted
+    and do not overlap. Adjacency is checked too: two touching ranges would
+    mean the generator emitted what should have been one, and a hand edit
+    that split a range is exactly the kind of change this catches.
+    """
+
+    from receipt._unicode_repertoire import UNASSIGNED_RANGES, is_unassigned
+
+    assert UNASSIGNED_RANGES
+    previous = -1
+    for first, last in UNASSIGNED_RANGES:
+        assert 0 <= first <= last <= 0x10FFFF
+        assert first > previous + 1
+        previous = last
+    # The lookup agrees with a scan at every boundary, including the ends.
+    for first, last in UNASSIGNED_RANGES:
+        assert is_unassigned(first) and is_unassigned(last)
+        if first > 0:
+            assert not is_unassigned(first - 1)
+        if last < 0x10FFFF:
+            assert not is_unassigned(last + 1)
+    # U+10FFFF is itself a noncharacter and so ``Cn``; the assigned side is
+    # checked with characters the pinned table encodes.
+    assert not is_unassigned(ord("a"))
+    assert not is_unassigned(0x1FAF6)
 
 
 def test_an_oversized_tier_is_quoted_within_bounds(tmp_path: pathlib.Path) -> None:
