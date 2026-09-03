@@ -119,7 +119,8 @@ answered for through a symlinked component or under another entry's spelling —
 the index holds no entry spelled as another spelling of a protected path or
 of any prefix of one — the directory a state file is read through is named by
 that path as much as its leaf is — which every one of those reconciliations is
-blind to because each is a comparison by exact spelling, what the index records as a path's *content* is
+blind to because each is a comparison by exact spelling, what the index
+records as a path's *content* is
 the content this verdict read wherever the commit under review changes that
 path — every reconciliation above compares stage, mode and type and none of
 them bytes, so a file rewritten, staged, and restored on disk went down the
