@@ -690,7 +690,7 @@ def test_spec_refuses_a_journal_capacity_above_the_byte_derived_ceiling() -> Non
 
 
 def test_the_spec_pins_a_suffix_by_one_rule_or_refuses_it() -> None:
-    """Binds the policy, suffix half, and S5R4-F5: the rule is the repertoire.
+    """Binds the suffix policy, S5R4-F5 and S7-F7: two regexes, two questions.
 
     A pin used to be screened four times over — a leading dot, a foldability
     screen against a pinned Unicode table, an ASCII rule, and a fold-key
@@ -699,9 +699,11 @@ def test_the_spec_pins_a_suffix_by_one_rule_or_refuses_it() -> None:
     arrangement wrong. The policy replaced them with one rule, and stated it
     one notch too tightly: a period and one to sixteen ASCII letters or
     digits. That was a compatibility break the finding named — the released
-    ``CorpusSpec`` accepted any dot-prefixed suffix, and none of ``.tar.gz``,
-    ``.a-b`` or ``._`` can be an 8.3 extension, while ``-`` and ``_`` are in
-    the portable repertoire already (S5R4-F5).
+    ``CorpusSpec`` accepted any dot-prefixed portable suffix. That includes
+    ``.tar.gz``, ``.ssxx``, ``.a-b`` and ``._``. S7-F7 corrects the old prose's
+    conflation with alias capability: ``.a-b`` and ``._`` *are* structurally
+    8.3 extensions and are screened by the narrower regex; ``.ssxx`` has four
+    characters after its period and is not.
 
     So the rule is a period followed by portable characters, with interior
     periods allowed and no length cap, and it still refuses everything the
@@ -709,12 +711,12 @@ def test_the_spec_pins_a_suffix_by_one_rule_or_refuses_it() -> None:
     letter inside an alias-capable pin, a non-ASCII letter outside one, a
     separator, a bare period, and a pin with no period.
 
-    Without the widening ``.tar.gz``, ``.a-b``, ``._`` and a twenty-character
-    pin are refused at construction and a consumer whose corpus is spelled
-    that way cannot state its own spec. Without the rule itself
-    ``.yaml\u0378`` constructs — the fold screen it used to face is gone with
-    the pinned table — and the suffix is then folded against every path in
-    the tree and every entry name the sweep sees.
+    Without the widening ``.tar.gz``, ``.ssxx``, ``.a-b``, ``._`` and a
+    twenty-character pin are refused at construction and a consumer whose
+    corpus is spelled that way cannot state its own spec. Without the rule
+    itself ``.yaml\u0378`` constructs — the fold screen it used to face is
+    gone with the pinned table — and the suffix is then folded against every
+    path in the tree and every entry name the sweep sees.
     """
 
     for suffix in (
@@ -727,8 +729,8 @@ def test_the_spec_pins_a_suffix_by_one_rule_or_refuses_it() -> None:
             "portable characters"
         ), suffix
     assert corpus_spec(content_suffixes=(".yaml", ".yml")).content_suffixes
-    # The four the sixteen-character grammar took away, given back.
-    for suffix in (".tar.gz", ".a-b", "._", "." + "y" * 20):
+    # The five shapes the sixteen-character grammar took away, given back.
+    for suffix in (".tar.gz", ".ssxx", ".a-b", "._", "." + "y" * 20):
         assert corpus_spec(content_suffixes=(suffix,)).content_suffixes == (suffix,)
 
 
@@ -6478,7 +6480,7 @@ def test_a_real_aliasing_root_spelling_keeps_the_root_component_refusal(
 
 
 def test_alias_capability_is_bounded_at_both_ends() -> None:
-    """Binds S5R2-F5 and the policy: what a pin an alias could carry is.
+    """Binds S5R2-F5 and S7-F7: what a pin an alias could carry is.
 
     An 8.3 extension is one to three characters, so a carryable pin is a
     period and one to three more. Both ends were found the hard way. The
@@ -6506,6 +6508,11 @@ def test_alias_capability_is_bounded_at_both_ends() -> None:
     own. Without the shape rule a pin like ``.a.b`` is compared against a
     derived extension it can never equal.
 
+    S7-F7 records the boundary examples explicitly: ``.a-b`` and ``._``
+    match the one-to-three-character alias grammar and are screened, while
+    the four-character ``.ssxx`` does not. The old prose claimed the reverse
+    for the short pins even though this test and the implementation did not.
+
     Without the bounds a four-character pin is compared truncated, and a
     bare period is treated as carryable.
     """
@@ -6518,6 +6525,7 @@ def test_alias_capability_is_bounded_at_both_ends() -> None:
     assert _alias_capable_suffix(".a-b")
     assert _alias_capable_suffix("._")
     assert not _alias_capable_suffix(".yaml")
+    assert not _alias_capable_suffix(".ssxx")
     # Four characters after the period, and a second period: neither can be
     # the extension an 8.3 alias carries.
     assert not _alias_capable_suffix(".tar.gz")
