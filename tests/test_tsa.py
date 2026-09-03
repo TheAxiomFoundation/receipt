@@ -2551,6 +2551,150 @@ def test_a_direct_token_caller_takes_the_one_read_itself(
     )
 
 
+def test_the_witness_digest_and_the_verified_imprint_come_from_one_read(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S4-F1: ``verify_witness``'s read is the read ``-data`` recomputes over.
+
+    The regression above drives ``verify_timestamp_token`` directly, which
+    proves the ``-data`` argument is a snapshot but says nothing about *whose*
+    snapshot. What closes the finding is the hand-down: the bytes
+    ``verify_witness`` hashed for the sidecar's ``digestSha256`` are the bytes
+    the imprint is checked against, so the two cannot describe different
+    files. Nothing binds that without this test -- ``record=`` can be dropped
+    from every call site and the rest of the suite stays green.
+
+    The witness here is exactly what a producer would write to exploit that:
+    its ``digestSha256`` is the real record's, its declared token is a genuine
+    stamp over a substitute, and the substitute is on disk for the duration of
+    ``verify_timestamp_token`` and gone afterwards. With the hand-down the
+    imprint is checked against the record the digest describes and the witness
+    is refused; without it ``verify_timestamp_token`` re-reads the path, gets
+    the substitute, and returns evidence whose ``digest_sha256`` names a
+    record the timestamp was never over.
+    """
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    witnessed = tree.record.read_bytes()
+    substitute = (
+        canonical_bytes(
+            {
+                "schemaVersion": "receipt_test_record_v1",
+                "recordedAt": (datetime.now(UTC) - timedelta(seconds=90)).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                ),
+                "observation": "the record the declared token is really about",
+            }
+        )
+        + b"\n"
+    )
+    token = tree.tokens[alpha.anchor_id]
+    alpha.tsa.stamp(sha256_bytes(substitute), token)
+    rewrite_witness(
+        tree,
+        lambda payload: payload["anchorOutcomes"][0].__setitem__(
+            "tokenSha256", sha256_bytes(token.read_bytes())
+        ),
+    )
+    # The sidecar still describes the real record, so the digest check passes.
+    assert json.loads(tree.witness.read_text())["digestSha256"] == sha256_bytes(
+        witnessed
+    )
+
+    original = tsa_module.verify_timestamp_token
+
+    def substituting(*arguments: Any, **keywords: Any) -> TokenEvidence:
+        tree.record.write_bytes(substitute)
+        try:
+            return original(*arguments, **keywords)
+        finally:
+            tree.record.write_bytes(witnessed)
+
+    monkeypatch.setattr(tsa_module, "verify_timestamp_token", substituting)
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert tree.record.read_bytes() == witnessed
+    message = str(caught.value)
+    assert message.startswith(f"OpenSSL command failed ({TS_VERIFY_COMMAND} ")
+    assert "ts_check_imprints:message imprint mismatch" in message
+
+
+def test_verify_witness_refuses_a_record_it_cannot_read_once(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """S4-F1: the round's one new refusal, where both docstrings place it.
+
+    ``verify_witness``'s read is the one the baseline let raise ``OSError``
+    out of the hash, and it is the site the module and harness docstrings
+    describe. Bound here rather than only through ``verify_timestamp_token``:
+    reverting this read to ``path.read_bytes()`` otherwise leaves the whole
+    offline suite green.
+
+    The symlink is the second half of the rule. ``O_NOFOLLOW`` means the read
+    is of the file the path names, not of whatever it points at, and the
+    path-level check in front of it says so with the same words -- so a record
+    that is a link to a record which verifies is refused all the same.
+    """
+
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    assert verify_tree(tree).status == "available"
+
+    absent = tree.records / RECORD_DAY / "record-9999.json"
+    with pytest.raises(TsaError) as missing:
+        verify_witness(absent, spec=tree.spec, records=tree.records)
+    assert str(missing.value) == (
+        f"witnessed record is missing or not a regular file: {absent}"
+    )
+
+    linked = tree.records / RECORD_DAY / "record-0002.json"
+    linked.symlink_to(tree.record.name)
+    linked.with_suffix(".witness.json").write_bytes(tree.witness.read_bytes())
+    assert linked.is_file() and linked.read_bytes() == tree.record.read_bytes()
+    with pytest.raises(TsaError) as symlinked:
+        verify_witness(linked, spec=tree.spec, records=tree.records)
+    assert str(symlinked.value) == (
+        f"witnessed record is missing or not a regular file: {linked}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "payload"),
+    [
+        ("crlf-broken.json", b'{\r\n  "a": 1,\r\n  oops\r\n}\r\n'),
+        ("lf-broken.json", b'{\n  "a": 1,\n  oops\n}\n'),
+        ("cr-only-broken.json", b'{\r  "a": 1,\r  oops\r}\r'),
+        ("not-an-object.json", b"[1, 2]\n"),
+        ("not-utf8.json", b'{"a": "\xff"}\n'),
+    ],
+    ids=["crlf", "lf", "cr", "array", "invalid-utf8"],
+)
+def test_the_one_reads_parse_refuses_exactly_as_the_ported_reader_does(
+    tmp_path: pathlib.Path, name: str, payload: bytes
+) -> None:
+    """S4-F1: parsing the one read is ``load_json``'s parse, byte for byte.
+
+    ``verify_witness`` reads the record once and parses those bytes where the
+    ported reader opened the path a second time, so the two have to refuse a
+    record in the same words. ``cannot read JSON`` carries ``json``'s own
+    offset into the decoded string, and ``Path.read_text`` translates
+    universal newlines before ``json`` counts: a ``bytes.decode`` that only
+    resembled it moved the offset by one per CR, which is why the parse now
+    goes through the same ``TextIOWrapper``. The CR cases are where the two
+    came apart; the rest are the other branches of the same two refusals.
+    """
+
+    path = tmp_path / name
+    path.write_bytes(payload)
+    with pytest.raises(TsaError) as ported:
+        tsa_module.load_json(path)
+    with pytest.raises(TsaError) as one_read:
+        tsa_module._record_payload(payload, path)
+    assert str(one_read.value) == str(ported.value)
+
+
 def alias_of(anchor: LocalAnchor, *, anchor_id: str) -> LocalAnchor:
     """The same authority under a second anchor id and endpoint.
 
@@ -2756,7 +2900,7 @@ def test_refuses_one_token_supplied_under_two_anchor_outcomes(
     with pytest.raises(TsaError) as caught:
         verify_tree(tree)
     assert str(caught.value) == (
-        f"duplicate TSA token file across anchor outcomes: {reused}"
+        f"duplicate TSA response file across anchor outcomes: {reused}"
     )
     assert [claim["tsaAnchorId"] for claim in verified] == [alpha.anchor_id]
 
@@ -2847,10 +2991,10 @@ def test_refuses_a_token_reused_between_a_primary_and_a_supplemental_outcome(
         mirror.anchor_id
     ]
     # Two genuine issuances by one authority over one digest are two tokens by
-    # either identity: distinct files, and distinct signed TimeStampTokens.
+    # either identity: distinct files, and distinct signed TSTInfos.
     assert (
-        evidence.tokens[0].signed_token_sha256
-        != evidence.supplemental_tokens[0].signed_token_sha256
+        evidence.tokens[0].signed_timestamp_sha256
+        != evidence.supplemental_tokens[0].signed_timestamp_sha256
     )
 
     # And the reuse the rule refuses.
@@ -2865,7 +3009,7 @@ def test_refuses_a_token_reused_between_a_primary_and_a_supplemental_outcome(
     with pytest.raises(TsaError) as caught:
         transition()
     assert str(caught.value) == (
-        f"duplicate TSA token file across anchor outcomes: {primary['tokenSha256']}"
+        f"duplicate TSA response file across anchor outcomes: {primary['tokenSha256']}"
     )
     assert [claim["tsaAnchorId"] for claim in verified] == [alpha.anchor_id]
 
@@ -2941,7 +3085,8 @@ def test_a_token_swapped_after_its_hash_check_is_not_what_gets_verified(
         records=tree.records,
     )
     assert (
-        substituted_evidence.signed_token_sha256 != unswapped.signed_token_sha256
+        substituted_evidence.signed_timestamp_sha256
+        != unswapped.signed_timestamp_sha256
     )
 
     reads = swap_the_token_at_the_first_read(
@@ -2999,20 +3144,111 @@ def rewrap_timestamp_response(response: bytes, note: str) -> bytes:
     return der_tlv(0x30, der_tlv(0x30, status[:integer_end] + free_text) + token)
 
 
-def signed_token_of(directory: pathlib.Path, response: pathlib.Path) -> bytes:
-    """The ``TimeStampToken`` OpenSSL extracts from a ``TimeStampResp`` file."""
+def run_openssl_here(arguments: list[str]) -> None:
+    """One OpenSSL call, for the premises a test asks OpenSSL directly."""
 
-    extracted = directory / f"{response.stem}.token.der"
     subprocess.run(
-        [
-            "openssl", "ts", "-reply", "-config", "/dev/null",
-            "-in", str(response), "-token_out", "-out", str(extracted),
-        ],
+        ["openssl", *arguments],
         check=True,
         capture_output=True,
         env={**os.environ, "OPENSSL_CONF": "/dev/null", "LC_ALL": "C"},
     )
+
+
+def extracted_token_of(directory: pathlib.Path, response: pathlib.Path) -> bytes:
+    """The ``TimeStampToken`` OpenSSL extracts from a ``TimeStampResp`` file."""
+
+    extracted = directory / f"{response.stem}.token.der"
+    run_openssl_here(
+        ["ts", "-reply", "-config", "/dev/null",
+         "-in", str(response), "-token_out", "-out", str(extracted)]
+    )
     return extracted.read_bytes()
+
+
+def signed_timestamp_of(directory: pathlib.Path, response: pathlib.Path) -> bytes:
+    """The DER ``TSTInfo`` the authority signed, out of a response file.
+
+    What ``TokenEvidence.signed_timestamp_sha256`` is a digest of, obtained
+    the way an auditor would: two OpenSSL calls, with no help from the module
+    under test.
+    """
+
+    token = directory / f"{response.stem}.token.der"
+    extracted = directory / f"{response.stem}.tstinfo.der"
+    run_openssl_here(
+        ["ts", "-reply", "-config", "/dev/null",
+         "-in", str(response), "-token_out", "-out", str(token)]
+    )
+    run_openssl_here(
+        ["cms", "-verify", "-inform", "DER", "-in", str(token),
+         "-noverify", "-nosigs", "-out", str(extracted)]
+    )
+    return extracted.read_bytes()
+
+
+def der_certificate(pem: pathlib.Path, out: pathlib.Path) -> bytes:
+    """One certificate's DER, for splicing into a token's certificate bag."""
+
+    run_openssl_here(["x509", "-in", str(pem), "-outform", "DER", "-out", str(out)])
+    return out.read_bytes()
+
+
+def der_elements(content: bytes) -> list[tuple[int, bytes, bytes]]:
+    """Every ``(tag, value, whole)`` triple in one DER SEQUENCE's content."""
+
+    found: list[tuple[int, bytes, bytes]] = []
+    offset = 0
+    while offset < len(content):
+        tag, value, end = _read_der_tlv(content, offset)
+        found.append((tag, value, content[offset:end]))
+        offset = end
+    return found
+
+
+def add_certificate_to_token_bag(response: bytes, certificate: bytes) -> bytes:
+    """The same signed ``TSTInfo``, in a token carrying one more certificate.
+
+    ::
+
+        TimeStampToken ::= ContentInfo { contentType, [0] EXPLICIT SignedData }
+        SignedData     ::= SEQUENCE { version, digestAlgorithms,
+                                      encapContentInfo,
+                                      certificates [0] IMPLICIT OPTIONAL,
+                                      crls [1] IMPLICIT OPTIONAL, signerInfos }
+
+    ``certificates`` sits outside the ``SignerInfo`` signature, as ``crls``
+    and ``unsignedAttrs`` do, so appending to the bag is a producer's to do
+    and leaves the signature, the signer and the ``TSTInfo`` untouched. The
+    response file's digest moves, the extracted token's digest moves, and the
+    timestamp does not -- which is the whole of why the coverage rule counts
+    the ``TSTInfo``. The test below asks OpenSSL for each half of that rather
+    than assuming it.
+    """
+
+    tag, body, end = _read_der_tlv(response, 0)
+    assert tag == 0x30 and end == len(response), "not one complete SEQUENCE"
+    status_tag, _status, offset = _read_der_tlv(body, 0)
+    assert status_tag == 0x30, "PKIStatusInfo is not a SEQUENCE"
+    status_bytes, token = body[:offset], body[offset:]
+    tag, content_info, _end = _read_der_tlv(token, 0)
+    assert tag == 0x30, "TimeStampToken is not a SEQUENCE"
+    (oid_tag, _oid, oid_raw), (explicit_tag, explicit, _raw) = der_elements(content_info)[:2]
+    assert oid_tag == 0x06 and explicit_tag == 0xA0, "not a CMS ContentInfo"
+    tag, signed_data, _end = _read_der_tlv(explicit, 0)
+    assert tag == 0x30, "SignedData is not a SEQUENCE"
+    parts = der_elements(signed_data)
+    tags = [tag for tag, _value, _raw in parts]
+    assert 0xA0 in tags, "the token carries no certificates to add to"
+    index = tags.index(0xA0)
+    bag = der_tlv(0xA0, parts[index][1] + certificate)
+    rebuilt = der_tlv(
+        0x30,
+        b"".join(bag if i == index else raw for i, (_t, _v, raw) in enumerate(parts)),
+    )
+    return der_tlv(
+        0x30, status_bytes + der_tlv(0x30, oid_raw + der_tlv(0xA0, rebuilt))
+    )
 
 
 def test_refuses_a_re_wrapped_response_offered_as_a_second_token(
@@ -3054,8 +3290,11 @@ def test_refuses_a_re_wrapped_response_offered_as_a_second_token(
     )
     # The premise, from OpenSSL directly: two files, one signed token.
     assert sha256_bytes(rewrapped.read_bytes()) != primary["tokenSha256"]
-    signed = signed_token_of(tmp_path, claimed)
-    assert signed_token_of(tmp_path, rewrapped) == signed
+    assert extracted_token_of(tmp_path, rewrapped) == extracted_token_of(
+        tmp_path, claimed
+    )
+    signed = signed_timestamp_of(tmp_path, claimed)
+    assert signed_timestamp_of(tmp_path, rewrapped) == signed
 
     rewrite_witness(
         tree,
@@ -3074,10 +3313,83 @@ def test_refuses_a_re_wrapped_response_offered_as_a_second_token(
             transition_bundle_updates=[pending],
         )
     assert str(caught.value) == (
-        "duplicate TSA token across anchor outcomes: "
-        f"{sha256_bytes(signed)}"
+        f"duplicate TSA timestamp across anchor outcomes: {sha256_bytes(signed)}"
     )
     # The file rule cannot see this one: the two outcomes name different bytes.
+    assert [claim["tsaAnchorId"] for claim in verified] == [
+        alpha.anchor_id,
+        mirror.anchor_id,
+    ]
+
+
+
+def test_refuses_a_re_bagged_token_offered_as_a_second_timestamp(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S4-F2: the identity is what was signed, not how it was packaged.
+
+    The re-wrapping above is the easy half. A ``TimeStampToken``'s own
+    ``SignedData`` also carries fields the ``SignerInfo`` signature does not
+    cover -- ``certificates``, ``crls``, ``unsignedAttrs`` -- so a producer
+    can change the token itself and keep the signature: here an unrelated
+    root is appended to the certificate bag. Both the response file's digest
+    and the digest of the token ``ts -reply -token_out`` extracts move with
+    it, so a coverage rule keyed on either counts encodings rather than
+    issuances, and one stamp covers a pending anchor's supplemental outcome
+    as well as the active anchor's.
+
+    The ``TSTInfo`` is the one thing that cannot move: it is the signed
+    content, so any change to it breaks the signature the ``-CAfile``
+    verification checks. All four halves of that are asked of OpenSSL
+    directly below -- different file, different extracted token, identical
+    ``TSTInfo``, and both files still verifying against the pinned root --
+    and the refusal names the digest of what the authority signed.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    mirror = alias_of(alpha, anchor_id="alpha-mirror-2026")
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    pending, spec = add_bundle_version(tree, [mirror], version=2)
+    primary = json.loads(tree.witness.read_text())["anchorOutcomes"][0]
+    claimed = tree.tokens[alpha.anchor_id]
+    rebagged = tree.records / RECORD_DAY / "record-0001.alpha-mirror-2026.tsr"
+    rebagged.write_bytes(
+        add_certificate_to_token_bag(
+            claimed.read_bytes(),
+            der_certificate(beta.tsa.root_pem, tmp_path / "beta-root.der"),
+        )
+    )
+    # The premise, from OpenSSL directly.
+    assert sha256_bytes(rebagged.read_bytes()) != primary["tokenSha256"]
+    assert extracted_token_of(tmp_path, rebagged) != extracted_token_of(
+        tmp_path, claimed
+    )
+    signed = signed_timestamp_of(tmp_path, claimed)
+    assert signed_timestamp_of(tmp_path, rebagged) == signed
+    assert openssl_ts_verifies(tree.record, claimed, alpha.tsa.root_pem)
+    assert openssl_ts_verifies(tree.record, rebagged, alpha.tsa.root_pem)
+
+    rewrite_witness(
+        tree,
+        lambda payload: payload.__setitem__(
+            "supplementalOutcomes",
+            [supplemental_outcome(tree, pending, mirror, rebagged, primary)],
+        ),
+    )
+    verified = record_token_verifications(monkeypatch)
+    with pytest.raises(TsaError) as caught:
+        verify_witness(
+            tree.record,
+            spec=spec,
+            records=tree.records,
+            trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+            transition_bundle_updates=[pending],
+        )
+    assert str(caught.value) == (
+        f"duplicate TSA timestamp across anchor outcomes: {sha256_bytes(signed)}"
+    )
     assert [claim["tsaAnchorId"] for claim in verified] == [
         alpha.anchor_id,
         mirror.anchor_id,
@@ -3130,7 +3442,7 @@ def test_the_openssl_version_gate_reads_the_banner(banner: str, supported: bool)
     """S4-F3: what the preflight accepts, stated one banner at a time.
 
     The floor is 3.0, and 3.0.0 exactly is on the accepting side of it.
-    ``storeutl`` arrived earlier, in 1.1.0, so it is not what sets the floor:
+    ``storeutl`` arrived earlier, in 1.1.1, so it is not what sets the floor:
     verifying a token passes ``-no-CAstore``, whose store the OpenSSL 3.0
     release notes introduce, and 1.1.1 -- the floor until this round, and the
     version the README named as the minimum -- passed the gate and then
@@ -3202,8 +3514,8 @@ def test_refuses_the_openssl_that_used_to_be_the_documented_minimum(
 
     A substituted banner is all a test can do about a version this machine
     does not have; what it cannot show is that the accepted floor works. The
-    project's CI job does that instead, running this whole suite against
-    ``ubuntu-latest``'s real OpenSSL 3.0.
+    project's CI job does that instead, running this whole suite against the
+    real ``openssl`` the ``ubuntu-latest`` image carries.
     """
 
     tree = build_witness_tree(tmp_path, local_anchors[:1])
