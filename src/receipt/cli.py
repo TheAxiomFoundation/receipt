@@ -122,8 +122,10 @@ What is written is canonical UTF-8, with no byte-order mark. The stream's
 own spelling used to be handed back to the encoder, and ``utf-8-sig`` is a
 UTF-8 codec that prepends U+FEFF: a ``--json`` verdict written to a stream
 under that codec began ``ef bb bf``, and a JSON document does not begin with
-a byte-order mark — ``json.loads`` refuses it, and so does every parser that
-follows RFC 8259 (peer review, Sol round 5). The mark is not content the
+a byte-order mark. RFC 8259 permits a parser to ignore one and plenty do
+not: a consumer that decodes the stream and parses the string gets
+``json.loads``'s own ``Unexpected UTF-8 BOM`` (peer review, Sol round 5).
+The mark is not content the
 command means to send in the text verdict either. So ``utf-8-sig`` is
 recognised as a UTF-8 stream and written as ``utf-8``, which is the same
 bytes minus the mark, and the trusted set — the codecs this module will
@@ -803,8 +805,9 @@ def _byte_safe_encoding(stream: TextIO) -> str:
     Honoured, and not handed back: what this returns is always ``utf-8`` or
     ``ascii``, never the stream's own spelling. ``utf-8-sig`` is a UTF-8
     codec that prepends a byte-order mark, and returning it put ``ef bb bf``
-    in front of a ``--json`` verdict, which is not a JSON document (peer
-    review, Sol round 5). A stream under that codec is a UTF-8 stream and is
+    in front of a ``--json`` verdict, which is not a JSON document — a
+    consumer decoding the stream and parsing the string gets
+    ``json.loads``'s own ``Unexpected UTF-8 BOM`` (peer review, Sol round 5). A stream under that codec is a UTF-8 stream and is
     written as ``utf-8``: the same bytes, minus a mark this command was
     never asked to send.
 
@@ -928,7 +931,7 @@ def _emit(text: str, stream: TextIO, *, encoding: str) -> None:
     reader sees what was meant, spelled in what the terminal can show.
 
     Which encoding that is, is :func:`_byte_safe_encoding`'s decision and
-    not the stream's: the stream's own codec is used only when it is UTF-8,
+    not the stream's: UTF-8 is used only where the stream's own codec is one,
     and every other one is replaced by ASCII, because escaping code points
     and then handing them to an arbitrary codec left the escaping to be
     undone by the encoder — cp1252 spells the printable U+203A as the

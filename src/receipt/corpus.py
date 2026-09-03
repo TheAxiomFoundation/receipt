@@ -786,8 +786,10 @@ MAX_TOMBSTONE_WORK = 262144
 #: E entries cost about 2×R×E entry visits, and nothing bounded it: a journal
 #: attesting a few hundred paths in a directory an adversary has filled is a
 #: verifier that reads for as long as the tree is wide (peer review, Sol
-#: round 4). Every other walk in this module is budgeted; this one was the
-#: exception.
+#: round 4). Every walk in this module is budgeted now. This one was called
+#: the last exception when the budget landed, and it was not: the
+#: closed-world sweep had no ceiling either, which the round after found
+#: (:data:`MAX_SWEEP_WORK`).
 #:
 #: The same number as ``MAX_TOMBSTONE_WORK`` and the same shape of bound: an
 #: entry is charged as it is taken from the listing, so the listing is
@@ -2011,9 +2013,9 @@ class _DirectoryGenerations:
     (peer review, Sol round 5). Every read the run makes is handed this one
     recorder — the opening sweep, the root-component checks, the first
     tombstone pass, the parents the attested spelling walk drains, the closing
-    sweep and the second tombstone pass — and none of them may decline it:
-    the parameter has no default anywhere it is taken, for the reason the
-    spelling budget has none.
+    sweep and the second tombstone pass — and none of them can decline it by
+    omission: the parameter has no default anywhere it is taken, for the
+    reason the spelling budget has none.
 
     What is stamped is not only what those passes *read*. Stamping the
     directories the walks happened to enumerate left every ancestor of an
@@ -2872,12 +2874,13 @@ def _assert_spelled_by_its_directory(
 
     The parent is stamped an instant before it is drained, under
     ``parent_relative`` — its own spelling relative to the tree root, which
-    is the key :class:`_DirectoryGenerations` uses. This walk is the first
-    thing in the run to read the directory holding an attested file, so
-    without the stamp taken here that directory's generation dated from
-    whatever later pass reached it (peer review, Sol round 5). The stamp is
-    taken after the resolution check above, because a component nothing
-    answers to is a directory this function never reads.
+    is the key :class:`_DirectoryGenerations` uses. That overlaps the
+    ancestors :func:`verify_corpus_binding` stamps by name just before this
+    walk, and the overlap is deliberate: the earliest stamp wins, so a second
+    recording costs nothing, and what a directory is watched from must not
+    depend on some other call site naming it (peer review, Sol round 5). The
+    stamp is taken after the resolution check above, because a component
+    nothing answers to is a directory this function never reads.
 
     The cost is one listing per component, and it is asked once per
     *attested* path only. Asking it of content paths as well answered a
@@ -2982,11 +2985,11 @@ def _assert_no_symlinked_component(
     paying for it, and no way to forget the budget by omission.
 
     ``generations`` is the run's directory recorder, carried through to the
-    spelling walk so that a parent it drains is stamped at this read rather
-    than at whatever later pass reaches it. It has no default for the reason
-    ``work`` has none, and it is taken even when ``work`` is ``None``: which
-    reads happen must not depend on the caller remembering to hand over the
-    recorder.
+    spelling walk so that a parent it drains is stamped where it is read. It
+    has no default for the reason ``work`` has none, and it is taken even
+    when ``work`` is ``None``: a directory read that stamps nothing is what
+    S6-F1 was, and the way to make one unwritable is to leave the caller no
+    way to omit the recorder.
 
     ``None`` has two callers. The content-root walk passes it because its
     components are checked a line later by
