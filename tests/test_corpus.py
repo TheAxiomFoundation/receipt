@@ -1179,6 +1179,102 @@ def test_the_fixture_spends_twenty_six_units_from_one_shared_prefix_budget(
     )
 
 
+def test_ancestor_stamping_builds_one_path_per_distinct_prefix(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S7-R3-F2: every prefix was built before ``_seen`` deduplicated it.
+
+    These 4,096 paths share 510 ancestors, so 510 directories are stamped —
+    but the recorder reconstructed ``directory / segment`` and
+    ``"/".join(walked)`` for all 2,088,960 ``(path, prefix)`` visits and let
+    ``_seen`` discard the duplicates afterwards: about 2.09 million ``Path``
+    objects and 1,065,369,600 characters of joined prefix text for 510
+    stamps, all of it inside the budget.
+
+    Deduplicating on the component before the string is built makes the work
+    linear in what is distinct: 510 built prefixes totalling 260,100
+    characters, one per unique ancestor, plus the root offered once per
+    declared path. That total is exactly the bound the finding asked for —
+    strings built at most once per unique prefix plus once per path — and it
+    is asserted as an equality here because this layout meets it exactly.
+
+    What is counted is every relative spelling handed to ``record``, because
+    that is the seam both implementations cross: the old loop built a
+    ``Path`` and a ``"/".join`` for each of its 2,088,960 visits and let
+    ``_seen`` discard the duplicates, so it hands over 2,093,056 strings of
+    1,065,369,600 characters where this hands over 4,606 of 260,100.
+
+    ``_directory_generation`` is stubbed because the layout's own depth
+    exceeds the host's ``PATH_MAX``: what is under test is what the recorder
+    builds and stamps, not what the filesystem answers, and every prefix
+    answering "directory" is the case that makes the walk run to full depth.
+
+    Without S7-R3-F2 both counts fail — 2,093,056 strings and four thousand
+    times the characters — and the ``_under`` join count is zero, because the
+    old loop spells its prefixes with ``"/".join`` instead.
+    """
+
+    import receipt.corpus as corpus_module
+
+    from receipt.corpus import _PathPrefixWork, _reject_aliasing_paths
+
+    shared = ["a"] * 510
+    paths = [
+        "/".join((*shared, f"{index:03x}")) for index in range(MAX_JOURNAL_ROWS)
+    ]
+    joins: list[int] = []
+    built: list[int] = []
+    stamps = [0]
+    real_under = corpus_module._under
+    real_record = corpus_module._DirectoryGenerations.record
+
+    def recording_under(directory: str, name: str) -> str:
+        joined = real_under(directory, name)
+        joins.append(len(joined))
+        return joined
+
+    def recording_record(
+        self: object, directory: pathlib.Path, relative: str
+    ) -> bool:
+        built.append(len(relative))
+        return real_record(self, directory, relative)
+
+    def stub_generation(directory: pathlib.Path) -> tuple[int, int, int, int]:
+        stamps[0] += 1
+        return (1, 2, 3, 4)
+
+    monkeypatch.setattr(corpus_module, "_under", recording_under)
+    monkeypatch.setattr(corpus_module, "_directory_generation", stub_generation)
+    monkeypatch.setattr(
+        corpus_module._DirectoryGenerations, "record", recording_record
+    )
+
+    work = _PathPrefixWork()
+    entries = _reject_aliasing_paths(paths, work=work)
+    generations = corpus_module._DirectoryGenerations(work)
+    for path in paths:
+        generations.record_ancestors(tmp_path, path)
+
+    unique_prefixes = 510
+    # Every string handed to the recorder: the root once per path, and one
+    # per distinct ancestor.
+    assert len(built) == unique_prefixes + len(paths) == 4606
+    # 1 + 3 + … + 1,019 characters, against the 4,096 copies of that sum the
+    # visit-wise loop built.
+    assert sum(built) == unique_prefixes**2 == 260100
+    assert MAX_JOURNAL_ROWS * sum(built) == 1065369600
+    assert len(joins) == unique_prefixes == 510
+    # The root and the 510 ancestors, stamped once each rather than once per
+    # visit, and held once each.
+    assert stamps[0] == unique_prefixes + 1 == 511
+    assert len(generations._seen) == 511
+
+    # 2,093,056 alias visits, 4,606 counted prefixes and 2,088,960 ancestor
+    # visits, from one budget that this layout does not exhaust.
+    assert work.work == 2093056 + entries + MAX_JOURNAL_ROWS * 510 == 4186622
+    assert work.work <= MAX_PATH_COMPONENTS_TOTAL
+
+
 def test_ancestor_stamping_stops_at_the_first_absent_prefix(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
