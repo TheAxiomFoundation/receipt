@@ -79,7 +79,13 @@ Three row kinds, one journal:
     it was. Two questions are asked about a tombstone, in this order — does
     the host resolve the exact spelling, and does any fold-equal spelling
     survive in a listing — because a filesystem resolves names its own
-    enumeration does not emit. The pair is asked twice per verification, for
+    enumeration does not emit. A third spelling answers to neither
+    question and is refused where the listing is read instead: a surviving
+    ``retired/gone.`` or ``retired/gone `` is the tombstoned
+    ``retired/gone`` on Win32, which strips a trailing dot or space before
+    the lookup, while the exact ``lstat`` misses it on POSIX and its fold
+    key differs from the tombstone's. Both askings screen for it, as the
+    content sweep already does under a content root. The pair is asked twice per verification, for
     the reason the paragraph on pass order below gives, and the second asking
     shares no listing between one tombstone and the next, so a directory read
     for an earlier tombstone cannot answer for a later one. The second
@@ -1823,6 +1829,20 @@ class _TombstoneIndex:
             # lands in one bucket here and another on the filesystem that
             # resolves it, which decides whether a tombstone is honoured.
             _assert_foldable(name, "tree entry examined for a tombstone")
+            # And the other spelling no fold key can pair, asked here rather
+            # than only under a content root. Win32 strips a trailing dot or
+            # space before a lookup, so a surviving "retired/gone." *is* the
+            # tombstoned "retired/gone" there — while the exact lstat misses
+            # it on POSIX and its fold key differs, so both questions this
+            # pass asks answered "absent" and the verdict named the path
+            # removed with the file still openable. No host catches it in
+            # passing either: the verifier refuses to run on Windows (peer
+            # review, Sol round 2). Every listing screens the same way now.
+            if _strips_to_another_name(name):
+                raise CorpusError(
+                    "tree entry Windows would alias by stripping a trailing "
+                    f"dot or space: {_quoted(name)}"
+                )
             folded.setdefault(_path_fold(name), []).append(directory / name)
         if self._cache:
             self._directories[key] = folded
@@ -1847,12 +1867,16 @@ def _fold_survivor(index: _TombstoneIndex, relative: str) -> str | None:
     What this search cannot see is a name the filesystem resolves but never
     emits — Win32 strips trailing dots and spaces before a lookup, and NTFS
     answers to 8.3 short names. Those are handled outside this function, from
-    both ends. A *declared* path spelled that way is refused at the schema
+    three sides. A *declared* path spelled that way is refused at the schema
     boundary by :func:`_aliases_natively`, so no tombstone names one. A *tree
-    entry* that answers to the tombstoned spelling is caught by the native
-    ``os.lstat`` of the exact path in :func:`verify_corpus_binding`, which
-    runs before this search and lets the host that is actually running decide
-    what its own lookup resolves.
+    entry* that answers to the tombstoned spelling on the running host is
+    caught by the native ``os.lstat`` of the exact path in
+    :func:`verify_corpus_binding`, which runs before this search and lets the
+    host that is actually running decide what its own lookup resolves. And a
+    tree entry that would answer to it on a host that is *not* running is
+    refused outright where :class:`_TombstoneIndex` lists it: a POSIX
+    ``retired/gone.`` beside a tombstone for ``retired/gone`` is invisible
+    to both of the questions above and is the file itself on Win32.
 
     That leaves one case modelled by neither, and it is deliberate: an entry
     whose name aliases another *on Windows only*, examined on a POSIX host.

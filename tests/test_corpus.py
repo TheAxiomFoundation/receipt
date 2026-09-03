@@ -4805,3 +4805,83 @@ def test_a_content_file_found_by_its_spelled_name_still_verifies(
     )
     assert [entry.path for entry in verification.content] == sorted(CONTENT)
     assert [entry.path for entry in verification.attested] == sorted(ATTESTED)
+
+
+@pytest.mark.parametrize("survivor", ["gone.", "gone "])
+def test_refuses_a_tombstone_survivor_windows_strips_to_the_tombstoned_name(
+    tmp_path: pathlib.Path, survivor: str
+) -> None:
+    """Binds S5R2-F2: the strip rule reaches tombstone listings too.
+
+    ``retired/gone.`` and ``retired/gone `` open ``retired/gone`` on Win32,
+    which removes a trailing dot or space from a component before the
+    lookup. Neither of the two questions a tombstone asks can see that: the
+    exact ``os.lstat`` of ``retired/gone`` misses on POSIX, and the fold key
+    of ``gone.`` is not the fold key of ``gone``, so the survivor sits in a
+    different bucket from the one the search reads. Both answered "absent",
+    the verdict named the path under removedPaths, and the file still opened
+    under the retired name on the host that matters — and no host catches it
+    in passing, because the verifier refuses to run on Windows.
+
+    The sweep already refuses such an entry under a content root; this is
+    the same rule where a tombstone reads a listing. Without it this
+    verification returns a CorpusVerification naming ``retired/gone`` as
+    removed.
+    """
+
+    body = '{"applied": true}\n'
+    rows = _tombstone_rows("retired/gone", body)
+    write_tree(tmp_path, attested={**ATTESTED, "retired/gone": body})
+    (tmp_path / "retired/gone").unlink()
+    (tmp_path / "retired" / survivor).write_text(body)
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+    assert str(caught.value) == (
+        "tree entry Windows would alias by stripping a trailing dot or "
+        f"space: {survivor!r}"
+    )
+
+
+def test_the_second_tombstone_pass_screens_the_strip_alias_as_well(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S5R2-F2: the screen belongs to both askings, not to the first.
+
+    The tombstone pair is asked twice per verification, and the second
+    asking exists precisely because the first one concluded absence from
+    listings it cached. A screen present only in the first pass would leave
+    the pass that re-establishes absence able to read a stripping alias out
+    of a fresh listing and call the path absent — which is the round-five
+    and round-six defect one pass later. The check sits where every listing
+    is read, so both askings screen the same way.
+
+    The first pass is patched to pass so that only the second can refuse,
+    and the call count asserts that is what happened. Without the fix the
+    second pass reports absence and the verification returns.
+    """
+
+    import receipt.corpus as corpus_module
+
+    body = '{"applied": true}\n'
+    rows = _tombstone_rows("retired/gone", body)
+    write_tree(tmp_path, attested={**ATTESTED, "retired/gone": body})
+    (tmp_path / "retired/gone").unlink()
+    (tmp_path / "retired/gone.").write_text(body)
+
+    real = corpus_module._assert_tombstones_absent
+    calls: list[int] = []
+
+    def patched(*args: object, **kwargs: object) -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            return None
+        return real(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(corpus_module, "_assert_tombstones_absent", patched)
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+    assert calls == [1, 1]
+    assert str(caught.value) == (
+        "tree entry Windows would alias by stripping a trailing dot or "
+        "space: 'gone.'"
+    )
