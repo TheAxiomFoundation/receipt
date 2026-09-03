@@ -3310,8 +3310,10 @@ def test_a_second_cased_spelling_of_a_release_entry_is_refused(
 ) -> None:
     """Binds S4-F2: the release root's index was reconciled with the working
     tree by asking ``is_file()`` about each indexed path, which is a question
-    the *filesystem* answers. On APFS, HFS+ or NTFS it answers about whatever
-    entry it considers the same name, so ``releases/README.MD`` and
+    the *filesystem* answers. Where names are compared case-insensitively —
+    APFS and HFS+ by default, and any case-insensitive mount — it answers
+    about whatever entry it considers the same name, so ``releases/README.MD``
+    and
     ``releases/README.md`` — two entries the commit carries, two release
     objects — were both answered by the one file on disk. One of them was in
     no enumeration, was never byte- or mode-verified, and the reconciliation
@@ -3689,3 +3691,82 @@ def test_the_descent_states_the_read_it_needs_where_it_has_no_search_flag(
         assert str(refusal.value) == expected
     finally:
         directory.chmod(0o755)
+
+
+@pytest.mark.skipif(
+    os.getuid() == 0, reason="root lists a directory it has no rights on"
+)
+def test_an_indexed_release_file_the_walk_cannot_enumerate_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S4-F2 on any POSIX filesystem, which the two spelling cases above are
+    not: they need names compared insensitively, so on a case- and
+    normalisation-sensitive filesystem — ext4, and so CI — the entry was
+    already absent and the old question already gave the same answer. This
+    one binds everywhere, because it is the same substitution with the
+    filesystem's *lookup* rather than its comparison doing the work:
+    ``is_file()`` resolves the whole name and needs only search permission on
+    the parents, so it answered "regular file" for an entry inside a
+    directory the traversal cannot list — and the traversal is what the index
+    is reconciled against. One committed release object, in no enumeration,
+    never byte- or mode-verified, and the two sides called agreed.
+
+    The refusal is deliberate and fail-closed, and it is the standard the
+    package already applies with a base: ``_working_release_files`` keys the
+    base comparison by the same traversal, so this tree is already refused
+    there, in ``main``'s words. Without the fix the push path accepts it
+    outright."""
+
+    candidate = base_repository(tmp_path)
+    vendor = candidate.root / CHAIN_SPEC.release_root_relative / "vendor"
+    vendor.mkdir()
+    (vendor / "notes.md").write_text("release notes\n", encoding="utf-8")
+    git(candidate.root, "add", "--", "releases/vendor/notes.md")
+    vendor.chmod(0o111)
+    try:
+        # Search permission is all the old question ever needed, and the file
+        # really is there: this is a refusal about what can be enumerated,
+        # not about what exists.
+        assert (vendor / "notes.md").read_text(encoding="utf-8") == "release notes\n"
+        assert (candidate.root / "releases" / "vendor" / "notes.md").is_file()
+
+        with pytest.raises(AppendError) as refusal:
+            run_push_gate(candidate)
+        assert str(refusal.value) == (
+            "release file recorded in the index is absent or not a regular "
+            "file: releases/vendor/notes.md"
+        )
+    finally:
+        vendor.chmod(0o755)
+
+
+@pytest.mark.skipif(
+    os.getuid() == 0, reason="root lists a directory it has no rights on"
+)
+def test_the_base_pass_already_refused_the_tree_the_walk_cannot_enumerate(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The other half of the test above, and the reason its refusal is not a
+    new standard: with a base ref the same tree is refused by
+    ``_working_release_files`` and the per-file loop, which are on ``main``
+    and have always keyed the base comparison by the traversal's own
+    enumeration. This test passes with S4-F2 reverted — that is its point.
+    What S4-F2 changed is that the candidate index and the push path are now
+    held to what the base-ref path already required."""
+
+    candidate = base_repository(tmp_path)
+    vendor = candidate.root / CHAIN_SPEC.release_root_relative / "vendor"
+    vendor.mkdir()
+    (vendor / "notes.md").write_text("release notes\n", encoding="utf-8")
+    candidate = commit_all(candidate, "a release file under its own directory")
+    append_one_row(candidate)
+    vendor.chmod(0o111)
+    try:
+        with pytest.raises(AppendError) as refusal:
+            run_gate(candidate)
+        assert str(refusal.value) == (
+            f"existing release file was deleted relative to {candidate.base}: "
+            "releases/vendor/notes.md"
+        )
+    finally:
+        vendor.chmod(0o755)
