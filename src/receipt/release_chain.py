@@ -33,7 +33,12 @@ index reads names its path as a literal pathspec, so git is asked about the
 exact path rather than handed a name to interpret as a pattern, and every git
 read here runs with git's four pathspec-mode environment variables dropped, so
 that literal pathspec means what it says instead of whatever an ambient
-``GIT_LITERAL_PATHSPECS`` or ``GIT_ICASE_PATHSPECS`` would make of it. The state
+``GIT_LITERAL_PATHSPECS`` or ``GIT_ICASE_PATHSPECS`` would make of it. Each
+also reads the entry's own flag word, because mode and object id do not say
+whether an entry records content: an intent-to-add entry (``git add -N``) is
+stage 0 at the working tree's mode with the empty blob's object id, which is
+what every check here took for a tracked file while the commit made from that
+index deletes the path. The state
 reads themselves changed shape but not their refusals: ``_regular_file_bytes``
 keeps both of its messages and their order, and opens the file it accepts
 through directory descriptors so no component of the path is resolved twice.
@@ -1990,14 +1995,43 @@ def _observed_git_category(path: pathlib.Path) -> str:
     return "100755" if entry.st_mode & 0o100 else "100644"
 
 
+# git's in-memory cache-entry flag for an intent-to-add entry (CE_INTENT_TO_ADD,
+# 1 << 29), as ``git ls-files --debug`` prints it. See _index_entries.
+CE_INTENT_TO_ADD = 0x2000_0000
+# ``git ls-files --debug`` prints exactly these five lines per entry, in this
+# order, whatever the entry is; the last carries the flag word.
+INDEX_DEBUG_LINES = 5
+_INDEX_DEBUG_FLAGS_RE = re.compile(rb"  size: [0-9]+\tflags: ([0-9a-fA-F]+)\n\Z")
+
+
+def _split_index_debug(chunk: bytes, pathspec: str) -> tuple[bytes, bytes]:
+    """Take one ``--debug`` block off the front of a chunk, and return the rest.
+
+    With ``-z`` the record's path is NUL-terminated and its debug block is
+    not, so everything between one NUL and the next is one entry's block
+    followed by the next entry's ``<mode> <oid> <stage>\t<path>``. The block
+    is a fixed five lines, so the split is by newline count rather than by
+    content: a path may hold newlines, tabs, or the word ``flags``, and none
+    of that can be mistaken for the block because the block comes first.
+    """
+
+    position = 0
+    for _ in range(INDEX_DEBUG_LINES):
+        newline = chunk.find(b"\n", position)
+        if newline < 0:
+            raise ReleaseChainError(f"cannot parse the index entry for {pathspec}")
+        position = newline + 1
+    return chunk[:position], chunk[position:]
+
+
 def _index_entries(
     root: pathlib.Path, pathspec: str
-) -> list[tuple[str, str, str]]:
-    """Every ``git ls-files -s`` record under one path: mode, stage, path.
+) -> list[tuple[str, str, str, bool]]:
+    """Every ``git ls-files -s`` record under one path.
 
-    The one place this package parses the index, shared by the checks below
-    so they read it the same way and report an unreadable or unparseable
-    index in the same words.
+    Each is ``(mode, stage, path, intent_to_add)``. The one place this package
+    parses the index, shared by the checks below so they read it the same way
+    and report an unreadable or unparseable index in the same words.
 
     The path is passed as a literal pathspec. Given to git bare it is a
     *pattern*: a filename carrying glob magic globs, and one beginning with
@@ -2010,21 +2044,48 @@ def _index_entries(
     others, and the checks that ask about exactly one path are correct only
     because each filters the records afterwards — a filter the release
     root's scan, which reads every record under a directory, does not have.
-    ``:(literal)`` says what is meant: this exact path, matched as written.
-    The diagnostics keep naming the path itself, not the magic.
+    ``:(literal)`` says what is meant: this exact path, matched as written,
+    and ``_git_environment`` drops the four variables that would reinterpret
+    it. The diagnostics keep naming the path itself, not the magic.
+
+    ``--debug`` is read alongside ``-s`` because mode, stage and object id do
+    not say whether an entry records any content. ``git add -N`` — and every
+    porcelain that runs it, ``git add -p`` on an untracked file included —
+    writes an *intent-to-add* entry: stage 0, mode 100644, the empty blob's
+    object id, and no content at all. Every check below took that for a
+    tracked file, so a ``git rm --cached`` of a protected path followed by
+    ``git add -N`` of it passed the tracked-state check, passed the index
+    agreement check (the working tree really does hold a regular 100644
+    file), passed the still-indexed check, and produced a commit that
+    *deletes* the path. The flag is what says so: ``--debug`` prints the
+    cache entry's flag word, and ``CE_INTENT_TO_ADD`` is set in it. The
+    empty blob is not the test — a file whose content really is empty has the
+    same object id and is an ordinary entry.
+
+    One command answers both, so the mode and the flag word describe the same
+    read of the same index rather than two reads a write could fall between.
+    ``-z`` applies to the path, so a path holding a newline is still exact;
+    the debug block that follows it is a fixed five lines and is split off by
+    counting them.
     """
 
-    completed = _git_run(root, ["ls-files", "-s", "-z", "--", f":(literal){pathspec}"])
+    completed = _git_run(
+        root, ["ls-files", "-s", "--debug", "-z", "--", f":(literal){pathspec}"]
+    )
     if completed.returncode != 0:
         diagnostic = completed.stderr.decode("utf-8", errors="replace").strip()
         raise ReleaseChainError(
             f"cannot read the index entry for {pathspec}: {diagnostic}"
         )
-    entries: list[tuple[str, str, str]] = []
-    for record in completed.stdout.split(b"\0"):
-        if not record:
-            continue
+    entries: list[tuple[str, str, str, bool]] = []
+    chunks = completed.stdout.split(b"\0")
+    record = chunks[0]
+    for chunk in chunks[1:]:
+        debug, next_record = _split_index_debug(chunk, pathspec)
+        flags = _INDEX_DEBUG_FLAGS_RE.search(debug)
         try:
+            if flags is None:
+                raise ValueError("no flag word")
             metadata, raw_path = record.split(b"\t", 1)
             mode, _object_id, stage = metadata.decode("ascii").split(" ")
             listed = raw_path.decode("utf-8")
@@ -2032,7 +2093,14 @@ def _index_entries(
             raise ReleaseChainError(
                 f"cannot parse the index entry for {pathspec}"
             ) from exc
-        entries.append((mode, stage, listed))
+        intent = bool(int(flags.group(1), 16) & CE_INTENT_TO_ADD)
+        entries.append((mode, stage, listed, intent))
+        record = next_record
+    # Every record is followed by its own block, so what is left after the
+    # last one is nothing. Anything else is output this parse does not
+    # understand, and an index this cannot read is not one to compare against.
+    if record:
+        raise ReleaseChainError(f"cannot parse the index entry for {pathspec}")
     return entries
 
 
@@ -2077,14 +2145,14 @@ def assert_state_path_tracked(
     parts = pathlib.PurePosixPath(path).parts
     for depth in range(1, len(parts)):
         ancestor = "/".join(parts[:depth])
-        for mode, _stage, listed in _index_entries(root, ancestor):
+        for mode, _stage, listed, _intent in _index_entries(root, ancestor):
             if listed == ancestor:
                 raise ReleaseChainError(
                     f"state path {path} has an indexed ancestor {ancestor} ({mode})"
                 )
     entries = [
-        (mode, stage)
-        for mode, stage, listed in _index_entries(root, path)
+        (mode, stage, intent)
+        for mode, stage, listed, intent in _index_entries(root, path)
         if listed == path
     ]
     if not entries:
@@ -2098,6 +2166,13 @@ def assert_state_path_tracked(
     if entries[0][0] not in {"100644", "100755"}:
         raise ReleaseChainError(
             f"state path {path} has a non-regular index entry: {entries[0][0]}"
+        )
+    # Last, because an intent-to-add entry is stage 0 at 100644 and passes
+    # every question above: there is nothing else left to say about it. It
+    # records no content, and a commit made from this index deletes the path.
+    if entries[0][2]:
+        raise ReleaseChainError(
+            f"index entry for {path} is intent-to-add and records no content"
         )
 
 
@@ -2147,7 +2222,7 @@ def assert_index_agrees_with_tree(
     # name carrying glob magic), so only entries for this exact path count.
     entries = [
         (mode, stage)
-        for mode, stage, listed in _index_entries(root, path)
+        for mode, stage, listed, _intent in _index_entries(root, path)
         if listed == path
     ]
     if not entries:
@@ -2204,8 +2279,8 @@ def assert_release_file_still_indexed(
 
     path = _exact_relative(relative)
     entries = [
-        (mode, stage)
-        for mode, stage, listed in _index_entries(root, path)
+        (mode, stage, intent)
+        for mode, stage, listed, intent in _index_entries(root, path)
         if listed == path
     ]
     if not entries:
@@ -2217,6 +2292,15 @@ def assert_release_file_still_indexed(
     if entries[0][0] not in {"100644", "100755"}:
         raise ReleaseChainError(
             f"candidate index records a non-regular entry at {path}: {entries[0][0]}"
+        )
+    # After those, for the reason the tracked-state check has it last: an
+    # intent-to-add entry answers every one of them like an ordinary tracked
+    # file, and records nothing. ``git rm --cached`` followed by ``git add
+    # -N`` leaves an entry where the check above looks for one, and a commit
+    # made from this index still deletes the release file.
+    if entries[0][2]:
+        raise ReleaseChainError(
+            f"index entry for {path} is intent-to-add and records no content"
         )
 
 
@@ -2295,7 +2379,7 @@ def assert_release_root_index_regular(root: pathlib.Path, spec: ChainSpec) -> No
 
     release_root = spec.release_root_relative.as_posix()
     modes: dict[str, str] = {}
-    for mode, stage, listed in sorted(
+    for mode, stage, listed, intent in sorted(
         _index_entries(root, release_root), key=lambda record: (record[2], record[1])
     ):
         if stage != "0":
@@ -2305,6 +2389,14 @@ def assert_release_root_index_regular(root: pathlib.Path, spec: ChainSpec) -> No
         if mode not in {"100644", "100755"}:
             raise ReleaseChainError(
                 f"release root carries an unsupported index entry: {listed} ({mode})"
+            )
+        # Beside the mode check, because an intent-to-add entry passes it: a
+        # release path added with ``git add -N`` is recorded at 100644 with
+        # no content, so the reconciliation below would find it on disk and
+        # call the pair agreed while the commit carries nothing for it.
+        if intent:
+            raise ReleaseChainError(
+                f"index entry for {listed} is intent-to-add and records no content"
             )
         modes[listed] = mode
     directory = root / spec.release_root_relative
