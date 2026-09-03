@@ -14,6 +14,7 @@ import unicodedata
 
 import pytest
 
+from receipt._render import bounded_encoded, bounded_key
 from receipt.corpus import (
     EVIDENCE_RENDER_STRUCTURE,
     GATE_RENDER_STRUCTURE,
@@ -72,17 +73,23 @@ def charged_gate(gate: dict[str, object]) -> int:
     """What the module charges one gate declaration against ``MAX_GATE_TEXT``.
 
     Spelled out from the shipped constants and ``json.dumps`` rather than
-    imported from the module, so the arithmetic under every budget test is
-    the renderer's and not a copy of the code being tested.
+    imported from ``receipt.corpus``, so the arithmetic under every budget
+    test is the renderer's and not a copy of the code being tested. The
+    bound comes from ``receipt._render``, which is the renderer: it is the
+    module ``receipt.cli`` puts every string through on its way into the
+    verdict, and charging the string before it rather than after was
+    S5R3-F10.
     """
 
     evidence: dict[str, str] = gate["evidence"]  # type: ignore[assignment]
     return (
         GATE_RENDER_STRUCTURE
-        + len(json.dumps(gate["gateId"]))
-        + len(json.dumps(gate["outcome"]))
+        + len(json.dumps(bounded_encoded(gate["gateId"])))
+        + len(json.dumps(bounded_encoded(gate["outcome"])))
         + sum(
-            EVIDENCE_RENDER_STRUCTURE + len(json.dumps(key)) + len(json.dumps(value))
+            EVIDENCE_RENDER_STRUCTURE
+            + len(json.dumps(bounded_key(key)))
+            + len(json.dumps(bounded_encoded(value)))
             for key, value in evidence.items()
         )
     )
@@ -91,7 +98,7 @@ def charged_gate(gate: dict[str, object]) -> int:
 def charged_removed(path: str) -> int:
     """What the module charges one removed path against ``MAX_REMOVED_TEXT``."""
 
-    return REMOVED_PATH_RENDER_STRUCTURE + len(json.dumps(path))
+    return REMOVED_PATH_RENDER_STRUCTURE + len(json.dumps(bounded_encoded(path)))
 
 
 def first_over(cost: int, budget: int) -> tuple[int, int]:
@@ -1915,6 +1922,57 @@ def test_refuses_a_journal_path_longer_than_the_bound(
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
 
 
+def test_a_gate_bounded_by_the_renderer_is_charged_what_the_renderer_prints(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5R3-F10: the charge and the rendering were two different sums.
+
+    ``receipt.cli`` puts every string in the verdict through
+    ``receipt._render`` before printing it, and ``receipt.corpus`` charged
+    the string the producer wrote. The two therefore disagreed in both
+    directions. Twenty-two evidence values of 1,024 U+1F600 each are the
+    accepting side of it: they render as 12,288 characters apiece
+    unbounded, so the old charge came to 270,000 and refused the gate —
+    over a budget that bounds the verdict, for text the verdict would never
+    have carried, because the renderer truncates each of them to 4,121.
+
+    The charge is made on the bounded string now, so this gate is accepted,
+    and the rendering is measured against it rather than assumed: the
+    verdict is built exactly as ``main`` builds it — ``result_to_dict``,
+    ``_bounded_payload``, ``json.dumps(..., indent=2, sort_keys=True)`` —
+    and the gate section's length is asserted equal to what was charged.
+
+    Without the fix this verification refuses.
+    """
+
+    write_tree(tmp_path)
+    evidence = {f"{index:04d}": "\U0001F600" * 1024 for index in range(22)}
+    gates = [
+        {"gateId": "g", "tier": "public", "outcome": "pass", "evidence": evidence}
+    ]
+    # What the unbounded charge came to, which is why this gate was refused.
+    unbounded = (
+        GATE_RENDER_STRUCTURE
+        + len(json.dumps("g"))
+        + len(json.dumps("pass"))
+        + sum(
+            EVIDENCE_RENDER_STRUCTURE + len(json.dumps(key)) + len(json.dumps(value))
+            for key, value in evidence.items()
+        )
+    )
+    assert unbounded > MAX_GATE_TEXT
+    charged = charged_gate(gates[0])
+    assert charged <= MAX_GATE_TEXT
+
+    rows = journal_rows(gates=gates)
+    verification = verify_corpus_binding(
+        tmp_path, render_journal(rows), spec=corpus_spec()
+    )
+    assert [gate.gate_id for gate in verification.gates] == ["g"]
+    rendered, _text = _verdict_of(tmp_path, rows)
+    assert len(_json_list_body(rendered, "public", 6)) == charged
+
+
 def test_refuses_removed_paths_over_the_verdict_budget(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -3714,6 +3772,15 @@ def test_refuses_a_gate_whose_escaped_evidence_floods_the_verdict(
     between what Python holds and what JSON emits is what carries a legal
     gate past a budget it was charged against — and the refusal names the
     row, because the charge is made as the row is validated.
+
+    Also binds S5R3-F10, from the side that still refuses. Each of these
+    values renders as 12,288 characters unbounded and as 4,121 once
+    ``receipt._render`` has bounded it — the 341 emoji that fit, plus the
+    truncation marker, which is itself charged because it is itself
+    printed. Sixty-four of them come to 265,262, over the budget, so this
+    gate is refused for what the verdict *renders* rather than for what the
+    producer wrote. Its sibling below is the same gate at twenty-two
+    values, which fits and is accepted.
     """
 
     write_tree(tmp_path)
@@ -3860,9 +3927,14 @@ def _verdict_of(
     handful of digests and timestamps with no producer-controlled string in
     it, so it cannot scale with either budget. What is measured is exactly
     what the budgets bound.
+
+    ``_bounded_payload`` is applied before ``json.dumps``, because ``main``
+    applies it: the string the verdict carries is the bounded one, and a
+    measurement that skipped the bound would be measuring something the
+    command never prints (S5R3-F10).
     """
 
-    from receipt.cli import _format_text
+    from receipt.cli import _bounded_payload, _format_text
     from receipt.verify import VerifyResult, result_to_dict
 
     verification = verify_corpus_binding(
@@ -3879,9 +3951,9 @@ def _verdict_of(
         chain=None,
         corpus=verification,
     )
-    return json.dumps(result_to_dict(result), indent=2, sort_keys=True), _format_text(
-        result
-    )
+    return json.dumps(
+        _bounded_payload(result_to_dict(result)), indent=2, sort_keys=True
+    ), _format_text(result)
 
 
 def _near_cap_rows(

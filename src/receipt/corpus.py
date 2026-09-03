@@ -115,7 +115,16 @@ one removed path costs the verdict is derived from the object
 ``receipt.verify.result_to_dict`` builds and the
 ``json.dumps(..., indent=2, sort_keys=True)`` ``receipt.cli`` renders it
 with: the escaped strings, and every brace, key, separator, indent and
-newline JSON puts around them at that nesting depth. Charging a *floor* for
+newline JSON puts around them at that nesting depth. And the strings are
+charged *after* ``receipt._render`` has bounded them, because that is what
+the renderer prints. Charging the string the producer wrote while the CLI
+printed the bounded one made the accounting and the rendering disagree in
+both directions — a gate whose evidence renders to well under the cap once
+bounded was refused for a charge nothing would ever print, and the charge
+for a gate that passed was not the length of what appeared (peer review,
+Sol round 3). The transformation lives in one module both import, and a
+test asserts equality between what is charged and what is rendered on a
+journal filled to just under both caps. Charging a *floor* for
 the structure instead let a journal filled to just under a cap render well
 past it (peer review, round seven), so the constants are exact and a test
 asserts equality between what is charged and the length of the section that
@@ -336,6 +345,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
+from receipt._render import bounded_encoded, bounded_key
 from receipt._unicode_repertoire import FORMAT_CONTROL_RANGES
 
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -1527,14 +1537,23 @@ def parse_journal(
             # the sum was compared. The gate's own evidence is summed whole,
             # because ``json.loads`` materialised the row before this point
             # and MAX_EVIDENCE_ENTRIES bounds how many entries that is.
+            # Charged on what the renderer will print, not on what the
+            # producer wrote: ``receipt.cli`` puts every string in the
+            # verdict through ``receipt._render`` first, and charging the
+            # unbounded string made the accounting and the rendering
+            # disagree in both directions (peer review, Sol round 3). The
+            # bound is a no-op for every string a real corpus carries, and
+            # for the ones it is not, this is the difference between
+            # refusing a gate for text nothing would print and charging what
+            # appears.
             gate_text_charged += (
                 GATE_RENDER_STRUCTURE
-                + _rendered_length(gate.gate_id)
-                + _rendered_length(gate.outcome)
+                + _rendered_length(bounded_encoded(gate.gate_id))
+                + _rendered_length(bounded_encoded(gate.outcome))
                 + sum(
                     EVIDENCE_RENDER_STRUCTURE
-                    + _rendered_length(key)
-                    + _rendered_length(value)
+                    + _rendered_length(bounded_key(key))
+                    + _rendered_length(bounded_encoded(value))
                     for key, value in gate.evidence.items()
                 )
             )
@@ -1601,7 +1620,10 @@ def parse_journal(
     removed_paths = tuple(sorted(removed))
     charged = 0
     for number, path in enumerate(removed_paths, start=1):
-        charged += REMOVED_PATH_RENDER_STRUCTURE + _rendered_length(path)
+        # The same bound the renderer applies, for the same reason.
+        charged += REMOVED_PATH_RENDER_STRUCTURE + _rendered_length(
+            bounded_encoded(path)
+        )
         if charged > MAX_REMOVED_TEXT:
             raise CorpusError(
                 "journal removed paths total more than the verdict budget of "
