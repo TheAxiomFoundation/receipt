@@ -2477,8 +2477,9 @@ def test_a_utf8_sig_stream_receives_no_byte_order_mark(
     written to a stream reporting that codec — a Windows console under a
     UTF-8 code page, a stream a host opened with the signature codec — began
     ``ef bb bf``, and a JSON document does not begin with a byte-order mark.
-    RFC 8259 says an implementation may ignore one; ``json.loads`` does not,
-    and neither do many parsers a machine consumer would use. The command's
+    RFC 8259 permits an implementation to ignore one and plenty do not: a
+    consumer that decodes the stream and parses the resulting string gets
+    ``json.loads``'s own ``Unexpected UTF-8 BOM``. The command's
     JSON contract is that every exit path prints exactly one object bearing
     a ``verdict`` key, and this path printed something no parser would read.
 
