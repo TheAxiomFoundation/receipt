@@ -89,14 +89,25 @@ so a filename carrying it could begin a control sequence through a
 character :func:`_terminal_safe` had no reason to touch; ISO-2022-JP emits
 ESC to switch character sets, so ordinary Japanese text carries 0x1B (peer
 review, Sol round 3). :func:`_byte_safe_encoding` uses the stream's own
-codec only when it is UTF-8 and ASCII with ``backslashreplace`` otherwise,
-so every byte written is one the escaper approved. UTF-16 and UTF-32 were
+codec only when it is UTF-8 and otherwise uses ASCII with
+``backslashreplace`` only after proving the advertised codec carries those
+ASCII bytes literally. UTF-16 and UTF-32 were
 trusted alongside it on the argument that a UTF is a UTF, and they do not
 survive it: under UTF-16LE the printable U+5B1B and U+6D38 encode to
 ``1b 5b 38 6d``, which is ``ESC [ 8 m`` and hides the rest of the line from
 anything reading the stream as bytes (peer review, Sol round 4). UTF-8 is
 trusted because its code units are bytes and the escaper judged every one of
 them; a wider unit is a unit the escaper never saw.
+
+Even the ASCII fallback has to be proved against the advertised codec. UTF-7
+decodes printable ASCII byte sequences into non-ASCII characters (including
+an ESC), and ``unicode_escape`` decodes the sanitiser's backslash spellings
+back into the controls they name; raw ASCII is also not a one-byte character
+stream under UTF-16 or UTF-32 (peer review, Sol round 7). At runtime
+:func:`_ascii_is_literal` round-trips every printable ASCII character plus LF
+and TAB and requires the encoded bytes to be byte-for-byte ASCII. A codec that
+fails is refused before anything is written. UTF-7, ``unicode_escape``,
+UTF-16 and UTF-32 fail; Latin-1, the cp125x pages and ISO-8859 pages pass.
 
 That decision is made once. It was sampled in :func:`main` to bound the text
 and sampled again in :func:`_emit` to encode it, so a stream whose
@@ -718,12 +729,11 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
 #: The canonical name of the one codec this module writes in when it is not
 #: falling back to ASCII: the codec whose bytes a reader decodes back to
 #: exactly the characters this module escaped, and which cannot spell a
-#: character it kept as a byte a terminal reads as a control. Everything else
-#: — a legacy code page, a stateful ISO-2022 encoding, UTF-7, and UTF-16 and
-#: UTF-32 as well — is a mapping this module does not model, and the escaping
-#: :func:`_terminal_safe` performs is over *characters*, so a codec that maps
-#: a printable character onto a terminal-controlling byte defeats it after
-#: the fact. See :func:`_byte_safe_encoding`.
+#: character it kept as a byte a terminal reads as a control. Another codec
+#: may receive only the ASCII fallback, and only when the runtime probe proves
+#: its reader decodes those bytes literally. The escaping
+#: :func:`_terminal_safe` performs is over *characters*, so anything weaker
+#: lets a codec defeat it after the fact. See :func:`_byte_safe_encoding`.
 #:
 #: ``utf-8-sig`` was in here, and it is not a codec this module may write in:
 #: it prepends U+FEFF, so a ``--json`` verdict began ``ef bb bf`` and was not
@@ -738,15 +748,41 @@ _TRUSTED_ENCODINGS = frozenset({"utf-8"})
 #: command would be adding, not bytes it was asked to write.
 _UTF8_STREAM_ENCODINGS = frozenset({"utf-8", "utf-8-sig"})
 
+_ASCII_LITERAL_PROBE = "".join(chr(code) for code in range(0x20, 0x7F)) + "\n\t"
+_ASCII_LITERAL_BYTES = _ASCII_LITERAL_PROBE.encode("ascii")
+
+
+def _ascii_is_literal(encoding: str) -> bool:
+    """Whether a codec carries terminal-safe ASCII byte for byte.
+
+    The probe contains every printable ASCII character plus LF and TAB. Its
+    encoding must equal the same text encoded as ASCII, and those exact bytes
+    must decode back to the original probe. Both directions matter: UTF-7 can
+    decode an ASCII sequence such as ``+ABs-`` into ESC, while
+    ``unicode_escape`` turns a sanitiser-produced ``\\x1b`` back into ESC.
+    UTF-16 and UTF-32 fail because their characters occupy wider code units.
+    Latin-1, cp125x and ISO-8859 codecs carry this repertoire literally and
+    pass. An unknown or unusable codec fails closed.
+    """
+
+    try:
+        encoded = _ASCII_LITERAL_PROBE.encode(encoding)
+        return (
+            encoded == _ASCII_LITERAL_BYTES
+            and _ASCII_LITERAL_BYTES.decode(encoding) == _ASCII_LITERAL_PROBE
+        )
+    except (LookupError, UnicodeError, ValueError):
+        return False
+
 
 def _escapes_non_ascii(encoding: str) -> bool:
     """Whether :func:`_emit` will spell a non-ASCII character in backslashes.
 
     True for every encoding but the trusted one, because :func:`_emit`
-    encodes with ``backslashreplace`` and :func:`_byte_safe_encoding` hands
-    it ASCII wherever the stream's own codec is not UTF-8. :func:`_rendered`
-    asks this so that what it measures is what the stream receives; an
-    unknown spelling answers True, which is the same fail-closed direction
+    encodes with ``backslashreplace`` and every successful non-UTF-8 decision
+    from :func:`_byte_safe_encoding` is ASCII. :func:`_rendered` asks this so
+    that what it measures is what the stream receives; an unknown spelling
+    answers True, which is the same fail-closed direction
     :func:`_byte_safe_encoding` takes.
 
     What it is asked about is a decision :func:`_byte_safe_encoding` made,
@@ -798,9 +834,20 @@ def _byte_safe_encoding(stream: TextIO) -> str:
     So the stream's codec is honoured only when it is UTF-8 — ``utf-8`` or
     ``utf-8-sig``, compared after ``codecs.lookup`` has canonicalised the
     spelling, which is what turns ``UTF_8`` and ``utf8`` into ``utf-8``.
-    Anything else, and anything unknown, is encoded as ASCII with
-    ``backslashreplace``, so no character outside ASCII can produce a byte
-    at all and every byte written is one the escaper approved.
+    Anything else is eligible only for ASCII with ``backslashreplace``, so no
+    character outside ASCII can produce a byte at all.
+
+    Eligibility is proved, not inferred from the codec's family. The bytes
+    are written directly to the stream's buffer, but a reader interprets them
+    through the codec the stream advertises. :func:`_ascii_is_literal` encodes
+    every printable ASCII character plus LF and TAB and requires exact ASCII
+    bytes, then decodes those bytes and requires the original probe. UTF-7
+    fails because printable ASCII sequences can decode to controls;
+    ``unicode_escape`` fails because backslash escapes decode back to the
+    controls the sanitiser removed; UTF-16 and UTF-32 fail because ASCII is
+    not one byte per character. Latin-1, cp125x and ISO-8859 codecs pass. A
+    failing or unknown codec is refused before any bytes are written (peer
+    review, Sol round 7).
 
     Honoured, and not handed back: what this returns is always ``utf-8`` or
     ``ascii``, never the stream's own spelling. ``utf-8-sig`` is a UTF-8
@@ -831,12 +878,11 @@ def _byte_safe_encoding(stream: TextIO) -> str:
     every one of them; UTF-16 and UTF-32 hand the terminal bytes no
     character in the text ever was.
 
-    The cost is that a UTF-8 verdict read through a terminal set to a
-    legacy code page shows mojibake, which is what it already showed, and
-    that a UTF-16 or UTF-32 stream now receives ASCII with backslash escapes
-    where it used to receive the characters. The gain is that no encoding
-    this command does not model can turn printable text into a control
-    sequence.
+    The cost is that a stream whose codec cannot prove literal ASCII is
+    refused. In particular UTF-7, ``unicode_escape``, UTF-16 and UTF-32 no
+    longer receive raw ASCII bytes that their own decoders interpret as
+    something else. A literal-ASCII legacy stream still receives ASCII with
+    backslash escapes for non-ASCII text.
 
     Asked once per emission, by :func:`main`, and the answer is handed to
     everything downstream. Asking again inside :func:`_emit` made the
@@ -848,9 +894,15 @@ def _byte_safe_encoding(stream: TextIO) -> str:
     trusted answer be compared and refused by one set of names.
     """
 
-    if _stream_encoding(stream) in _UTF8_STREAM_ENCODINGS:
+    name = _stream_encoding(stream)
+    if name in _UTF8_STREAM_ENCODINGS:
         return "utf-8"
-    return "ascii"
+    if _ascii_is_literal(name):
+        return "ascii"
+    raise OSError(
+        f"verdict stream codec {name} does not carry ASCII literally; "
+        "the verdict cannot be written safely"
+    )
 
 
 def _write_all(target: Any, payload: Any) -> None:
@@ -932,12 +984,12 @@ def _emit(text: str, stream: TextIO, *, encoding: str) -> None:
 
     Which encoding that is, is :func:`_byte_safe_encoding`'s decision and
     not the stream's: UTF-8 is used only where the stream's own codec is one,
-    and every other one is replaced by ASCII, because escaping code points
-    and then handing them to an arbitrary codec left the escaping to be
-    undone by the encoder — cp1252 spells the printable U+203A as the
-    single byte 0x9B, which is CSI (peer review, Sol round 3), and UTF-16LE
-    spells the printable U+5B1B and U+6D38 as ``ESC [ 8 m`` (peer review,
-    Sol round 4).
+    and another codec gets ASCII only where :func:`_ascii_is_literal` proves
+    its reader will see the same characters. Escaping code points and then
+    handing them to an arbitrary codec left the escaping to be undone —
+    UTF-7 and ``unicode_escape`` can decode ASCII back into ESC, while
+    UTF-16 does not decode raw ASCII bytes as one byte per character (peer
+    review, Sol round 7).
 
     That decision arrives as ``encoding`` and is not re-taken here. It was,
     and :func:`main` had already taken it once to bound the verdict's

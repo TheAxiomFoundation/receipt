@@ -2185,6 +2185,81 @@ class _CodecStdout(io.TextIOWrapper):
 
 
 @pytest.mark.parametrize(
+    "encoding, canonical",
+    [("utf-7", "utf-7"), ("unicode_escape", "unicode-escape")],
+)
+def test_a_codec_that_decodes_ascii_into_controls_is_refused(
+    repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    encoding: str,
+    canonical: str,
+) -> None:
+    """Binds S7-F4: raw ASCII is not literal under every non-UTF-8 codec.
+
+    UTF-7 turns the printable bytes ``+ABs-`` into ESC, while
+    ``unicode_escape`` turns the sanitiser's own ``\\x1b`` spelling back into
+    ESC. The runtime probe refuses both before stdout receives a byte and
+    ``main`` returns the existing render refusal. Without S7-F4 the old
+    fallback reports PASS and writes raw ASCII that the advertised decoder
+    interprets as a control-bearing or invalid verdict.
+    """
+
+    if encoding == "utf-7":
+        assert b"+ABs-[2J".decode(encoding) == "\x1b[2J"
+    else:
+        assert b"\\x1b[2J".decode(encoding) == "\x1b[2J"
+
+    stream = _CodecStdout(encoding)
+    monkeypatch.setattr(sys, "stdout", stream)
+    assert run(repo, "--json") == EXIT_FAIL
+    assert stream.written() == b""
+    error = capsys.readouterr().err
+    assert "verdict could not be rendered; treat the run as unverified" in error
+    assert (
+        f"OSError: verdict stream codec {canonical} does not carry ASCII "
+        "literally; the verdict cannot be written safely" in error
+    )
+    assert error.rstrip("\n").endswith("receipt verify: FAIL")
+
+
+def test_a_latin1_stream_round_trips_the_proved_ascii_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Binds S7-F4: literal-ASCII codecs must retain the safe fallback.
+
+    Latin-1 carries every probed byte literally, so non-ASCII producer text
+    is backslash-escaped into ASCII and the stream's own decoder recovers the
+    exact emitted text. The recorder also proves the fallback was selected by
+    the probe. Without S7-F4 the old unconditional ASCII branch never calls
+    it, so that assertion fails even though Latin-1 happened to be safe.
+    """
+
+    import receipt.cli as cli_module
+
+    real_probe = cli_module._ascii_is_literal
+    probed: list[str] = []
+
+    def recording_probe(encoding: str) -> bool:
+        probed.append(encoding)
+        return real_probe(encoding)
+
+    monkeypatch.setattr(cli_module, "_ascii_is_literal", recording_probe)
+
+    payload = "FAILED: binding \u203a rules/x.yaml\tcontrol"
+    stream = _CodecStdout("latin-1")
+    encoding = cli_module._byte_safe_encoding(stream)
+    assert encoding == "ascii"
+    assert probed == ["iso8859-1"]
+    cli_module._emit(payload, stream, encoding=encoding)
+    data = stream.written()
+
+    expected = payload.encode("ascii", "backslashreplace").decode("ascii") + "\n"
+    assert data == expected.encode("ascii")
+    assert data.decode(stream.encoding) == expected
+
+
+@pytest.mark.parametrize(
     "encoding, payload",
     [
         # U+203A is cp1252's 0x9B, which is CSI.
@@ -2209,10 +2284,10 @@ def test_a_legacy_codec_cannot_turn_the_verdict_into_a_control_sequence(
     Japanese text carries 0x1B and the verdict is full of escape sequences
     with no adversary at all.
 
-    The stream's codec is used now only when it is a UTF; everything else is
-    encoded as ASCII with ``backslashreplace``, so no character outside
-    ASCII can produce a byte and every byte written is one the escaper
-    approved. Without the fix each of these payloads puts 0x9b or 0x1b on
+    The stream's codec is used now only when it is UTF-8; these two
+    literal-ASCII codecs receive ASCII with ``backslashreplace``, so no
+    character outside ASCII can produce a byte and every byte written is one
+    the escaper approved. Without the fix each payload puts 0x9b or 0x1b on
     the stream.
     """
 
@@ -2278,7 +2353,7 @@ def test_a_utf8_stream_still_carries_the_characters_themselves(
 def test_a_wider_code_unit_cannot_carry_an_escape_sequence_either(
     encoding: str,
 ) -> None:
-    """Binds S5R4-F3: a UTF is not a UTF as far as a terminal is concerned.
+    """Binds S5R4-F3 and S7-F4: wider codecs cannot carry raw ASCII bytes.
 
     S5R3-F6 admitted UTF-16 and UTF-32 alongside UTF-8 on the argument that
     they are "the same with wider units". They are not, and the difference
@@ -2293,24 +2368,28 @@ def test_a_wider_code_unit_cannot_carry_an_escape_sequence_either(
     Hiding a line is enough: the verdict's trusted last line is where an
     auditor reads PASS or FAIL.
 
-    The trusted codec path is UTF-8 alone now, so these streams receive
-    ASCII with backslash escapes. The assertion is over the raw bytes,
-    because bytes are what the finding is about. Without the fix each of
-    these payloads puts 0x1b on the stream.
+    S5R4-F3 removed them from the trusted codec path and sent raw ASCII to
+    their binary buffer instead. S7-F4 closes the remaining mismatch: their
+    advertised decoder does not carry those ASCII bytes literally, so the
+    stream is refused before anything is written. Without S7-F4
+    ``_byte_safe_encoding`` returns ``"ascii"`` and the no-byte assertion
+    and exact ``OSError`` both fail.
     """
 
-    from receipt.cli import _byte_safe_encoding, _emit
+    from receipt.cli import _byte_safe_encoding
 
     payload = "FAILED: binding \u5b1b\u6d38.yaml"
     assert all(ord(character) not in (0x1B, 0x9B) for character in payload)
     assert 0x1B in payload.encode(encoding)
 
     stream = _CodecStdout(encoding)
-    _emit(payload, stream, encoding=_byte_safe_encoding(stream))
-    data = stream.written()
-    assert data.isascii()
-    assert b"\x1b" not in data and b"\x9b" not in data
-    assert data == b"FAILED: binding \\u5b1b\\u6d38.yaml\n"
+    with pytest.raises(OSError) as caught:
+        _byte_safe_encoding(stream)
+    assert str(caught.value) == (
+        f"verdict stream codec {codecs.lookup(encoding).name} does not carry "
+        "ASCII literally; the verdict cannot be written safely"
+    )
+    assert stream.written() == b""
 
 
 class _ShiftingCodecStdout(io.TextIOWrapper):
@@ -2436,8 +2515,8 @@ def test_a_bufferless_stream_of_an_untrusted_codec_is_refused(
     error = capsys.readouterr().err
     assert "verdict could not be rendered; treat the run as unverified" in error
     assert (
-        "OSError: verdict stream has no binary buffer and its encoding is not "
-        "UTF-8; the verdict cannot be written safely" in error
+        "OSError: verdict stream codec cp037 does not carry ASCII literally; "
+        "the verdict cannot be written safely" in error
     )
     assert error.rstrip("\n").endswith("receipt verify: FAIL")
 
