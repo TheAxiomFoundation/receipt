@@ -2233,9 +2233,17 @@ def swap_at_the_first_cafile(
 
 
 def openssl_failure_detail(message: str) -> str:
-    """The OpenSSL diagnostic out of a ported ``OpenSSL command failed`` text."""
+    """The OpenSSL diagnostic out of a ported ``OpenSSL command failed`` text.
 
-    return message.split("): ", 1)[1]
+    Each ``error:`` line OpenSSL prints is prefixed with the id of the thread
+    that raised it -- sixteen hex digits on 3.0, which Ubuntu's CI runners
+    carry, and a decimal on 1.1.1 -- so two runs of the same failure differ
+    there and nowhere else. The prefix is stripped so the comparison is of
+    what OpenSSL said, not of which thread said it.
+    """
+
+    detail = message.split("): ", 1)[1]
+    return re.sub(r"^[0-9A-Fa-f]+:(?=error:)", "", detail, flags=re.MULTILINE)
 
 
 def test_a_root_swapped_after_validation_is_not_what_gets_trusted(
