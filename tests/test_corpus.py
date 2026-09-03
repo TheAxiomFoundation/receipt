@@ -2206,10 +2206,21 @@ class _Scan:
 def _scandir(directory_name: str, **reshape):
     """An ``os.scandir`` that reshapes exactly one directory's listing.
 
-    Only the tombstone index scans; the content sweep lists through
-    ``pathlib.Path.iterdir``. On 3.13 and 3.14 ``iterdir`` is itself built on
-    ``os.scandir``, so the wrapper is scoped by directory name and hands back
-    the host's own iterator, untouched, for every other listing.
+    Every directory this module reads is scanned — the tombstone index, the
+    attested spelling walk, and since S6-F2 the closed-world sweep and the
+    root-component checks as well, which used to list through
+    ``pathlib.Path.iterdir``. So the wrapper is scoped by directory name and
+    hands back the host's own iterator, untouched, for every other listing.
+
+    Declaring a name rather than writing one is often the only way to say
+    what a test is about on every host. APFS refuses to create a filename
+    carrying an unassigned code point at all — the ``open`` fails with
+    EILSEQ — while ext4 and NTFS store the bytes without comment; a
+    case-insensitive volume cannot hold two entries that differ only in
+    case, which is exactly the pair a collision test needs; and a name Win32
+    strips before a lookup is an ordinary name here. The verifier has to
+    hold on the filesystems that allow these names, so they reach it through
+    the listing rather than off the disk.
     """
 
     real = os.scandir
@@ -2218,6 +2229,26 @@ def _scandir(directory_name: str, **reshape):
         if pathlib.PurePath(os.fspath(target)).name != directory_name:
             return real(target)
         return _Scan(real(target), **reshape)
+
+    return scandir
+
+
+def _scandir_at(target: pathlib.Path, extra: str):
+    """An ``os.scandir`` that adds one entry to exactly one directory.
+
+    ``_scandir`` is scoped by directory name, which is enough where the name
+    is unique in the tree; this one is scoped by the directory itself, for
+    the tree root and for a name a fixture uses twice. What it injects is a
+    name: the sweep rebuilds every entry as ``directory / name``, so an entry
+    declared here is a name in that directory and nothing else.
+    """
+
+    real = os.scandir
+
+    def scandir(directory):
+        if pathlib.Path(os.fspath(directory)) != target:
+            return real(directory)
+        return _Scan(real(directory), extra=[extra])
 
     return scandir
 
@@ -2303,6 +2334,88 @@ def test_many_tombstones_over_one_cached_bucket_exceed_the_budget(
             tmp_path, render_journal(reindex(rows)), spec=corpus_spec()
         )
     assert "tombstone is unverifiable: .axiom/retired/gone-" in str(caught.value)
+
+
+def test_the_content_sweep_stops_reading_a_directory_wider_than_its_budget(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S6-F2: the closed-world sweep was the one walk with no ceiling.
+
+    ``_list_directory`` read a directory of any width into a sorted list, and
+    ``_tree_content_paths`` descended into every directory that listing named,
+    with no counter anywhere. So a content root carrying arbitrarily many
+    portable, suffix-excluded entries — names the sweep must look at and the
+    journal need never mention, since none of them is content — made the
+    verifier allocate and ``lstat`` for as long as the tree was wide. The
+    tombstone pass and the spelling walk had both been budgeted for rounds;
+    this one had not.
+
+    Two thousand entries against a budget of sixty-four. The wrapper hands
+    the module the host's own scandir iterator over a directory really on
+    disk and counts what the module takes from it, which is the half of the
+    finding a charge made after the listing would not fix: at most one entry
+    past the budget out of two thousand, because the charge is made as each
+    name arrives and the refusal is raised from inside the ``with``. Without
+    the budget every one of the two thousand is read, sorted and screened,
+    and the verification goes on to refuse them as unlisted content or to
+    pass.
+    """
+
+    width = 2000
+    budget = 64
+    pulled: list[str] = []
+    write_tree(tmp_path)
+    wide = tmp_path / "rules" / "wide"
+    wide.mkdir()
+    for index in range(width):
+        (wide / f"entry-{index:05d}.txt").write_text("")
+    monkeypatch.setattr("receipt.corpus.MAX_SWEEP_WORK", budget)
+    monkeypatch.setattr(os, "scandir", _scandir("wide", pulled=pulled))
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        f"the closed-world sweep would read more than {budget} directory "
+        "entries; the tree cannot be closed"
+    )
+    assert len(pulled) <= budget + 1
+    assert len(pulled) < width
+
+
+def test_an_ordinary_corpus_sweeps_far_under_the_sweep_budget(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S6-F2, the control: the budget must not refuse a real corpus.
+
+    A bound is only worth having if what it refuses is the adversarial input
+    and not the ordinary one, so the fixture's own cost is measured rather
+    than claimed: it verifies at a budget of fourteen and refuses at
+    thirteen, which is what fourteen entry visits means — the repository
+    root once per sweep for the root-component check, then ``rules``,
+    ``rules/benefit`` and ``rules/tax``, and the whole of it a second time
+    for the closing sweep, because both sweeps charge one running total.
+
+    The shipped number is four orders of magnitude above that, and it has to
+    be read beside ``MAX_JOURNAL_ROWS``: a tree whose content files approach
+    it could not verify anyway, since the journal cannot bind that many rows.
+    What it bounds is everything else a content root may hold.
+
+    This test passes with the S6-F2 change disabled, except for the two
+    lowered-budget assertions that are the change itself.
+    """
+
+    from receipt.corpus import MAX_SWEEP_WORK
+
+    write_tree(tmp_path)
+    journal = render_journal(journal_rows())
+    monkeypatch.setattr("receipt.corpus.MAX_SWEEP_WORK", 14)
+    verification = verify_corpus_binding(tmp_path, journal, spec=corpus_spec())
+    assert [entry.path for entry in verification.content] == sorted(CONTENT)
+    monkeypatch.setattr("receipt.corpus.MAX_SWEEP_WORK", 13)
+    with pytest.raises(CorpusError, match="the tree cannot be closed"):
+        verify_corpus_binding(tmp_path, journal, spec=corpus_spec())
+    assert MAX_SWEEP_WORK == 262144
 
 
 def _planting_fold_survivor(plant):
@@ -2870,27 +2983,6 @@ def test_a_tombstone_entry_that_cannot_be_stat_after_the_listing_refuses(
         os.chmod(tmp_path / "retired", 0o755)
 
 
-def _listing_with(directory_name: str, extra: str):
-    """An ``iterdir`` that reports one more entry than the content sweep holds.
-
-    APFS refuses to create a filename carrying an unassigned code point at
-    all — the ``open`` fails with EILSEQ — while ext4 and NTFS store the bytes
-    without comment. The verifier has to hold on the filesystems that allow
-    the name, so on this host the name reaches the sweep through the listing
-    rather than through the disk.
-    """
-
-    real = pathlib.Path.iterdir
-
-    def iterdir(self: pathlib.Path):
-        entries = list(real(self))
-        if self.name == directory_name:
-            entries.append(self / extra)
-        return iter(entries)
-
-    return iterdir
-
-
 def test_refuses_a_tree_entry_carrying_an_unassigned_code_point(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2914,7 +3006,7 @@ def test_refuses_a_tree_entry_carrying_an_unassigned_code_point(
 
     assert unicodedata.category("͸") == "Cn"
     write_tree(tmp_path)
-    monkeypatch.setattr(pathlib.Path, "iterdir", _listing_with("tax", "notes͸"))
+    monkeypatch.setattr(os, "scandir", _scandir("tax", extra=["notes͸"]))
     with pytest.raises(CorpusError, match="is not a portable name") as caught:
         verify_corpus_binding(
             tmp_path, render_journal(journal_rows()), spec=corpus_spec()
@@ -3207,16 +3299,8 @@ def test_the_aliasing_root_component_refusal_names_the_entry(
     wording, which an auditor has to act on — is covered everywhere.
     """
 
-    real = pathlib.Path.iterdir
-
-    def iterdir(self: pathlib.Path):
-        entries = list(real(self))
-        if self == tmp_path:
-            entries.append(self / "RULES")
-        return iter(entries)
-
     write_tree(tmp_path)
-    monkeypatch.setattr(pathlib.Path, "iterdir", iterdir)
+    monkeypatch.setattr(os, "scandir", _scandir_at(tmp_path, "RULES"))
     with pytest.raises(CorpusError) as caught:
         verify_corpus_binding(
             tmp_path, render_journal(journal_rows()), spec=corpus_spec()
@@ -3225,26 +3309,6 @@ def test_the_aliasing_root_component_refusal_names_the_entry(
         "tree entry 'RULES' aliases the pinned content root component 'rules' "
         "on a case- or normalization-insensitive filesystem"
     )
-
-
-def _iterdir_with(target: pathlib.Path, extra: pathlib.Path):
-    """A ``Path.iterdir`` that adds one entry to exactly one directory.
-
-    The sweep lists through ``iterdir``, and the collisions these tests are
-    about cannot be written on a case-insensitive host — which is the host
-    the collision is dangerous on. Injecting the entry the case-sensitive
-    host would emit makes the test say the same thing everywhere.
-    """
-
-    real = pathlib.Path.iterdir
-
-    def iterdir(self: pathlib.Path):
-        entries = list(real(self))
-        if self == target:
-            entries.append(extra)
-        return iter(entries)
-
-    return iterdir
 
 
 def test_refuses_two_directories_a_case_insensitive_checkout_would_merge(
@@ -3272,11 +3336,7 @@ def test_refuses_two_directories_a_case_insensitive_checkout_would_merge(
     """
 
     write_tree(tmp_path)
-    monkeypatch.setattr(
-        pathlib.Path,
-        "iterdir",
-        _iterdir_with(tmp_path / "rules", tmp_path / "rules" / "TAX"),
-    )
+    monkeypatch.setattr(os, "scandir", _scandir_at(tmp_path / "rules", "TAX"))
     with pytest.raises(CorpusError) as caught:
         verify_corpus_binding(
             tmp_path, render_journal(journal_rows()), spec=corpus_spec()
@@ -3295,19 +3355,20 @@ def test_refuses_a_directory_that_would_merge_with_a_content_file(
     What merges on a case-insensitive volume is the name, whatever it names,
     so a directory whose name folds onto a bound content file is the same
     ambiguity: the consumer's checkout holds one of them and cannot say
-    which. The check therefore runs before either entry is classified, and
-    the entry injected here is a real directory — created out of the way and
-    listed in place — beside the real file ``rules/tax/rate.yaml``.
+    which. The check therefore runs before either entry is classified, which
+    is what makes a declared name enough here: the entry never reaches the
+    ``lstat`` that would decide what it is.
 
-    Without the pair check the sweep classifies the directory as a directory,
-    descends it, finds nothing, and verifies the corpus.
+    Declared rather than written because the pair cannot be written on the
+    volume the ambiguity is about — a case-insensitive host will not hold
+    ``Rate.yaml`` beside ``rate.yaml``, which is the whole finding. Without
+    the pair check the sweep goes on to judge the name one entry at a time
+    and the auditor gets whatever that produces instead of this refusal.
     """
 
     write_tree(tmp_path)
-    intruder = tmp_path / "spare" / "Rate.yaml"
-    intruder.mkdir(parents=True)
     monkeypatch.setattr(
-        pathlib.Path, "iterdir", _iterdir_with(tmp_path / "rules" / "tax", intruder)
+        os, "scandir", _scandir_at(tmp_path / "rules" / "tax", "Rate.yaml")
     )
     with pytest.raises(CorpusError) as caught:
         verify_corpus_binding(
@@ -3340,9 +3401,7 @@ def test_refuses_two_merging_entries_beside_a_pinned_root_component(
 
     write_tree(tmp_path)
     (tmp_path / "notes").mkdir()
-    monkeypatch.setattr(
-        pathlib.Path, "iterdir", _iterdir_with(tmp_path, tmp_path / "NOTES")
-    )
+    monkeypatch.setattr(os, "scandir", _scandir_at(tmp_path, "NOTES"))
     with pytest.raises(CorpusError) as caught:
         verify_corpus_binding(
             tmp_path, render_journal(journal_rows()), spec=corpus_spec()
@@ -3493,7 +3552,7 @@ def test_refuses_a_tree_entry_whose_name_windows_would_strip(
     """
 
     write_tree(tmp_path)
-    monkeypatch.setattr(pathlib.Path, "iterdir", _listing_with("tax", "notes.yaml."))
+    monkeypatch.setattr(os, "scandir", _scandir("tax", extra=["notes.yaml."]))
     with pytest.raises(CorpusError) as caught:
         verify_corpus_binding(
             tmp_path, render_journal(journal_rows()), spec=corpus_spec()
@@ -3528,16 +3587,8 @@ def test_refuses_an_entry_beside_a_root_component_windows_would_strip(
     trailing or not.
     """
 
-    real = pathlib.Path.iterdir
-
-    def iterdir(self: pathlib.Path):
-        entries = list(real(self))
-        if self == tmp_path:
-            entries.append(self / "rules ")
-        return iter(entries)
-
     write_tree(tmp_path)
-    monkeypatch.setattr(pathlib.Path, "iterdir", iterdir)
+    monkeypatch.setattr(os, "scandir", _scandir_at(tmp_path, "rules "))
     with pytest.raises(CorpusError) as caught:
         verify_corpus_binding(
             tmp_path, render_journal(journal_rows()), spec=corpus_spec()
@@ -6082,7 +6133,7 @@ def test_a_real_aliasing_root_spelling_keeps_the_root_component_refusal(
     ``rules`` pin — preempting ``_assert_no_aliasing_root_component``, which
     asks the same question a line later and names the entry that aliases the
     pinned spelling. The existing test for that wording injects a phantom
-    entry through ``iterdir`` and so never exercised the real case.
+    entry into the listing and so never exercised the real case.
 
     The content-root walk asks the symlink question and not the spelling
     one, because the check a line later says more. This asserts the refusal
