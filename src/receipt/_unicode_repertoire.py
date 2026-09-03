@@ -389,10 +389,11 @@ def generate_default_ignorable_ranges(ucd_text: str) -> tuple[tuple[int, int], .
     tuple came from Unicode 14.0.0's, whose URL the module docstring names.
     The parser takes every non-comment line assigning
     ``Default_Ignorable_Code_Point``, reads the code point or ``first..last``
-    range in its first field, and merges what is adjacent or overlapping — so
-    the file's 27 lines become 17 ranges, the four consecutive Mongolian
-    entries becoming one and the seven consecutive tag-and-variation-selector
-    entries becoming one.
+    range in its first field, and merges what is adjacent or overlapping. The
+    file's 27 lines become 17 ranges across exactly three merges: three
+    Mongolian lines into U+180B..U+180F, three word-joiner and
+    invisible-operator lines into U+2060..U+206F, and seven tag and
+    variation-selector lines into U+E0000..U+E0FFF — 27 - 2 - 2 - 6 = 17.
 
     Parsed rather than derived from ``unicodedata`` because there is nothing
     to derive it from: the standard library exposes category, combining
