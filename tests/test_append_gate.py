@@ -4220,24 +4220,42 @@ def test_an_index_alias_is_refused_against_a_base_as_well(
     )
 
 
-def an_outside_release_tree(tmp_path: pathlib.Path, holding: str) -> pathlib.Path:
-    """A release tree outside the candidate, with a manifest directory in it.
+def an_outside_release_tree(
+    tmp_path: pathlib.Path,
+    holding: str,
+    *,
+    witnesses: Witnesses,
+    candidate: Candidate,
+    anchors: pathlib.Path,
+    chain: ChainSpec = CHAIN_SPEC,
+) -> pathlib.Path:
+    """A release tree outside the candidate, holding a chain that verifies.
 
-    A manifest is what makes the difference visible: the push path decides
-    whether a chain exists by asking ``is_dir()`` about the manifest
-    directory, which follows every component of the path it is given, so a
-    root pointing here made this chain the one the verdict spoke for.
+    A chain is what makes the difference visible: the push path decides
+    whether one exists by asking ``is_dir()`` about the manifest directory,
+    which follows every component of the path it is given, so a root pointing
+    here made this chain the one the verdict spoke for. It is a *valid* chain,
+    over exactly the candidate's own state bytes, because that is what makes
+    the escape an acceptance — a malformed manifest here would be refused a
+    step later and the tests below would pin a rejection that says nothing
+    about which tree was read.
     """
 
     outside = tmp_path / "outside"
-    manifests = outside / holding
-    manifests.mkdir(parents=True)
-    (manifests / "0000-0000000000000000.json").write_text("{}\n", encoding="utf-8")
+    ledger_bytes, prefix_bytes = state_bytes_of(candidate, chain)
+    write_release_chain(
+        outside / holding,
+        anchors,
+        witnesses=witnesses,
+        chain=chain,
+        ledger_bytes=ledger_bytes,
+        prefix_bytes=prefix_bytes,
+    )
     return outside
 
 
 def test_a_symlinked_release_root_is_refused_on_the_push_path(
-    tmp_path: pathlib.Path,
+    tmp_path: pathlib.Path, witnesses: Witnesses
 ) -> None:
     """Binds S4R2-F1: on the push path everything the gate knows about a
     release tree it learns by joining the configured root onto the candidate
@@ -4255,22 +4273,32 @@ def test_a_symlinked_release_root_is_refused_on_the_push_path(
     anything reads through them is what answers it, in the words this package
     has always refused a symlinked ``releases`` with.
 
-    Without the walk this run reaches ``verify_release_chain`` and refuses —
-    or accepts — on the strength of the outside manifest."""
+    Without the walk this run reaches ``verify_release_chain`` and *accepts*
+    on the strength of the outside chain: with the walk's body removed this
+    tree returns ``thesis-facts append check OK: 2 rows, immutable prefix 1,
+    release 0``, a verdict naming a release the candidate tree does not
+    carry."""
 
     candidate = base_repository(tmp_path)
     shutil.rmtree(candidate.root / "releases")
     candidate = commit_all(candidate, "a base with no release tree")
-    outside = an_outside_release_tree(tmp_path, "manifests")
+    anchors = tmp_path / "anchors"
+    outside = an_outside_release_tree(
+        tmp_path,
+        "manifests",
+        witnesses=witnesses,
+        candidate=candidate,
+        anchors=anchors,
+    )
     (candidate.root / "releases").symlink_to(outside)
 
     with pytest.raises(AppendError) as refusal:
-        run_push_gate(candidate)
+        run_push_gate_with_anchors(candidate, anchors)
     assert str(refusal.value) == "releases must be a real directory, not a symlink"
 
 
 def test_a_symlinked_parent_of_a_nested_release_root_is_refused(
-    tmp_path: pathlib.Path,
+    tmp_path: pathlib.Path, witnesses: Witnesses
 ) -> None:
     """S4R2-F1 for a component above the root, which is the same substitution
     without the root itself being a link: a spec whose release root is
@@ -4280,19 +4308,145 @@ def test_a_symlinked_parent_of_a_nested_release_root_is_refused(
     and the index scan again records nothing for an untracked root.
 
     The component that redirects is named, in the shape the state-path walk
-    uses for the same fact."""
+    uses for the same fact. Here too the chain behind the link verifies, so
+    the escape is an acceptance: with this walk's body and S4R3-F3's closing
+    re-check both removed, this tree returns ``thesis-facts append check OK: 2
+    rows, immutable prefix 1, release 0``. With only the walk removed the
+    re-check catches it instead — ``data/releases`` ``lstat``s as a directory
+    through the link while nothing was held for it — which is the two
+    answering for the same fact from opposite ends of the run, not one of them
+    being redundant: the leaf case above is accepted outright with the walk
+    removed, because an ``lstat`` of a symlinked leaf is not a directory and
+    the re-check with nothing held has nothing to object to."""
 
     spec = spec_with_release_root("data/releases")
     candidate = base_repository(tmp_path, "data/releases")
     shutil.rmtree(candidate.root / "data")
     candidate = commit_all(candidate, "a base with no release tree")
-    outside = an_outside_release_tree(tmp_path, "releases/manifests")
+    anchors = tmp_path / "anchors"
+    outside = an_outside_release_tree(
+        tmp_path,
+        "releases/manifests",
+        witnesses=witnesses,
+        candidate=candidate,
+        anchors=anchors,
+        chain=spec.chain,
+    )
     (candidate.root / "data").symlink_to(outside)
 
     with pytest.raises(AppendError) as refusal:
-        run_push_gate(candidate, spec=spec)
+        run_push_gate_with_anchors(candidate, anchors, spec=spec)
     assert str(refusal.value) == (
         "release root path traverses a symlink at 'data': data/releases"
+    )
+
+
+@pytest.mark.parametrize(
+    "swap, refusal_text",
+    [
+        ("symlink", "releases must be a real directory, not a symlink"),
+        ("directory", "release root changed during verification"),
+    ],
+    ids=["symlink", "directory"],
+)
+def test_a_release_root_swapped_after_its_walk_is_refused(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    witnesses: Witnesses,
+    swap: str,
+    refusal_text: str,
+) -> None:
+    """Binds S4R3-F3. The release root's walk was a pathname preflight: it
+    looked at every component with ``lstat`` and returned, and everything that
+    reads through that root afterwards resolves the whole name again —
+    ``manifest_directory.is_dir()``, ``iterdir()``, and the chain verification
+    on this path. So a root replaced *after* the walk passed was followed by
+    all of them, and the index scan that ends this path cannot say so: it
+    refuses a symlinked root only when the index records entries under it, and
+    an untracked root records none, so it returns.
+
+    The tree here makes the substitution visible rather than assumed. The
+    chain inside the candidate enumerates but does not verify — its manifest
+    is over state bytes this ledger does not hold — so an acceptance can only
+    have come from the chain outside, which is valid over exactly these state
+    bytes. Verified against this branch with ``_assert_release_root_unchanged``
+    made a no-op, where both parameters return ``thesis-facts append check OK:
+    2 rows, immutable prefix 1, release 0``.
+
+    Both halves of the closing check are bound. Swapped for a link, the
+    re-walk answers in the walk's own words, which is the more specific of the
+    two true things to say; swapped for another real directory, the walk has
+    nothing to object to and what refuses is the comparison of the held
+    descriptor's ``fstat`` against the path's ``lstat``. What neither can do is
+    see a root swapped after the walk and swapped back before the re-check;
+    that residual is stated on ``release_chain.hold_release_root`` and in both
+    module docstrings."""
+
+    candidate = base_repository(tmp_path)
+    shutil.rmtree(candidate.root / "releases")
+    candidate = commit_all(candidate, "a base with no release tree")
+    anchors = tmp_path / "anchors"
+    ledger_bytes, prefix_bytes = state_bytes_of(candidate)
+    write_release_chain(
+        candidate.root / CHAIN_SPEC.manifest_relative,
+        anchors,
+        witnesses=witnesses,
+        ledger_bytes=ledger_bytes + b"a row this ledger does not carry\n",
+        prefix_bytes=prefix_bytes,
+    )
+    outside = an_outside_release_tree(
+        tmp_path,
+        "manifests",
+        witnesses=witnesses,
+        candidate=candidate,
+        anchors=anchors,
+    )
+    release_root = candidate.root / CHAIN_SPEC.release_root_relative
+    verified_for_real = append_gate.verify_release_chain
+
+    def swap_the_root_first(*arguments: Any, **keywords: Any) -> Any:
+        """Exchange the walked root, at the first read that goes through it."""
+
+        release_root.rename(tmp_path / "the-walked-root")
+        if swap == "symlink":
+            release_root.symlink_to(outside)
+        else:
+            shutil.move(str(outside), str(release_root))
+        return verified_for_real(*arguments, **keywords)
+
+    monkeypatch.setattr(append_gate, "verify_release_chain", swap_the_root_first)
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate_with_anchors(candidate, anchors)
+    assert str(refusal.value) == refusal_text
+
+
+def test_the_chain_inside_a_walked_root_is_what_the_verdict_reads(
+    tmp_path: pathlib.Path, witnesses: Witnesses
+) -> None:
+    """S4R3-F3's control, and the half of the case the swap test asserts by
+    contradiction: the in-tree chain those parameters plant really is one this
+    verifier refuses, so an acceptance there could only have been the outside
+    one. Left unswapped, this tree is refused for the state its own manifest
+    claims."""
+
+    candidate = base_repository(tmp_path)
+    shutil.rmtree(candidate.root / "releases")
+    candidate = commit_all(candidate, "a base with no release tree")
+    anchors = tmp_path / "anchors"
+    ledger_bytes, prefix_bytes = state_bytes_of(candidate)
+    write_release_chain(
+        candidate.root / CHAIN_SPEC.manifest_relative,
+        anchors,
+        witnesses=witnesses,
+        ledger_bytes=ledger_bytes + b"a row this ledger does not carry\n",
+        prefix_bytes=prefix_bytes,
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate_with_anchors(candidate, anchors)
+    assert str(refusal.value) == (
+        "release 0 lineCount 3 exceeds working-tree line count 2"
     )
 
 
@@ -4788,6 +4942,26 @@ def run_gate_with_anchors(
         spec=spec,
         base_ref=candidate.base if base_ref is None else base_ref,
         release_anchor_dir=anchors,
+    )
+
+
+def run_push_gate_with_anchors(
+    candidate: Candidate,
+    anchors: pathlib.Path,
+    *,
+    spec: AppendGateSpec = GATE_SPEC,
+) -> str:
+    """The push path over a chain built by this module's own witnesses.
+
+    ``release_anchor_dir`` is what turns production pin enforcement off for
+    those generated identities, exactly as it does on the base-ref path; the
+    cases that need a chain the gate actually verifies take this rather than
+    ``run_push_gate``, which points the verifier at the production anchors the
+    fixture has none of.
+    """
+
+    return verify_append_gate(
+        candidate.root, spec=spec, release_anchor_dir=anchors
     )
 
 

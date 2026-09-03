@@ -42,7 +42,12 @@ because every comparison here reads the working tree and none of them ever
 looked at what the commit would carry; the release root's own path walk,
 which the gate runs before anything reads through that root, since every check
 that
-would meet a link there is downstream of following it; the state-path guards
+would meet a link there is downstream of following it — and which now hands
+the gate the approved directory held open, opened from the candidate root's
+own descriptor with ``O_NOFOLLOW``, so that after every read through that root
+the gate can ask whether the root it read through is still the one the walk
+approved, a walk on its own being a pathname preflight every later read
+resolves again; the state-path guards
 ``append_gate`` calls, whose walk — like the release root's — now also
 requires each component to be spelled by the directory holding it, because
 what a component *is* is learned by resolving its name and a name-folding
@@ -1324,6 +1329,123 @@ def unreadable_directory_error(
         "secure descent requires read permission on every directory above a "
         f"state file on this platform: {relative.as_posix()}"
     )
+
+
+def hold_release_root(
+    root: pathlib.Path, spec: ChainSpec, *, root_descriptor: int
+) -> int | None:
+    """Walk the release root, then hold the directory the walk approved open.
+
+    ``assert_no_symlinked_release_root`` is a pathname preflight: it looks at
+    every component and returns, and everything that reads through the root
+    afterwards resolves the whole name again. On the push path that is
+    ``manifest_directory.is_dir()``, ``iterdir()`` and the chain verification;
+    against a base it is the working-tree enumeration and the release-history
+    comparisons. So a root replaced by a symlink *after* the walk passed was
+    followed by all of them, and the verdict spoke for a chain outside the
+    tree — the index scan at the end cannot say so, because an untracked root
+    holds no index entries and it returns.
+
+    Holding a descriptor is what turns the walk's finding into something that
+    can be checked again at the end. It is opened from the candidate root's own
+    held descriptor, component by component with ``O_NOFOLLOW`` and
+    ``O_DIRECTORY`` and search rights where the platform offers them, so no
+    component is resolved by name a second time and a link that appeared since
+    the walk fails rather than being followed.
+
+    ``None`` means the walk found no directory to hold: the release root is
+    absent, which is legal, or it is not a directory, which the walk permits
+    and the checks after it answer for (a tracked regular file standing where
+    the root was is refused by the release root's index scan, in its own
+    words). ``assert_release_root_unchanged`` requires that to still be true,
+    so a directory moved into the root's place mid-run is a change either way.
+
+    What this does not do is make the reads themselves go through the
+    descriptor: they stay by pathname, because they are ``rglob``, ``is_dir``
+    and a manifest enumeration rather than one open of one file. So the
+    guarantee is a comparison at two instants, not a lock — a root swapped
+    after the walk and swapped back before the re-check is not seen. That is
+    the same residual the closing state re-reads leave, and it closes the same
+    way: by verifying the committed tree object rather than a working tree,
+    which is tracked as follow-up work.
+    """
+
+    assert_no_symlinked_release_root(root, spec)
+    assert_secure_descent_supported()
+    parent = root_descriptor
+    held: int | None = None
+    for segment in spec.release_root_relative.parts:
+        try:
+            child = os.open(segment, DIRECTORY_OPEN_FLAGS, dir_fd=parent)
+        except OSError as exc:
+            if held is not None:
+                os.close(held)
+            # Absent, not a directory, or — where the flags make a link an
+            # ``ELOOP`` rather than an ``ENOTDIR`` — a link that arrived since
+            # the walk said there was none. Nothing to hold for any of them:
+            # the walk permits the first two, and the third is a change
+            # ``assert_release_root_unchanged`` refuses at the end, in the
+            # walk's own words, because with nothing held its requirement is
+            # that there still be no directory here.
+            if exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+                return None
+            if DESCENT_REQUIRES_DIRECTORY_READ and exc.errno == errno.EACCES:
+                # The same fact ``_set_root`` meets at the candidate root on a
+                # platform with no search-only flag, answered in the same
+                # words: this directory has not changed, it cannot be read.
+                raise unreadable_directory_error(
+                    root / spec.release_root_relative, spec.release_root_relative
+                ) from exc
+            raise
+        if held is not None:
+            os.close(held)
+        held = child
+        parent = child
+    assert held is not None
+    # ``O_PATH`` with ``O_NOFOLLOW`` opens a symlink itself rather than
+    # failing, and it is ``O_DIRECTORY`` that turns that back into ENOTDIR.
+    # Assert what the flag is relied on for: a descriptor that is not a
+    # directory here can only be a link that arrived since the walk.
+    if not stat.S_ISDIR(os.fstat(held).st_mode):
+        os.close(held)
+        raise ReleaseChainError("release root changed during verification")
+    return held
+
+
+def assert_release_root_unchanged(
+    root: pathlib.Path, spec: ChainSpec, descriptor: int | None
+) -> None:
+    """Require the release root to be what ``hold_release_root`` approved.
+
+    The walk is re-run first, so a link left standing at any component of any
+    configured path under that root is answered in the walk's own words rather
+    than as a bare identity mismatch — the more specific of the two true things
+    to say. Then the path's ``lstat`` is compared against the ``fstat`` of the
+    descriptor this run still holds, which is what makes the comparison one
+    about a directory: an open descriptor holds its inode, so no directory
+    created at that path since can have been given its number.
+
+    With nothing held, the walk found no directory there and the requirement is
+    that there still is none.
+    """
+
+    assert_no_symlinked_release_root(root, spec)
+    path = root / spec.release_root_relative
+    if descriptor is None:
+        try:
+            present = stat.S_ISDIR(os.lstat(path).st_mode)
+        except OSError:
+            return
+        if present:
+            raise ReleaseChainError("release root changed during verification")
+        return
+    try:
+        current = os.lstat(path)
+        held = os.fstat(descriptor)
+    except OSError as exc:
+        raise ReleaseChainError("release root changed during verification") from exc
+    if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
+        raise ReleaseChainError("release root changed during verification")
 
 
 def _is_symlink_at(name: str, parent: int) -> bool:
