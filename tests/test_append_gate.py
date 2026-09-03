@@ -4711,6 +4711,115 @@ def test_a_nested_manifest_directory_in_the_tree_is_accepted(
     )
 
 
+def a_manifest_path_that_is_not_a_directory(
+    candidate: Candidate, tmp_path: pathlib.Path, shape: str
+) -> None:
+    """Put one of the three non-directories at the manifest path.
+
+    Each is a thing ``manifest_directory.is_dir() and any(iterdir())`` reads as
+    "this tree has no chain": a tracked regular file, a link to an empty
+    directory, and a link to nothing at all.
+    """
+
+    manifests = candidate.root / CHAIN_SPEC.manifest_relative
+    if shape == "tracked-blob":
+        manifests.write_text("not a manifest directory\n", encoding="utf-8")
+        git(candidate.root, "add", "-A")
+        git(candidate.root, "commit", "--quiet", "-m", "a blob at the manifest path")
+        return
+    if shape == "empty-directory-link":
+        empty = tmp_path / "an-empty-directory"
+        empty.mkdir()
+        manifests.symlink_to(empty)
+        return
+    manifests.symlink_to(tmp_path / "nothing-is-here")
+
+
+@pytest.mark.parametrize(
+    "shape",
+    ["tracked-blob", "empty-directory-link", "dangling-link"],
+)
+def test_the_push_path_decides_the_manifest_paths_type_before_its_chain(
+    tmp_path: pathlib.Path, shape: str
+) -> None:
+    """Binds S4R4-F3. On the push path there is no base to compare against, so
+    whether this tree has a chain at all is decided by asking the filesystem:
+    ``initialized`` is ``manifest_directory.is_dir() and any(iterdir())``. All
+    three shapes here answer that question ``False`` — a tracked 100644 blob
+    standing where the manifest directory was is not a directory, a link to an
+    empty directory has nothing in it, a dangling link resolves to nothing —
+    and ``False`` means "no chain", which is an acceptance with no manifest,
+    no signature and no receipt verified.
+
+    Nothing else on this path says otherwise. The release root's walk stops one
+    component short of this leaf, deliberately, because the leaf has the
+    enumeration's own refusal — but the enumeration only runs once something
+    has decided to enumerate, and this is the decision. The root's index scan
+    that follows reconciles the tracked blob with the regular file the
+    traversal finds, which is exactly what it is, and holds no entry at all for
+    either untracked link.
+
+    Measured at 22da6c4 with the type decision removed: all three return
+    ``thesis-facts append check OK: 2 rows, immutable prefix 1``. Refused now
+    in ``_enumerate_manifest_files``'s own words, which is what a link to a
+    *populated* directory here has always been refused with."""
+
+    candidate = base_repository(tmp_path)
+    a_manifest_path_that_is_not_a_directory(candidate, tmp_path, shape)
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate)
+    assert str(refusal.value) == (
+        "release manifest path is not a regular directory: "
+        f"{candidate.root}/{CHAIN_SPEC.manifest_relative.as_posix()}"
+    )
+
+
+def test_a_manifest_path_that_is_absent_is_still_no_chain(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S4R4-F3's other side: an absent chain is legal and stays legal. The
+    fixture carries no manifest directory at all, which is the ordinary
+    pre-genesis tree, and the type decision returns for it exactly as
+    ``_enumerate_manifest_files``'s own ``exists()`` does — the push path's
+    acceptance for such a tree is unchanged."""
+
+    candidate = base_repository(tmp_path)
+    assert not (candidate.root / CHAIN_SPEC.manifest_relative).exists()
+
+    assert run_push_gate(candidate) == (
+        "thesis-facts append check OK: 2 rows, immutable prefix 1"
+    )
+
+
+def test_an_anchor_path_that_is_not_a_directory_keeps_its_own_refusal(
+    tmp_path: pathlib.Path, witnesses: Witnesses
+) -> None:
+    """S4R4-F3's boundary, which is why only the manifest leaf gets a type
+    decision. The release root's walk stops one component short of the anchor
+    path too, on the same reasoning — the leaf has a refusal of its own — and
+    unlike the manifest path nothing here decides whether the anchors are
+    read. The first read through that path meets them, and a path that is not
+    a directory is refused in words the extraction gave: the producer key's,
+    and past it the TSA anchor's. Adding a check ahead of them would replace
+    those sentences for every tree they answer.
+
+    The anchor directory the gate reads is the one it is handed — the trusted
+    code root's, or this override — so this drives it through the same
+    ``release_anchor_dir`` the fixtures use. Passes either way by design."""
+
+    candidate, _anchors, _stem = genesis_proposal(tmp_path, witnesses)
+    not_a_directory = tmp_path / "anchors-as-a-file"
+    not_a_directory.write_text("not a directory\n", encoding="utf-8")
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate_with_anchors(candidate, not_a_directory)
+    assert str(refusal.value) == (
+        "missing or non-regular producer public key: "
+        f"{not_a_directory}/{CHAIN_SPEC.producer_public_key_filename}"
+    )
+
+
 def test_the_base_ref_path_keeps_its_symlinked_release_root_refusal(
     tmp_path: pathlib.Path,
 ) -> None:
