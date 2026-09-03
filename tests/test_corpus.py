@@ -40,6 +40,15 @@ from corpus_fixture import (
 )
 
 
+#: The one refusal the portable-name policy produces. Quoted here so a test
+#: asserting it reads as one fact rather than as three lines of message, and
+#: so a change to the wording is one edit rather than a dozen.
+NOT_PORTABLE = (
+    "is not a portable name (ASCII letters, digits, '.', '_' and '-', not "
+    "ending in '.', not a Win32 device name)"
+)
+
+
 def write_tree(
     root: pathlib.Path,
     content: dict[str, str] | None = None,
@@ -295,12 +304,20 @@ def test_refuses_a_fifo_named_like_content(tmp_path: pathlib.Path) -> None:
 
 
 def test_refuses_a_path_with_a_colon(tmp_path: pathlib.Path) -> None:
-    """"C:/x" joins drive-absolute under Windows pathlib; refuse everywhere."""
+    """Binds the policy: "C:/x" joins drive-absolute under Windows pathlib.
+
+    A colon is outside the portable repertoire, so one screen refuses it and
+    the module no longer carries a colon rule of its own — it carried two,
+    one for declared paths and one for enumerated names, saying the same
+    thing in different words. Without the screen this path validates and
+    joins drive-absolute under ``pathlib`` on Windows, referencing a file
+    outside the root.
+    """
 
     write_tree(tmp_path)
     rows = journal_rows()
     rows[3]["path"] = "C:/outside.toml"  # the attested row
-    with pytest.raises(CorpusError, match="':'"):
+    with pytest.raises(CorpusError, match="is not a portable name"):
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
 
 
@@ -630,42 +647,51 @@ def test_spec_refuses_an_empty_content_root() -> None:
         corpus_spec(content_roots=())
 
 
-def test_spec_refuses_a_content_suffix_carrying_an_unassigned_code_point() -> None:
-    """Binds F3: the suffix was checked for its leading dot and nothing else.
+def test_the_spec_pins_a_suffix_by_one_rule_or_refuses_it() -> None:
+    """Binds the policy, suffix half: four screens become one rule.
 
-    ``_has_pinned_suffix`` folds the pinned suffix against every journal path
-    and every tree entry name, and a fold key is stable across Unicode tables
-    only for assigned characters. U+0378 has never been assigned, so a spec
-    pinning ``.yaml\u0378`` decides what the closed world contains one way on
-    the interpreter that encodes it next and another on every interpreter
-    today — the consumer's own trust anchor, silently interpreter-dependent.
-    Every other name this module folds is screened; this one was not.
+    A pin used to be screened four times over — a leading dot, a foldability
+    screen against a pinned Unicode table, an ASCII rule, and a fold-key
+    length test to decide which pins the ASCII rule applied to — and every
+    one of those was added by a review round that found the previous
+    arrangement wrong. The rule now is that a pin is a period and one to
+    sixteen ASCII letters or digits. This asserts the classes each of the
+    four used to answer for, and one the arrangement never covered at all:
+    an unassigned code point, a non-ASCII letter inside an alias-capable
+    pin, a non-ASCII letter outside one, a second period, a separator, a
+    bare period, and a pin with no period.
 
-    Without the fix the spec constructs and the suffix is folded unexamined.
+    Without the rule ``.yaml\u0378`` constructs — the fold screen it used to
+    face is gone with the pinned table — and the suffix is then folded
+    against every path in the tree and every entry name the sweep sees.
     """
 
-    import unicodedata
+    for suffix in (
+        ".yaml\u0378", ".\u00e9ml", ".\u00e9yaml", ".tar.gz", ".y/ml", ".", "yaml"
+    ):
+        with pytest.raises(CorpusError) as caught:
+            corpus_spec(content_suffixes=(suffix,))
+        assert str(caught.value).startswith(
+            "CorpusSpec content suffix must be '.' followed by one to sixteen"
+        ), suffix
+    assert corpus_spec(content_suffixes=(".yaml", ".yml")).content_suffixes
 
-    assert unicodedata.category("\u0378") == "Cn"
-    with pytest.raises(CorpusError, match="outside the pinned Unicode") as caught:
-        corpus_spec(content_suffixes=(".yaml\u0378",))
-    assert str(caught.value).startswith("CorpusSpec content suffix contains")
 
-
-def test_spec_refuses_a_content_root_carrying_an_unassigned_code_point() -> None:
-    """Binds F3, the root half: the same screen, named for the spec.
+def test_the_spec_refuses_a_content_root_outside_the_portable_repertoire() -> None:
+    """Binds the policy, root half: the same screen, named for the spec.
 
     A root is folded by ``content_root_of`` for every path the journal binds,
-    so an unassigned code point in one has the same effect as in a suffix.
-    ``_validate_relative_path`` already refused it, under a label that named
-    a path; the screen now runs first and names the spec, because the fault
-    is in the consumer's committed code and that is what has to be edited.
-    Without the fix the refusal is the path-shaped one.
+    and the sweep descends its exact spelling, so a root whose equivalence
+    class this module would have to guess at decides closed-world membership
+    on the auditor's host rather than on the corpus. The screen runs before
+    the path rules so the refusal names the consumer's committed spec, which
+    is the file that has to be edited, rather than naming a path. Without it
+    the refusal is the path-shaped one.
     """
 
-    with pytest.raises(CorpusError, match="outside the pinned Unicode") as caught:
+    with pytest.raises(CorpusError, match="is not a portable name") as caught:
         corpus_spec(content_roots=(pathlib.PurePosixPath("ru\u0378les"),))
-    assert str(caught.value).startswith("CorpusSpec content root contains")
+    assert str(caught.value).startswith("CorpusSpec content root is not a portable")
 
 
 def test_reproducible_and_unreproducible_gates_are_separated(
@@ -903,9 +929,20 @@ def test_refuses_a_file_swapped_between_lstat_and_open(
 def test_refuses_paths_that_alias_under_unicode_normalization_alone(
     tmp_path: pathlib.Path,
 ) -> None:
-    """NFC and NFD spellings of the same name are one file on a normalizing
-    filesystem and two on others; a journal listing both is ambiguous
-    everywhere, case differences aside entirely."""
+    """Binds the policy: the normalization class is removed, not paired.
+
+    NFC and NFD spellings of the same name are one file on a normalizing
+    filesystem and two on others, and the fold key used to pair them so a
+    journal listing both was refused as ambiguous. The policy answers it one
+    step earlier and without a model: neither spelling is a portable name, so
+    a corpus cannot carry either and there is no pair to decide about.
+
+    Without the screen these two rows are ordinary content paths whose
+    ambiguity depends on which filesystem the auditor cloned onto. The
+    aliasing check the fold key still performs is asserted, over the case
+    variation that remains inside the repertoire, by
+    ``test_refuses_paths_that_alias_under_case_or_normalization``.
+    """
 
     import unicodedata
 
@@ -925,7 +962,7 @@ def test_refuses_paths_that_alias_under_unicode_normalization_alone(
             }
         )
     reindex(rows)
-    with pytest.raises(CorpusError, match="would alias"):
+    with pytest.raises(CorpusError, match="is not a portable name"):
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
 
 
@@ -1253,18 +1290,24 @@ def test_refuses_a_case_varied_content_path_bound_as_attested(
 
 
 def test_refuses_a_zero_width_joiner_in_a_journal_path(tmp_path: pathlib.Path) -> None:
-    """Paths are sanitised by the same helper the evidence strings are.
+    """Binds the policy: a path used to be screened as producer text.
 
-    Widening that helper to Unicode category Cf widens what a path may spell,
-    which is where the format class does its other damage: a zero-width joiner
-    makes two rows binding two different files print as one name in the verdict
-    an auditor reads.
+    A zero-width joiner makes two rows binding two different files print as
+    one name in the verdict an auditor reads, and HFS+ ignores it entirely
+    when it compares names, so the two rows are one file there. Both were
+    answered by screens on paths — the format-control class and the
+    default-ignorable table — and both are answered now by the repertoire,
+    which holds neither. ``_reject_control_characters`` still runs over gate
+    evidence, where the text is not a name and cannot be constrained this
+    way.
+
+    Without the screen this row is an ordinary content path.
     """
 
     write_tree(tmp_path)
     rows = journal_rows()
     rows[0]["path"] = "rules/benefit/amo\u200dunt.yaml"
-    with pytest.raises(CorpusError, match="Unicode format control"):
+    with pytest.raises(CorpusError, match="is not a portable name"):
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
 
 
@@ -1362,6 +1405,11 @@ def test_refuses_a_lone_surrogate_in_a_journal_path(tmp_path: pathlib.Path) -> N
     ``os.lstat`` raises ``UnicodeEncodeError`` on it, a ``ValueError`` that no
     ``OSError`` handler in this module sees, so without the screen the row
     escaped as an unclassified exception instead of a refusal that names it.
+
+    Binds the policy for the message: a lone surrogate is outside the
+    portable repertoire, so the refusal is the portable-name one and the
+    surrogate class no longer needs a rule of its own on a path. It keeps
+    one on gate evidence, which is not a name.
     """
 
     write_tree(tmp_path)
@@ -1380,7 +1428,7 @@ def test_refuses_a_lone_surrogate_in_a_journal_path(tmp_path: pathlib.Path) -> N
         }
     )
     reindex(rows)
-    with pytest.raises(CorpusError, match="lone surrogate"):
+    with pytest.raises(CorpusError, match="is not a portable name"):
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
 
 
@@ -1447,12 +1495,14 @@ def test_two_paths_varied_in_case_and_normalization_at_once_still_alias(
     on the fold. Found by peer review; the fold normalizes again after
     folding.
 
-    Exercised through a pinned non-ASCII suffix before S5-F3 made one
-    illegal at construction. The same fold decides which declared paths
-    would alias on a case- or normalization-insensitive filesystem, so the
-    property is held there instead — end to end, and on a site where a
-    non-ASCII name is still legal — with the predicate checked directly
-    beside it.
+    The fold key is still computed this way, and the property is still
+    true of it, because ``_path_fold`` is asked of names the portable-name
+    screen has *not* seen — the siblings of an attested path's components,
+    which are someone else's files. What the policy changes is the second
+    half of this test: a declared path spelled either way is no longer a
+    path a corpus may carry, so the end-to-end refusal is the portable-name
+    one and not the aliasing one. Both halves are asserted, so a change to
+    either is visible.
     """
 
     from receipt.corpus import _has_pinned_suffix, _path_fold
@@ -1473,7 +1523,7 @@ def test_two_paths_varied_in_case_and_normalization_at_once_still_alias(
             }
         )
     reindex(rows)
-    with pytest.raises(CorpusError, match="would alias"):
+    with pytest.raises(CorpusError, match="is not a portable name"):
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
 
 
@@ -1749,12 +1799,19 @@ def test_refuses_a_removed_path_under_a_symlinked_parent(
 def test_refuses_a_path_carrying_an_unassigned_code_point(
     tmp_path: pathlib.Path,
 ) -> None:
-    """The fold key is stable only for assigned characters.
+    """Binds the policy: the unassigned class is refused by repertoire now.
 
-    Unicode fixes case folding and normalization once a character is
-    encoded and says nothing before, so a path with an unassigned code point
-    could alias under one interpreter's table and not another's (peer
-    review, round two). U+0378 has never been assigned.
+    The fold key is stable across Unicode tables only for characters the
+    standard has already encoded, so a path carrying an unassigned code
+    point could alias under one interpreter's table and not another's (peer
+    review, round two). Two rounds went into deciding *whose* table said
+    which, ending with 698 ranges of Unicode 14.0 pinned in the package. The
+    policy answers it with no table at all: U+0378 is not an ASCII letter,
+    digit, ``.``, ``_`` or ``-``, and neither is anything the standard has
+    yet to encode.
+
+    Without the screen this row is an ordinary content path whose fold key
+    depends on the auditor's interpreter.
     """
 
     import unicodedata
@@ -1763,7 +1820,7 @@ def test_refuses_a_path_carrying_an_unassigned_code_point(
     write_tree(tmp_path)
     rows = journal_rows()
     rows[0]["path"] = "rules/benefit/amo\u0378unt.yaml"
-    with pytest.raises(CorpusError, match="outside the pinned Unicode"):
+    with pytest.raises(CorpusError, match="is not a portable name"):
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
 
 
@@ -2450,61 +2507,80 @@ def test_the_tombstone_index_keys_two_case_varied_directories_apart(
 def test_refuses_a_declared_path_with_a_trailing_dot_component(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds F1: Win32 strips trailing dots before the lookup.
+    """Binds F1 and the policy: Win32 strips trailing dots before a lookup.
 
     ``rules/tax/rate.yaml.`` and ``rules/tax/rate.yaml`` are one file there,
     and no listing emits the dotted spelling, so nothing in the fold model
-    can pair them. A declared path spelled that way is refused instead.
-    Without the fix it is an ordinary path and binds a second row against the
-    same file.
+    can pair them. This is the one Win32 alias rule the portable repertoire
+    does *not* subsume — a trailing period is spelled out of characters the
+    repertoire admits — so the screen asks it as its own question, and the
+    refusal is the portable-name one.
+
+    Without it the path is ordinary and binds a second row against the same
+    file.
     """
 
     write_tree(tmp_path)
     rows = journal_rows()
     rows[0]["path"] = "rules/benefit/amount.yaml."
-    with pytest.raises(CorpusError, match="component Windows would alias"):
+    with pytest.raises(CorpusError, match="is not a portable name"):
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
 
 
 def test_refuses_a_declared_path_with_a_trailing_space_component(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds F1: the same lookup strips trailing spaces.
+    """Binds F1 and the policy: the same lookup strips trailing spaces.
 
     A directory component is enough — the alias need not be the file itself.
-    Without the fix the path validates and the trailing space is invisible in
-    every rendered verdict.
+    Unlike the trailing period, a space needs no rule of its own: it is
+    outside the portable repertoire wherever it sits, so a name carrying one
+    anywhere is refused and the trailing case is a special case of nothing.
+
+    Without the screen the path validates and the trailing space is
+    invisible in every rendered verdict.
     """
 
     write_tree(tmp_path)
     rows = journal_rows()
     rows[0]["path"] = "rules/benefit /amount.yaml"
-    with pytest.raises(CorpusError, match="component Windows would alias"):
+    with pytest.raises(CorpusError, match="is not a portable name"):
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
 
 
 def test_refuses_a_declared_path_shaped_like_an_8_3_short_name(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds F1: NTFS hands out 8.3 short names that open the long name.
+    """Binds F1, F12 and the policy: the tilde grammar is gone with the tilde.
 
     ``RULESF~1.YAM`` is not emitted by any listing, so the fold model cannot
-    pair it with the long name it opens. Refused at the schema boundary; a
-    path of that shape but too long to be a short name is left alone, which
-    is what the second half asserts.
+    pair it with the long name it opens, and a declared path spelled that way
+    aliased a file this module could not enumerate. Deciding *which* names
+    were spelled that way took a grammar — a repertoire, a stem length, a
+    numeric tail, a rule about which tilde the tail is taken from — and two
+    review rounds, one to widen it and one to narrow it, each of which had
+    been wrong about ordinary names a corpus may hold.
+
+    ``~`` is outside the portable repertoire, so there is no grammar left to
+    get wrong: every one of these is refused with the same message, whether
+    or not 8.3 generation could have produced it. That is also what closes
+    S5R3-F12, whose two spellings are among them.
+
+    Without the screen every one of these is an ordinary declared path.
     """
 
     write_tree(tmp_path)
-    rows = journal_rows()
-    rows[0]["path"] = "rules/RULESF~1.YAM"
-    with pytest.raises(CorpusError, match="component Windows would alias"):
-        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
-
-    rows = journal_rows()
-    rows[0]["path"] = "rules/benefit/long~1name.yaml"
-    with pytest.raises(CorpusError, match="not bound by the witnessed journal") as other:
-        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
-    assert "Windows would alias" not in str(other.value)
+    for spelling in (
+        "rules/RULESF~1.YAM",
+        "rules/benefit/long~1name.yaml",
+        "rules/A~0.TXT",
+        "rules/A~1.TXT",
+        "rules/benefit/notes.yaml~",
+    ):
+        rows = journal_rows()
+        rows[0]["path"] = spelling
+        with pytest.raises(CorpusError, match="is not a portable name"):
+            verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
 
 
 def _hiding_scandir(directory_name: str, hidden: str):
@@ -2662,19 +2738,20 @@ def _listing_with(directory_name: str, extra: str):
 def test_refuses_a_tree_entry_carrying_an_unassigned_code_point(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Binds F2: entry names were folded without being screened.
+    """Binds F2 and the policy: entry names were folded without a screen.
 
-    Declared paths refuse an unassigned code point because the fold key is
-    only stable across Unicode tables for assigned characters. Filesystem
-    entry names went straight into the same fold — U+A7CB folds to U+0264 on
-    Unicode 16 and to itself before it — so whether the sweep called a file
-    content, and so whether the closed world contained it, depended on the
-    verifier's interpreter rather than on the tree.
+    Declared paths were screened for an unassigned code point because the
+    fold key is stable across Unicode tables only for assigned characters.
+    Filesystem entry names went straight into the same fold — U+A7CB folds
+    to U+0264 on Unicode 16 and to itself before it — so whether the sweep
+    called a file content, and so whether the closed world contained it,
+    depended on the verifier's interpreter rather than on the tree.
 
-    The screen has to run before anything else looks at the entry, and that
-    is what this pins: without it the name is folded, found to carry no
-    pinned suffix or to be no regular file, and the refusal is a different
-    one or none at all.
+    The class is refused by repertoire now rather than by a pinned table,
+    but the site is unchanged and so is what it pins: the screen has to run
+    before anything else looks at the entry, and without it the name is
+    folded, found to carry no pinned suffix or to be no regular file, and
+    the refusal is a different one or none at all.
     """
 
     import unicodedata
@@ -2682,7 +2759,7 @@ def test_refuses_a_tree_entry_carrying_an_unassigned_code_point(
     assert unicodedata.category("͸") == "Cn"
     write_tree(tmp_path)
     monkeypatch.setattr(pathlib.Path, "iterdir", _listing_with("tax", "notes͸"))
-    with pytest.raises(CorpusError, match="outside the pinned Unicode") as caught:
+    with pytest.raises(CorpusError, match="is not a portable name") as caught:
         verify_corpus_binding(
             tmp_path, render_journal(journal_rows()), spec=corpus_spec()
         )
@@ -2692,15 +2769,16 @@ def test_refuses_a_tree_entry_carrying_an_unassigned_code_point(
 def test_refuses_an_unassigned_code_point_in_a_tombstone_listing(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Binds F2: the tombstone search folds entry names too.
+    """Binds F2 and the policy: the tombstone search folds entry names too.
 
     The fold search buckets every name in a directory by fold key to decide
-    whether a removed path survives under an aliasing spelling. An unassigned
-    code point lands in one bucket on one interpreter and another on the next,
-    so the same tree honours the tombstone under one Python and refuses under
-    another. The index reads nothing but the name, so an injected entry is
-    exactly what a real one would be here: without the screen the name folds
-    unexamined, no survivor is found, and this verification passes.
+    whether a removed path survives under an aliasing spelling. A name whose
+    equivalence class this module would have to guess at lands in one bucket
+    here and another on the filesystem that resolves it, so the same tree
+    honours the tombstone on one host and refuses on another. The index
+    reads nothing but the name, so an injected entry is exactly what a real
+    one would be here: without the screen the name folds unexamined, no
+    survivor is found, and this verification passes.
     """
 
     body = '{"applied": true}\n'
@@ -2708,175 +2786,46 @@ def test_refuses_an_unassigned_code_point_in_a_tombstone_listing(
     (tmp_path / "retired").mkdir()
     rows = _tombstone_rows("retired/apply-manifest.json", body)
     monkeypatch.setattr(os, "scandir", _scandir("retired", extra=["sibling͸"]))
-    with pytest.raises(CorpusError, match="outside the pinned Unicode") as caught:
+    with pytest.raises(CorpusError, match="is not a portable name") as caught:
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
     assert "tree entry examined for a tombstone" in str(caught.value)
 
 
-def test_refuses_a_path_carrying_a_code_point_the_pinned_table_lacks(
+def test_the_refusal_no_longer_depends_on_the_interpreter_at_all(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds S4-F5: the screen consulted the running table, so it moved.
+    """Binds S4-F5 and the policy: the version-dependence is gone, not pinned.
 
-    ``_assert_assigned`` exists to make the fold key mean one thing on every
-    supported interpreter. Deciding "assigned" from the *running* table gave
-    it the same defect facing the other way: U+A7CB is unassigned in Unicode
-    14.0 and 15.1 — Python 3.11 through 3.13 — and assigned in 16.0, which
-    3.14 ships, where it folds to U+0264. So a journal carrying it was
-    refused on three supported interpreters and accepted on the fourth, and
-    the acceptance the screen promises to make stable was itself a function
-    of which Python the auditor happened to run.
+    S4-F5 was that "is this code point assigned" was answered by the
+    *running* table, so U+A7CB — unassigned in Unicode 14.0 and 15.1, which
+    Python 3.11 through 3.13 ship, and assigned in 16.0, which 3.14 ships —
+    was refused on three supported interpreters and accepted on the fourth.
+    The answer was to pin 698 ranges of Unicode 14.0 in the package.
 
-    The repertoire is pinned to Unicode 14.0 now, so this refuses everywhere.
-    Without the fix this test fails on 3.14 — the path verifies and folds to
-    a key three of the four supported interpreters would not produce — and
-    passes on 3.11 through 3.13 for the wrong reason, which is the finding.
+    The policy answers it without a table: U+A7CB is outside the portable
+    repertoire on every interpreter, as is U+1FAF6, which Unicode 14.0 did
+    encode and which the pinned table therefore accepted. Both are asserted,
+    because what the policy trades away is exactly the second one — a corpus
+    could name a file ``🫶.yaml`` and cannot now — and the trade should be
+    visible in the suite rather than only in a docstring.
+
+    Without the screen the first path verifies and folds to a key three of
+    the four supported interpreters would not produce.
     """
 
     write_tree(tmp_path)
-    rows = journal_rows()
-    rows[0]["path"] = "rules/benefit/amo\ua7cbunt.yaml"
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
-    # The quoted spelling is not pinned: ``_quoted`` is ``repr``, and repr
-    # prints a character the *running* table calls assigned and escapes one
-    # it does not — so the same path reads back differently on 3.13 and
-    # 3.14. What is pinned is the refusal, which no longer does.
-    assert str(caught.value).startswith(
-        "journal row 1 path contains a code point outside the pinned "
-        "Unicode 14.0 repertoire (0xa7cb): "
-    )
-    assert "amo" in str(caught.value) and "unt.yaml" in str(caught.value)
-
-
-def test_a_character_assigned_in_the_pinned_table_still_verifies(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Binds S4-F5, the other side: the pin must not shrink the repertoire.
-
-    U+1FAF6 HEART HANDS was encoded in Unicode 14.0, which is the pinned
-    table, so it is inside the repertoire on every supported interpreter and
-    a corpus may name a file with it. A pin taken from a table *older* than
-    the oldest supported interpreter, or a generator that mistook an
-    assigned block for an unassigned one, would refuse this and every
-    refusal test above would still pass.
-
-    The file is real, so the name goes through the sweep's screen as well as
-    the journal's. This test passes on the head too — it is a control, not a
-    regression.
-    """
-
-    content = dict(CONTENT)
-    content["rules/tax/\U0001faf6.yaml"] = "name: hands\nvalue: 1\n"
-    write_tree(tmp_path, content=content)
-    verification = verify_corpus_binding(
-        tmp_path, render_journal(journal_rows(content=content)), spec=corpus_spec()
-    )
-    assert "rules/tax/\U0001faf6.yaml" in [entry.path for entry in verification.content]
-
-
-def test_the_pinned_repertoire_decides_each_class_of_code_point() -> None:
-    """Binds S4-F5: the three answers the pin has to give, stated together.
-
-    A code point no table has ever assigned (U+0378) refuses. One assigned
-    after the pinned table (U+A7CB, Unicode 16.0) refuses, because the
-    question is what Unicode 14.0 knew and not what this interpreter knows.
-    One assigned by the pinned table (U+1FAF6, Unicode 14.0) is accepted.
-
-    Without the fix the middle answer is whatever the running interpreter
-    says, which is the whole finding: on 3.14 it is "accepted".
-    """
-
-    import unicodedata
-
-    from receipt.corpus import _assert_assigned
-
-    for code in (0x0378, 0xA7CB):
+    for spelling in ("rules/benefit/amo\ua7cbunt.yaml", "rules/tax/\U0001faf6.yaml"):
+        rows = journal_rows()
+        rows[0]["path"] = spelling
         with pytest.raises(CorpusError) as caught:
-            _assert_assigned(f"x{chr(code)}y", "label")
+            verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+        # The quoted spelling is not pinned: ``_quoted`` is ``repr``, and
+        # repr prints a character the *running* table calls assigned and
+        # escapes one it does not, so the same path reads back differently
+        # on 3.13 and 3.14. What is pinned is the refusal, which does not.
         assert str(caught.value).startswith(
-            f"label contains a code point outside the pinned Unicode 14.0 "
-            f"repertoire ({code:#06x})"
-        )
-    assert _assert_assigned("x\U0001faf6y", "label") == "x\U0001faf6y"
-    # The running table's own answer, recorded so the reason the middle case
-    # exists stays legible when the table moves again: U+A7CB is Cn until
-    # Unicode 16.0, which is what the old screen consulted.
-    running = tuple(int(part) for part in unicodedata.unidata_version.split("."))
-    assert (unicodedata.category(chr(0xA7CB)) == "Cn") == (running < (16,))
-
-
-def test_the_shipped_repertoire_is_what_its_generator_produces() -> None:
-    """Binds S4-F5: the pinned data must be checkable, not merely asserted.
-
-    ``generate_unassigned_ranges`` is the script that produced the shipped
-    tuple, kept in the module so this test can re-run it. On an interpreter
-    carrying Unicode 14.0 — CI's 3.11 job — the two must be equal. On any
-    later table the generator returns a strict subset, which is the superset
-    property the pin relies on rather than a disagreement, so the comparison
-    is skipped there with that reason.
-    """
-
-    import unicodedata
-
-    from receipt._unicode_repertoire import (
-        UNASSIGNED_RANGES,
-        UNIDATA_VERSION,
-        generate_unassigned_ranges,
-    )
-
-    running = unicodedata.unidata_version
-    if running != UNIDATA_VERSION:
-        regenerated = generate_unassigned_ranges()
-        pinned = {
-            code
-            for first, last in UNASSIGNED_RANGES
-            for code in range(first, last + 1)
-        }
-        running_set = {
-            code for first, last in regenerated for code in range(first, last + 1)
-        }
-        # The property that makes pinning safe, checked on the interpreter
-        # that is actually running: nothing this table calls unassigned is
-        # outside the pinned set.
-        assert running_set <= pinned
-        pytest.skip(
-            f"the running Unicode table is {running}, not {UNIDATA_VERSION}; "
-            "the generator reproduces the shipped tuple only on the pinned "
-            "table, and the superset property was checked instead"
-        )
-    assert generate_unassigned_ranges() == UNASSIGNED_RANGES
-
-
-def test_the_shipped_repertoire_is_sorted_disjoint_and_in_range() -> None:
-    """Binds S4-F5: the bisect in ``is_unassigned`` assumes all three.
-
-    ``is_unassigned`` finds the last range starting at or below a code point
-    and looks no further, which is only correct for ranges that are sorted
-    and do not overlap. Adjacency is checked too: two touching ranges would
-    mean the generator emitted what should have been one, and a hand edit
-    that split a range is exactly the kind of change this catches.
-    """
-
-    from receipt._unicode_repertoire import UNASSIGNED_RANGES, is_unassigned
-
-    assert UNASSIGNED_RANGES
-    previous = -1
-    for first, last in UNASSIGNED_RANGES:
-        assert 0 <= first <= last <= 0x10FFFF
-        assert first > previous + 1
-        previous = last
-    # The lookup agrees with a scan at every boundary, including the ends.
-    for first, last in UNASSIGNED_RANGES:
-        assert is_unassigned(first) and is_unassigned(last)
-        if first > 0:
-            assert not is_unassigned(first - 1)
-        if last < 0x10FFFF:
-            assert not is_unassigned(last + 1)
-    # U+10FFFF is itself a noncharacter and so ``Cn``; the assigned side is
-    # checked with characters the pinned table encodes.
-    assert not is_unassigned(ord("a"))
-    assert not is_unassigned(0x1FAF6)
+            f"journal row 1 path {NOT_PORTABLE}: "
+        ), spelling
 
 
 def test_an_oversized_tier_is_quoted_within_bounds(tmp_path: pathlib.Path) -> None:
@@ -2962,18 +2911,20 @@ def test_a_forged_verdict_line_in_a_tree_name_is_escaped(
     terminal erased the line and redrew it. Without the fix the raw escape is
     in the message.
 
-    Which refusal carries the name moved with S5R2-F3: the forged line
-    carries a colon, and the name screen refuses that before anything
-    decides whether the entry is a symlink. The property under test is
-    unchanged — a tree-derived name reaches an auditor escaped — and it is
-    now bound at the earlier of the two boundaries, which is the one every
+    Which refusal carries the name moved twice, and the property under test
+    did not: S5R2-F3 moved it to the colon screen, and the policy moved it
+    to the one screen that replaced all of those. The forged line carries an
+    ESC, a carriage return, a space and a colon, none of them
+    in the portable repertoire, and the screen runs before anything decides
+    whether the entry is a symlink. A tree-derived name still reaches an
+    auditor escaped, and it is still bound at the earliest boundary every
     enumerated name passes through.
     """
 
     forged = "\x1b[2K\rVERDICT: PASS"
     write_tree(tmp_path)
     (tmp_path / "rules/tax" / forged).symlink_to(tmp_path / "rules/tax/rate.yaml")
-    with pytest.raises(CorpusError, match="contains a colon") as caught:
+    with pytest.raises(CorpusError, match="is not a portable name") as caught:
         verify_corpus_binding(
             tmp_path, render_journal(journal_rows()), spec=corpus_spec()
         )
@@ -3164,92 +3115,74 @@ def _refuses_short_name_alias(tmp_path: pathlib.Path, name: str) -> None:
     )
 
 
-def test_refuses_a_short_name_alias_hidden_behind_an_embedded_space(
-    tmp_path: pathlib.Path,
+def _refuses_as_unportable(tmp_path: pathlib.Path, name: str) -> None:
+    """Write ``rules/<name>`` and assert the portable-name screen refuses it."""
+
+    write_tree(tmp_path)
+    (tmp_path / "rules" / name).write_text("name: smuggled\n")
+    spec = corpus_spec(content_suffixes=(".yaml", ".yml"))
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, render_journal(journal_rows()), spec=spec)
+    assert str(caught.value) == (
+        f"tree entry {'rules/' + name!r} {NOT_PORTABLE}: {name!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "name", ["smuggled.y mlx", "smuggled.y m l x", "smuggled . yml"]
+)
+def test_refuses_a_short_name_alias_hidden_behind_a_space(
+    tmp_path: pathlib.Path, name: str
 ) -> None:
-    """Binds S4-F1: the extension was truncated before the 8.3 rules ran.
+    """Binds S4-F1 and the policy: the space class is refused, not modelled.
 
     Win32 removes every space from a name *before* it truncates the
-    extension to three characters, so with ``.yml`` pinned the file emitted
-    as ``smuggled.y mlx`` is handed the alias ``SMUGGL~1.YML`` and that
-    alias opens the same bytes. The screen read the written extension
-    instead — ``y mlx``, first three characters ``Y M`` — decided the alias
-    could not carry a pinned suffix, and let the long name be skipped as
-    non-content. The closed world the verdict then called closed held a file
-    reachable under a content name.
+    extension to three characters, so with ``.yml`` pinned each of these is
+    handed the alias ``SMUGGL~1.YML``, which opens the same bytes. The screen
+    read the written extension instead — ``y mlx`` truncating to ``Y M`` —
+    decided the alias could not carry a pinned suffix, and let the long name
+    be skipped as non-content, so the closed world the verdict called closed
+    held a file reachable under a content name. Three separate tests pinned
+    the three ways a space could hide there, because a fix that dropped only
+    the first space, or only a leading one, would satisfy one and leave the
+    others open.
 
-    Without the fix this verification returns a CorpusVerification with the
-    file sitting in the tree, unbound.
+    A space is outside the portable repertoire, so all three refuse on the
+    name and none of them reaches the derivation at all. The space rule
+    stays in ``_short_name_extension`` because it is Win32's rule and the
+    function is asked directly by tests, but no name the sweep hands it can
+    carry one. Without the screen these are ordinary non-content files and
+    the verification returns a CorpusVerification over a tree that holds
+    them.
     """
 
-    _refuses_short_name_alias(tmp_path, "smuggled.y mlx")
-
-
-def test_refuses_a_short_name_alias_hidden_behind_several_spaces(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Binds S4-F1: one space was not the bound; every space is removed.
-
-    ``smuggled.y m l x`` carries three of them, and the alias Win32 derives
-    is the same ``SMUGGL~1.YML``. Pinned separately from its sibling because
-    a fix that dropped only the first space, or only a leading one, would
-    satisfy that test and leave this hole open. Without the fix the written
-    extension truncates to ``Y M`` again and the file is skipped.
-    """
-
-    _refuses_short_name_alias(tmp_path, "smuggled.y m l x")
-
-
-def test_refuses_a_short_name_alias_whose_space_precedes_the_dot(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Binds S4-F1: the removal happens before the period is located, too.
-
-    ``smuggled . yml`` is not content by suffix — its last four characters
-    are ``" yml"``, not ``".yml"`` — and it does not end in a dot or a
-    space, so the stripping screen does not reach it either. Win32 removes
-    both spaces first and then finds the period, so the alias is
-    ``SMUGGL~1.YML``. Without the fix the written extension is ``" yml"``,
-    truncating to ``" YM"``, and the file is skipped as non-content.
-    """
-
-    _refuses_short_name_alias(tmp_path, "smuggled . yml")
+    _refuses_as_unportable(tmp_path, name)
 
 
 def test_a_short_name_extension_carrying_a_non_ascii_character_is_refused(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds S5-F3: the underscore model was unsound, so the name is refused.
+    """Binds S5-F3 and the policy: the code-page question is not asked now.
 
     Round seven pinned this name as an *acceptance*, on the model that 8.3
     generation substitutes an underscore for every character its namespace
     cannot hold, so ``smuggled.ÿml`` would be handed ``._ML`` or ``.Y_M``
     and neither is ``.YML``. The model was wrong: the 8.3 namespace is an
     OEM code page and not ASCII, so a character the volume's code page can
-    represent survives into the short name and is uppercased there. With
+    represent survives into the short name and is uppercased there — with
     ``.éml`` pinned, ``smuggled.émlx`` gets an alias ending ``.ÉML`` on a
-    code page 850 volume while the underscore model answered ``._ML`` and
-    let the file be skipped as non-content (peer review, round eight).
+    code page 850 volume (peer review, round eight). Round eight refused the
+    name as underivable; Sol round 2 then had to bound that refusal twice
+    over, because it was refusing ordinary names.
 
-    Which code page a volume uses is not something an auditor's clone
-    reports, and guessing it wrong in either direction is a wrong answer
-    about closed-world membership. So the expectation moves from acceptance
-    to refusal: the verifier says it cannot derive the alias rather than
-    deriving one it cannot stand behind. Without the fix this name is
-    silently skipped as non-content under a model of a mapping the volume
-    had not agreed to.
+    The refusal stands and its reason is now the repertoire: a non-ASCII
+    extension is a non-portable name, so no code page is consulted, no
+    derivation is attempted, and there is no bound to get wrong. Without the
+    screen this name is silently skipped as non-content under a model of a
+    mapping the volume had not agreed to.
     """
 
-    write_tree(tmp_path)
-    (tmp_path / "rules" / "smuggled.ÿml").write_text("name: smuggled\n")
-    spec = corpus_spec(content_suffixes=(".yaml", ".yml"))
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(tmp_path, render_journal(journal_rows()), spec=spec)
-    assert str(caught.value) == (
-        "8.3 alias extension cannot be derived for a name whose extension "
-        "carries non-ASCII characters (the volume's OEM code page decides "
-        "it): 'smuggled.ÿml'"
-    )
+    _refuses_as_unportable(tmp_path, "smuggled.ÿml")
 
 
 def test_refuses_a_tree_entry_whose_name_windows_would_strip(
@@ -3269,8 +3202,12 @@ def test_refuses_a_tree_entry_whose_name_windows_would_strip(
     The name is injected through the sweep's listing rather than written:
     what the verifier has to hold against is a filesystem that emits the
     name, and injecting it makes the test say the same thing on every host.
-    Without the fix the entry falls through to the ``lstat``, which fails,
+    Without the screen the entry falls through to the ``lstat``, which fails,
     and the refusal is the non-regular-file one instead.
+
+    Binds the policy for the message: the trailing period is the one Win32
+    alias rule the portable repertoire does not subsume, so it is one of the
+    three questions the single screen asks and its refusal is that screen's.
     """
 
     write_tree(tmp_path)
@@ -3280,8 +3217,7 @@ def test_refuses_a_tree_entry_whose_name_windows_would_strip(
             tmp_path, render_journal(journal_rows()), spec=corpus_spec()
         )
     assert str(caught.value) == (
-        "content root contains an entry Windows would alias: "
-        "'rules/tax/notes.yaml.'"
+        f"tree entry 'rules/tax/notes.yaml.' {NOT_PORTABLE}: 'notes.yaml.'"
     )
 
 
@@ -3298,8 +3234,16 @@ def test_refuses_an_entry_beside_a_root_component_windows_would_strip(
     the strip question as well as the fold question.
 
     Injected into the tree root's listing so the branch is covered on every
-    host. Without the fix nothing here refuses: the entry is not fold-equal
-    to ``rules``, the sweep never descends it, and the verification passes.
+    host. Without the screen nothing here refuses: the entry is not
+    fold-equal to ``rules``, the sweep never descends it, and the
+    verification passes.
+
+    Binds the policy for the message, and for the width of the screen: this
+    is the site where the portable-name rule reaches furthest, because every
+    entry beside a component of a pinned root is screened and the first such
+    component's parent is the repository root. A space is outside the
+    repertoire wherever it sits, so this refuses whether the space is
+    trailing or not.
     """
 
     real = pathlib.Path.iterdir
@@ -3317,7 +3261,7 @@ def test_refuses_an_entry_beside_a_root_component_windows_would_strip(
             tmp_path, render_journal(journal_rows()), spec=corpus_spec()
         )
     assert str(caught.value) == (
-        "content root contains an entry Windows would alias: 'rules '"
+        f"tree entry beside 'rules' {NOT_PORTABLE}: 'rules '"
     )
 
 
@@ -3725,26 +3669,32 @@ def test_refuses_a_gate_whose_escaped_evidence_floods_the_verdict(
     )
 
 
-def test_refuses_removed_paths_whose_escaped_spelling_floods_the_verdict(
+def test_a_removed_path_can_no_longer_render_wider_than_it_is_written(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds R6-F3: ``MAX_REMOVED_TEXT`` had the same gap as the gate budget.
+    """Binds R6-F3 and the policy: the escaping gap is closed for paths.
 
-    removedPaths is the other producer-controlled list the verdict renders
-    verbatim, and it was charged the same way — by Python characters. A path
-    spelled in characters outside the BMP renders twelve times its length, so
-    four hundred of them charged 30,800 against a budget of 262,144 while
-    putting 295,600 characters of escaped JSON into the verdict.
+    R6-F3 was that ``MAX_REMOVED_TEXT`` charged Python characters while
+    ``json.dumps`` renders with ``ensure_ascii`` on, so a path spelled in
+    characters outside the BMP rendered twelve times its length: four
+    hundred of them charged 30,800 against a budget of 262,144 while putting
+    295,600 characters of escaped JSON into the verdict. The fix was to
+    charge what the renderer emits, and it stands.
 
-    Nothing else in the schema stops it: each path is inside
-    ``MAX_PATH_TEXT``, each code point is assigned and is neither a control
-    nor a format character, and a producer may retire as many paths as it
-    likes. Charged as rendered, the set refuses. Without the fix it verifies
-    — really verifies, not merely refuses differently, which is why each
-    name here stays inside the 255-byte limit a filesystem puts on one
-    component: a path too long to look for would refuse on the old module as
-    an unverifiable tombstone and the test would bind nothing.
+    Under the portable-name policy the input that demonstrated it cannot
+    exist. A removed path is a declared path, so it is ASCII, so
+    ``json.dumps`` escapes nothing in it and its rendered length is its
+    written length plus the two quotes. Both halves are asserted here: the
+    old demonstration journal refuses as a non-portable name, and the
+    rendering of a portable path is exactly its length plus two.
+
+    The gap itself is not gone from the module — gate evidence is producer
+    text and not a name, so it can still carry a non-BMP character, and
+    ``test_refuses_a_gate_whose_escaped_evidence_floods_the_verdict``
+    exercises the same arithmetic where it is still reachable.
     """
+
+    from receipt.corpus import _rendered_length
 
     body = '{"applied": true}\n'
     retired = [
@@ -3768,18 +3718,13 @@ def test_refuses_removed_paths_whose_escaped_spelling_floods_the_verdict(
     write_tree(tmp_path)
     # What the old charge came to, which is why this journal used to pass.
     assert sum(len(path) for path in retired) <= MAX_REMOVED_TEXT
-    # Every path costs the same here, so which one first carries the running
-    # total over is arithmetic; the module charges them in sorted order,
-    # which is the order the verdict renders them in.
-    number, charged = first_over(charged_removed(retired[0]), MAX_REMOVED_TEXT)
-    assert number <= len(retired)
-    with pytest.raises(CorpusError) as caught:
+    # And what the renderer would have made of it, which is the gap.
+    assert sum(_rendered_length(path) for path in retired) > MAX_REMOVED_TEXT
+    with pytest.raises(CorpusError, match="is not a portable name"):
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
-    assert str(caught.value) == (
-        f"journal removed paths total more than the verdict budget of "
-        f"{MAX_REMOVED_TEXT} characters: {charged} charged at path {number} "
-        f"of {len(retired)}"
-    )
+    # No portable path can reopen it: escaping a portable name is a no-op.
+    for portable in (".axiom/apply-manifest.json", "rules/tax/rate.yaml", "a-_.b"):
+        assert _rendered_length(portable) == len(portable) + 2
 
 
 def _gate_id(index: int, width: int) -> str:
@@ -4105,43 +4050,6 @@ DOTLESS_SMALL_I = "ı"
 DOTTED_CAPITAL_I = "İ"
 
 
-#: The ``Default_Ignorable_Code_Point`` section of Unicode 14.0.0's
-#: DerivedCoreProperties.txt, verbatim, so the generator's self-check runs
-#: offline and the source of the shipped table is on the record beside it:
-#: https://www.unicode.org/Public/14.0.0/ucd/DerivedCoreProperties.txt
-#: Quoted exactly as published, which is why these lines run past the width
-#: the rest of this module keeps to — a re-wrapped quotation proves nothing.
-UCD_14_DEFAULT_IGNORABLE = """\
-00AD          ; Default_Ignorable_Code_Point # Cf       SOFT HYPHEN
-034F          ; Default_Ignorable_Code_Point # Mn       COMBINING GRAPHEME JOINER
-061C          ; Default_Ignorable_Code_Point # Cf       ARABIC LETTER MARK
-115F..1160    ; Default_Ignorable_Code_Point # Lo   [2] HANGUL CHOSEONG FILLER..HANGUL JUNGSEONG FILLER
-17B4..17B5    ; Default_Ignorable_Code_Point # Mn   [2] KHMER VOWEL INHERENT AQ..KHMER VOWEL INHERENT AA
-180B..180D    ; Default_Ignorable_Code_Point # Mn   [3] MONGOLIAN FREE VARIATION SELECTOR ONE..MONGOLIAN FREE VARIATION SELECTOR THREE
-180E          ; Default_Ignorable_Code_Point # Cf       MONGOLIAN VOWEL SEPARATOR
-180F          ; Default_Ignorable_Code_Point # Mn       MONGOLIAN FREE VARIATION SELECTOR FOUR
-200B..200F    ; Default_Ignorable_Code_Point # Cf   [5] ZERO WIDTH SPACE..RIGHT-TO-LEFT MARK
-202A..202E    ; Default_Ignorable_Code_Point # Cf   [5] LEFT-TO-RIGHT EMBEDDING..RIGHT-TO-LEFT OVERRIDE
-2060..2064    ; Default_Ignorable_Code_Point # Cf   [5] WORD JOINER..INVISIBLE PLUS
-2065          ; Default_Ignorable_Code_Point # Cn       <reserved-2065>
-2066..206F    ; Default_Ignorable_Code_Point # Cf  [10] LEFT-TO-RIGHT ISOLATE..NOMINAL DIGIT SHAPES
-3164          ; Default_Ignorable_Code_Point # Lo       HANGUL FILLER
-FE00..FE0F    ; Default_Ignorable_Code_Point # Mn  [16] VARIATION SELECTOR-1..VARIATION SELECTOR-16
-FEFF          ; Default_Ignorable_Code_Point # Cf       ZERO WIDTH NO-BREAK SPACE
-FFA0          ; Default_Ignorable_Code_Point # Lo       HALFWIDTH HANGUL FILLER
-FFF0..FFF8    ; Default_Ignorable_Code_Point # Cn   [9] <reserved-FFF0>..<reserved-FFF8>
-1BCA0..1BCA3  ; Default_Ignorable_Code_Point # Cf   [4] SHORTHAND FORMAT LETTER OVERLAP..SHORTHAND FORMAT UP STEP
-1D173..1D17A  ; Default_Ignorable_Code_Point # Cf   [8] MUSICAL SYMBOL BEGIN BEAM..MUSICAL SYMBOL END PHRASE
-E0000         ; Default_Ignorable_Code_Point # Cn       <reserved-E0000>
-E0001         ; Default_Ignorable_Code_Point # Cf       LANGUAGE TAG
-E0002..E001F  ; Default_Ignorable_Code_Point # Cn  [30] <reserved-E0002>..<reserved-E001F>
-E0020..E007F  ; Default_Ignorable_Code_Point # Cf  [96] TAG SPACE..CANCEL TAG
-E0080..E00FF  ; Default_Ignorable_Code_Point # Cn [128] <reserved-E0080>..<reserved-E00FF>
-E0100..E01EF  ; Default_Ignorable_Code_Point # Mn [240] VARIATION SELECTOR-17..VARIATION SELECTOR-256
-E01F0..E0FFF  ; Default_Ignorable_Code_Point # Cn [3600] <reserved-E01F0>..<reserved-E0FFF>
-"""
-
-
 def test_refuses_a_tree_entry_a_target_filesystem_would_ignore_a_code_point_in(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -4160,22 +4068,17 @@ def test_refuses_a_tree_entry_a_target_filesystem_would_ignore_a_code_point_in(
     the clone is verified on one host and resolved on another.
 
     Without the screen this verification returns a CorpusVerification with
-    the file sitting in the tree, unbound. The 8.3 rule from S5-F3 refuses
-    the same name a few lines later, for the unrelated reason that its
-    extension carries a non-ASCII character — so disabling this screen alone
-    on the finished head moves the refusal rather than removing it, and it
-    is the *skip* that was the defect.
+    the file sitting in the tree, unbound.
+
+    Binds the policy for the message and for the table behind it. The class
+    used to be decided by 17 pinned ranges of Unicode 14.0's
+    ``Default_Ignorable_Code_Point`` property, parsed from the published
+    file because ``unicodedata`` exposes no query for it. The repertoire
+    decides it now, with nothing to pin and nothing to re-derive: a joiner
+    is not an ASCII letter, digit, ``.``, ``_`` or ``-``.
     """
 
-    write_tree(tmp_path)
-    (tmp_path / "rules" / f"evil.y{ZERO_WIDTH_JOINER}ml").write_text("name: evil\n")
-    spec = corpus_spec(content_suffixes=(".yaml", ".yml"))
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(tmp_path, render_journal(journal_rows()), spec=spec)
-    assert str(caught.value) == (
-        "tree entry 'rules/evil.y\\u200dml' contains a Unicode format control "
-        "(0x200d): 'evil.y\\u200dml'"
-    )
+    _refuses_as_unportable(tmp_path, f"evil.y{ZERO_WIDTH_JOINER}ml")
 
 
 def test_refuses_a_tombstone_listing_entry_a_filesystem_may_ignore(
@@ -4195,6 +4098,9 @@ def test_refuses_a_tombstone_listing_entry_a_filesystem_may_ignore(
     a filesystem that emits the name, and injecting it says the same thing
     on every host. Without the screen this verification passes and reports
     ``retired/apply-manifest.json`` under removedPaths.
+
+    Binds the policy for the message: the tombstone listing is screened by
+    the same one screen every other listing is.
     """
 
     body = '{"applied": true}\n'
@@ -4209,8 +4115,8 @@ def test_refuses_a_tombstone_listing_entry_a_filesystem_may_ignore(
     with pytest.raises(CorpusError) as caught:
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
     assert str(caught.value) == (
-        "tree entry examined for a tombstone contains a Unicode format control "
-        "(0x200d): 'apply-manifest.jso\\u200dn'"
+        f"tree entry examined for a tombstone {NOT_PORTABLE}: "
+        "'apply-manifest.jso\\u200dn'"
     )
 
 
@@ -4226,12 +4132,17 @@ def test_refuses_two_declared_paths_hfs_plus_would_call_one_file(
     are one file on that filesystem, and ``_reject_aliasing_paths`` could not
     pair them because their fold keys differ.
 
-    This is the same hazard that function refuses for case and normalization
-    aliases, one class further out: a closed world whose membership depends
-    on which filesystem the auditor resolved the tree on is not closed. Both
-    files are real here and both hash, so without the screen this
-    verification passes and reports a closed world of four content files
-    that no HFS+ consumer can hold.
+    This is the same hazard ``_reject_aliasing_paths`` refuses for case and
+    normalization aliases, one class further out: a closed world whose
+    membership depends on which filesystem the auditor resolved the tree on
+    is not closed. Both files are real here and both hash, so without the
+    screen this verification passes and reports a closed world of four
+    content files that no HFS+ consumer can hold.
+
+    Binds the policy for the message. U+034F is the case that shows why the
+    repertoire is the better answer than a table: it is default-ignorable
+    and *not* a format control, so the Cf screen never saw it and a second
+    pinned table had to be added to catch it. The repertoire needs no third.
     """
 
     smuggled = f"rules/tax/ra{COMBINING_GRAPHEME_JOINER}te.yaml"
@@ -4243,8 +4154,7 @@ def test_refuses_two_declared_paths_hfs_plus_would_call_one_file(
             tmp_path, render_journal(journal_rows(content=content)), spec=corpus_spec()
         )
     assert str(caught.value) == (
-        "journal row 4 path contains a code point a target filesystem may "
-        f"ignore when comparing names (0x034f): '{smuggled}'"
+        f"journal row 4 path {NOT_PORTABLE}: '{smuggled}'"
     )
 
 
@@ -4267,13 +4177,21 @@ def test_refuses_a_dotless_i_beside_the_name_an_upcase_table_folds_it_onto(
     two names together that a POSIX host genuinely keeps apart, which
     breaks the closed world in the other direction.
 
-    The wording moved with S5R2-F11: the claim rests on Unicode's own
-    mapping table rather than on "NTFS", because the two upcase tables that
-    can actually be read disagree — see
-    ``test_the_dotless_i_claim_is_checked_against_a_real_upcase_table``.
+    S5R2-F11 then had to restate the claim, because the two upcase tables
+    that can actually be read disagree about the dotless half and agree that
+    nothing maps the *dotted* U+0130 onto ``I`` — so the pair was refused
+    together on a premise that held for one of them, and a Turkish-locale
+    producer lost the spelling they are far more likely to write. That is
+    the shape the policy exists to stop: three review rounds spent deciding
+    whose case mapping this module implements, over two characters.
 
-    Both files are real and both are bound, so without the screen this
-    verification returns a CorpusVerification over five content files.
+    Both are outside the portable repertoire now, and both refuse with the
+    same message and for a reason that needs no table at all. Both are
+    asserted, because the second is the cost side of the trade.
+
+    Both files are real and both are bound, so without the screen the
+    dotless verification returns a CorpusVerification over five content
+    files.
     """
 
     content = dict(CONTENT)
@@ -4285,192 +4203,17 @@ def test_refuses_a_dotless_i_beside_the_name_an_upcase_table_folds_it_onto(
             tmp_path, render_journal(journal_rows(content=content)), spec=corpus_spec()
         )
     assert str(caught.value) == (
-        "journal row 3 path contains the Turkic dotless i (0x0131), which an "
-        "upcase table built from Unicode's simple uppercase mappings folds "
-        "onto I while this fold key keeps it distinct: "
+        f"journal row 3 path {NOT_PORTABLE}: "
         f"'rules/tax/ev{DOTLESS_SMALL_I}l.yaml'"
     )
 
-
-def test_accepts_a_declared_path_carrying_the_turkic_dotted_capital_i(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Binds S5R2-F11: U+0130 was refused on a premise the sources deny.
-
-    The pair was refused together, on the claim that NTFS's upcase table
-    maps both onto ASCII ``I``. Half of that is wrong, and it is the half
-    that costs a corpus a legal name. U+0130 LATIN CAPITAL LETTER I WITH
-    DOT ABOVE is already uppercase: Unicode 14.0 gives it *no* simple
-    uppercase mapping, and the one real upcase table that can be read maps
-    it to itself. Nothing merges it with ``i``, so the fold key and the
-    filesystem agree about it, and refusing it refused a spelling a
-    Turkish-locale producer is far more likely to write than its dotless
-    sibling.
-
-    What ``casefold`` does to it — the two-character key ``i\u0307`` —
-    merges it with the *sequence* ``i`` plus U+0307, which a real table
-    keeps apart. That is over-refusal, the safe direction, and
-    ``_reject_aliasing_paths`` already refuses such a pair when both
-    spellings are actually bound. This journal binds one.
-
-    Without the fix this verification raises. The dotless half is still
-    refused, which its own test asserts.
-    """
-
-    content = dict(CONTENT)
-    content[f"rules/tax/{DOTTED_CAPITAL_I}.yaml"] = "name: dotted\nvalue: 1\n"
-    write_tree(tmp_path, content=content)
-    verification = verify_corpus_binding(
-        tmp_path, render_journal(journal_rows(content=content)), spec=corpus_spec()
-    )
-    assert f"rules/tax/{DOTTED_CAPITAL_I}.yaml" in [
-        entry.path for entry in verification.content
-    ]
-
-
-def test_the_dotless_i_claim_is_checked_against_a_real_upcase_table() -> None:
-    """Binds S5R2-F11: the refusal has to rest on something that was read.
-
-    Two sources were fetched on 2026-09-03 and both are quoted here, because
-    the claim the screen rests on is a claim about tables this module does
-    not ship.
-
-    Unicode 14.0's ``UnicodeData.txt``
-    (https://www.unicode.org/Public/14.0.0/ucd/UnicodeData.txt), the pinned
-    repertoire's own release, lines 305 and 306:
-
-        0130;LATIN CAPITAL LETTER I WITH DOT ABOVE;Lu;0;L;0049 0307;;;;N;
-        LATIN CAPITAL LETTER I DOT;;;0069;
-        0131;LATIN SMALL LETTER DOTLESS I;Ll;0;L;;;;;N;;;0049;;0049
-
-    Field 12 is the simple *uppercase* mapping. U+0131 has one, U+0049. U+0130
-    has none — it is already uppercase, and its field 13 lowercase mapping is
-    U+0069. So an upcase table built from these mappings folds ``ı`` onto
-    ``I`` and leaves ``İ`` alone, which is exactly what ``str.upper`` does on
-    the running interpreter and what the first two assertions below pin.
-
-    ntfs-3g's ``ntfs_upcase_table_build``
-    (https://raw.githubusercontent.com/tuxera/ntfs-3g/edge/libntfs-3g/unistr.c),
-    the default ``$UpCase`` it builds when a volume's own table cannot be
-    read, described in its comment as "the table as defined by Windows XP"
-    with deltas up to Windows 7. It encodes the table as ranges and offsets,
-    and the relevant structure is ``uc_dup_table``, whose loop is
-    ``for (i = start; i < end; i += 2) uc[i + 1] = i`` — every second code
-    point of a range mapped onto the one before it, which is odd-onto-even
-    where the range starts even and even-onto-odd where it starts odd:
-
-        static int uc_dup_table[][2] = { /* Start, End */
-        {0x0100, 0x012F}, {0x01A0, 0x01A6}, ...
-        {0x0132, 0x0137}, {0x01B3, 0x01B7}, ...
-
-    The first range stops at 0x012F and the next begins at 0x0132, so
-    **neither** 0x0130 nor 0x0131 is mapped by it — and no ``uc_run_table``
-    range, no ``uc_byte_table`` offset and no ``newuppercase`` entry covers
-    either. Rebuilding the whole 65,536-entry table from that source gives
-    ``uc[0x130] == 0x130`` and ``uc[0x131] == 0x131``, with U+0049 and
-    U+0069 the only code points mapping onto ``I``.
-
-    That is a real disagreement between the two sources about U+0131, and it
-    is itself the reason to refuse it: the fold key must decide the same
-    question the target filesystem decides, and here two readable candidate
-    tables decide it differently, so no single answer is safe. About U+0130
-    they agree, and they agree with ``casefold``, which is why S5R2-F11 stops
-    refusing it.
-
-    This test is a restatement of the fetched sources plus the checks the
-    running interpreter can make; it cannot re-fetch them offline. It passes
-    with the S5R2-F11 change disabled, which is the point — it is the record
-    of what the decision rests on.
-    """
-
-    # Unicode's simple case mappings, as the interpreter implements them.
-    assert DOTLESS_SMALL_I.upper() == "I"
-    assert DOTTED_CAPITAL_I.upper() == DOTTED_CAPITAL_I
-    # And what this module's fold key does with the same two.
-    assert DOTLESS_SMALL_I.casefold() == DOTLESS_SMALL_I
-    assert DOTTED_CAPITAL_I.casefold() == "i\u0307"
-    # So the dotless i is the one an upcase table merges and the fold key
-    # does not: two names this module calls distinct, one file there.
-    assert DOTLESS_SMALL_I.upper() == "i".upper()
-    assert DOTLESS_SMALL_I.casefold() != "i".casefold()
-    # And the dotted capital is not: distinct under both, either way round.
-    assert DOTTED_CAPITAL_I.upper() != "i".upper()
-    assert DOTTED_CAPITAL_I.casefold() != "i".casefold()
-
-
-def test_the_shipped_ignorable_table_is_what_its_generator_produces() -> None:
-    """Binds S5-F2: the pinned property table must be checkable, not asserted.
-
-    ``unicodedata`` exposes no ``Default_Ignorable_Code_Point`` query at all,
-    so the table cannot be re-derived from the running interpreter the way
-    the unassigned ranges can. It is parsed from the published property file
-    instead, and the 27 lines of that file are carried here verbatim — the
-    ``Default_Ignorable_Code_Point`` section of
-
-        https://www.unicode.org/Public/14.0.0/ucd/DerivedCoreProperties.txt
-
-    — so the check runs offline and the source text sits beside the claim it
-    supports. Parsing them must reproduce the shipped tuple exactly: 17
-    ranges and 4,174 code points, the 27 lines merging in exactly three
-    places — three Mongolian lines into U+180B..U+180F, three word-joiner
-    and invisible-operator lines into U+2060..U+206F, and seven tag and
-    variation-selector lines into U+E0000..U+E0FFF.
-
-    Without the fix there is no table to check. A hand-edited one is what
-    this catches: an entry dropped, a range widened, or the merge done wrong.
-    """
-
-    from receipt._unicode_repertoire import (
-        DEFAULT_IGNORABLE_RANGES,
-        generate_default_ignorable_ranges,
-    )
-
-    assert generate_default_ignorable_ranges(UCD_14_DEFAULT_IGNORABLE) == (
-        DEFAULT_IGNORABLE_RANGES
-    )
-    assert len(DEFAULT_IGNORABLE_RANGES) == 17
-    assert sum(last - first + 1 for first, last in DEFAULT_IGNORABLE_RANGES) == 4174
-    assert (
-        len(
-            [
-                line
-                for line in UCD_14_DEFAULT_IGNORABLE.splitlines()
-                if "; Default_Ignorable_Code_Point" in line
-            ]
+    dotted = dict(CONTENT)
+    dotted[f"rules/tax/{DOTTED_CAPITAL_I}.yaml"] = "name: dotted\nvalue: 1\n"
+    write_tree(tmp_path, content=dotted)
+    with pytest.raises(CorpusError, match="is not a portable name"):
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows(content=dotted)), spec=corpus_spec()
         )
-        == 27
-    )
-
-
-def test_the_shipped_ignorable_table_is_sorted_disjoint_and_in_range() -> None:
-    """Binds S5-F2: ``is_default_ignorable`` bisects, so it assumes all three.
-
-    The lookup finds the last range starting at or below a code point and
-    looks no further, which is only correct for ranges that are sorted and
-    do not overlap. Adjacency is checked too: two touching ranges would mean
-    the generator's merge failed to join what the file split, and a hand edit
-    that split a range is exactly what this catches.
-    """
-
-    from receipt._unicode_repertoire import (
-        DEFAULT_IGNORABLE_RANGES,
-        is_default_ignorable,
-    )
-
-    assert DEFAULT_IGNORABLE_RANGES
-    previous = -1
-    for first, last in DEFAULT_IGNORABLE_RANGES:
-        assert 0 <= first <= last <= 0x10FFFF
-        assert first > previous + 1
-        previous = last
-    for first, last in DEFAULT_IGNORABLE_RANGES:
-        assert is_default_ignorable(first) and is_default_ignorable(last)
-        assert not is_default_ignorable(first - 1)
-        assert not is_default_ignorable(last + 1)
-    # The two classes the screen keeps apart, and one ordinary character.
-    assert is_default_ignorable(0x200D) and is_default_ignorable(0x034F)
-    assert not is_default_ignorable(ord("a"))
-    assert not is_default_ignorable(0x0131)
 
 
 def test_an_ordinary_neighbour_is_not_refused_against_a_four_character_pin(
@@ -4537,8 +4280,10 @@ def test_refuses_a_name_whose_alias_extension_the_code_page_would_decide(
     non-content while its alias opened a content name.
 
     Refused rather than modelled, because the clone does not report the code
-    page. Without the fix this verification passes with the file in the tree
-    and no row binding it.
+    page — and refused now by the repertoire, one step earlier and without
+    the two bounds Sol round 2 had to put on the underivability refusal to
+    stop it refusing ordinary names. Without the screen this verification
+    passes with the file in the tree and no row binding it.
     """
 
     write_tree(tmp_path)
@@ -4547,34 +4292,34 @@ def test_refuses_a_name_whose_alias_extension_the_code_page_would_decide(
     with pytest.raises(CorpusError) as caught:
         verify_corpus_binding(tmp_path, render_journal(journal_rows()), spec=spec)
     assert str(caught.value) == (
-        "8.3 alias extension cannot be derived for a name whose extension "
-        "carries non-ASCII characters (the volume's OEM code page decides "
-        "it): 'smuggled.émlx'"
+        f"tree entry 'rules/smuggled.émlx' {NOT_PORTABLE}: 'smuggled.émlx'"
     )
 
 
 def test_the_spec_refuses_a_non_ascii_content_suffix_at_construction() -> None:
-    """Binds S5-F3: a pin the 8.3 screen cannot judge against is refused.
+    """Binds S5-F3 and the policy: a pin the screen cannot judge is refused.
 
-    The screen refuses to derive an alias extension for a name whose
-    extension carries a non-ASCII character, because the volume's OEM code
-    page decides it. A *pin* carrying one has the same problem from the
-    other side: nothing the screen can derive could ever be compared
-    against ``.éml`` with confidence, so the pin cannot answer the question
-    it exists to ask.
+    A pin carrying a non-ASCII character could never be compared with
+    confidence against an alias extension the volume's OEM code page
+    decides, so the pin cannot answer the question it exists to ask. S5-F3
+    refused it; Sol round 2 then narrowed the refusal to alias-capable pins,
+    because refusing ``.éyaml`` refused a configuration nothing ever asks
+    about.
 
-    Refused at construction, where the committed spec that carries the fault
-    is what a refusal names. Without the rule the spec is accepted and every
-    ASCII-extension name is silently judged against a pin no alias can be
-    compared to.
+    The policy refuses both, and refuses them for the plainer reason that a
+    pin is ASCII. That is a real narrowing of what a spec may declare, and
+    it is asserted here at both lengths so the cost is on the record.
+    Without the rule the spec is accepted and every name is judged against a
+    pin no alias can be compared to.
     """
 
-    with pytest.raises(CorpusError) as caught:
-        corpus_spec(content_suffixes=(".yaml", ".éml"))
-    assert str(caught.value) == (
-        "CorpusSpec content suffix must be ASCII, because an 8.3 alias "
-        "extension cannot be derived against a non-ASCII one: '.éml'"
-    )
+    for suffix in (".éml", ".éyaml"):
+        with pytest.raises(CorpusError) as caught:
+            corpus_spec(content_suffixes=(".yaml", suffix))
+        assert str(caught.value) == (
+            "CorpusSpec content suffix must be '.' followed by one to "
+            f"sixteen ASCII letters or digits: {suffix!r}"
+        )
 
 
 def test_refuses_a_declared_path_naming_a_win32_reserved_device(
@@ -4592,8 +4337,13 @@ def test_refuses_a_declared_path_naming_a_win32_reserved_device(
 
     That is the module's standing hazard in a new shape: the spelling means
     one thing to the verifier and another to the host that will use the
-    tree. Without the fix this row is accepted and the verdict claims a
+    tree. Without the screen this row is accepted and the verdict claims a
     binding no Win32 consumer can rely on.
+
+    The device table survives the portable-name policy, because a device
+    name is spelled out of portable characters: ``NUL.yaml`` is ASCII
+    letters and a period. It is one of the three questions the single screen
+    asks, so the refusal is that screen's.
     """
 
     content = dict(CONTENT)
@@ -4604,8 +4354,7 @@ def test_refuses_a_declared_path_naming_a_win32_reserved_device(
             tmp_path, render_journal(journal_rows(content=content)), spec=corpus_spec()
         )
     assert str(caught.value) == (
-        "journal row 1 path carries a Win32 reserved device name in a "
-        "component: 'rules/NUL.yaml'"
+        f"journal row 1 path {NOT_PORTABLE}: 'rules/NUL.yaml'"
     )
 
 
@@ -4622,7 +4371,7 @@ def test_refuses_a_tree_entry_named_for_a_win32_reserved_device(
     under a mode.
 
     Matched case-insensitively on the text before the first period, so the
-    lowercase spelling and the extension change nothing. Without the fix
+    lowercase spelling and the extension change nothing. Without the screen
     this verification passes with the entry in the tree.
     """
 
@@ -4633,8 +4382,7 @@ def test_refuses_a_tree_entry_named_for_a_win32_reserved_device(
             tmp_path, render_journal(journal_rows()), spec=corpus_spec()
         )
     assert str(caught.value) == (
-        "tree entry 'rules/con.yml' carries a Win32 reserved device name in "
-        "a component: 'con.yml'"
+        f"tree entry 'rules/con.yml' {NOT_PORTABLE}: 'con.yml'"
     )
 
 
@@ -4657,7 +4405,14 @@ def test_refuses_a_tree_entry_named_for_a_superscript_com_port(
 
     The name is ASCII-uppercased rather than ``str.upper``-ed, so U+00B9 is
     compared as written; that is why the superscripts are table entries and
-    not a mapping. Without the fix this verification passes.
+    not a mapping. Without the screen this verification passes.
+
+    Under the portable-name policy these six are refused twice over — a
+    superscript digit is not an ASCII digit either — and the message no
+    longer says which question refused them. The table entries stay because
+    they are the shape of a Win32 fact and not of this repertoire, and
+    because ``_win32_device_basename`` is asked directly by
+    ``test_the_device_basename_is_derived_the_way_win32_derives_it``.
     """
 
     write_tree(tmp_path)
@@ -4667,8 +4422,7 @@ def test_refuses_a_tree_entry_named_for_a_superscript_com_port(
             tmp_path, render_journal(journal_rows()), spec=corpus_spec()
         )
     assert str(caught.value) == (
-        "tree entry 'rules/COM¹.yml' carries a Win32 reserved device "
-        "name in a component: 'COM¹.yml'"
+        f"tree entry 'rules/COM¹.yml' {NOT_PORTABLE}: 'COM¹.yml'"
     )
 
 
@@ -4719,6 +4473,12 @@ def test_refuses_a_device_name_padded_with_spaces_before_its_extension(
     Without the composition this journal verifies: the file is a regular
     file, its digest matches, and the sweep calls the world closed, while a
     Win32 consumer reading the same path gets nothing at all.
+
+    The portable-name policy refuses it on the space before the device
+    question is reached, so this input now has two independent reasons to
+    refuse and one message for both. The composition is still asserted
+    directly, over unscreened names, by
+    ``test_the_device_basename_is_derived_the_way_win32_derives_it``.
     """
 
     content = dict(CONTENT)
@@ -4729,8 +4489,7 @@ def test_refuses_a_device_name_padded_with_spaces_before_its_extension(
             tmp_path, render_journal(journal_rows(content=content)), spec=corpus_spec()
         )
     assert str(caught.value) == (
-        "journal row 1 path carries a Win32 reserved device name in a "
-        "component: 'rules/NUL .yaml'"
+        f"journal row 1 path {NOT_PORTABLE}: 'rules/NUL .yaml'"
     )
 
 
@@ -4746,10 +4505,13 @@ def test_refuses_a_tree_entry_whose_device_name_is_cut_short_by_a_colon(
     anywhere, and POSIX allows the name, so the sweep is where this one has
     to be caught.
 
-    Trailing spaces are removed after that truncation and not before, which
-    ``nul  .txt`` pins in the same breath. Without the composition both
-    entries are skipped as ordinary non-content files and the verification
-    passes.
+    Trailing spaces are removed after that truncation and not before.
+    Without the composition this entry is skipped as an ordinary non-content
+    file and the verification passes.
+
+    The portable-name policy refuses it on the colon as well, so the one
+    message covers both reasons; the composition itself is asserted directly
+    by ``test_the_device_basename_is_derived_the_way_win32_derives_it``.
     """
 
     write_tree(tmp_path)
@@ -4759,8 +4521,8 @@ def test_refuses_a_tree_entry_whose_device_name_is_cut_short_by_a_colon(
             tmp_path, render_journal(journal_rows()), spec=corpus_spec()
         )
     assert str(caught.value) == (
-        "tree entry 'rules/CON:stream.yml' carries a Win32 reserved device "
-        "name in a component: 'CON:stream.yml'"
+        f"tree entry 'rules/CON:stream.yml' {NOT_PORTABLE}: "
+        "'CON:stream.yml'"
     )
 
 
@@ -4862,16 +4624,24 @@ def test_refuses_an_attested_path_the_directory_does_not_spell(
 def test_refuses_an_attested_name_stored_under_a_different_normalization(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds S5R2-F1: normalization aliases a spelling exactly as case does.
+    """Binds S5R2-F1 and the policy: normalization aliases as case does.
 
-    The journal attests the NFC spelling of ``café.md``; the tree stores the
-    NFD one. APFS and HFS+ resolve either spelling to the file they hold, so
-    the declared name opened the stored bytes and the digest matched; ext4
-    holds two distinct names and the declared one is simply absent. The same
-    corpus, the same journal, two verdicts — and the listing is what settles
-    it, because a listing emits the spelling the volume stores.
+    The journal attests the NFC spelling of ``café.md`` and the tree stores
+    the NFD one. APFS and HFS+ resolve either spelling to the file they
+    hold, so the declared name opened the stored bytes and the digest
+    matched; ext4 holds two distinct names and the declared one is simply
+    absent — the same corpus, the same journal, two verdicts. S5R2-F1
+    settled it by binding the spelling a listing emits.
 
-    Without the fix the resolving host passes.
+    The policy settles the *declared* half one step earlier and on every
+    host identically: neither spelling is a portable name, so a corpus
+    cannot attest either. The spelling walk is what still answers the case
+    variation that remains inside the repertoire, which
+    ``test_refuses_an_attested_path_the_directory_does_not_spell`` asserts.
+
+    Without the screen the refusal is host-dependent — the spelling walk on
+    a resolving host, the missing-file refusal elsewhere — and without
+    S5R2-F1 as well the resolving host passes.
     """
 
     nfc = unicodedata.normalize("NFC", "caf\u00e9.md")
@@ -4887,11 +4657,9 @@ def test_refuses_an_attested_name_stored_under_a_different_normalization(
             render_journal(journal_rows(attested=attested)),
             spec=corpus_spec(),
         )
-    message = str(caught.value)
-    assert message in (
-        f"path component {nfc!r} is not spelled by its directory: {nfc}",
-        f"bound file is missing or not a regular file: {nfc}",
-    ), message
+    assert str(caught.value) == (
+        f"journal row 5 path {NOT_PORTABLE}: {nfc!r}"
+    )
 
 
 def test_refuses_a_required_attested_path_the_directory_does_not_spell(
@@ -4984,6 +4752,11 @@ def test_refuses_a_tombstone_survivor_windows_strips_to_the_tombstoned_name(
     the same rule where a tombstone reads a listing. Without it this
     verification returns a CorpusVerification naming ``retired/gone`` as
     removed.
+
+    Binds the policy for the message, and the two spellings now refuse for
+    two different reasons under one wording: ``gone.`` ends in a period,
+    which is the third question the screen asks, and ``gone `` carries a
+    character the repertoire does not hold.
     """
 
     body = '{"applied": true}\n'
@@ -4994,8 +4767,7 @@ def test_refuses_a_tombstone_survivor_windows_strips_to_the_tombstoned_name(
     with pytest.raises(CorpusError) as caught:
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
     assert str(caught.value) == (
-        "tree entry Windows would alias by stripping a trailing dot or "
-        f"space: {survivor!r}"
+        f"tree entry examined for a tombstone {NOT_PORTABLE}: {survivor!r}"
     )
 
 
@@ -5039,8 +4811,7 @@ def test_the_second_tombstone_pass_screens_the_strip_alias_as_well(
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
     assert calls == [1, 1]
     assert str(caught.value) == (
-        "tree entry Windows would alias by stripping a trailing dot or "
-        "space: 'gone.'"
+        f"tree entry examined for a tombstone {NOT_PORTABLE}: 'gone.'"
     )
 
 
@@ -5049,8 +4820,8 @@ def test_refuses_a_tree_entry_named_as_an_alternate_data_stream(
 ) -> None:
     """Binds S5R2-F3: a colon in an enumerated name passed every screen.
 
-    ``rules/tax/rate.yaml:payload.txt`` is an ordinary file on POSIX and a
-    perfectly good filename here: it is not under a pinned suffix, its 8.3
+    ``rules/tax/rate.yaml:payload.txt`` is an ordinary file on POSIX and was
+    a perfectly good filename here: it is not under a pinned suffix, its 8.3
     alias extension is ``TXT``, it aliases no other entry by stripping, it
     carries no device basename, and its fold key collides with nothing. So
     the sweep skipped it as non-content. On Win32 the same name opens an
@@ -5059,10 +4830,11 @@ def test_refuses_a_tree_entry_named_as_an_alternate_data_stream(
     witnessed ones without appearing anywhere in the closed world the
     verdict just called closed.
 
-    Declared paths have refused a colon since round three. This is the same
-    rule where the tree's own names are screened. Without it this
-    verification returns a CorpusVerification over the three content files
-    and never mentions the stream.
+    Declared paths refused a colon from round three and enumerated names
+    from Sol round 2, in two rules with two wordings. The colon is outside
+    the portable repertoire, so there is one rule and one wording. Without
+    it this verification returns a CorpusVerification over the three content
+    files and never mentions the stream.
     """
 
     write_tree(tmp_path)
@@ -5072,8 +4844,7 @@ def test_refuses_a_tree_entry_named_as_an_alternate_data_stream(
             tmp_path, render_journal(journal_rows()), spec=corpus_spec()
         )
     assert str(caught.value) == (
-        "tree entry 'rules/tax/rate.yaml:payload.txt' contains a colon, "
-        "which Win32 reads as a stream or drive separator: "
+        f"tree entry 'rules/tax/rate.yaml:payload.txt' {NOT_PORTABLE}: "
         "'rate.yaml:payload.txt'"
     )
 
@@ -5101,8 +4872,7 @@ def test_refuses_a_tombstone_listing_entry_carrying_a_colon(
     with pytest.raises(CorpusError) as caught:
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
     assert str(caught.value) == (
-        "tree entry examined for a tombstone contains a colon, which Win32 "
-        "reads as a stream or drive separator: 'gone:stream'"
+        f"tree entry examined for a tombstone {NOT_PORTABLE}: 'gone:stream'"
     )
 
 
@@ -5234,23 +5004,31 @@ def test_refuses_a_journal_with_more_rows_than_the_parser_budget(
 def test_a_non_ascii_extension_is_not_refused_where_no_pin_can_carry_it(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds S5R2-F5: the screen derived before it filtered the pins.
+    """Binds S5R2-F5 and the policy: the pins are still filtered first.
 
     With only ``.yaml`` pinned, no 8.3 alias can carry a pinned suffix at
-    all: an alias extension is three characters and ``.yaml`` needs four. So
-    the answer for every name in the tree is the same, and it does not
-    depend on any code page. ``notes.é`` was refused as underivable anyway,
-    because the extension was derived before the pins that could not use it
-    were filtered out — a refusal over a question no pin had put, against an
-    ordinary non-content file that a real corpus may well carry.
+    all: an alias extension is three characters and ``.yaml`` needs four, so
+    the answer for every name in the tree is the same. S5R2-F5 was that the
+    extension was derived *before* the unusable pins were filtered out, so
+    ``notes.é`` was refused as underivable over a question no pin had put.
 
-    The pins are selected first now, and where none is alias-capable the
-    name is never touched. Without the fix this verification raises the OEM
-    refusal instead of returning.
+    The filter-first order stands and is asserted directly. What the policy
+    changes is the example: ``notes.é`` is refused now, by name and on every
+    configuration, so the name that shows the order is an ASCII one. An
+    ordinary ``notes.yam`` under a four-character pin verifies, which is the
+    same property the round-eight exactness fix left, and the predicate is
+    asserted beside it so the order is stated rather than inferred.
+
+    Without the filter this file still verifies — the derivation succeeds
+    and matches nothing — so the direct assertion is what binds it.
     """
 
+    from receipt.corpus import _short_name_carries_pinned_suffix
+
+    assert not _short_name_carries_pinned_suffix("notes.yam", (".yaml",))
+    assert _short_name_carries_pinned_suffix("notes.yamx", (".yam",))
     write_tree(tmp_path)
-    (tmp_path / "rules/notes.é").write_text("scratch\n")
+    (tmp_path / "rules/notes.yam").write_text("scratch\n")
     verification = verify_corpus_binding(
         tmp_path, render_journal(journal_rows()), spec=corpus_spec()
     )
@@ -5260,245 +5038,68 @@ def test_a_non_ascii_extension_is_not_refused_where_no_pin_can_carry_it(
 def test_a_non_ascii_character_past_the_third_cannot_reach_the_alias(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds S5R2-F5: the code page decides nothing past the third character.
+    """Binds S5R2-F5 and the policy: the truncation still comes first.
 
     An 8.3 extension is three characters, so the fourth character of the
-    extension source is dropped before any code page could have an opinion
-    about it. ``x.abcé`` is handed the alias extension ``ABC`` on every
-    volume there is; with ``.yml`` pinned that is not a pinned suffix, and
-    the file is an ordinary non-content one. Screening the whole extension
-    source for non-ASCII refused it as underivable.
+    extension source is dropped before anything else looks at it. S5R2-F5
+    was that the whole extension source was screened for non-ASCII before
+    the truncation, so ``x.abcé`` — alias extension ``ABC`` on every volume
+    there is — was refused as underivable.
 
-    The truncation runs first now, so what the code page is asked about is
-    exactly what reaches the alias. Without the fix this verification raises
-    the OEM refusal.
+    The truncation still runs first, and the derivation is asserted directly
+    over the finding's own name, which is the assertion that survives the
+    policy: the name itself is refused now, by name, before the sweep asks
+    the 8.3 question at all. Both are asserted, so neither the order nor the
+    screen can be removed silently.
     """
 
+    from receipt.corpus import _short_name_extension
+
+    assert _short_name_extension("x.abcé") == "ABC"
     write_tree(tmp_path)
     (tmp_path / "rules/x.abcé").write_text("scratch\n")
     spec = corpus_spec(content_suffixes=(".yaml", ".yml"))
-    verification = verify_corpus_binding(
-        tmp_path, render_journal(journal_rows()), spec=spec
-    )
-    assert len(verification.content) == len(CONTENT)
+    with pytest.raises(CorpusError, match="is not a portable name"):
+        verify_corpus_binding(tmp_path, render_journal(journal_rows()), spec=spec)
 
 
 def test_the_derivation_still_lands_on_the_first_three_characters(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds S5R2-F5, the other side: truncating first must not skip a file.
+    """Binds S5R2-F5 and the policy: the 8.3 model still refuses over ASCII.
 
     ``x.ymlé`` has the alias extension ``YML``, which is a pinned suffix, so
-    the file is content under a name no listing emits and the sweep must
-    refuse it — for that reason and not as an underivable one. This pins
-    which refusal speaks, because the change that stops refusing the é could
-    as easily have stopped deriving anything.
+    the file was content under a name no listing emits and the sweep had to
+    refuse it — for that reason and not as an underivable one. That is what
+    S5R2-F5's truncation-first order bought, and the derivation is still
+    asserted directly.
 
-    ``_short_name_extension`` is asserted directly as well, so the
-    derivation is stated rather than inferred from the refusal. This test
-    fails on the head with the OEM refusal in place of the alias refusal.
+    What the policy keeps is the part that matters to a corpus: an *ASCII*
+    name whose alias carries a pinned suffix is still refused by the 8.3
+    screen, with the 8.3 screen's own message. ``smuggled.ymlx`` is that
+    name, and it is the one the model exists for. The é name is refused by
+    the portable-name screen a step earlier, which is asserted too, so which
+    screen speaks for which name is pinned rather than assumed.
     """
 
     from receipt.corpus import _short_name_extension
 
     assert _short_name_extension("x.ymlé") == "YML"
     write_tree(tmp_path)
-    (tmp_path / "rules/x.ymlé").write_text("scratch\n")
     spec = corpus_spec(content_suffixes=(".yaml", ".yml"))
+
+    (tmp_path / "rules/x.ymlé").write_text("scratch\n")
+    with pytest.raises(CorpusError, match="is not a portable name"):
+        verify_corpus_binding(tmp_path, render_journal(journal_rows()), spec=spec)
+    (tmp_path / "rules/x.ymlé").unlink()
+
+    (tmp_path / "rules/smuggled.ymlx").write_text("scratch\n")
     with pytest.raises(CorpusError) as caught:
         verify_corpus_binding(tmp_path, render_journal(journal_rows()), spec=spec)
     assert str(caught.value) == (
         "content root contains a file whose short-name alias would carry a "
-        "pinned suffix: 'rules/x.ymlé'"
+        "pinned suffix: 'rules/smuggled.ymlx'"
     )
-
-
-def test_a_non_ascii_character_inside_the_alias_is_still_underivable(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Binds S5R2-F5, the control: the refusal that must survive the change.
-
-    ``smuggled.émlx`` truncates to ``éml``, so the é *does* reach the alias
-    and the volume's code page decides whether it ends ``.ÉML`` — a pinned
-    suffix — or something else. That is the round-eight finding, and
-    narrowing the screen to the first three characters must not narrow it
-    past this name.
-
-    This test passes with the S5R2-F5 change disabled, which is the point:
-    it is here to catch the change going one character too far.
-    """
-
-    write_tree(tmp_path)
-    (tmp_path / "rules/smuggled.émlx").write_text("name: smuggled\n")
-    spec = corpus_spec(content_suffixes=(".yaml", ".eml"))
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(tmp_path, render_journal(journal_rows()), spec=spec)
-    assert str(caught.value) == (
-        "8.3 alias extension cannot be derived for a name whose extension "
-        "carries non-ASCII characters (the volume's OEM code page decides "
-        "it): 'smuggled.émlx'"
-    )
-
-
-def test_the_spec_accepts_a_non_ascii_suffix_no_alias_could_carry() -> None:
-    """Binds S5R2-F5: the ASCII rule belongs to alias-capable pins only.
-
-    ``.éyaml`` has a five-character extension, so no 8.3 alias can carry it
-    and the screen never derives anything to compare against it. Refusing
-    the pin at construction refused a legal configuration over a question
-    the screen would never put — and it is a configuration a real corpus
-    might hold, since a suffix outside ASCII is legal everywhere else in
-    this module.
-
-    ``.éml`` is still refused, because an alias could carry a three-
-    character extension and the derivation against it cannot be made. Both
-    halves are asserted here; without the fix the first raises.
-    """
-
-    spec = corpus_spec(content_suffixes=(".yaml", ".éyaml"))
-    assert ".éyaml" in spec.content_suffixes
-    with pytest.raises(CorpusError) as caught:
-        corpus_spec(content_suffixes=(".yaml", ".éml"))
-    assert str(caught.value) == (
-        "CorpusSpec content suffix must be ASCII, because an 8.3 alias "
-        "extension cannot be derived against a non-ASCII one: '.éml'"
-    )
-
-
-@pytest.mark.parametrize("name", ["A~1B.TXT", "~1foo.txt", "a ~1.txt"])
-def test_an_ordinary_name_carrying_a_tilde_digit_is_not_a_short_name(
-    tmp_path: pathlib.Path, name: str
-) -> None:
-    """Binds S5R2-F9: the recognizer was much wider than 8.3 generation.
-
-    A tilde-digit anywhere inside any run of non-period characters was
-    enough, so three ordinary names were refused at the schema boundary for
-    resembling an alias none of them could be. ``A~1B.TXT`` has no numeric
-    tail, so no collision counter produced it; ``~1foo.txt`` has nothing
-    before the tilde to have been shortened from; ``a ~1.txt`` carries a
-    space, which generation replaces with an underscore rather than
-    emitting. Each is a path a real corpus may hold, and the module refused
-    the whole journal over it.
-
-    The grammar is what generation produces now. Without the fix this
-    verification raises "has a component Windows would alias".
-    """
-
-    body = "# note\n"
-    attested = {**ATTESTED, name: body}
-    write_tree(tmp_path, attested=attested)
-    verification = verify_corpus_binding(
-        tmp_path, render_journal(journal_rows(attested=attested)), spec=corpus_spec()
-    )
-    assert name in [entry.path for entry in verification.attested]
-
-
-@pytest.mark.parametrize("name", ["RULESF~1.YAM", "SMUGG~12.YML"])
-def test_a_real_short_name_shape_is_still_refused(
-    tmp_path: pathlib.Path, name: str
-) -> None:
-    """Binds S5R2-F9, the control: the shapes generation does produce.
-
-    ``RULESF~1.YAM`` is the six-character basis with a one-digit counter;
-    ``SMUGG~12.YML`` is the five-character basis with a two-digit one, which
-    is how generation makes room as the counter grows. Both are eight-
-    character stems, both are spellings NTFS hands out, and neither is
-    emitted by any listing — so a declared path spelled either way aliases a
-    file this module cannot enumerate and is refused.
-
-    Both of these pass with the S5R2-F9 change disabled, which is the point:
-    they are here to stop the tightened grammar from being tightened past
-    the spellings that matter.
-    """
-
-    write_tree(tmp_path)
-    rows = journal_rows()
-    rows[0]["path"] = f"rules/{name}"
-    with pytest.raises(CorpusError, match="component Windows would alias"):
-        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
-
-
-def test_a_stem_longer_than_eight_characters_is_not_a_short_name(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Binds S5R2-F9: the 8 of 8.3 is a definition, so it bounds the grammar.
-
-    ``SMUGGL~12.YML`` has a nine-character stem. The 8.3 namespace holds
-    eight, which is what Microsoft's "Naming Files, Paths, and Namespaces"
-    means by "the short MS-DOS (also called *8.3*) style naming
-    convention", and it is why generation shortens the basis as the
-    collision counter grows — ``SMUGG~12`` rather than ``SMUGGL~12``. No
-    volume hands out the nine-character spelling, so a declared path
-    carrying it aliases nothing and is an ordinary name.
-
-    Pinned beside its eight-character sibling so the boundary is stated
-    rather than implied. This test passes with the S5R2-F9 change disabled
-    as well — the old recognizer's ``[^.]{1,8}`` stem already bounded this
-    — and it is here because the round-2 brief named ``SMUGGL~12.YML`` as a
-    spelling that should stay refused. It does not, under either grammar,
-    and the nine characters are why.
-    """
-
-    body = "# note\n"
-    attested = {**ATTESTED, "SMUGGL~12.YML": body}
-    write_tree(tmp_path, attested=attested)
-    verification = verify_corpus_binding(
-        tmp_path, render_journal(journal_rows(attested=attested)), spec=corpus_spec()
-    )
-    assert "SMUGGL~12.YML" in [entry.path for entry in verification.attested]
-
-
-def test_the_short_name_grammar_is_the_one_generation_produces() -> None:
-    """Binds S5R2-F9: the grammar itself, at its every boundary.
-
-    Each accepted spelling below is one 8.3 generation can hand out and each
-    refused one is not, and every clause of the grammar has a case that
-    turns on it *alone*: the ASCII repertoire (``a ~1.txt``, ``a+~1.txt``),
-    the one-to-six basis (``ABCDEFG~1``), the one-to-six digits
-    (``A~1234567``) and their lower bound (``A~``), the eight-character stem
-    (``AB~123456``, whose basis and digits are both legal), the
-    three-character extension (``RULESF~1.YAML``) and its lower bound
-    (``RULESF~1.``), and the numeric tail being a tail at all
-    (``A~1B.TXT``). One more case is about where the tail is taken from:
-    ``A~1FOO~1.TXT`` is what generation gives a long name beginning
-    ``A~1foo``, and a split at the *first* tilde would not recognise it.
-
-    Non-ASCII characters are accepted in both parts, which
-    :func:`_short_name_character` explains and which
-    ``test_a_short_name_carrying_an_oem_character_is_still_refused`` binds
-    end to end.
-    """
-
-    from receipt.corpus import _is_short_name
-
-    for name in (
-        "RULESF~1.YAM",
-        "RULESF~1",
-        "SMUGG~12.YML",
-        "A~1",
-        "A~123456",
-        "A~1FOO~1.TXT",
-        "$~1.Y_L",
-    ):
-        assert _is_short_name(name), name
-    for name in (
-        "A~1B.TXT",  # no numeric tail
-        "~1foo.txt",  # nothing before the tilde
-        "a ~1.txt",  # a space is not in the ASCII repertoire
-        "a+~1.txt",  # nor is a plus, which generation replaces
-        "SMUGGL~12.YML",  # a nine-character stem
-        "AB~123456",  # six digits and a two-character basis: stem of nine
-        "A~",  # no digits at all
-        "A~1234567",  # seven digits
-        "ABCDEFG~1",  # a seven-character basis
-        "RULESF~1.YAML",  # a four-character extension
-        "RULESF~1.",  # an empty extension
-        "RULESF~1.Y.M",  # a period inside the extension
-        "rules.yaml",  # no tilde at all
-        ".yml",  # an empty stem
-        "long~1name.yaml",
-    ):
-        assert not _is_short_name(name), name
 
 
 @pytest.mark.parametrize("name", ["COM0.yaml", "LPT0.yaml", "com0.yml", "lpt0"])
@@ -5565,75 +5166,6 @@ def test_the_device_table_is_exactly_what_its_two_sources_say() -> None:
     assert "LPT0" not in WIN32_RESERVED_DEVICE_NAMES
 
 
-def test_alias_capability_is_measured_on_the_fold_key_not_the_written_pin(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Binds S5R2-F5, adversarially: the two halves must measure the same thing.
-
-    S5R2-F5 filters the pins an alias could carry before deriving anything,
-    and asks the ASCII rule only of that set. Measuring the set by the
-    *written* length of the pin while every comparison in this module uses
-    the fold key put the two halves out of step: the NFD spelling of
-    ``.éml`` is five characters written and four folded, so it was called
-    incapable, escaped the ASCII rule that refuses it at construction, and
-    was then skipped by the alias comparison as well — while
-    ``_has_pinned_suffix`` folds and happily calls a file ending ``.éml``
-    content. That reopens exactly the hole round eight closed: on a code
-    page 850 volume the alias of ``smuggled.émlx`` ends ``.ÉML``, which
-    folds onto that pin, and the sweep skipped the file as non-content.
-
-    Capability is measured on the fold key now, in one predicate both halves
-    call. Without it the spec below constructs and the file below verifies.
-    """
-
-    from receipt.corpus import _alias_capable_suffix
-
-    nfd = unicodedata.normalize("NFD", ".éml")
-    assert len(nfd) == 5 and len(unicodedata.normalize("NFC", nfd)) == 4
-    assert _alias_capable_suffix(nfd)
-    assert not _alias_capable_suffix(".éyaml")
-    with pytest.raises(CorpusError) as caught:
-        corpus_spec(content_suffixes=(".yaml", nfd))
-    # Quoted as written, so the refusal names the spelling the spec carries
-    # rather than the composed form the fold key derived from it.
-    assert str(caught.value) == (
-        "CorpusSpec content suffix must be ASCII, because an 8.3 alias "
-        f"extension cannot be derived against a non-ASCII one: {nfd!r}"
-    )
-
-
-def test_a_short_name_carrying_an_oem_character_is_still_refused(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Binds S5R2-F9, adversarially: the repertoire is not ASCII.
-
-    The 8.3 namespace is an OEM code page rather than ASCII — the premise
-    ``_short_name_extension`` refuses on from the other side — so a
-    character the volume's code page can represent survives into a short
-    name and is uppercased there. ``SMUGGL~1.ÉML`` is a spelling NTFS really
-    hands out for a long name with a ``.émlx`` extension on a code page 850
-    volume, and it opens that long name's file.
-
-    Tightening the recognizer to an ASCII-only repertoire accepted it as an
-    ordinary declared path, which is the alias screen failing exactly where
-    the module's own 8.3 paragraph says an alias exists. Every non-ASCII
-    character is allowed in the recognizer now; the ASCII half is unchanged,
-    so ``A~1B.TXT``, ``~1foo.txt`` and ``a ~1.txt`` are still ordinary
-    names. Without the widening this journal verifies.
-    """
-
-    from receipt.corpus import _is_short_name
-
-    assert _is_short_name("SMUGGL~1.ÉML")
-    assert _is_short_name("SMUGGL~1.YÉM")
-    assert not _is_short_name("a ~1.txt")
-    write_tree(tmp_path)
-    rows = journal_rows()
-    rows[0]["path"] = "rules/SMUGGL~1.ÉML"
-    with pytest.raises(CorpusError, match="component Windows would alias"):
-        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
-
-
 def test_a_real_aliasing_root_spelling_keeps_the_root_component_refusal(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -5669,34 +5201,40 @@ def test_a_real_aliasing_root_spelling_keeps_the_root_component_refusal(
     ), message
 
 
-def test_a_degenerate_content_suffix_asks_the_8_3_screen_nothing(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Binds S5R2-F5, adversarially: capability is bounded at both ends.
+def test_alias_capability_is_bounded_at_both_ends() -> None:
+    """Binds S5R2-F5 and the policy: what a pin an alias could carry is.
 
-    The schema accepts any suffix beginning with a dot, ``"."`` included. A
-    derived 8.3 alias extension is never empty — ``_short_name_extension``
-    returns ``None`` when there is nothing after the last period, and the
-    comparison prepends a dot to what it does return — so no alias can end
-    in a bare ``"."`` and a corpus pinning it is asking the 8.3 screen
-    nothing at all. Counting it alias-capable made every non-ASCII extension
-    under a content root raise the OEM refusal for a configuration whose
-    answer is False on every code page, which is the exact over-refusal
-    S5R2-F5 removed at the other end of the same test.
+    An 8.3 extension is one to three characters, so a carryable pin is a
+    period and one to three more. Both ends were found the hard way. The
+    upper end came from round eight, where comparing the first three
+    characters of a longer pin refused an ordinary ``notes.yam`` under a
+    ``.yaml`` configuration. The lower end came from the adversarial review
+    of S5R2-F5: the schema then accepted a bare ``"."`` as a pin, a derived
+    alias extension is never empty, and counting that pin capable made every
+    non-ASCII extension under a content root raise the underivability
+    refusal for a configuration whose answer is False on every code page.
 
-    Without the lower bound this verification raises.
+    The lower end is now a statement rather than a guard, because
+    :data:`CONTENT_SUFFIX_RE` admits no pin shorter than two characters —
+    which is asserted here too, so removing the guard cannot quietly outlive
+    the rule that makes it safe. And the measurement is the written length
+    again rather than the fold key, which is sound only because a pin is
+    ASCII: that is asserted as well.
+
+    Without the bounds a four-character pin is compared truncated, and a
+    bare period is treated as carryable.
     """
 
-    from receipt.corpus import _alias_capable_suffix
+    from receipt.corpus import _alias_capable_suffix, _path_fold
 
     assert not _alias_capable_suffix(".")
     assert _alias_capable_suffix(".y")
     assert _alias_capable_suffix(".yml")
     assert not _alias_capable_suffix(".yaml")
-    write_tree(tmp_path)
-    (tmp_path / "rules/notes.é").write_text("scratch\n")
-    spec = corpus_spec(content_suffixes=(".yaml", "."))
-    verification = verify_corpus_binding(
-        tmp_path, render_journal(journal_rows()), spec=spec
-    )
-    assert len(verification.content) == len(CONTENT)
+    # The schema is what keeps the low end unreachable.
+    for degenerate in (".", ""):
+        with pytest.raises(CorpusError):
+            corpus_spec(content_suffixes=(degenerate,))
+    # And ASCII is what makes the written length the folded length.
+    for pin in (".y", ".yml", ".YAML", ".t3st"):
+        assert len(_path_fold(pin)) == len(pin)
