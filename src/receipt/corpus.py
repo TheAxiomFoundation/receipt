@@ -223,6 +223,15 @@ own roots and suffixes, the entry names the sweep judges, and the entry
 names the tombstone search buckets — with a distinct message for each
 class.
 
+One more Win32 spelling is refused by that same screen, and it is not an
+aliasing question at all. ``CON``, ``PRN``, ``AUX``, ``NUL`` and the
+``COM``/``LPT`` series name character devices in every directory, whatever
+extension follows them, so a journal and a POSIX file both spelling
+``rules/NUL.yaml`` verified here while an ordinary Win32 open of that path
+read the null device instead of the witnessed bytes (peer review, round
+eight). The list is Microsoft's own, pinned in this module, matched per
+component on the text before the first period and case-insensitively.
+
 Every trust anchor arrives from the consumer's committed :class:`CorpusSpec`.
 The module ships no defaults: not a content root, not a required gate, not an
 accepted tier.
@@ -784,6 +793,40 @@ def _assert_assigned(value: str, label: str) -> str:
     return value
 
 
+#: The basenames Win32 resolves to a character device instead of to a file,
+#: in every directory and whatever extension follows them: ``rules/NUL.yaml``
+#: opens the null device, not the bytes a journal bound. The list is the one
+#: Microsoft documents for Windows 11 in "Naming Files, Paths, and
+#: Namespaces" (learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file),
+#: including the superscript spellings COM¹ COM² COM³ and LPT¹ LPT² LPT³,
+#: which Win32 resolves as their ASCII-digit counterparts do. Pinned here
+#: rather than derived, because it is a Win32 fact and not a Unicode one.
+WIN32_RESERVED_DEVICE_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{digit}" for digit in range(10)}
+    | {f"LPT{digit}" for digit in range(10)}
+    | {f"COM{superscript}" for superscript in "\u00b9\u00b2\u00b3"}
+    | {f"LPT{superscript}" for superscript in "\u00b9\u00b2\u00b3"}
+)
+
+
+def _ascii_upper(text: str) -> str:
+    """Uppercase the ASCII letters and nothing else.
+
+    ``str.upper`` applies the full Unicode case mapping, which folds
+    characters this comparison has no business folding — U+0131 uppercases
+    to ``I`` and the ligature ``ﬀ`` to ``FF`` — while Win32's device-name
+    match is over the ASCII spellings. The superscript digits in
+    :data:`WIN32_RESERVED_DEVICE_NAMES` are compared as they are written,
+    which is what makes them entries in the table rather than a mapping.
+    """
+
+    return "".join(
+        chr(ord(character) - 32) if "a" <= character <= "z" else character
+        for character in text
+    )
+
+
 #: The Turkic dotted capital I and dotless small i. NTFS's upcase table maps
 #: both onto ASCII ``I``, so ``evıl.yml`` and ``evil.yml`` are one name on an
 #: NTFS volume; ``str.casefold`` keeps them apart, and so does this module's
@@ -814,10 +857,10 @@ def _assert_foldable(value: str, label: str) -> str:
     "these are exactly the files" would be false on the host that matters
     without being false on the host that checked (peer review, round eight).
 
-    Four refusals, each with its own message, each checked over the whole
+    Five refusals, each with its own message, each checked over the whole
     string before the next one is asked — so which class a name is refused
     under is a property of the name and not of where in it the offending
-    character sits:
+    character sits. The first four are about single code points:
 
     - a code point outside the pinned Unicode 14.0 repertoire, which is
       :func:`_assert_assigned` and the oldest of the four;
@@ -842,9 +885,23 @@ def _assert_foldable(value: str, label: str) -> str:
       and keeping ``casefold`` leaves the NTFS consumer with a name outside
       the closed world.
 
+    The fifth is about a whole component rather than a character in one: a
+    Win32 reserved device name. ``CON``, ``PRN``, ``AUX``, ``NUL``, the
+    ``COM`` and ``LPT`` series and their superscript spellings resolve to a
+    character device in every directory and whatever extension follows
+    them, so an ordinary Win32 open of ``rules/NUL.yaml`` reads the null
+    device rather than the bytes a journal bound and a digest witnessed
+    (peer review, round eight). This is not an aliasing question — the name
+    does not resolve to some *other* file — but it has the same shape and
+    the same answer: the spelling means one thing to this verifier and
+    another to the host that will use it. Matched on the component up to
+    its first period, ASCII-uppercased, against
+    :data:`WIN32_RESERVED_DEVICE_NAMES`.
+
     ``value`` may be a whole relative path or a single component; every
     message quotes it whole through :func:`_quoted`, so a refusal names what
-    was screened.
+    was screened. The component split is over ``/``, so a value that is
+    already one component is screened as one.
     """
 
     _assert_assigned(value, label)
@@ -867,6 +924,15 @@ def _assert_foldable(value: str, label: str) -> str:
                 f"{label} contains the Turkic dotted or dotless i "
                 f"({ord(character):#06x}), which NTFS case-folds onto I while "
                 f"this fold key keeps it distinct: {_quoted(value)}"
+            )
+    for component in value.split("/"):
+        # The basename is the component up to its first period, because that
+        # is how Win32 matches a device: "NUL", "NUL.yaml" and "NUL.tar.gz"
+        # all open the null device.
+        if _ascii_upper(component.split(".", 1)[0]) in WIN32_RESERVED_DEVICE_NAMES:
+            raise CorpusError(
+                f"{label} carries a Win32 reserved device name in a "
+                f"component: {_quoted(value)}"
             )
     return value
 
@@ -1021,6 +1087,13 @@ def _aliases_natively(segment: str) -> bool:
     :func:`_short_name_carries_pinned_suffix` where the sweep meets it: a
     file really named ``RULESF~1.YAM`` on a POSIX host is an ordinary file,
     not an alias of anything, so the tilde shape is not refused there.
+
+    A third Win32 spelling is *not* here, deliberately: a reserved device
+    basename such as ``NUL`` or ``COM1``. It belongs to the same family —
+    a name Win32 resolves to something other than the bytes on disk — but
+    it is not an alias of another entry, and the question has to be asked
+    of tree entries and tombstone survivors as well as of declared paths.
+    :func:`_assert_foldable` asks it once, for all of them.
     """
 
     if _strips_to_another_name(segment):
