@@ -5488,7 +5488,14 @@ def test_a_nested_release_root_component_in_another_normalisation_is_refused(
     component that is not that spelling is refused.
 
     Where names are compared exactly the NFD rename is again a deletion, and
-    the tree is refused for that instead."""
+    the tree is refused for that instead. And on a filesystem that normalises
+    a name as it stores it — a case-sensitive APFS volume does, where the
+    case-insensitive one this repository sits on preserves the spelling it is
+    given — the rename is neither: the directory comes back spelled exactly as
+    the spec names it, which is the fixture failing to build the case rather
+    than the case being answered, so it is skipped. That is the same fact
+    ``a_folded_spelling`` documents for the case-folding renames, asked here of
+    the spelling the spec pins rather than of a second one."""
 
     composed = "donnée"
     decomposed = unicodedata.normalize("NFD", composed)
@@ -5496,6 +5503,8 @@ def test_a_nested_release_root_component_in_another_normalisation_is_refused(
     spec = spec_with_release_root(f"{composed}/releases")
     candidate = base_repository(tmp_path, f"{composed}/releases")
     (candidate.root / composed).rename(candidate.root / decomposed)
+    if composed in os.listdir(candidate.root):
+        pytest.skip("the filesystem normalised the rename back to the pinned name")
     folded = a_folded_spelling(candidate.root, composed)
 
     with pytest.raises(AppendError) as refusal:
