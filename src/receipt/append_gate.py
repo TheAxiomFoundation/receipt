@@ -68,8 +68,13 @@ entry the walk cannot see, no entry the walk cannot find, and no entry
 answered for through a symlinked component or under another entry's spelling —
 the index holds no entry spelled as another spelling of a protected path,
 which every one of those reconciliations is blind to because each is a
-comparison by exact spelling, and the post-cutover binding values are
-validated for shape rather than presence alone. Every one of those index reads
+comparison by exact spelling, what the index records as a path's *content* is
+the content this verdict read wherever the commit under review changes that
+path — every reconciliation above compares stage, mode and type and none of
+them bytes, so a file rewritten, staged, and restored on disk went down the
+whole data path over the restored bytes while the commit carried the rewrite —
+and the post-cutover binding values are validated for shape rather than
+presence alone. Every one of those index reads
 asks about the exact path, as a literal pathspec, rather than handing git a
 name to interpret as a pattern, as does the base tree's enumeration — a
 release root beginning with ``:`` was read as pathspec magic and the magic
@@ -157,7 +162,8 @@ not available: the read is what the folded name would have answered.
 
 Nothing else is an exception: the per-file
 ``release_chain.assert_index_agrees_with_tree``, the check beside it that
-every base release file is still an entry in the candidate index, and the
+every base release file is still an entry in the candidate index,
+``release_chain.assert_index_content_bound`` after both of those, and the
 release root's index scan all run after the comparisons they qualify, so a
 comparison that passed while the working tree was not carrying what git
 recorded is caught afterwards and nothing pre-existing is pre-empted; the
@@ -219,12 +225,14 @@ from receipt.release_chain import (
     assert_file_modes_authoritative,
     assert_index_agrees_with_tree,
     assert_index_carries_no_protected_alias,
+    assert_index_content_bound,
     ChainSpec,
     MANIFEST_RE,
     ReleaseChainError,
     assert_no_symlinked_release_root,
     assert_no_symlinked_state_component,
     assert_release_root_index_regular,
+    ChainVerification,
     assert_secure_descent_supported,
     assert_state_path_tracked,
     confined_state_descriptor,
@@ -1327,6 +1335,24 @@ def check_state_modes(
             )
         except ReleaseChainError as exc:
             raise AppendError(str(exc)) from exc
+        # And, last for this path, what the index records as its content. The
+        # mode comparison above and the type comparison beside it say nothing
+        # about bytes, and neither does anything else on this path: the ledger
+        # and the frozen prefix were read from the working tree. A rewrite
+        # staged and then restored on disk passed every one of them while the
+        # commit under review carries a ledger no check here has read. The
+        # bytes handed over are the snapshot's — the one read this verdict
+        # made of this file — so the index is bound to what was verified
+        # rather than to a second read. Without a snapshot there is no such
+        # read to bind to, and a caller using this function on its own gets
+        # exactly the comparisons it always did.
+        if snapshot is not None:
+            try:
+                assert_index_content_bound(
+                    candidate.root, base.commit, relative, snapshot.payload
+                )
+            except ReleaseChainError as exc:
+                raise AppendError(str(exc)) from exc
 
 
 def _release_triple(
@@ -1412,6 +1438,58 @@ def _state_snapshot_bytes(
         candidate.spec.chain.state_relative.as_posix(): ledger_bytes,
         candidate.spec.chain.prefix_relative.as_posix(): prefix_bytes,
     }
+
+
+def _bind_new_release_files(
+    base: _BaseCommit,
+    candidate: _CandidateTree,
+    new_files: set[str],
+    verification: ChainVerification,
+) -> None:
+    """Bind the index to the release files this proposal adds and just verified.
+
+    The release verification is the comparison for a new release file: the
+    manifest's bytes are canonical, hash to their own filename, and are what
+    the producer signature and both RFC 3161 receipts are over. All of it is
+    read from the working tree. Staging different bytes under the same name and
+    restoring the verified ones on disk left every one of those checks passing
+    over content the commit under review does not carry — and a new file has no
+    base entry, so the base comparison the release-history pass makes for an
+    existing one does not exist here either.
+
+    The manifest is bound to the bytes the verification itself parsed, which
+    the result carries. The producer signature and the receipts are read here:
+    the signature's bytes are consumed inside the verification and not
+    returned, and a receipt is never read into this process at all — OpenSSL
+    opens it by pathname, twice. So for those three what this binds is the
+    content of one read made here, after the verification, and the window
+    between that read and OpenSSL's is the same read-versus-use residual the
+    module docstring states for the working tree as a whole.
+    """
+
+    verified: dict[str, bytes] = {}
+    for record in verification.releases:
+        try:
+            listed = record.path.relative_to(candidate.root).as_posix()
+        except ValueError:  # pragma: no cover - the walk refuses an outside root
+            continue
+        verified[listed] = record.raw
+    for relative in sorted(new_files):
+        payload = verified.get(relative)
+        if payload is None:
+            try:
+                payload = (
+                    candidate.root / pathlib.PurePosixPath(relative)
+                ).read_bytes()
+            except OSError as exc:
+                raise AppendError(
+                    "cannot re-read the release file this verdict verified: "
+                    f"{relative}"
+                ) from exc
+        try:
+            assert_index_content_bound(candidate.root, base.commit, relative, payload)
+        except ReleaseChainError as exc:
+            raise AppendError(str(exc)) from exc
 
 
 def check_release_proposal(
@@ -1508,6 +1586,7 @@ def check_release_proposal(
             raise AppendError(
                 "genesis proposal must create exactly one release at index 0"
             )
+        _bind_new_release_files(base, candidate, new_files, verification)
         return 0
 
     try:
@@ -1550,6 +1629,7 @@ def check_release_proposal(
             f"release chain length must be {expected_length} for this proposal; "
             f"found {len(candidate_verification.releases)}"
         )
+    _bind_new_release_files(base, candidate, new_files, candidate_verification)
     return candidate_verification.head.release_index
 
 

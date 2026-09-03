@@ -59,10 +59,22 @@ the root identity that was two numbers a filesystem may hand to another
 directory, S4R2-F4 the configured path handed to ``git ls-tree`` as a
 pathspec rather than as a name.
 
-The fixture is a local git repository built from scratch — no network, no
-witnesses, no signatures. Its release tree holds a README and no manifests, so
-the gate's chain verification finds nothing to verify and the checks under
-test are the ones that run before it.
+Docstrings labelled S4R3-F1 onward name that fourth gate's third round,
+numbering from one again: S4R3-F1 the index blob no check bound to the bytes a
+verdict read, S4R3-F2 the assume-unchanged and skip-worktree entries that hide
+a working-tree rewrite from ``git diff``, S4R3-F3 the release root re-resolved
+after its own walk had passed, S4R3-F4 the configured paths below that root
+whose intermediate components nothing walked, S4R3-F5 the spelling check that
+failed open where a directory could not be listed.
+
+The fixture is a local git repository built from scratch, and no network is
+used anywhere here. Most of it holds a README and no manifests, so the gate's
+chain verification finds nothing to verify and the checks under test are the
+ones that run before it. The cases that need a chain — the ones about what a
+verdict reads through the release root, and about the release files a proposal
+adds — build a real one offline: two locally generated timestamp authorities
+and a generated producer key, from ``corpus_fixture``, over exactly this
+fixture's own state bytes.
 """
 
 from __future__ import annotations
@@ -90,12 +102,16 @@ from receipt.append_gate import (
     expected_assertion_version_id,
     verify_append_gate,
 )
+from receipt.canonical import canonical_bytes
 from receipt.release_chain import (
     AnchorSpec,
     ChainSpec,
     ReleaseChainError,
     _regular_file_bytes,
 )
+from receipt.sign import generate_signing_keypair, sign_payload
+
+from corpus_fixture import LocalTsa, build_local_tsa, created_at
 
 # The fixture repository carries no release manifests, so no anchor identity
 # below is ever consumed: these tests exercise the gate's path up to and
@@ -296,6 +312,12 @@ def git(root: pathlib.Path, *arguments: str, stdin: str | None = None) -> str:
         input=stdin,
     )
     return completed.stdout.strip()
+
+
+def _index_paths(root: pathlib.Path, pathspec: str) -> list[str]:
+    """The paths ``_index_entries`` returns for one pathspec, in its order."""
+
+    return [record.path for record in release_chain._index_entries(root, pathspec)]
 
 
 def spec_with_release_root(release_root: str) -> AppendGateSpec:
@@ -658,6 +680,12 @@ def moving_base_repository(
     manifest.write_bytes(kept_manifest)
     rows.append(observation_row(BASE_ROW_COUNT + 2))
     write_ledger(first.root, rows)
+    # The proposal is staged, as a reviewed checkout's is. Without this the
+    # index still holds the later commit's README while the working tree
+    # holds the base's, which is a staged rewrite of a base release file with
+    # the disk restored — exactly what S4R3-F1 refuses, and nothing this
+    # fixture is about.
+    git(first.root, "add", "-A")
     return Candidate(root=first.root, base="moving"), first.base, later
 
 
@@ -2747,7 +2775,12 @@ def test_the_index_is_asked_about_a_path_not_a_pattern(
     candidate = commit_all(candidate, "release files with glob magic in a name")
     append_one_row(candidate)
 
-    assert release_chain._index_entries(candidate.root, "releases/x[y]z.md") == [
+    assert [
+        (record.mode, record.stage, record.path, record.intent_to_add)
+        for record in release_chain._index_entries(
+            candidate.root, "releases/x[y]z.md"
+        )
+    ] == [
         ("100644", "0", "releases/x[y]z.md", False)
     ]
     release_chain.assert_index_agrees_with_tree(candidate.root, "releases/x[y]z.md")
@@ -3098,12 +3131,7 @@ def test_an_ambient_literal_pathspec_mode_cannot_hide_the_index(
     append_one_row(candidate)
 
     state_path = CHAIN_SPEC.state_relative.as_posix()
-    assert [
-        listed
-        for _mode, _stage, listed, _intent in release_chain._index_entries(
-            candidate.root, state_path
-        )
-    ] == [state_path]
+    assert _index_paths(candidate.root, state_path) == [state_path]
     release_chain.assert_state_path_tracked(candidate.root, CHAIN_SPEC.state_relative)
     assert run_gate(candidate) == (
         "thesis-facts append check OK: 3 rows, immutable prefix 1, "
@@ -3135,12 +3163,9 @@ def test_an_ambient_icase_pathspec_mode_cannot_widen_an_index_read(
         f"100644,{blob},releases/README.MD",
     )
 
-    assert [
-        listed
-        for _mode, _stage, listed, _intent in release_chain._index_entries(
-            candidate.root, "releases/README.md"
-        )
-    ] == ["releases/README.md"]
+    assert _index_paths(candidate.root, "releases/README.md") == [
+        "releases/README.md"
+    ]
 
 
 def test_an_ambient_icase_pathspec_mode_leaves_an_ordinary_proposal_alone(
@@ -3221,20 +3246,20 @@ def test_an_intent_to_add_index_entry_is_readable_as_such(
     git(candidate.root, "add", "--", "releases/empty.md")
     re_add_as_intent_to_add(candidate, state_path)
 
-    (intent_mode, intent_stage, _path, intent) = release_chain._index_entries(
-        candidate.root, state_path
-    )[0]
-    (empty_mode, empty_stage, _empty_path, empty_intent) = release_chain._index_entries(
+    (intent_record,) = release_chain._index_entries(candidate.root, state_path)
+    (empty_record,) = release_chain._index_entries(
         candidate.root, "releases/empty.md"
-    )[0]
+    )
     # Same mode, same stage, same object id — and only one of them records
     # anything.
-    assert (intent_mode, intent_stage) == (empty_mode, empty_stage) == ("100644", "0")
+    assert (intent_record.mode, intent_record.stage) == ("100644", "0")
+    assert (empty_record.mode, empty_record.stage) == ("100644", "0")
+    assert intent_record.object_id == empty_record.object_id
     assert git(candidate.root, "rev-parse", f":{state_path}") == git(
         candidate.root, "rev-parse", ":releases/empty.md"
     )
-    assert intent is True
-    assert empty_intent is False
+    assert intent_record.intent_to_add is True
+    assert empty_record.intent_to_add is False
 
 
 @pytest.mark.parametrize("with_base", [True, False], ids=["base-ref", "push"])
@@ -3283,7 +3308,10 @@ def test_an_intent_to_add_state_entry_keeps_the_earlier_refusals(
     ledger.unlink()
     ledger.symlink_to(tmp_path / "elsewhere.jsonl")
     re_add_as_intent_to_add(candidate, state_path)
-    assert release_chain._index_entries(candidate.root, state_path) == [
+    assert [
+        (record.mode, record.stage, record.path, record.intent_to_add)
+        for record in release_chain._index_entries(candidate.root, state_path)
+    ] == [
         ("120000", "0", state_path, True)
     ]
 
@@ -4521,4 +4549,295 @@ def test_a_folded_component_is_refused_on_any_filesystem(
         run_push_gate(candidate)
     assert str(refusal.value) == (
         f"path component {component} is not spelled by its directory: {path}"
+    )
+
+
+def stage_a_rewrite_and_restore(path: pathlib.Path, rewritten: bytes) -> bytes:
+    """Record ``rewritten`` for ``path`` in the index, leaving the disk as it was.
+
+    The shape S4R3-F1 is about, in three lines: write the bytes the commit is
+    to carry, stage them, put the verified bytes back. ``git diff`` still
+    reports the path (the index differs from the base), so the surface
+    classification is unchanged and the data path runs; every check on that
+    path then reads the disk. Returns the bytes left on disk.
+    """
+
+    kept = path.read_bytes()
+    path.write_bytes(rewritten)
+    git(path.parent, "add", "-A")
+    path.write_bytes(kept)
+    return kept
+
+
+def test_a_ledger_staged_as_a_rewrite_and_restored_on_disk_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S4R3-F1 for the file the whole verdict is about. Every check that
+    is a verdict about the ledger's content reads the working tree: the frozen
+    prefix comparison, the append-only diff, the row bindings, and the release
+    verification are all fed one snapshot of the bytes on disk. The index — the
+    commit under review — was compared for stage, mode and type and never for
+    content, because the parse discarded the object id.
+
+    So a proposal could stage a rewrite of the frozen prefix's own first line
+    beside an ordinary append, restore the appended bytes on disk, and be
+    accepted: the ledger this verdict read is a lawful append, and the ledger
+    this commit carries rewrites line 1. Verified against 7f7597a, where this
+    tree is accepted as ``thesis-facts append check OK: 3 rows, immutable
+    prefix 1, +1 appended vs base``.
+
+    Without ``assert_index_content_bound`` in ``check_state_modes`` this run
+    returns that acceptance."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    ledger = candidate.root / CHAIN_SPEC.state_relative
+    rewritten = b" " + ledger.read_bytes()
+    stage_a_rewrite_and_restore(ledger, rewritten)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "candidate index records different content for "
+        "ledger/official_observations.jsonl than the working tree this "
+        "verdict read"
+    )
+
+
+def test_a_base_release_file_staged_as_a_rewrite_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S4R3-F1 for a release file the base already carries. The release-history
+    pass compares that file's mode and its bytes, and both comparisons read the
+    working tree; ``assert_release_file_still_indexed`` beside them asks only
+    whether an entry is there. ``git rm --cached`` was the hole that check
+    closed — this is the other half of the same fact, an entry that is there
+    and records something else.
+
+    A file the base carries has a base blob, so the rule is at its tightest
+    here: the index has to record that blob, because the pass just established
+    that the bytes on disk are it. Verified against 7f7597a, where this tree is
+    accepted.
+
+    Without the call after ``assert_release_file_still_indexed`` this run
+    returns that acceptance."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    readme = candidate.root / CHAIN_SPEC.release_root_relative / "README.md"
+    stage_a_rewrite_and_restore(readme, b"Release history, quietly revised.\n")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "candidate index records different content for releases/README.md "
+        "than the working tree this verdict read"
+    )
+
+
+def test_a_pre_existing_state_refusal_precedes_the_content_binding(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S4R3-F1's placement. The binding runs after every pre-existing
+    comparison for the path it is about — in ``check_state_modes``, which is
+    after the frozen prefix, the append-only diff, the row checks and the
+    release proposal — so a tree that is wrong in a way the extracted verifier
+    already names keeps that refusal.
+
+    Here the working tree rewrites the frozen prefix's first line and the index
+    records a third thing again. The prefix comparison speaks first, in the
+    words it always used.
+
+    Without the placement — the binding moved ahead of ``check_prefix`` — this
+    would answer with the index refusal instead."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    ledger = candidate.root / CHAIN_SPEC.state_relative
+    rows = ledger.read_bytes().splitlines(keepends=True)
+    ledger.write_bytes(b"".join([b"  " + rows[0], *rows[1:]]))
+    git(candidate.root, "add", "-A")
+    ledger.write_bytes(b"".join([b" " + rows[0], *rows[1:]]))
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value).startswith("immutable prefix line 1 ")
+
+
+@dataclass(frozen=True)
+class Witnesses:
+    """One generated producer key and two locally generated timestamp authorities.
+
+    Everything a real release carries, built offline: the anchors, policy OIDs,
+    signer certificates and SPKIs are real values, so a chain written with them
+    is one ``verify_release_chain`` verifies for real rather than one it skips.
+    Expensive (two RSA keygens and two certificate signings), so it is built
+    once per module and the trees below are written from it.
+    """
+
+    alpha: LocalTsa
+    beta: LocalTsa
+    private_pem: bytes
+    public_pem: bytes
+
+
+@pytest.fixture(scope="module")
+def witnesses(tmp_path_factory: pytest.TempPathFactory) -> Witnesses:
+    workspace = tmp_path_factory.mktemp("witnesses")
+    alpha = build_local_tsa(workspace / "alpha", "alpha", "1.3.6.1.4.1.99999.1.1")
+    beta = build_local_tsa(workspace / "beta", "beta", "1.3.6.1.4.1.99999.2.1")
+    private_pem, public_pem = generate_signing_keypair()
+    return Witnesses(
+        alpha=alpha, beta=beta, private_pem=private_pem, public_pem=public_pem
+    )
+
+
+def write_release_chain(
+    manifests: pathlib.Path,
+    anchors: pathlib.Path,
+    *,
+    witnesses: Witnesses,
+    chain: ChainSpec = CHAIN_SPEC,
+    ledger_bytes: bytes,
+    prefix_bytes: bytes,
+) -> str:
+    """A valid genesis release over exactly these state bytes; return its stem.
+
+    ``manifests`` and ``anchors`` are written wherever the caller points them,
+    which is the whole point for the cases below: a chain that verifies is what
+    makes an escape an *acceptance* rather than a refusal about a malformed
+    manifest, and where such a chain sits decides which tree a verdict spoke
+    for.
+    """
+
+    manifests.mkdir(parents=True, exist_ok=True)
+    anchors.mkdir(parents=True, exist_ok=True)
+    (anchors / chain.producer_public_key_filename).write_bytes(witnesses.public_pem)
+    for tsa in (witnesses.alpha, witnesses.beta):
+        (anchors / tsa.root_pem.name).write_bytes(tsa.root_pem.read_bytes())
+    lines = ledger_bytes.decode("utf-8").split("\n")[:-1]
+    manifest = {
+        "schemaVersion": chain.schema_version,
+        "releaseIndex": 0,
+        "previousManifestSha256": None,
+        "state": {
+            "path": chain.state_path,
+            "jsonlSha256": hashlib.sha256(ledger_bytes).hexdigest(),
+            "lineCount": len(lines),
+            "immutablePrefixSha256": hashlib.sha256(prefix_bytes).hexdigest(),
+        },
+        "append": None,
+        "createdAtUtc": created_at(120),
+        "producer": {"repo": "TheAxiomFoundation/receipt", "branch": "fixture"},
+    }
+    raw = canonical_bytes(manifest) + b"\n"
+    digest = hashlib.sha256(raw).hexdigest()
+    stem = f"0000-{digest[:16]}"
+    (manifests / f"{stem}.json").write_bytes(raw)
+    (manifests / f"{stem}.producer.sig").write_bytes(
+        sign_payload(witnesses.private_pem, raw, domain=b"")
+    )
+    for tsa in (witnesses.alpha, witnesses.beta):
+        tsa.stamp(digest, manifests / f"{stem}.{tsa.name}.tsr")
+    return stem
+
+
+def state_bytes_of(
+    candidate: Candidate, chain: ChainSpec = CHAIN_SPEC
+) -> tuple[bytes, bytes]:
+    return (
+        (candidate.root / chain.state_relative).read_bytes(),
+        (candidate.root / chain.prefix_relative).read_bytes(),
+    )
+
+
+def genesis_proposal(
+    tmp_path: pathlib.Path, witnesses: Witnesses
+) -> tuple[Candidate, pathlib.Path, str]:
+    """A base with no chain, and a working tree carrying a valid genesis one.
+
+    The anchors live outside the candidate deliberately: ``releases/anchors``
+    is GATE_SURFACE here, so a proposal that wrote them into the tree would be
+    a mixed data/gate proposal and never reach the release verification at all.
+    The gate takes them through ``release_anchor_dir``, which is also what
+    turns production pin enforcement off for these fixture identities.
+    """
+
+    candidate = base_repository(tmp_path)
+    anchors = tmp_path / "anchors"
+    ledger_bytes, prefix_bytes = state_bytes_of(candidate)
+    stem = write_release_chain(
+        candidate.root / CHAIN_SPEC.manifest_relative,
+        anchors,
+        witnesses=witnesses,
+        ledger_bytes=ledger_bytes,
+        prefix_bytes=prefix_bytes,
+    )
+    return candidate, anchors, stem
+
+
+def run_gate_with_anchors(
+    candidate: Candidate,
+    anchors: pathlib.Path,
+    *,
+    base_ref: str | None = None,
+    spec: AppendGateSpec = GATE_SPEC,
+) -> str:
+    return verify_append_gate(
+        candidate.root,
+        spec=spec,
+        base_ref=candidate.base if base_ref is None else base_ref,
+        release_anchor_dir=anchors,
+    )
+
+
+def test_a_valid_genesis_proposal_is_accepted(
+    tmp_path: pathlib.Path, witnesses: Witnesses
+) -> None:
+    """The control the three cases below need: a genesis release this fixture
+    builds offline really does verify, so an acceptance means the chain was
+    verified rather than that nothing was found to verify."""
+
+    candidate, anchors, _stem = genesis_proposal(tmp_path, witnesses)
+    stage(candidate)
+
+    assert run_gate_with_anchors(candidate, anchors) == (
+        "thesis-facts append check OK: 2 rows, immutable prefix 1, "
+        "+0 appended vs base, release 0"
+    )
+
+
+@pytest.mark.parametrize("suffix", [".json", ".alpha.tsr"], ids=["manifest", "receipt"])
+def test_a_new_release_file_staged_with_other_content_is_refused(
+    tmp_path: pathlib.Path, witnesses: Witnesses, suffix: str
+) -> None:
+    """S4R3-F1 for the files a release proposal adds. A new release file has no
+    base entry, so the byte comparison the release-history pass makes for an
+    existing one does not apply to it; what stands in its place is the chain
+    verification, and that reads the working tree — the manifest's canonical
+    bytes, the signature over them, both receipts over their digest.
+
+    Staging different bytes under the same name and restoring the verified ones
+    on disk left all of it passing over content the commit does not carry.
+    Verified against 7f7597a, where this tree is accepted as ``thesis-facts
+    append check OK: 2 rows, immutable prefix 1, +0 appended vs base,
+    release 0``.
+
+    Both branches of the binding are covered: the manifest is bound to the
+    bytes the verification itself parsed and returned, and a receipt is bound
+    to a read made after it, because a receipt is never read into this process
+    at all — OpenSSL opens it by pathname.
+
+    Without ``_bind_new_release_files`` this run returns that acceptance."""
+
+    candidate, anchors, stem = genesis_proposal(tmp_path, witnesses)
+    target = candidate.root / CHAIN_SPEC.manifest_relative / f"{stem}{suffix}"
+    stage_a_rewrite_and_restore(target, b"not what this verdict verified\n")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate_with_anchors(candidate, anchors)
+    assert str(refusal.value) == (
+        "candidate index records different content for "
+        f"{CHAIN_SPEC.manifest_relative.as_posix()}/{stem}{suffix} than the "
+        "working tree this verdict read"
     )

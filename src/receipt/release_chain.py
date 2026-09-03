@@ -31,8 +31,13 @@ the whole name does — and because a case- or normalisation-insensitive
 filesystem answers one entry's question with another entry's file; the
 whole-index read that refuses an entry spelled as another spelling of a
 protected path, which every one of those reconciliations is blind to because
-each compares by exact spelling; the release root's own path walk, which the
-gate runs before anything reads through that root, since every check that
+each compares by exact spelling; the content binding, which requires the blob
+the index records for a path to be either the base's — the commit under review
+does not change it — or the git blob id of the bytes the caller just verified,
+because every comparison here reads the working tree and none of them ever
+looked at what the commit would carry; the release root's own path walk,
+which the gate runs before anything reads through that root, since every check
+that
 would meet a link there is downstream of following it; the state-path guards
 ``append_gate`` calls, whose walk — like the release root's — now also
 requires each component to be spelled by the directory holding it, because
@@ -2089,7 +2094,12 @@ def _git_run(
     arguments: list[str],
     *,
     text: bool = False,
+    stdin: bytes | None = None,
 ) -> subprocess.CompletedProcess[Any]:
+    # ``stdin`` feeds bytes to a command that reads them rather than a path:
+    # only ``git hash-object --stdin`` uses it, so that the bytes a verdict
+    # read are what git is asked to name. Omitted, the child gets no input at
+    # all, exactly as every read here always has.
     try:
         return subprocess.run(
             ["git", *arguments],
@@ -2098,6 +2108,7 @@ def _git_run(
             capture_output=True,
             text=text,
             env=_git_environment(),
+            input=stdin,
         )
     except FileNotFoundError as exc:
         raise ReleaseChainError("git is required for --base-ref verification") from exc
@@ -2325,6 +2336,25 @@ INDEX_DEBUG_LINES = 5
 _INDEX_DEBUG_FLAGS_RE = re.compile(rb"  size: [0-9]+\tflags: ([0-9a-fA-F]+)\n\Z")
 
 
+@dataclass(frozen=True)
+class _IndexRecord:
+    """One ``git ls-files -s --debug`` record, as this package reads it.
+
+    A tuple carried the first three of these and grew a fourth; six positional
+    fields unpacked at seven call sites is a shape that mis-reads silently, so
+    they are named. ``object_id`` is the blob the index records for the path —
+    the content the commit under review would carry — which the parse used to
+    discard, leaving every reconciliation here a comparison of mode, stage and
+    type with nothing said about bytes. See ``assert_index_content_bound``.
+    """
+
+    mode: str
+    object_id: str
+    stage: str
+    path: str
+    intent_to_add: bool
+
+
 def _split_index_debug(chunk: bytes, unparseable: str) -> tuple[bytes, bytes]:
     """Take one ``--debug`` block off the front of a chunk, and return the rest.
 
@@ -2347,7 +2377,7 @@ def _split_index_debug(chunk: bytes, unparseable: str) -> tuple[bytes, bytes]:
 
 def _parse_index_records(
     stdout: bytes, unparseable: str, *, path_errors: str = "strict"
-) -> list[tuple[str, str, str, bool]]:
+) -> list[_IndexRecord]:
     """Parse ``git ls-files -s --debug -z`` output into its records.
 
     Split from ``_index_entries`` so the read of one path and the read of the
@@ -2362,7 +2392,7 @@ def _parse_index_records(
     refusal about a file no check here is about. See ``_all_index_entries``.
     """
 
-    entries: list[tuple[str, str, str, bool]] = []
+    entries: list[_IndexRecord] = []
     chunks = stdout.split(b"\0")
     record = chunks[0]
     for chunk in chunks[1:]:
@@ -2372,12 +2402,20 @@ def _parse_index_records(
             if flags is None:
                 raise ValueError("no flag word")
             metadata, raw_path = record.split(b"\t", 1)
-            mode, _object_id, stage = metadata.decode("ascii").split(" ")
+            mode, object_id, stage = metadata.decode("ascii").split(" ")
             listed = raw_path.decode("utf-8", path_errors)
         except (ValueError, UnicodeDecodeError) as exc:
             raise ReleaseChainError(unparseable) from exc
-        intent = bool(int(flags.group(1), 16) & CE_INTENT_TO_ADD)
-        entries.append((mode, stage, listed, intent))
+        word = int(flags.group(1), 16)
+        entries.append(
+            _IndexRecord(
+                mode=mode,
+                object_id=object_id,
+                stage=stage,
+                path=listed,
+                intent_to_add=bool(word & CE_INTENT_TO_ADD),
+            )
+        )
         record = next_record
     # Every record is followed by its own block, so what is left after the
     # last one is nothing. Anything else is output this parse does not
@@ -2387,14 +2425,12 @@ def _parse_index_records(
     return entries
 
 
-def _index_entries(
-    root: pathlib.Path, pathspec: str
-) -> list[tuple[str, str, str, bool]]:
+def _index_entries(root: pathlib.Path, pathspec: str) -> list[_IndexRecord]:
     """Every ``git ls-files -s`` record under one path.
 
-    Each is ``(mode, stage, path, intent_to_add)``. The one place this package
-    parses the index, shared by the checks below so they read it the same way
-    and report an unreadable or unparseable index in the same words.
+    Each is an ``_IndexRecord``. The one place this package parses the index,
+    shared by the checks below so they read it the same way and report an
+    unreadable or unparseable index in the same words.
 
     The path is passed as a literal pathspec. Given to git bare it is a
     *pattern*: a filename carrying glob magic globs, and one beginning with
@@ -2446,7 +2482,7 @@ def _index_entries(
     )
 
 
-def _all_index_entries(root: pathlib.Path) -> list[tuple[str, str, str, bool]]:
+def _all_index_entries(root: pathlib.Path) -> list[_IndexRecord]:
     """Every record in the candidate index, with no pathspec at all.
 
     The reads above ask about one configured path, which is the right question
@@ -2543,9 +2579,10 @@ def assert_index_carries_no_protected_alias(
         spec.prefix_relative.as_posix(),
     )
     folded = {path: _folded_parts(path) for path in protected}
-    for _mode, _stage, listed, _intent in sorted(
-        _all_index_entries(root), key=lambda record: (record[2], record[1])
+    for record in sorted(
+        _all_index_entries(root), key=lambda entry: (entry.path, entry.stage)
     ):
+        listed = record.path
         parts = listed.split("/")
         listed_folded = _folded_parts(listed)
         for path in protected:
@@ -2600,15 +2637,14 @@ def assert_state_path_tracked(
     parts = pathlib.PurePosixPath(path).parts
     for depth in range(1, len(parts)):
         ancestor = "/".join(parts[:depth])
-        for mode, _stage, listed, _intent in _index_entries(root, ancestor):
-            if listed == ancestor:
+        for record in _index_entries(root, ancestor):
+            if record.path == ancestor:
                 raise ReleaseChainError(
-                    f"state path {path} has an indexed ancestor {ancestor} ({mode})"
+                    f"state path {path} has an indexed ancestor {ancestor} "
+                    f"({record.mode})"
                 )
     entries = [
-        (mode, stage, intent)
-        for mode, stage, listed, intent in _index_entries(root, path)
-        if listed == path
+        record for record in _index_entries(root, path) if record.path == path
     ]
     if not entries:
         raise ReleaseChainError(
@@ -2616,16 +2652,16 @@ def assert_state_path_tracked(
         )
     # The same fact assert_index_agrees_with_tree refuses, in its words: a
     # conflicted merge records stages 1-3 and no single mode for the path.
-    if len(entries) > 1 or entries[0][1] != "0":
+    if len(entries) > 1 or entries[0].stage != "0":
         raise ReleaseChainError(f"candidate index holds an unmerged entry at {path}")
-    if entries[0][0] not in {"100644", "100755"}:
+    if entries[0].mode not in {"100644", "100755"}:
         raise ReleaseChainError(
-            f"state path {path} has a non-regular index entry: {entries[0][0]}"
+            f"state path {path} has a non-regular index entry: {entries[0].mode}"
         )
     # Last, because an intent-to-add entry is stage 0 at 100644 and passes
     # every question above: there is nothing else left to say about it. It
     # records no content, and a commit made from this index deletes the path.
-    if entries[0][2]:
+    if entries[0].intent_to_add:
         raise ReleaseChainError(
             f"index entry for {path} is intent-to-add and records no content"
         )
@@ -2676,17 +2712,15 @@ def assert_index_agrees_with_tree(
     # A pathspec can match more than the path asked about (a directory, or a
     # name carrying glob magic), so only entries for this exact path count.
     entries = [
-        (mode, stage)
-        for mode, stage, listed, _intent in _index_entries(root, path)
-        if listed == path
+        record for record in _index_entries(root, path) if record.path == path
     ]
     if not entries:
         return
     # Stages 1-3 are a conflicted merge: the index records no single mode for
     # this path, so there is nothing for the working tree to agree with.
-    if len(entries) > 1 or entries[0][1] != "0":
+    if len(entries) > 1 or entries[0].stage != "0":
         raise ReleaseChainError(f"candidate index holds an unmerged entry at {path}")
-    index_mode = entries[0][0]
+    index_mode = entries[0].mode
 
     if observed is None:
         observed = _observed_git_category(root / pathlib.PurePosixPath(path))
@@ -2734,29 +2768,124 @@ def assert_release_file_still_indexed(
 
     path = _exact_relative(relative)
     entries = [
-        (mode, stage, intent)
-        for mode, stage, listed, intent in _index_entries(root, path)
-        if listed == path
+        record for record in _index_entries(root, path) if record.path == path
     ]
     if not entries:
         raise ReleaseChainError(
             f"existing release file was removed from the candidate index: {path}"
         )
-    if len(entries) > 1 or entries[0][1] != "0":
+    if len(entries) > 1 or entries[0].stage != "0":
         raise ReleaseChainError(f"candidate index holds an unmerged entry at {path}")
-    if entries[0][0] not in {"100644", "100755"}:
+    if entries[0].mode not in {"100644", "100755"}:
         raise ReleaseChainError(
-            f"candidate index records a non-regular entry at {path}: {entries[0][0]}"
+            f"candidate index records a non-regular entry at {path}: "
+            f"{entries[0].mode}"
         )
     # After those, for the reason the tracked-state check has it last: an
     # intent-to-add entry answers every one of them like an ordinary tracked
     # file, and records nothing. ``git rm --cached`` followed by ``git add
     # -N`` leaves an entry where the check above looks for one, and a commit
     # made from this index still deletes the release file.
-    if entries[0][2]:
+    if entries[0].intent_to_add:
         raise ReleaseChainError(
             f"index entry for {path} is intent-to-add and records no content"
         )
+
+
+def _blob_id(root: pathlib.Path, payload: bytes) -> str:
+    """The object id git would record for exactly these bytes as a blob.
+
+    Asked of git in the repository under review rather than computed here, so
+    the repository's own object format decides: a SHA-256 repository names its
+    blobs with SHA-256, and a digest this package chose would compare against
+    nothing. ``--stdin`` with no ``--path`` applies no filter — the bytes are
+    named as they stand, which is the comparison ``assert_index_content_bound``
+    wants and the one this package's byte comparisons already assume (an
+    existing release file must equal its base blob byte for byte, so a checkout
+    whose content is filtered on the way into the index refuses there already).
+    """
+
+    completed = _git_run(root, ["hash-object", "-t", "blob", "--stdin"], stdin=payload)
+    if completed.returncode != 0:
+        diagnostic = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise ReleaseChainError(f"cannot hash the verified bytes: {diagnostic}")
+    try:
+        return completed.stdout.decode("ascii").strip()
+    except UnicodeDecodeError as exc:  # pragma: no cover - git prints hex
+        raise ReleaseChainError("cannot hash the verified bytes") from exc
+
+
+def assert_index_content_bound(
+    root: pathlib.Path,
+    base_commit: str,
+    relative: pathlib.PurePosixPath | str,
+    verified: bytes,
+) -> None:
+    """Require the index to record the content this verdict actually read.
+
+    Every reconciliation above compares stage, mode and type. None of them
+    compares *content*: the parse discarded the object id, and the ledger, the
+    frozen prefix, the base release files and the release verification all read
+    the working tree. So a protected file could be rewritten, staged, and then
+    restored on disk — the rewrite is in the index and nowhere else — and the
+    whole data path ran over the restored bytes and returned an acceptance,
+    while the commit made from that index carries the rewrite nothing here ever
+    looked at. ``git diff`` sees it (the index differs from the base), which is
+    why the surface classification catches it for the gate-only exit; but on
+    the data path the classification is not a verdict about content, and every
+    check that is a verdict about content read the disk.
+
+    So, for one path: let ``I`` be the blob the index records for it, ``B`` the
+    blob the base tree records (absent for a file this proposal adds), and
+    ``H`` the blob id of the bytes the caller verified. ``I == B`` means the
+    commit under review does not change this path at all and the working tree's
+    difference from it is the proposal — the upstream verifier's model, and the
+    shape of every differential-harness case, where the fixture commits with
+    ``git add -A`` and then mutates the working tree alone. ``I == H`` means
+    the commit carries exactly the bytes this verdict read. Anything else is a
+    third content no check here has seen, and it refuses.
+
+    ``verified`` must be the bytes the caller's own comparison consumed, not a
+    fresh read: re-reading the path here would bind the index to a second read
+    and leave the first unbound, which is the hole rather than the fix.
+
+    The caller supplies a base commit, so this runs only where there is a
+    commit under review to compare against — the base-ref path. On the push
+    path there is no base, no ``B``, and no diff this could qualify; nothing
+    calls it there.
+
+    Exactly one stage-0 entry is required, and every caller has already
+    established that (``assert_state_path_tracked`` for the state files,
+    ``assert_release_file_still_indexed`` for a base release file,
+    ``assert_release_root_index_regular`` for the release root's own entries).
+    A path with no entry at all is an untracked file the proposal adds without
+    staging, which is what the harness's own release files are; there is no
+    recorded content to disagree with, and the checks that care about a missing
+    entry refuse in their own words. Both return here rather than inventing a
+    second answer for a fact already answered.
+
+    Like the two index checks beside it this runs after the comparisons it
+    qualifies, so a file whose working-tree bytes or mode already differ from
+    the base keeps the upstream verifier's refusal and nothing pre-existing is
+    pre-empted.
+    """
+
+    path = _exact_relative(relative)
+    entries = [
+        record for record in _index_entries(root, path) if record.path == path
+    ]
+    if len(entries) != 1 or entries[0].stage != "0":
+        return
+    recorded = entries[0].object_id
+    base_entry = git_tree_entries(root, base_commit, path).get(path)
+    if base_entry is not None and recorded == base_entry.object_id:
+        return
+    if recorded == _blob_id(root, verified):
+        return
+    raise ReleaseChainError(
+        f"candidate index records different content for {path} than the "
+        "working tree this verdict read"
+    )
 
 
 def _assert_no_symlinked_release_component(root: pathlib.Path, listed: str) -> None:
@@ -2874,26 +3003,29 @@ def assert_release_root_index_regular(root: pathlib.Path, spec: ChainSpec) -> No
 
     release_root = spec.release_root_relative.as_posix()
     modes: dict[str, str] = {}
-    for mode, stage, listed, intent in sorted(
-        _index_entries(root, release_root), key=lambda record: (record[2], record[1])
+    for record in sorted(
+        _index_entries(root, release_root),
+        key=lambda entry: (entry.path, entry.stage),
     ):
-        if stage != "0":
+        listed = record.path
+        if record.stage != "0":
             raise ReleaseChainError(
                 f"candidate index holds an unmerged entry at {listed}"
             )
-        if mode not in {"100644", "100755"}:
+        if record.mode not in {"100644", "100755"}:
             raise ReleaseChainError(
-                f"release root carries an unsupported index entry: {listed} ({mode})"
+                "release root carries an unsupported index entry: "
+                f"{listed} ({record.mode})"
             )
         # Beside the mode check, because an intent-to-add entry passes it: a
         # release path added with ``git add -N`` is recorded at 100644 with
         # no content, so the reconciliation below would find it on disk and
         # call the pair agreed while the commit carries nothing for it.
-        if intent:
+        if record.intent_to_add:
             raise ReleaseChainError(
                 f"index entry for {listed} is intent-to-add and records no content"
             )
-        modes[listed] = mode
+        modes[listed] = record.mode
     directory = root / spec.release_root_relative
     if directory.is_symlink() or not directory.is_dir():
         # Not a directory, but the index records content under it: a tracked
@@ -2973,7 +3105,8 @@ def verify_release_history_immutable(
                 f"existing release file mode changed relative to {commit}: "
                 f"{relative} ({entry.mode} -> {candidate_mode})"
             )
-        if current.read_bytes() != git_blob_bytes(root, entry):
+        candidate_bytes = current.read_bytes()
+        if candidate_bytes != git_blob_bytes(root, entry):
             raise ReleaseChainError(
                 f"existing release file bytes changed relative to {commit}: {relative}"
             )
@@ -2990,6 +3123,12 @@ def verify_release_history_immutable(
         # so a proposal that drops an existing release file from the index
         # alone passed every one of them while deleting release history.
         assert_release_file_still_indexed(root, relative)
+        # And what it records has to be the bytes just compared. Both
+        # comparisons above read the working tree; the index is what the
+        # commit carries, and a rewrite staged and then restored on disk left
+        # the mode equal, the bytes equal, the entry present, and the commit
+        # under review changing a file this pass calls immutable.
+        assert_index_content_bound(root, commit, relative, candidate_bytes)
     # After every per-file comparison, and for the same reason: the release
     # root's own index entries, which the working-tree enumeration above
     # cannot see when they are directories it skips or gitlinks nothing
