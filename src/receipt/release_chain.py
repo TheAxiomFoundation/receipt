@@ -2459,7 +2459,8 @@ def assert_release_root_index_regular(root: pathlib.Path, spec: ChainSpec) -> No
     The second direction is settled by the walk's own spelling, not by the
     filesystem's resolution of the entry's name. Asking ``is_file()`` about
     each indexed path lets a case-insensitive or normalisation-insensitive
-    filesystem — APFS, HFS+, NTFS — answer for a differently spelled entry:
+    filesystem — APFS and HFS+ by default, and any case-insensitive mount —
+    answer for a differently spelled entry:
     with ``releases/README.md`` and ``releases/README.MD`` both in the index
     and one file on disk, one file answered both questions, so one committed
     release object was in no enumeration and was never verified while the
