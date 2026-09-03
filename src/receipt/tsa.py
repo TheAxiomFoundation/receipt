@@ -9,7 +9,7 @@ through a frozen :class:`TsaSpec` supplied by consumer code.  This module
 ships no repository-specific trust defaults and performs no chain walk or
 producer signature verification.
 
-The port is stricter than the baseline in twenty places, each refusing an
+The port is stricter than the baseline in twenty-one places, each refusing an
 input the pinned tree never presents and so each outside the differential
 contract: a record under witness that is not a readable regular file, which
 the baseline let raise out of the hash; a path this module resolves out of
@@ -66,8 +66,13 @@ anchor ever seen, joining equal ``(ID, root SPKI)`` authorities and shared
 signing keys whether or not an occurrence is skipped, never deleting a
 historical edge, and choosing at most the newest candidate from a pending-only
 class, which makes classification independent of anchor-array order (peer
-review, sixth gate round two); a caller-supplied trust transition that omits
-an update the
+review, sixth gate round two); a pending bundle that presents two anchors from
+one of those historical classes, which would make one authority current twice
+under disjoint signer sets that the bundle-local check cannot connect -- the
+class, not an ``(ID, root SPKI)`` pair, is the unit, and the refusal names both
+anchors and every authority identity in the class they share (peer review,
+sixth gate round two); a caller-supplied trust transition that omits an update
+the
 witnessed record itself carries, which is a transition read from one instant
 of the record and evidence taken from another; a chain genesis file or a
 witness sidecar that is not a readable regular file -- genesis had no
@@ -323,7 +328,9 @@ its text is kept verbatim as ported.  The duplicate-timestamp refusal is the
 other, and what closed it is the pending-authority rules above: two outcomes
 rest on one authority's signature only if two anchors both pin the
 certificate that response was signed with, and no pairing of anchors that
-could reaches two outcomes -- inside one bundle they are refused at load;
+could reaches two outcomes -- inside one bundle a current shared signer is
+refused at load, and inside a pending bundle the historical-class guard
+refuses disjoint current signers that still belong to one class;
 across an active and a pending bundle the pending one is measured against
 whole classes and is skipped as a rename or refused as a split or a merge,
 so it never becomes a candidate at all; and across pending bundles every
@@ -2841,6 +2848,21 @@ def _split_or_merge_message(occurrence: _AnchorOccurrence) -> str:
     )
 
 
+def _pending_class_collision_message(
+    history: _AuthorityHistory,
+    first: _AnchorOccurrence,
+    second: _AnchorOccurrence,
+) -> str:
+    """Name two anchors and the complete historical class they share."""
+
+    return (
+        f"pending TSA bundle anchors {first.path}/{first.anchor['id']} and "
+        f"{second.path}/{second.anchor['id']} resolve to one historical "
+        "authority class: "
+        f"{history.class_authorities(first.authority)}"
+    )
+
+
 def _build_authority_history(
     records: Path,
     trusted_bundles: Mapping[str, dict[str, Any]],
@@ -2860,7 +2882,8 @@ def _build_authority_history(
     its edges are then retained whether an occurrence is new, a rename, or a
     skipped rotation.  Semantic errors are remembered until every pending
     occurrence has entered the graph, so the graph consumed by candidate
-    classification is the complete history for this verification.
+    classification and the per-bundle class guard is the complete history for
+    this verification.
     """
 
     active_occurrences: list[_AnchorOccurrence] = []
@@ -2912,6 +2935,24 @@ def _build_authority_history(
         # what makes the answer independent of anchor-array order.
         for occurrence in batch:
             history.add(occurrence)
+
+    # The bundle-local signer rule sees only the signer sets this version
+    # declares.  Historical aliases can therefore arrive as two anchors whose
+    # current signers are disjoint even though every earlier rename and
+    # rotation puts them in one class.  Once the complete graph is known, one
+    # class may occupy at most one anchor slot in each pending bundle.  Check
+    # this before the prefix-time split/merge errors above so the more precise
+    # two-anchor diagnosis wins when both describe the same transition (peer
+    # review, sixth gate round two).
+    for batch in pending_batches:
+        first_by_class: dict[_Authority, _AnchorOccurrence] = {}
+        for occurrence in batch:
+            class_root = history.find(occurrence.authority)
+            first = first_by_class.setdefault(class_root, occurrence)
+            if first is not occurrence:
+                raise TsaError(
+                    _pending_class_collision_message(history, first, occurrence)
+                )
 
     if errors:
         raise TsaError(min(errors)[1])
@@ -3053,6 +3094,15 @@ def _supplemental_candidates(
     its newest occurrence, because succession changes the representation
     that survives without changing the authority's class (peer review, sixth
     gate round two).
+
+    A class may be represented only once inside any one pending bundle.  The
+    ordinary bundle check catches two anchors sharing a *current* signer, but
+    two historical aliases can rotate to disjoint current signers and evade
+    it while still naming one authority twice.  The completed graph therefore
+    checks every pending batch and refuses two anchors with one class, naming
+    both anchor slots and the full class they resolve to.  This also catches a
+    rotation that imports another class's historical signer while that class
+    occupies its own slot in the bundle (peer review, sixth gate round two).
 
     Between them these rules leave no shape in which two outcomes of one
     witness rest on one authority's signature, which is why

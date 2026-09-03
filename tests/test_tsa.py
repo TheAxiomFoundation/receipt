@@ -5341,6 +5341,122 @@ def test_a_skipped_pending_rotation_is_history_for_a_later_rename(
     ) == {}
 
 
+def test_a_pending_bundle_may_not_present_one_historical_class_twice(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_alpha: LocalTsa,
+) -> None:
+    """S6-R2-F2: the class, not either active identity, is the unit.
+
+    A/S1 is activated under the rename B/S1, so the two active identities are
+    one historical class.  A pending bundle then rotates them independently
+    to A/S2 and B/S3.  Its current signer sets are disjoint, so the local
+    shared-signer check passes, and the old active-identity shortcuts skip both
+    anchors.  Without the class guard the bundle therefore makes one authority
+    current twice; the completed graph must instead refuse both anchor slots
+    by name and show the class that makes them one.
+    """
+
+    alpha = local_anchors[0]
+    first_rotation = certificate_pins(rotated_alpha.signer_pem)
+    second_rotation = certificate_pins(
+        rotate_tsa_signer(alpha.tsa, tmp_path / "alpha-third").signer_pem
+    )
+    assert first_rotation["spkiSha256"] != second_rotation["spkiSha256"]
+    tree = build_witness_tree(tmp_path / "tree", [alpha])
+    renamed = alias_of(alpha, anchor_id="alpha-renamed-2026")
+    rename, spec = add_bundle_version(tree, [renamed], version=2)
+    pending, spec = add_bundle_version(
+        tree,
+        [alpha, renamed],
+        version=3,
+        signers={
+            alpha.anchor_id: first_rotation,
+            renamed.anchor_id: second_rotation,
+        },
+        base=spec,
+    )
+    written = json.loads(
+        (tree.records / "trust" / "tsa-anchors-v3.json").read_text()
+    )["anchors"]
+    assert [
+        {signer["spkiSha256"] for signer in anchor["allowedSigners"]}
+        for anchor in written
+    ] == [
+        {first_rotation["spkiSha256"]},
+        {second_rotation["spkiSha256"]},
+    ]
+
+    active = {BUNDLE_LOGICAL: tree.reference, str(rename["path"]): rename}
+    class_members = tuple(
+        sorted(
+            (
+                (alpha.anchor_id, alpha.root_pins["spkiSha256"]),
+                (renamed.anchor_id, alpha.root_pins["spkiSha256"]),
+            )
+        )
+    )
+    with pytest.raises(TsaError) as caught:
+        tsa_module._supplemental_candidates(
+            tree.records, active, [pending], spec=spec
+        )
+    assert str(caught.value) == (
+        f"pending TSA bundle anchors {pending['path']}/{renamed.anchor_id} and "
+        f"{pending['path']}/{alpha.anchor_id} resolve to one historical "
+        f"authority class: {class_members}"
+    )
+
+
+def test_a_rotation_may_not_import_another_classs_historical_signer(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_beta: LocalTsa,
+) -> None:
+    """S6-R2-F2: importing another class's signer joins both anchor slots.
+
+    Active A/S1 and B/S2 are separate classes.  The pending A anchor rotates
+    to B's historical S2 while pending B rotates to fresh S3.  The new bundle
+    again has disjoint current signer sets, but A's imported signer joins its
+    identity to B's history.  Without the completed-graph bundle guard both
+    active-identity shortcuts skip; with it the two slots resolve to the one
+    class named by the refusal.
+    """
+
+    alpha, beta = local_anchors[:2]
+    rotated = certificate_pins(rotated_beta.signer_pem)
+    tree = build_witness_tree(tmp_path, [alpha, beta])
+    pending, spec = add_bundle_version(
+        tree,
+        [alpha, beta],
+        version=2,
+        signers={
+            alpha.anchor_id: beta.signer_pins,
+            beta.anchor_id: rotated,
+        },
+    )
+    class_members = tuple(
+        sorted(
+            (
+                (alpha.anchor_id, alpha.root_pins["spkiSha256"]),
+                (beta.anchor_id, beta.root_pins["spkiSha256"]),
+            )
+        )
+    )
+
+    with pytest.raises(TsaError) as caught:
+        tsa_module._supplemental_candidates(
+            tree.records,
+            {BUNDLE_LOGICAL: tree.reference},
+            [pending],
+            spec=spec,
+        )
+    assert str(caught.value) == (
+        f"pending TSA bundle anchors {pending['path']}/{alpha.anchor_id} and "
+        f"{pending['path']}/{beta.anchor_id} resolve to one historical "
+        f"authority class: {class_members}"
+    )
+
+
 def test_succession_keeps_the_predecessors_signer_in_pending_history(
     tmp_path: pathlib.Path,
     local_anchors: tuple[LocalAnchor, ...],
@@ -5387,14 +5503,15 @@ def test_pending_anchor_array_order_does_not_change_the_class_verdict(
     local_anchors: tuple[LocalAnchor, ...],
     rotated_beta: LocalTsa,
 ) -> None:
-    """S6-R2-F3: one prebuilt history makes anchor-array order irrelevant.
+    """S6-R2-F3/F2: one prebuilt history makes array order irrelevant.
 
     After pending B/S1, one bundle contains successor B/S2 and alias C/S1.
     The rolling implementation accepts two candidates when B is visited first
     because succession deletes S1, but raises the pending-alias refusal when C
     is visited first because S1 still has an owner.  Sorting cannot repair a
-    state machine whose answer depends on deletion; both permutations must
-    instead produce the same class verdict and the same one candidate.
+    state machine whose answer depends on deletion.  Both permutations must
+    instead produce the same class verdict; F2 then refuses because B and C
+    occupy two slots of this one pending bundle while resolving to that class.
     """
 
     beta = local_anchors[1]
@@ -5426,9 +5543,20 @@ def test_pending_anchor_array_order_does_not_change_the_class_verdict(
     forward = verdict([incoming, renamed], "forward")
     reverse = verdict([renamed, incoming], "reverse")
     assert forward == reverse
+    class_members = tuple(
+        sorted(
+            (
+                (incoming.anchor_id, beta.root_pins["spkiSha256"]),
+                (renamed.anchor_id, beta.root_pins["spkiSha256"]),
+            )
+        )
+    )
     assert forward == (
-        "accepted",
-        (("records/trust/tsa-anchors-v3.json", renamed.anchor_id),),
+        "refused",
+        "pending TSA bundle anchors "
+        f"records/trust/tsa-anchors-v3.json/{incoming.anchor_id} and "
+        f"records/trust/tsa-anchors-v3.json/{renamed.anchor_id} resolve to "
+        f"one historical authority class: {class_members}",
     )
 
 
@@ -6619,12 +6747,13 @@ def test_refuses_a_re_wrapped_response_offered_as_a_second_token(
             transition_bundle_updates=[pending_first, pending_second],
         )
 
-    # The rule in front: two pending bundles, one authority, one survivor.
+    # The rule in front: two pending bundles filing one authority twice.
     with pytest.raises(TsaError) as first_refusal:
         transition()
     assert str(first_refusal.value) == (
-        "supplemental TSA outcome is not introduced by a pending trust "
-        f"transition: ('{pending_first['path']}', '{first.anchor_id}')"
+        "pending TSA bundles introduce one authority under two anchors: "
+        f"{pending_first['path']}/{first.anchor_id} and "
+        f"{pending_second['path']}/{second.anchor_id}"
     )
 
     blind_the_pending_signer_reader(monkeypatch)
@@ -6813,8 +6942,9 @@ def test_refuses_a_re_bagged_token_offered_as_a_second_timestamp(
     with pytest.raises(TsaError) as first_refusal:
         transition()
     assert str(first_refusal.value) == (
-        "supplemental TSA outcome is not introduced by a pending trust "
-        f"transition: ('{pending_first['path']}', '{first.anchor_id}')"
+        "pending TSA bundles introduce one authority under two anchors: "
+        f"{pending_first['path']}/{first.anchor_id} and "
+        f"{pending_second['path']}/{second.anchor_id}"
     )
 
     blind_the_pending_signer_reader(monkeypatch)
