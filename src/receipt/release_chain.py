@@ -51,7 +51,12 @@ resolves again; the state-path guards
 ``append_gate`` calls, whose walk — like the release root's — now also
 requires each component to be spelled by the directory holding it, because
 what a component *is* is learned by resolving its name and a name-folding
-filesystem resolves a name this package never wrote; the anchor-set digest in
+filesystem resolves a name this package never wrote, and refuses a directory
+that folds names and cannot be listed rather than descending it, since the
+listing was the only thing that could have bound the spelling and a
+search-only mode is all it takes to withhold it — where names are compared
+exactly, resolution and listing agree and the search-only descent stays
+allowed; the anchor-set digest in
 the result) run beside the extracted checks without altering any of their
 refusals, and carry their own tests. Every one of those index reads names its
 path as a literal pathspec, so git is asked about the exact path rather than
@@ -1103,6 +1108,51 @@ def _is_reparse_point(path: pathlib.Path) -> bool:
     return stat.S_ISLNK(entry.st_mode) or bool(getattr(entry, "st_reparse_tag", 0))
 
 
+def _folds_a_spelling(parent: pathlib.Path, segment: str) -> bool:
+    """Whether a directory answers to a spelling of ``segment`` it was not given.
+
+    Asked only where the parent cannot be listed, and it is the question that
+    decides whether that matters. The probe is the same fold the index alias
+    check compares by, narrowed to what a filesystem can actually be shown to
+    do: for a component carrying cased letters, ``segment.swapcase()``; for one
+    whose NFC and NFD forms differ, the other form. If any of those resolves to
+    the same ``(st_dev, st_ino)`` as the component itself, then two spellings
+    reach one file here and the directory's listing was the only thing that
+    could have said which one it holds.
+
+    Where none of them resolves, the directory does not fold *this* name, and
+    that is what the caller needs: resolution and listing agree for a component
+    the filesystem compares exactly, so the component that resolved is the
+    component the directory holds and the walk may descend a search-only
+    directory as it always has. Answering ``False`` for a component that is not
+    there at all is the same answer for the same reason — there is no file for
+    two spellings to reach.
+
+    Each probe is an ``lstat``, which needs search rights on the parent and no
+    read rights, so this asks nothing the descent itself does not already need.
+    """
+
+    try:
+        target = os.lstat(parent / segment)
+    except OSError:
+        return False
+    identity = (target.st_dev, target.st_ino)
+    variants = {
+        segment.swapcase(),
+        unicodedata.normalize("NFC", segment),
+        unicodedata.normalize("NFD", segment),
+    }
+    variants.discard(segment)
+    for variant in sorted(variants):
+        try:
+            probe = os.lstat(parent / variant)
+        except OSError:
+            continue
+        if (probe.st_dev, probe.st_ino) == identity:
+            return True
+    return False
+
+
 def _assert_component_spelled(
     parent: pathlib.Path,
     segment: str,
@@ -1124,13 +1174,24 @@ def _assert_component_spelled(
 
     A component that is not there at all is not this check's business — an
     absent release root is legal, and an absent state file is the reader's
-    refusal — so it returns and lets the check after the walk say so. A
-    directory this verifier cannot list is not one that can answer either:
-    refusing there would take back the search-only descent that
-    ``confined_state_descriptor`` exists to allow, where a directory above a
-    state file is traversable and deliberately not listable. What answers for
-    the index in that case is ``assert_index_carries_no_protected_alias``,
-    which compares spellings and reads no directory at all.
+    refusal — so it returns and lets the check after the walk say so.
+
+    A directory this verifier cannot list cannot answer the question, which is
+    a different thing from answering it favourably. Where names are compared
+    exactly nothing is lost by descending anyway: resolution and listing agree
+    there, so the component that resolved is the component the directory
+    holds, and the search-only descent ``confined_state_descriptor`` exists to
+    allow — a directory above a state file that is traversable and
+    deliberately not listable — stays allowed, with
+    ``assert_index_carries_no_protected_alias`` answering for the index side
+    on every filesystem because it compares spellings and reads no directory
+    at all. Where names fold, the listing was the *only* way to bind the
+    spelling: the index can hold the canonical path while the file on disk is
+    spelled some other way, the alias check sees nothing because the index
+    spelling is right, and making the parent search-only is all it takes to
+    turn this check off. So the two are separated by asking whether the parent
+    folds this name (``_folds_a_spelling``), and a parent that does and cannot
+    be listed refuses.
 
     On a filesystem that compares names exactly this refusal is unreachable by
     construction: a name that resolves is a name the directory lists. It is
@@ -1144,6 +1205,12 @@ def _assert_component_spelled(
     try:
         names = os.listdir(parent)
     except OSError:
+        if _folds_a_spelling(parent, segment):
+            raise ReleaseChainError(
+                f"cannot bind the spelling of {'/'.join(walked)}: its "
+                "directory folds names and cannot be listed: "
+                f"{relative.as_posix()}"
+            ) from None
         return
     if segment in names:
         return
