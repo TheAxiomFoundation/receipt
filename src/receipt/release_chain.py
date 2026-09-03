@@ -1481,8 +1481,14 @@ def hold_release_root(
 
     assert_no_symlinked_release_root(root, spec)
     assert_secure_descent_supported()
-    parent = root_descriptor
-    held: int | None = None
+    # Seeded with the candidate root's own directory rather than with nothing,
+    # so that a spec whose release root *is* the candidate root — no components
+    # to walk, which ``PurePosixPath('.')`` and an empty path both give — holds
+    # the directory it names instead of falling off the end of the loop with
+    # nothing held. The re-check then compares that root against itself, which
+    # is the true answer for such a spec.
+    held: int | None = os.open(".", DIRECTORY_OPEN_FLAGS, dir_fd=root_descriptor)
+    parent = held
     for segment in spec.release_root_relative.parts:
         try:
             child = os.open(segment, DIRECTORY_OPEN_FLAGS, dir_fd=parent)
@@ -1510,7 +1516,6 @@ def hold_release_root(
             os.close(held)
         held = child
         parent = child
-    assert held is not None
     # ``O_PATH`` with ``O_NOFOLLOW`` opens a symlink itself rather than
     # failing, and it is ``O_DIRECTORY`` that turns that back into ENOTDIR.
     # Assert what the flag is relied on for: a descriptor that is not a
