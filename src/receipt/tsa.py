@@ -590,6 +590,16 @@ class WitnessEvidence:
 
 
 def sha256_file(path: Path) -> str:
+    """Hash a file, as the baseline hashes one.
+
+    Public, ported, and no longer called from inside this module: every file
+    the verification hashes is hashed over the one read it was judged from --
+    the record, the claimed response, the pinned root, and now the trust
+    bundle, whose commitment hash used to come from an open of its own.  This
+    stays for consumer code and for the differential harness's own chain
+    walk, which hashes the previous record the way the baseline does.
+    """
+
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
@@ -1114,13 +1124,22 @@ def validate_token_time(
 
 
 def _trust_bundle_reference(
-    records: Path, path: Path, payload: dict[str, Any]
+    records: Path, path: Path, payload: dict[str, Any], data: bytes
 ) -> dict[str, Any]:
+    """The reference a bundle's own bytes produce, for the commitment compare.
+
+    ``data`` is the one read ``payload`` was parsed from, and both the hash
+    and the size are taken from it rather than from a second open and a
+    ``stat`` of ``path``: a commitment computed from a later instant of a
+    mutable file says nothing about the payload the anchors were read out of.
+    ``path`` is still the repository file the caller's refusals name.
+    """
+
     return {
         "bundleId": payload.get("bundleId"),
         "path": logical_path(records, path),
-        "sha256": sha256_file(path),
-        "size": path.stat().st_size,
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "size": len(data),
         "canonicalJsonSha256": canonical_sha256(payload),
     }
 
@@ -1142,14 +1161,18 @@ def _load_trust_bundle(
             f"TSA trust bundle is not independently pinned by verifier code: {logical}"
         )
     path = physical_path(records, logical)
-    payload = _load_json_once(
+    # One read, and every question the load asks about this file is asked of
+    # these bytes: the payload it parses to, whether they are the canonical
+    # encoding of that payload, their SHA-256 and their length. Each used to
+    # open the path again (peer review, sixth gate round one).
+    payload, bundle_bytes = _read_json_once(
         path, label=f"TSA trust bundle is missing or not regular: {path}"
     )
     if payload.get("schemaVersion") != "thesis_tsa_trust_bundle_v1":
         raise TsaError(f"unsupported TSA trust schema: {payload.get('schemaVersion')!r}")
     if not isinstance(payload.get("bundleId"), str) or not payload["bundleId"]:
         raise TsaError(f"TSA trust bundle lacks bundleId: {path}")
-    if path.read_bytes() not in {canonical_bytes(payload), canonical_bytes(payload) + b"\n"}:
+    if bundle_bytes not in {canonical_bytes(payload), canonical_bytes(payload) + b"\n"}:
         raise TsaError(f"TSA trust configuration is not canonical JSON: {path}")
     anchors = payload.get("anchors")
     if not isinstance(anchors, list) or not anchors:
@@ -1171,7 +1194,7 @@ def _load_trust_bundle(
             raise TsaError(f"duplicate TSA endpoint in trust bundle: {endpoint}")
         anchor_ids.add(anchor_id)
         endpoints.add(endpoint)
-    actual_reference = _trust_bundle_reference(records, path, payload)
+    actual_reference = _trust_bundle_reference(records, path, payload, bundle_bytes)
     if reference != actual_reference:
         raise TsaError(
             f"TSA trust bundle commitment mismatch for {logical}: "
@@ -1630,6 +1653,32 @@ def _read_pinned_root(path: Path) -> bytes:
     return pem
 
 
+def _read_json_once(path: Path, *, label: str) -> tuple[dict[str, Any], bytes]:
+    """``_load_json_once``, and the bytes the payload was parsed from.
+
+    A caller that has more to ask of a JSON input than what it parses to
+    cannot ask it of the path again: ``_load_trust_bundle`` decides three
+    things about a bundle besides its payload -- whether it is canonical
+    JSON, its SHA-256, and its size -- and each of those used its own
+    ``read_bytes`` or ``stat`` of the repository path.  So the payload came
+    from one instant of a mutable file and the three commitments from three
+    others, and a writer replacing the bundle with a FIFO after the guarded
+    read had ``read_bytes`` and ``sha256_file`` waiting for a writer with no
+    timeout -- the hang the one-read discipline exists to prevent, reached
+    through the one input that had not been given it (peer review, sixth gate
+    round one).
+
+    So the bytes come back beside the payload and every one of those
+    questions is asked of them.  ``_load_json_once`` keeps its own shape for
+    the two callers with nothing further to ask.
+    """
+
+    if not path.is_file() or path.is_symlink():
+        raise TsaError(label)
+    data, _identity = _read_file_once(path, label)
+    return _record_payload(data, path), data
+
+
 def _load_json_once(path: Path, *, label: str) -> dict[str, Any]:
     """``load_json`` over one non-blocking, ``fstat``-judged read of ``path``.
 
@@ -1663,10 +1712,8 @@ def _load_json_once(path: Path, *, label: str) -> dict[str, Any]:
     ``read_text`` would have followed it.
     """
 
-    if not path.is_file() or path.is_symlink():
-        raise TsaError(label)
-    data, _identity = _read_file_once(path, label)
-    return _record_payload(data, path)
+    payload, _data = _read_json_once(path, label=label)
+    return payload
 
 
 def _write_root_snapshot(directory: Path, pem: bytes) -> Path:

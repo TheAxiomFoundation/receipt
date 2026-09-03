@@ -3116,6 +3116,120 @@ def test_a_fifo_raced_in_after_the_path_check_refuses_without_blocking(
     assert str(caught.value) == expected
 
 
+def race_a_fifo_in_after_the_one_read(
+    monkeypatch: pytest.MonkeyPatch, victim: pathlib.Path
+) -> list[str]:
+    """Put a FIFO at ``victim`` for exactly the window after its one read.
+
+    The other side of the window ``replace_with_a_fifo_after_the_path_check``
+    opens. That one arrives between a caller's path-level check and the open
+    the check was about; this one arrives after the guarded open has already
+    returned every byte, which is where a second open of the same pathname
+    would be -- and a read-only open of a FIFO waits for a writer with no
+    timeout, so a load that re-reads its own path hangs here rather than
+    refusing. The FIFO is taken away again when that load returns, so nothing
+    after it is about a file that is not there; what the window covers is one
+    load, which is the unit the finding is about. Returns the swap, so a test
+    can show the writer ran.
+    """
+
+    real_read = tsa_module._read_file_once
+    real_load = tsa_module._load_trust_bundle
+    original = victim.read_bytes()
+    swapped: list[str] = []
+
+    def reading(
+        path: pathlib.Path, missing: str
+    ) -> tuple[bytes, tuple[int, int]]:
+        answer = real_read(path, missing)
+        if os.fspath(path) == os.fspath(victim) and not swapped:
+            victim.unlink()
+            os.mkfifo(victim)
+            swapped.append(str(victim))
+        return answer
+
+    def loading(
+        records: pathlib.Path, reference: dict[str, Any], **keywords: Any
+    ) -> Any:
+        try:
+            return real_load(records, reference, **keywords)
+        finally:
+            if swapped and stat.S_ISFIFO(os.lstat(victim).st_mode):
+                victim.unlink()
+                victim.write_bytes(original)
+
+    monkeypatch.setattr(tsa_module, "_read_file_once", reading)
+    monkeypatch.setattr(tsa_module, "_load_trust_bundle", loading)
+    return swapped
+
+
+def test_the_bundle_load_asks_nothing_of_its_path_after_the_one_read(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S6-F2: the canonicality, the hash and the size come from the one read.
+
+    ``_load_json_once`` captured the bundle's bytes and parsed them, and then
+    the load opened the repository path three more times: ``read_bytes`` for
+    the canonical-JSON comparison, ``sha256_file`` for the commitment hash and
+    a ``stat`` for the size. So the anchor set came from one instant of a
+    mutable file and its three commitments from three later ones -- and a
+    writer replacing the bundle with a FIFO in any of those windows had the
+    re-reads waiting for a writer with no timeout, which is the hang the
+    non-blocking one-read discipline exists to prevent, reached through the
+    one input that had not been given it.
+
+    Everything now comes from the captured bytes, so this load asks the path
+    for nothing at all after its read: a FIFO occupying the pathname for
+    exactly that window changes nothing, and the alarm is what turns a
+    re-read into a loud failure rather than a hung suite. Run at the head
+    with the canonical comparison put back to ``path.read_bytes()`` and the
+    alarm fires there; put back with ``sha256_file`` instead and it fires
+    there. The premises are asserted rather than assumed: the writer really
+    ran, what stood at the pathname really was a FIFO, and the bundle's own
+    commitment -- the hash and the size a ``TrustBundleSpec`` pins -- is still
+    checked, because a bundle whose bytes disagree with it is still refused.
+    """
+
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("platform has no FIFOs")
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    assert verify_tree(tree).status == "available"
+    bundle = tree.records.resolve() / "trust" / tree.bundle.name
+
+    def blocked(_signal: int, _frame: Any) -> None:
+        raise RuntimeError("the load re-read its own path and blocked")
+
+    swapped = race_a_fifo_in_after_the_one_read(monkeypatch, bundle)
+    previous = signal.signal(signal.SIGALRM, blocked)
+    signal.alarm(30)
+    try:
+        evidence = verify_tree(tree)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+    # The writer really did run, and the load carried on regardless.
+    assert swapped == [str(bundle)]
+    assert evidence.status == "available"
+    assert evidence.trust_bundle_id == BUNDLE_ID
+
+    # And the commitment those bytes are measured against still binds: a
+    # bundle whose contents disagree with the pinned hash and size refuses,
+    # so what moved is where the two values are read from and not whether
+    # they are compared.
+    payload = json.loads(tree.bundle.read_text())
+    payload["anchors"][0]["allowedPolicyOids"].append("1.3.6.1.4.1.99999.9.9")
+    tree.bundle.write_bytes(canonical_bytes(payload) + b"\n")
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value).startswith(
+        f"TSA trust bundle commitment mismatch for {BUNDLE_LOGICAL}: "
+    )
+    assert f"'sha256': '{tree.reference['sha256']}'" in str(caught.value)
+    assert f"'size': {tree.reference['size']}" in str(caught.value)
+
+
 def test_a_genesis_path_that_is_not_a_regular_file_is_refused_by_name(
     tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
 ) -> None:
@@ -3310,6 +3424,24 @@ def record_root_validations(
     return validated
 
 
+def record_bundle_loads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> collections.Counter[str]:
+    """Count how often each trust bundle is put through ``_load_trust_bundle``."""
+
+    original = tsa_module._load_trust_bundle
+    loaded: collections.Counter[str] = collections.Counter()
+
+    def recording(
+        records: pathlib.Path, reference: dict[str, Any], **keywords: Any
+    ) -> Any:
+        loaded[str(tsa_module.physical_path(records, str(reference["path"])))] += 1
+        return original(records, reference, **keywords)
+
+    monkeypatch.setattr(tsa_module, "_load_trust_bundle", recording)
+    return loaded
+
+
 def record_openssl_arguments(
     monkeypatch: pytest.MonkeyPatch,
 ) -> list[list[str]]:
@@ -3367,6 +3499,13 @@ def test_one_verification_opens_each_judged_file_exactly_as_often_as_it_judges_i
     this asserts the two numbers are equal, which is what makes the bytes
     judged the bytes used. A refactor that changes the seven should recount
     it here rather than loosen the equality beside it.
+
+    S6R1-F2 brings the trust bundle under the same equality. It opened four
+    times per load -- ``_load_json_once`` for the payload, ``read_bytes`` for
+    the canonical comparison, ``sha256_file`` for the commitment hash and a
+    ``stat`` for the size -- so the anchors came from one instant of the file
+    and its three commitments from three others. Five loads here, and now
+    five opens.
     """
 
     tree = build_witness_tree(tmp_path, local_anchors[:2])
@@ -3374,6 +3513,7 @@ def test_one_verification_opens_each_judged_file_exactly_as_often_as_it_judges_i
         str(tree.records.resolve() / "trust" / anchor.tsa.root_pem.name)
         for anchor in local_anchors[:2]
     }
+    bundle = str(tree.records.resolve() / "trust" / tree.bundle.name)
     tokens = {
         str(tree.records.resolve() / RECORD_DAY / token.name)
         for token in tree.tokens.values()
@@ -3382,6 +3522,7 @@ def test_one_verification_opens_each_judged_file_exactly_as_often_as_it_judges_i
     probe.write_bytes(b"counted three times")
 
     validated = record_root_validations(monkeypatch)
+    loaded = record_bundle_loads(monkeypatch)
     invocations = record_openssl_arguments(monkeypatch)
     opens = record_opens(monkeypatch)
 
@@ -3405,6 +3546,12 @@ def test_one_verification_opens_each_judged_file_exactly_as_often_as_it_judges_i
     }
     assert set(validated) == roots
     assert {validated[root] for root in roots} == {7}
+    # S6R1-F2: and the bundle, which used to open four times per load -- once
+    # for the payload, once for the canonical comparison, once for the
+    # commitment hash and a ``stat`` for the size -- opens once per load.
+    assert set(loaded) == {bundle}
+    assert loaded[bundle] == 5
+    assert opens[bundle] == loaded[bundle]
 
     # And no file under the records tree ever reaches OpenSSL by name.
     named = [
