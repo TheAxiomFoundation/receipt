@@ -941,13 +941,14 @@ def test_maximum_rows_at_maximum_portable_depth_use_a_shared_prefix_trie(
     materialises. The trie folds one component per visit — 2,101,248
     characters over these paths, plus the 4,190,208 the whole-path pass folds
     and always did. The cumulative loop folded a joined prefix per visit
-    instead: 1,069,551,616 characters, one gibibyte of strings for one
-    within-cap journal, which is what the finding measured as about two
-    gibibytes held live.
+    instead: 1,069,559,808 characters for the prefix pass alone, so
+    1,073,750,016 in total — a gibibyte of prefix strings for one within-cap
+    journal, which is what the finding measured as about two gibibytes held
+    live once each is also kept in the index.
 
     Without S7-F1 the call does not accept a budget, the returned allocation
-    count is absent rather than 4,606, and the folded-character bound is
-    exceeded by a factor of about 170.
+    count is absent rather than 4,606, and the folded-character total is
+    1,073,750,016 rather than 6,291,456 — 170 times the bound asserted here.
     """
 
     import receipt.corpus as corpus_module
@@ -986,9 +987,11 @@ def test_maximum_rows_at_maximum_portable_depth_use_a_shared_prefix_trie(
     whole_paths = MAX_JOURNAL_ROWS * 1023
     components = MAX_JOURNAL_ROWS * (510 * 1 + 3)
     assert folded[0] == whole_paths + components == 6291456
-    # A joined prefix per visit is 1 + 3 + 5 + … + 1023 per path.
-    assert MAX_JOURNAL_ROWS * 511 * 511 == 1069551616
-    assert folded[0] < 8 * 1024 * 1024
+    # A joined prefix per visit costs 1 + 3 + … + 1019 for the shared
+    # components and 1,023 for the leaf, per path.
+    joined = MAX_JOURNAL_ROWS * (510**2 + 1023)
+    assert whole_paths + joined == 1073750016
+    assert folded[0] < 8 * 1024 * 1024 < joined
 
 
 def test_the_fixture_spends_eighteen_visits_from_one_shared_prefix_budget(
