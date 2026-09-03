@@ -900,6 +900,79 @@ def test_the_surface_walk_is_bounded(
         "cannot be classified: "
     )
 
+class RecordingScandir:
+    """``os.scandir`` that records every entry the caller actually consumes.
+
+    The count is the measurement S5-G1-F3 is about: what the walk *visited*,
+    not what the budget allowed. It delegates the context-manager protocol to
+    the real iterator so the descriptor is closed the same way, and it counts
+    at the moment an entry is handed over, so a walk that stops mid-directory
+    is distinguishable from one that drained it first.
+    """
+
+    def __init__(self, inner: Any, seen: list[str]) -> None:
+        self._inner = inner
+        self._seen = seen
+
+    def __enter__(self) -> RecordingScandir:
+        self._inner.__enter__()
+        return self
+
+    def __exit__(self, *arguments: Any) -> Any:
+        return self._inner.__exit__(*arguments)
+
+    def __iter__(self) -> Iterator[Any]:
+        for entry in self._inner:
+            self._seen.append(entry.name)
+            yield entry
+
+
+def test_the_surface_walk_charges_before_it_keeps_a_name(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S5-G1-F3. ``MAX_SURFACE_WALK_ENTRIES`` was enforced once per
+    directory, against ``len(names)`` — which means the whole listing had
+    already been materialised into a list before the bound was consulted. The
+    bound is on directories a candidate controls: the protected surfaces are
+    where a proposal puts its files, so one directory holding millions of
+    entries cost the memory and the time to name every one of them before the
+    refusal that says the surface is too wide to enumerate. A bound charged
+    after the work is not a bound on the work.
+
+    It is charged per entry now, inside the ``os.scandir`` iteration and
+    before the name is kept, so the walk stops at the first entry past the
+    budget. Here the budget is 20 and the directory holds 500: measured at
+    1275847 the walk consumed 508 entries to reach the same refusal, and it
+    consumes 21 now — the budget, and the one entry that overran it.
+
+    The refusal itself is unchanged, in its own words and naming the directory
+    the walk was in; ``test_the_surface_walk_is_bounded`` binds that."""
+
+    candidate = base_repository(tmp_path)
+    add_gate_file(candidate)
+    wide = candidate.root / CHAIN_SPEC.state_relative.parent / "wide"
+    wide.mkdir()
+    for number in range(500):
+        (wide / f"f{number:04d}").write_text("x", encoding="utf-8")
+    budget = 20
+    seen: list[str] = []
+    real_scandir = os.scandir
+    monkeypatch.setattr(
+        os, "scandir", lambda where: RecordingScandir(real_scandir(where), seen)
+    )
+    monkeypatch.setattr(append_gate, "MAX_SURFACE_WALK_ENTRIES", budget)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        f"protected surface enumeration exceeded {budget} entries, so the "
+        "proposal cannot be classified: ledger/wide"
+    )
+    # At most the budget, plus the entry whose charge overran it. Never the
+    # 500 the directory holds, which is what the head consumed.
+    assert len(seen) <= budget + 1
+    assert len(os.listdir(wide)) == 500
+
 
 def test_a_clean_gate_only_proposal_keeps_its_baseline_verdict(
     tmp_path: pathlib.Path,
