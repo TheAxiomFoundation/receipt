@@ -111,7 +111,20 @@ three stated exceptions at entry, all saying that a comparison cannot be made
 here rather than making one, and two further placements stated after them. The
 checkout-level ``release_chain.assert_file_modes_authoritative`` runs ahead of
 the release-history file checks (and after the base ref is resolved, so a
-false setting cannot mask a base that names nothing). The per-state-path
+false setting cannot mask a base that names nothing). Beside it, sharing that
+exception rather than adding another,
+``release_chain.assert_working_tree_classification_authoritative`` refuses a
+checkout in which ``git diff`` and ``git ls-files --others`` are a cache
+rather than a comparison: ``core.fsmonitor`` set to anything but false makes
+git trust a monitor's "unchanged" for a path, ``core.trustctime`` false and
+``core.checkStat`` minimal drop the stat fields a same-size rewrite with a
+restored mtime changes, and ``core.untrackedCache`` answers the untracked
+listing from a cached directory scan. Every one of them lets a ledger
+rewritten beside a gate file classify gate-only, which returns before the
+ledger is read — the same fact the assume-unchanged and skip-worktree refusal
+covers for one entry, reached through a setting instead. All four are
+properties of the checkout rather than of any file, so like the modes guard
+they say a comparison cannot be made here rather than making one. The per-state-path
 ``release_chain.assert_state_path_tracked`` runs ahead of everything that
 reads either state file, because an untracked state path, or one under a
 gitlink, is not this commit's content and nothing downstream can be a verdict
@@ -293,6 +306,7 @@ from receipt.release_chain import (
     assert_index_agrees_with_tree,
     assert_index_carries_no_protected_alias,
     assert_index_content_bound,
+    assert_working_tree_classification_authoritative,
     ChainSpec,
     MANIFEST_RE,
     ReleaseChainError,
@@ -1953,6 +1967,18 @@ def _verify_selected_tree(
     # state file is read.
     try:
         assert_file_modes_authoritative(candidate.root)
+    except ReleaseChainError as exc:
+        raise AppendError(str(exc)) from exc
+    # And beside it, about the same checkout and for the same reason: whether
+    # git will look at the working tree at all. The surface classification
+    # below is ``git diff`` plus ``git ls-files --others``, and four settings
+    # turn either into a cache — a file-system monitor whose "unchanged" git
+    # trusts, a stat comparison with the change time or all but size dropped,
+    # a cached untracked listing. Under any of them a ledger rewritten beside
+    # a gate file classifies gate-only and is never read. Checkout-level, so
+    # it stands where the modes guard stands and shares its exception.
+    try:
+        assert_working_tree_classification_authoritative(candidate.root)
     except ReleaseChainError as exc:
         raise AppendError(str(exc)) from exc
     # And the two state files must be files git is tracking here, with no

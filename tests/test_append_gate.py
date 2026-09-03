@@ -1399,6 +1399,163 @@ def test_the_push_path_refuses_a_non_authoritative_checkout(
     assert str(refusal.value) == message
 
 
+CLASSIFICATION_SETTINGS = [
+    (
+        "core.fsmonitor",
+        "true",
+        "working-tree changes cannot be classified: core.fsmonitor is enabled "
+        "in this checkout, and git's classification would trust it",
+    ),
+    (
+        "core.trustctime",
+        "false",
+        "working-tree changes cannot be classified: core.trustctime is false "
+        "in this checkout, so git's stat cache can call a rewritten file "
+        "unchanged",
+    ),
+    (
+        "core.checkStat",
+        "minimal",
+        "working-tree changes cannot be classified: core.checkStat is minimal "
+        "in this checkout, so git's stat cache ignores the fields a same-size "
+        "rewrite changes",
+    ),
+    (
+        "core.untrackedCache",
+        "true",
+        "working-tree changes cannot be classified: core.untrackedCache is "
+        "enabled in this checkout, so the untracked listing this "
+        "classification reads would come from a cache",
+    ),
+]
+
+CLASSIFICATION_IDS = ["fsmonitor", "trustctime", "checkStat", "untrackedCache"]
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "message"), CLASSIFICATION_SETTINGS, ids=CLASSIFICATION_IDS
+)
+def test_a_checkout_whose_changes_cannot_be_classified_is_refused(
+    tmp_path: pathlib.Path, key: str, value: str, message: str
+) -> None:
+    """Binds S4R4-F5. Refusing the assume-unchanged and skip-worktree flags
+    covers one entry marked by hand; the surface classification still trusted
+    git's stat cache for every other path, and four checkout settings decide
+    what that cache is allowed to skip.
+
+    With ``core.fsmonitor`` set, git keeps ``CE_FSMONITOR_VALID`` on a path a
+    monitor did not report and reports it clean whatever the file now holds.
+    With ``core.trustctime`` false the inode change time leaves the stat
+    comparison, and with ``core.checkStat`` minimal everything but size and
+    whole-second mtime does, so a same-size rewrite whose mtime is restored is
+    not a change git will look for. With ``core.untrackedCache`` the untracked
+    half of the changed set — ``git ls-files --others`` — is answered from a
+    cached directory listing. Under any of them a ledger rewritten beside a
+    gate file classifies gate-only, and that exit returns before the frozen
+    prefix, the append-only diff, the row bindings and the release history are
+    read at all.
+
+    The tree here is that proposal. Measured at 02fada3 with the guard
+    removed, for all four parameters: against a base it is refused as ``mixed
+    data/gate proposal is forbidden`` — on this checkout, where no monitor and
+    no cache is actually in place to hide the rewrite — and on the push path
+    it is accepted as ``thesis-facts append check OK: 3 rows, immutable prefix
+    1``. The guard's answer comes first, because a checkout whose changes
+    cannot be classified says so before any verdict about what changed in it —
+    the exception the modes guard beside it already has, shared rather than
+    added to. Both paths are covered: the push path has no classification of
+    its own, and the settings are just as unverifiable there."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    add_gate_file(candidate)
+    git(candidate.root, "config", key, value)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == message
+
+    with pytest.raises(AppendError) as push:
+        run_push_gate(candidate)
+    assert str(push.value) == message
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("core.fsmonitor", "false"),
+        ("core.trustctime", "true"),
+        ("core.checkStat", "default"),
+        ("core.untrackedCache", "false"),
+    ],
+    ids=CLASSIFICATION_IDS,
+)
+def test_a_setting_that_is_off_leaves_the_classification_alone(
+    tmp_path: pathlib.Path, key: str, value: str
+) -> None:
+    """S4R4-F5's other side. The refusal is about a setting doing something,
+    not about the key appearing in a config file: each of these is the value
+    that leaves git comparing the working tree, and an ordinary proposal under
+    it is accepted exactly as before. An ordinary checkout sets none of them at
+    all, which the assertion below states."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    for setting, _value, _message in CLASSIFICATION_SETTINGS:
+        assert release_chain._git_value(candidate.root, setting) is None
+    git(candidate.root, "config", key, value)
+
+    assert run_gate(candidate) == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 1, "
+        "+1 appended vs base"
+    )
+
+
+def test_an_untracked_cache_left_in_place_is_refused_as_enabled(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S4R4-F5 for the value that is neither true nor false.
+    ``core.untrackedCache=keep`` tells git to leave whatever cache the index
+    already carries in place, so the untracked listing this classification
+    reads can still come from one. Only an explicitly false or unset setting
+    is off, which is why the two settings that take non-boolean values are
+    read as written rather than through ``git config --bool`` — which fails
+    outright on ``keep`` and would turn the question into a refusal about
+    being unable to read it."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    git(candidate.root, "config", "core.untrackedCache", "keep")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "working-tree changes cannot be classified: core.untrackedCache is "
+        "enabled in this checkout, so the untracked listing this "
+        "classification reads would come from a cache"
+    )
+
+
+def test_a_monitor_hook_path_is_the_same_answer_as_true(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S4R4-F5 for the other non-boolean: ``core.fsmonitor`` names a hook as
+    well as taking ``true``, and a hook is the older form of exactly the same
+    arrangement — git asks it what changed and trusts the answer. The hook
+    need not exist for the setting to be a claim this verifier cannot check."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    git(candidate.root, "config", "core.fsmonitor", ".git/hooks/fsmonitor-watchman")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "working-tree changes cannot be classified: core.fsmonitor is enabled "
+        "in this checkout, and git's classification would trust it"
+    )
+
+
 def test_an_invalid_base_ref_is_refused_before_the_checkout_guard(
     tmp_path: pathlib.Path,
 ) -> None:
