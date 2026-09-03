@@ -42,7 +42,11 @@ base's — the commit under review
 does not change it — or the git blob id of the bytes the caller just verified,
 because every comparison here reads the working tree and none of them ever
 looked at what the commit would carry; the release root's own path walk,
-which the gate runs before anything reads through that root, since every check
+which the gate runs before anything reads through that root and
+``verify_release_chain`` runs again at its own top — so the public verifier
+and ``receipt verify`` are confined by it too, rather than certifying a chain
+reached through a symlinked interior component of a configured path — since
+every check
 that
 would meet a link there is downstream of following it — and which now hands
 the gate the approved directory held open, opened from the candidate root's
@@ -1383,7 +1387,13 @@ def assert_no_symlinked_release_root(root: pathlib.Path, spec: ChainSpec) -> Non
     the manifest directory's own name is — so the spelling check runs at every
     component of all three paths.
 
-    The gate reaches this through ``hold_release_root`` at the top of both of
+    Two callers reach this, at two depths, and both are wanted.
+    ``verify_release_chain`` runs it at its own top, before any manifest is
+    enumerated, so the public verifier and ``receipt verify`` get it with no
+    append gate in the picture — without which a chain behind a symlinked
+    interior component of a multi-component manifest path was verified and
+    reported as a pass. The gate reaches it earlier, through
+    ``hold_release_root`` at the top of both of
     its release-proposal paths, ahead of the reads, rather than after the
     comparisons the way the index checks run: a root that is not in the
     candidate tree is not a release root this verdict can be about, so there
@@ -2239,6 +2249,32 @@ def verify_release_chain(
     (unset) fields, which is visible to reflection such as
     ``dataclasses.asdict``.
 
+    The release tree's own confinement walk runs at the top of this function,
+    before any manifest is enumerated: every component of the release root,
+    the manifest path and the anchor path is required to be spelled by the
+    directory that holds it and to be reached through no symlink. It was
+    added for the append gate and reached only from there, through
+    ``hold_release_root``, which left this function — and so ``receipt
+    verify``, whose custody pass is this function — verifying a chain reached
+    through a symlinked interior component of a multi-component manifest path,
+    and one stored under a leaf spelled some other way wherever names fold.
+    Measured before the move: ``receipt verify`` over a clone whose
+    ``releases/journal`` is a link to a directory outside it returned
+    ``VERDICT: PASS — custody and corpus binding``, for a release history no
+    part of which was in the tree the auditor had been handed.
+
+    The gate's own call is kept rather than removed as a duplicate, because it
+    is not one. It reaches the walk through ``hold_release_root``, which opens
+    and holds the directory the walk approved for the whole of a proposal, and
+    it stands at the top of both release-proposal paths, ahead of the
+    release-history pass and the push path's type decision. This one stands
+    inside the chain verification those paths eventually call. Moving the
+    gate's to here would move every pre-emption round 12 established and
+    pinned — a dangling release-root link answered as a link rather than as a
+    deleted release file, a folded ``Releases`` answered as a spelling rather
+    than as changed bytes — and would leave ``hold_release_root`` holding a
+    descriptor for a root nothing had walked.
+
     ``state_bytes`` maps a relative POSIX state path to the bytes a caller
     has already read for it, and those bytes are used in place of reading
     that path. It exists for a caller that reads each state file once and
@@ -2278,6 +2314,25 @@ def verify_release_chain(
     anchor_observer: dict[str, str] | None = (
         {} if compute_anchor_set_digest else None
     )
+
+    # Every component of all three configured paths, before anything reads
+    # through any of them. This walk was added for the append gate and reached
+    # only from there, through ``hold_release_root``, so the public verifier —
+    # and ``receipt verify``, whose custody pass is this function — verified a
+    # chain reached through a symlinked interior component of a
+    # multi-component manifest path, and one stored under a leaf spelled some
+    # other way wherever names fold. Neither is the path the spec pins, and
+    # both are outside the tree the auditor was handed. It runs here, after the
+    # arguments are validated and the anchor probe has had its say, and before
+    # the enumeration, because everything below resolves these names again.
+    #
+    # It walks all three paths whatever ``anchor_dir`` says. An override
+    # replaces the directory the anchors are *read* from; it does not make the
+    # spec's own anchor path something this root may reach through a link, and
+    # the walk asks only what each component is and how it is spelled — never
+    # about the leaf's type, which is where a caller's override legitimately
+    # differs.
+    assert_no_symlinked_release_root(root, spec)
 
     enumerated = _enumerate_manifest_files(root, spec)
     if not enumerated:
