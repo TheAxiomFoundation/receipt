@@ -2054,6 +2054,91 @@ def test_a_short_write_does_not_truncate_the_verdict() -> None:
     assert stream.buffer.calls > 6
 
 
+class _OneUnitTarget:
+    """A writer that takes exactly one unit per call and records the offers.
+
+    The degenerate short writer, and the one the copying cost is worst on. It
+    records the length of everything it is offered and, separately, how many
+    units had to be *materialised* to make those offers: a ``memoryview``
+    slice is a window on the caller's own buffer and costs nothing, while a
+    ``bytes`` or ``str`` slice is a fresh object of that length.
+    """
+
+    def __init__(self) -> None:
+        self.data: list[object] = []
+        self.offered: list[int] = []
+        self.materialised = 0
+
+    def write(self, payload) -> int:
+        self.offered.append(len(payload))
+        if not isinstance(payload, memoryview):
+            self.materialised += len(payload)
+        self.data.append(payload[:1] if isinstance(payload, str) else bytes(payload[:1]))
+        return 1
+
+    def flush(self) -> None:
+        return None
+
+
+def test_a_one_unit_writer_costs_the_payload_and_not_its_square() -> None:
+    """Binds S6-F5: the remainder was copied after every short write.
+
+    ``_write_all`` repeated the write until the payload was gone by rebinding
+    ``payload = payload[written:]``, which copies everything left over on
+    every call. A writer that takes one unit at a time therefore made the
+    loop copy N + (N−1) + … + 1 units to write N — quadratic in the length of
+    a verdict, on exactly the streams this loop exists for, since a
+    ``BufferedWriter`` never short-writes and a raw or unbuffered one is
+    where the counts come from at all. Nothing here is adversary-controlled,
+    so this is cost rather than a hole; it is still the wrong shape.
+
+    The loop tracks an offset into one ``memoryview`` now. What each call is
+    offered is a window on the caller's own buffer, so the offers are still
+    N, N−1, … by length and nothing whatever is copied to make them, which is
+    what the recorder separates. Without the fix ``materialised`` is the sum
+    of the offers — over eight million units for this four-kilobyte payload.
+    """
+
+    from receipt.cli import _write_all
+
+    payload = b"x" * 4096
+    target = _OneUnitTarget()
+    _write_all(target, payload)
+
+    assert b"".join(target.data) == payload
+    assert len(target.offered) == len(payload)
+    assert target.materialised == 0
+    # The offers themselves are unchanged — each call is offered everything
+    # that is left — so what the fix removes is the copying and not the
+    # accounting.
+    assert sum(target.offered) == len(payload) * (len(payload) + 1) // 2
+
+
+def test_a_one_unit_text_writer_still_writes_the_whole_verdict() -> None:
+    """Binds S6-F5, the text half: the same loop, the other payload type.
+
+    ``_emit``'s bufferless fallback hands this loop a ``str``, and ``str``
+    has no buffer protocol to take a view of, so the remainder is a copy per
+    short write there and the docstring says so. What must hold either way is
+    that the offset drives the loop and the payload arrives whole: a bug in
+    the offset arithmetic truncates or repeats a verdict, which is the defect
+    the loop was added for.
+
+    This test passes with the S6-F5 change disabled, which is the point: it
+    is the control that keeps the rewrite from changing what a short-writing
+    text stream receives.
+    """
+
+    from receipt.cli import _write_all
+
+    payload = "VERDICT: FAIL \u2014 binding\nreceipt verify: FAIL"
+    target = _OneUnitTarget()
+    _write_all(target, payload)
+
+    assert "".join(target.data) == payload
+    assert len(target.offered) == len(payload)
+
+
 def test_a_stream_that_takes_no_bytes_becomes_the_render_refusal(
     repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
