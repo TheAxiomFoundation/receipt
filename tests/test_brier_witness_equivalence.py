@@ -91,6 +91,14 @@ Deliberately outside the mutation contract:
   port also refuses a record that is not a readable regular file, where the
   baseline let the hash raise ``OSError``; the chain walk enumerates the
   records it goes on to verify, so no case here presents one;
+- the baseline hashes a claimed ``TimeStampResp`` through one open of its
+  pathname and then lets ``openssl ts -reply`` and ``openssl ts -verify`` open
+  it twice more; the port reads it once and gives both of them a private
+  byte-for-byte copy.  The bytes are the same bytes, so every case's outcome
+  is unchanged; only the ``-in`` argument's spelling changes, and again no
+  compared message quotes an OpenSSL command line -- the flip and truncation
+  mutations retain the committed hash on purpose and bind the deterministic
+  token-hash refusal before OpenSSL is reached;
 - the baseline compares a bundle's anchors with the code identities in one
   direction only, so an identity scoped to a bundle whose anchors do not
   include it is ignored; the port requires the two sets to be equal at load.
@@ -112,12 +120,16 @@ Deliberately outside the mutation contract:
   (``fa02bd55...`` for ``freetsa-root-2016``, ``7abda95e...`` for
   ``digicert-trusted-root-g4``), so no case here reaches the refusal;
 - the baseline de-duplicates a v2 witness's anchor outcomes by anchor id and
-  leaves the token free; the port additionally requires every verified token's
-  digest to be distinct across the witness's primary and supplemental outcomes
-  together, refusing at the outcome that repeats one and so ahead of the
-  ported refusals inside the token verifier.  The 53 pinned witnesses declare
-  91 tokens between them, at most two per witness and never the same digest
-  twice, so the refusal fires on no case here;
+  leaves the response free; the port additionally requires every verified
+  response to be distinct across the witness's primary and supplemental
+  outcomes together, by two rules: the file an outcome names, refused ahead of
+  the ported refusals inside the token verifier, and the signed
+  ``TimeStampToken`` extracted from it, refused where that verifier returns
+  (the ``PKIStatusInfo`` wrapper around a token is unsigned, so two files with
+  different digests can carry one identical token).  The 53 pinned witnesses
+  declare 91 tokens between them, at most two per witness, and neither the
+  same file digest nor the same signed token twice, so neither refusal fires
+  on any case here;
 - the baseline takes an anchor ID alone for the active identity when deciding
   which anchors of a pending bundle need a supplemental outcome, so a pending
   anchor reusing an active ID under a different root is skipped; the port

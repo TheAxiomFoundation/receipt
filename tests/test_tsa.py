@@ -31,6 +31,7 @@ from receipt.tsa import (
     _certificate_count,
     _decode_oid,
     _load_trust_bundle,
+    _read_der_tlv,
     _BUNDLE_CLAIM_FIELDS,
     TokenEvidence,
     TrustBundleSpec,
@@ -938,7 +939,7 @@ def test_refuses_a_token_whose_imprint_is_over_other_bytes(
     # record, the token, the pinned root -- so none of them is stable across
     # runs and none of them is a file in the records tree.
     assert message.startswith(f"OpenSSL command failed ({TS_VERIFY_COMMAND} ")
-    assert str(tree.record) not in openssl_command(message)
+    assert str(tree.records) not in openssl_command(message)
     assert "ts_check_imprints:message imprint mismatch" in message
 
 
@@ -2324,7 +2325,7 @@ def test_a_root_swapped_after_validation_is_not_what_gets_trusted(
     prefix = f"OpenSSL command failed ({TS_VERIFY_COMMAND} "
     assert str(unswapped.value).startswith(prefix)
     assert str(swapped.value).startswith(prefix)
-    assert str(tree.record) not in openssl_command(str(swapped.value))
+    assert str(tree.records) not in openssl_command(str(swapped.value))
     assert openssl_failure_detail(str(swapped.value)) == openssl_failure_detail(
         str(unswapped.value)
     )
@@ -2403,7 +2404,7 @@ def test_a_second_authority_appended_after_the_count_is_not_trusted(
     prefix = f"OpenSSL command failed ({TS_VERIFY_COMMAND} "
     assert str(unswapped.value).startswith(prefix)
     assert str(swapped.value).startswith(prefix)
-    assert str(tree.record) not in openssl_command(str(swapped.value))
+    assert str(tree.records) not in openssl_command(str(swapped.value))
     assert openssl_failure_detail(str(swapped.value)) == openssl_failure_detail(
         str(unswapped.value)
     )
@@ -2504,7 +2505,7 @@ def test_a_record_swapped_at_the_data_read_is_not_what_the_token_covered(
     assert tree.record.read_bytes() == witnessed
     message = str(caught.value)
     assert message.startswith(f"OpenSSL command failed ({TS_VERIFY_COMMAND} ")
-    assert str(tree.record) not in openssl_command(message)
+    assert str(tree.records) not in openssl_command(message)
     assert "ts_check_imprints:message imprint mismatch" in message
 
 
@@ -2725,7 +2726,9 @@ def test_refuses_one_token_supplied_under_two_anchor_outcomes(
     about coverage, not about cryptography, and that is what this binds: the
     refusal names the reused digest and fires at the second outcome, before
     that outcome's token is put to OpenSSL at all -- the recorder sees one
-    verification, the first outcome's. Two authorities with distinct roots is
+    verification, the first outcome's. It is the file rule that fires here,
+    because both outcomes name the same bytes; the signed-token rule below is
+    the one for two files carrying one token. Two authorities with distinct roots is
     the case where the reuse would have been caught later anyway, though by a
     check about the token rather than about coverage (with the rule removed
     this witness refuses on the policy the copied claim declares), and binding
@@ -2752,8 +2755,40 @@ def test_refuses_one_token_supplied_under_two_anchor_outcomes(
     verified = record_token_verifications(monkeypatch)
     with pytest.raises(TsaError) as caught:
         verify_tree(tree)
-    assert str(caught.value) == f"duplicate TSA token across anchor outcomes: {reused}"
+    assert str(caught.value) == (
+        f"duplicate TSA token file across anchor outcomes: {reused}"
+    )
     assert [claim["tsaAnchorId"] for claim in verified] == [alpha.anchor_id]
+
+
+def supplemental_outcome(
+    tree: WitnessTree,
+    pending: Mapping[str, Any],
+    anchor: LocalAnchor,
+    token: pathlib.Path,
+    primary: Mapping[str, Any],
+) -> dict[str, Any]:
+    """One ``supplementalOutcomes`` member offering ``token`` for ``anchor``.
+
+    Everything the primary outcome says about its response except the response
+    itself. The pending anchor in both tests below is the active authority
+    under a second id, so the policy and the signer really are the same and
+    the response is the only thing that may differ -- which is what makes the
+    reuse cases below the shape a coverage rule has to catch.
+    """
+
+    return {
+        **{field: primary[field] for field in _TOKEN_FIELDS},
+        "role": "pending_trust_bundle",
+        "status": "available",
+        "trustBundleId": pending["bundleId"],
+        "trustBundlePath": pending["path"],
+        "trustBundleSha256": pending["sha256"],
+        "tsaAnchorId": anchor.anchor_id,
+        "tsa": anchor.endpoint,
+        "tokenPath": logical_path(tree.records, token),
+        "tokenSha256": sha256_bytes(token.read_bytes()),
+    }
 
 
 def test_refuses_a_token_reused_between_a_primary_and_a_supplemental_outcome(
@@ -2770,8 +2805,10 @@ def test_refuses_a_token_reused_between_a_primary_and_a_supplemental_outcome(
     primary outcome and the pending anchor's supplemental outcome at once, and
     both verify: the control below stamps a second, distinct token for the
     pending anchor and the same witness verifies with one token and one
-    supplemental token. Reuse the first token instead and, without this rule,
-    the pending authority is admitted on evidence it never produced.
+    supplemental token -- distinct as files and distinct as signed tokens,
+    which is what says the rules count responses and not issuances. Reuse the
+    first token instead and, without this rule, the pending authority is
+    admitted on evidence it never produced.
     """
 
     alpha = local_anchors[0]
@@ -2781,18 +2818,7 @@ def test_refuses_a_token_reused_between_a_primary_and_a_supplemental_outcome(
     primary = json.loads(tree.witness.read_text())["anchorOutcomes"][0]
 
     def supplemental_over(token: pathlib.Path) -> dict[str, Any]:
-        return {
-            **{field: primary[field] for field in _TOKEN_FIELDS},
-            "role": "pending_trust_bundle",
-            "status": "available",
-            "trustBundleId": pending["bundleId"],
-            "trustBundlePath": pending["path"],
-            "trustBundleSha256": pending["sha256"],
-            "tsaAnchorId": mirror.anchor_id,
-            "tsa": mirror.endpoint,
-            "tokenPath": logical_path(tree.records, token),
-            "tokenSha256": sha256_bytes(token.read_bytes()),
-        }
+        return supplemental_outcome(tree, pending, mirror, token, primary)
 
     def transition() -> WitnessEvidence:
         return verify_witness(
@@ -2820,6 +2846,12 @@ def test_refuses_a_token_reused_between_a_primary_and_a_supplemental_outcome(
     assert [token.anchor_id for token in evidence.supplemental_tokens] == [
         mirror.anchor_id
     ]
+    # Two genuine issuances by one authority over one digest are two tokens by
+    # either identity: distinct files, and distinct signed TimeStampTokens.
+    assert (
+        evidence.tokens[0].signed_token_sha256
+        != evidence.supplemental_tokens[0].signed_token_sha256
+    )
 
     # And the reuse the rule refuses.
     rewrite_witness(
@@ -2833,9 +2865,223 @@ def test_refuses_a_token_reused_between_a_primary_and_a_supplemental_outcome(
     with pytest.raises(TsaError) as caught:
         transition()
     assert str(caught.value) == (
-        f"duplicate TSA token across anchor outcomes: {primary['tokenSha256']}"
+        f"duplicate TSA token file across anchor outcomes: {primary['tokenSha256']}"
     )
     assert [claim["tsaAnchorId"] for claim in verified] == [alpha.anchor_id]
+
+
+
+def swap_the_token_at_the_first_read(
+    monkeypatch: pytest.MonkeyPatch, target: pathlib.Path, content: bytes
+) -> list[str]:
+    """Overwrite ``target`` the instant OpenSSL is about to read a response.
+
+    ``openssl ts -reply`` is the first thing done with a claimed token, and it
+    used to be done to the pathname the declared digest had been taken from
+    through an earlier open. This is the writer who arrives in that gap.
+    """
+
+    original = tsa_module._run_openssl
+    reads: list[str] = []
+
+    def swapping(arguments: list[str], **keywords: Any) -> Any:
+        if arguments[:2] == ["ts", "-reply"]:
+            target.write_bytes(content)
+            reads.append(arguments[1])
+        return original(arguments, **keywords)
+
+    monkeypatch.setattr(tsa_module, "_run_openssl", swapping)
+    return reads
+
+
+def test_a_token_swapped_after_its_hash_check_is_not_what_gets_verified(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S4-F2: the response OpenSSL reads is the one the digest was taken from.
+
+    ``tokenSha256`` was computed from one open of the response's pathname and
+    ``openssl ts -reply`` and ``openssl ts -verify`` then made two more, so
+    the digest an auditor is shown described the file at an earlier instant
+    than the one the verification read. A writer with access to the records
+    tree could let the hash check pass on the response the witness declares
+    and hand the verifications a different one -- and both responses here are
+    genuine stamps by the pinned authority over this very record, so the
+    substituted one verifies just as well and nothing downstream objects.
+
+    The two are distinguishable in the evidence, asserted below: a second
+    issuance carries its own serial, so its signed token has its own digest.
+    Without the one read the swap moves that digest while ``token_sha256``
+    goes on naming the file the witness declared, which is evidence about two
+    different responses in one record. With it the verifications are given a
+    private copy of the bytes that were hashed, and the swap changes what is
+    on disk and nothing else.
+    """
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    claimed = tree.tokens[alpha.anchor_id]
+    substitute = tree.records / RECORD_DAY / "record-0001.second-issuance.tsr"
+    alpha.tsa.stamp(sha256_bytes(tree.record.read_bytes()), substitute)
+    assert sha256_bytes(substitute.read_bytes()) != sha256_bytes(claimed.read_bytes())
+
+    claim = token_claim(tree, alpha)
+    verify = lambda: verify_timestamp_token(
+        tree.record, claim, tree.reference, spec=tree.spec, records=tree.records
+    )
+    unswapped = verify()
+    # The premise: the substitute is a response of its own, and the evidence
+    # would say so.
+    substituted_evidence = verify_timestamp_token(
+        tree.record,
+        claim_against(tree, tree.reference, alpha, substitute),
+        tree.reference,
+        spec=tree.spec,
+        records=tree.records,
+    )
+    assert (
+        substituted_evidence.signed_token_sha256 != unswapped.signed_token_sha256
+    )
+
+    reads = swap_the_token_at_the_first_read(
+        monkeypatch, claimed, substitute.read_bytes()
+    )
+    swapped = verify()
+    # The writer really did run, and really did change the declared file.
+    assert reads == ["-reply"]
+    assert claimed.read_bytes() == substitute.read_bytes()
+    assert swapped == unswapped
+    assert swapped.token_sha256 == claim["tokenSha256"]
+
+
+def der_length(length: int) -> bytes:
+    """A DER definite-length octet string for ``length``."""
+
+    if length < 0x80:
+        return bytes([length])
+    body = length.to_bytes((length.bit_length() + 7) // 8, "big")
+    return bytes([0x80 | len(body)]) + body
+
+
+def der_tlv(tag: int, content: bytes) -> bytes:
+    return bytes([tag]) + der_length(len(content)) + content
+
+
+def rewrap_timestamp_response(response: bytes, note: str) -> bytes:
+    """The same signed token in a second ``TimeStampResp``, carrying ``note``.
+
+    ::
+
+        TimeStampResp  ::= SEQUENCE { status PKIStatusInfo,
+                                      timeStampToken TimeStampToken OPTIONAL }
+        PKIStatusInfo  ::= SEQUENCE { status PKIStatus,
+                                      statusString PKIFreeText OPTIONAL,
+                                      failInfo PKIFailureInfo OPTIONAL }
+        PKIFreeText    ::= SEQUENCE SIZE (1..MAX) OF UTF8String
+
+    Nothing signed is touched: the ``TimeStampToken`` is copied across byte
+    for byte and only the wrapper's optional ``statusString`` is added, which
+    is exactly the freedom a producer has. The result is a second file, with
+    its own SHA-256, that ``openssl ts -reply -token_out`` extracts the
+    identical token from -- asserted in the test below rather than assumed.
+    """
+
+    tag, body, end = _read_der_tlv(response, 0)
+    assert tag == 0x30 and end == len(response), "not one complete SEQUENCE"
+    status_tag, status, offset = _read_der_tlv(body, 0)
+    assert status_tag == 0x30, "PKIStatusInfo is not a SEQUENCE"
+    token = body[offset:]
+    integer_tag, _status_value, integer_end = _read_der_tlv(status, 0)
+    assert integer_tag == 0x02, "PKIStatus is not an INTEGER"
+    assert integer_end == len(status), "PKIStatusInfo already carries an option"
+    free_text = der_tlv(0x30, der_tlv(0x0C, note.encode("utf-8")))
+    return der_tlv(0x30, der_tlv(0x30, status[:integer_end] + free_text) + token)
+
+
+def signed_token_of(directory: pathlib.Path, response: pathlib.Path) -> bytes:
+    """The ``TimeStampToken`` OpenSSL extracts from a ``TimeStampResp`` file."""
+
+    extracted = directory / f"{response.stem}.token.der"
+    subprocess.run(
+        [
+            "openssl", "ts", "-reply", "-config", "/dev/null",
+            "-in", str(response), "-token_out", "-out", str(extracted),
+        ],
+        check=True,
+        capture_output=True,
+        env={**os.environ, "OPENSSL_CONF": "/dev/null", "LC_ALL": "C"},
+    )
+    return extracted.read_bytes()
+
+
+def test_refuses_a_re_wrapped_response_offered_as_a_second_token(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S4-F2: what covers an outcome is the signed token, not the file.
+
+    A ``TimeStampResp`` is a signed ``TimeStampToken`` inside an unsigned
+    ``PKIStatusInfo`` wrapper, and the wrapper is the producer's to write: an
+    optional ``statusString`` inserted into it changes the file's SHA-256 and
+    nothing the authority signed. So counting responses by ``tokenSha256``
+    counted files, and one genuine token in two wrappers was two tokens by
+    that count -- enough to cover a pending authority's supplemental outcome
+    with the active authority's response, which is the case the coverage rule
+    exists for and the one place a reused token is otherwise accepted.
+
+    Both halves of the premise are asked of OpenSSL directly below: the two
+    files have different digests, and ``ts -reply -token_out`` extracts
+    identical bytes from them. Without the signed-token identity the transition
+    verifies with one token and one supplemental token, both resting on one
+    response; with it the second outcome is refused by the digest of what was
+    actually signed, after its token is verified because that is the earliest
+    the identity is known -- the recorder shows both verifications ran.
+    """
+
+    alpha = local_anchors[0]
+    mirror = alias_of(alpha, anchor_id="alpha-mirror-2026")
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    pending, spec = add_bundle_version(tree, [mirror], version=2)
+    primary = json.loads(tree.witness.read_text())["anchorOutcomes"][0]
+    claimed = tree.tokens[alpha.anchor_id]
+    rewrapped = tree.records / RECORD_DAY / "record-0001.alpha-mirror-2026.tsr"
+    rewrapped.write_bytes(
+        rewrap_timestamp_response(
+            claimed.read_bytes(), "re-wrapped, and signed by nobody"
+        )
+    )
+    # The premise, from OpenSSL directly: two files, one signed token.
+    assert sha256_bytes(rewrapped.read_bytes()) != primary["tokenSha256"]
+    signed = signed_token_of(tmp_path, claimed)
+    assert signed_token_of(tmp_path, rewrapped) == signed
+
+    rewrite_witness(
+        tree,
+        lambda payload: payload.__setitem__(
+            "supplementalOutcomes",
+            [supplemental_outcome(tree, pending, mirror, rewrapped, primary)],
+        ),
+    )
+    verified = record_token_verifications(monkeypatch)
+    with pytest.raises(TsaError) as caught:
+        verify_witness(
+            tree.record,
+            spec=spec,
+            records=tree.records,
+            trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+            transition_bundle_updates=[pending],
+        )
+    assert str(caught.value) == (
+        "duplicate TSA token across anchor outcomes: "
+        f"{sha256_bytes(signed)}"
+    )
+    # The file rule cannot see this one: the two outcomes name different bytes.
+    assert [claim["tsaAnchorId"] for claim in verified] == [
+        alpha.anchor_id,
+        mirror.anchor_id,
+    ]
 
 
 @pytest.fixture
