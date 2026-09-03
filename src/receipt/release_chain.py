@@ -1387,7 +1387,7 @@ def assert_no_symlinked_release_root(root: pathlib.Path, spec: ChainSpec) -> Non
     the manifest directory's own name is — so the spelling check runs at every
     component of all three paths.
 
-    Two callers reach this, at two depths, and both are wanted.
+    Three callers reach this, at three depths, and all three are wanted.
     ``verify_release_chain`` runs it at its own top, before any manifest is
     enumerated, so the public verifier and ``receipt verify`` get it with no
     append gate in the picture — without which a chain behind a symlinked
@@ -1397,7 +1397,12 @@ def assert_no_symlinked_release_root(root: pathlib.Path, spec: ChainSpec) -> Non
     its release-proposal paths, ahead of the reads, rather than after the
     comparisons the way the index checks run: a root that is not in the
     candidate tree is not a release root this verdict can be about, so there
-    is nothing for a later refusal to be more specific about. It runs a second
+    is nothing for a later refusal to be more specific about. And the gate
+    reaches it once more on the exit that takes neither of those paths: a
+    gate-only verdict returns a confinement over the release root without
+    reading anything through it, so nothing there would otherwise have walked
+    it, and the confinement would have spoken for whatever an untracked link
+    at a component of the root pointed at. It runs a second
     time at the end of each path, from ``assert_release_root_unchanged``,
     because a walk on its own is a preflight every later read resolves again.
     For a single-component root — every consumer's, and every fixture's but

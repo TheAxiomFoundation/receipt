@@ -95,6 +95,14 @@ S5-R2-F3 — the release tree's confinement walk the public verifier never ran
 ``verify_release_chain`` and ``receipt verify`` are driven with no append gate
 in the picture.
 
+Docstrings labelled S5-G1-F1 onward name a fresh gate's first round,
+numbering from one again: S5-G1-F1 the release root's own ancestors, which
+classified as ordinary unclassified paths so that a gate-only proposal could
+replace the directory the root lives in, S5-G1-F2 the whole-index alias scan
+that covered the release root and the state paths but not the configured gate
+and data surfaces, S5-G1-F3 the surface walk's budget, which was charged only
+after a directory's whole listing had been built.
+
 The fixture is a local git repository built from scratch, and no network is
 used anywhere here. Most of it holds a README and no manifests, so the gate's
 chain verification finds nothing to verify and the checks under test are the
@@ -5257,6 +5265,122 @@ def test_a_symlinked_parent_of_a_nested_release_root_is_refused(
         run_push_gate_with_anchors(candidate, anchors, spec=spec)
     assert str(refusal.value) == (
         "release root path traverses a symlink at 'data': data/releases"
+    )
+
+def a_nested_base_with_no_release_tree(tmp_path: pathlib.Path) -> Candidate:
+    """A base configured for ``data/releases`` with nothing at ``data`` yet.
+
+    The release tree arrives later, which is the tree the ancestor cases below
+    are about: with nothing tracked under ``data``, a proposal that puts a
+    file or a link there is a change at a single path, and no deleted release
+    file gives the confinement something to refuse for another reason.
+    """
+
+    candidate = base_repository(tmp_path, "data/releases")
+    shutil.rmtree(candidate.root / "data")
+    return commit_all(candidate, "a base with no release tree")
+
+
+def test_a_file_standing_where_a_nested_release_root_lives_is_not_gate_only(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5-G1-F1. The gate-only exit claims a confinement over the
+    release root, and every check that could make that claim good — the root's
+    component walk, the working-tree enumeration, the index scan — is
+    downstream of it. What the confinement itself asked was whether an
+    unclassified change was *at* the root or under it, so with a root of
+    ``data/releases`` a proposal replacing ``data`` was neither: ``data``
+    matches no surface pattern, is not the release root and is not inside it.
+    It classified as an ordinary unclassified change and the verdict named it
+    beside ``DATA_SURFACE unchanged``, over a tree whose release root had
+    stopped being a directory at all.
+
+    The release root's ancestors are on the release surface for the reason the
+    root is: the root's existence as a real directory is the premise of every
+    release-root check, and a proposal that changes that premise is not
+    gate-only.
+
+    Measured at 427e08d: ``thesis-facts append check OK: gate-only proposal;
+    DATA_SURFACE unchanged; GATE_SURFACE changes=['scripts/check_append.py'];
+    unclassified changes=['data']``. The walk has nothing to say about this
+    tree — ``data`` is a regular file, not a link, and a listing of it fails
+    with ``ENOTDIR``, which is the absence answer both walks pass on — so what
+    refuses is the confinement, in its own words."""
+
+    spec = spec_with_release_root("data/releases")
+    candidate = a_nested_base_with_no_release_tree(tmp_path)
+    add_gate_file(candidate)
+    (candidate.root / "data").write_text("not a directory\n", encoding="utf-8")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate, spec=spec)
+    assert str(refusal.value) == (
+        "gate-only proposal changes unclassified release path(s): ['data']"
+    )
+
+
+def test_a_linked_ancestor_of_a_nested_release_root_is_refused_before_the_verdict(
+    tmp_path: pathlib.Path, witnesses: Witnesses
+) -> None:
+    """S5-G1-F1 where the ancestor redirects rather than removes, which is the
+    escape in its complete form: ``data`` is an untracked link to a directory
+    outside the checkout holding a whole valid release chain, so
+    ``data/releases`` resolves to a real directory, ``data/releases/manifests``
+    to a real chain, and the gate-only verdict's confinement — the only claim
+    that exit makes about the release tree — was a statement about a release
+    history no part of which is in the tree under review.
+    ``test_a_symlinked_parent_of_a_nested_release_root_is_refused`` binds the
+    same substitution on the push path, where the walk was already reached.
+
+    The walk runs before the gate-only verdict now, and it answers first: this
+    tree is refused in the words that name the component that redirects, not
+    in the confinement's, which would say only that a path on the release
+    surface changed. Both refusals are correct about this tree and the walk's
+    is the more specific.
+
+    Measured at 427e08d: ``thesis-facts append check OK: gate-only proposal;
+    DATA_SURFACE unchanged; GATE_SURFACE changes=['scripts/check_append.py'];
+    unclassified changes=['data']``, with the outside chain unread and
+    unmentioned."""
+
+    spec = spec_with_release_root("data/releases")
+    candidate = a_nested_base_with_no_release_tree(tmp_path)
+    outside = an_outside_release_tree(
+        tmp_path,
+        "releases/manifests",
+        witnesses=witnesses,
+        candidate=candidate,
+        anchors=tmp_path / "anchors",
+        chain=spec.chain,
+    )
+    add_gate_file(candidate)
+    (candidate.root / "data").symlink_to(outside)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate, spec=spec)
+    assert str(refusal.value) == (
+        "release root path traverses a symlink at 'data': data/releases"
+    )
+
+
+def test_an_untouched_nested_release_root_still_returns_gate_only(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S5-G1-F1's other side. Neither half of the fix costs a legitimate
+    proposal anything: a nested release root that is a real directory the
+    proposal does not touch is walked, found to be what the spec names, and
+    the gate-only verdict is exactly the one it always was. The ancestor
+    ``data`` is on the release surface, and no change is proposed at it.
+
+    The same verdict with and without the fix, which is the binding."""
+
+    spec = spec_with_release_root("data/releases")
+    candidate = base_repository(tmp_path, "data/releases")
+    add_gate_file(candidate)
+
+    assert run_gate(candidate, spec=spec) == (
+        "thesis-facts append check OK: gate-only proposal; DATA_SURFACE "
+        f"unchanged; GATE_SURFACE changes=['{GATE_FILE}']"
     )
 
 
