@@ -39,7 +39,13 @@ Additions since the extraction close confinement gaps the upstream battery
 never presented: a gate-only proposal is confined to the surfaces its verdict
 speaks for, classified from what the candidate index records as well as from
 what its working tree shows, a state path that traverses a symlinked component
-is refused before it is read, the base is resolved to a commit once and
+is refused before it is read and so is a release root that does — its own
+components are walked from the candidate root before anything reads through
+them, because the checks that would have met a link are all downstream of
+reading through it — with every component of both required to be spelled by
+the directory that holds it, since what a component *is* comes from resolving
+its name and a name-folding filesystem resolves one this package never named,
+the base is resolved to a commit once and
 carried to every consumer, every git read runs with ``refs/replace`` disabled
 so a replacement object cannot change what the printed OID reads as, each
 state file is read once — through directory descriptors, so no component of
@@ -116,7 +122,24 @@ path the whole run takes, because a root exchanged since ``_set_root``
 recorded it means the tree being classified is not the tree this verdict was
 asked about; it runs again before the gate-only return, which is the one exit
 reached without a state read and therefore without the descent that would
-otherwise make the comparison. Nothing else is an exception: the per-file
+otherwise make the comparison.
+
+``release_chain.assert_no_symlinked_release_root`` is placed by the same rule
+those three follow rather than being a fourth entry-level one: it runs at the
+top of both release-proposal paths, ahead of every read through the release
+root, because a root reached through a linked component — or under a spelling
+the candidate tree does not hold — is not this proposal's release root, and
+nothing read through it is evidence about this proposal. For a
+single-component root, which is what every consumer here and every fixture
+has, the only input it refuses that the enumeration below would also have
+refused is a symlinked root itself, and it gives that refusal in the
+enumeration's own words, so nothing observable is pre-empted; everything else
+it refuses, nothing refused before. A root of more than one component can also
+pre-empt the enumeration's byte and mode refusals about the files it would
+have reached through the link — comparisons whose subject is a file outside
+the tree.
+
+Nothing else is an exception: the per-file
 ``release_chain.assert_index_agrees_with_tree``, the check beside it that
 every base release file is still an entry in the candidate index, and the
 release root's index scan all run after the comparisons they qualify, so a
@@ -184,6 +207,7 @@ from receipt.release_chain import (
     ChainSpec,
     MANIFEST_RE,
     ReleaseChainError,
+    assert_no_symlinked_release_root,
     assert_no_symlinked_state_component,
     assert_release_root_index_regular,
     assert_secure_descent_supported,
@@ -1393,6 +1417,17 @@ def check_release_proposal(
     append must carry exactly one next release bundle.
     """
 
+    # Before anything reads through the release root, on this path and the
+    # push path alike: a root reached through a symlinked component, or under
+    # a spelling the candidate tree does not hold, is not this proposal's
+    # release root, and every comparison below would be about whatever it
+    # points at. The leaf case is the enumeration's own refusal, in its
+    # words, so the base-ref path answers a symlinked ``releases`` exactly as
+    # it always has.
+    try:
+        assert_no_symlinked_release_root(candidate.root, candidate.spec.chain)
+    except ReleaseChainError as exc:
+        raise AppendError(str(exc)) from exc
     try:
         commit, new_files, base_release_entries = verify_release_history_immutable(
             candidate.root,
@@ -1519,6 +1554,15 @@ def check_release_chain_without_base(
     with no chain returns here without one otherwise.
     """
 
+    # First, because ``is_dir()`` below follows every component of the path it
+    # is given: an untracked ``releases`` pointing outside the checkout made
+    # the chain in that directory the one this path verified, and the root's
+    # index scan at the end cannot say so — it refuses a symlinked root only
+    # when the index holds entries under it, and an untracked one holds none.
+    try:
+        assert_no_symlinked_release_root(candidate.root, candidate.spec.chain)
+    except ReleaseChainError as exc:
+        raise AppendError(str(exc)) from exc
     manifest_directory = candidate.root / candidate.spec.chain.manifest_relative
     initialized = manifest_directory.is_dir() and any(manifest_directory.iterdir())
     verification = None

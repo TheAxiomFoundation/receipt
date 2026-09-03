@@ -52,10 +52,12 @@ is bound in tests/test_release_chain.py, where the public custody path and
 ``receipt verify`` itself are driven.
 
 Docstrings labelled S4R2-F1 onward name that fourth gate's second round,
-numbering from one again: S4R2-F2 the protected path an index entry could
-spell another way, S4R2-F3 the root identity that was two numbers a
-filesystem may hand to another directory, S4R2-F4 the configured path handed
-to ``git ls-tree`` as a pathspec rather than as a name.
+numbering from one again: S4R2-F1 the release root reached through a
+symlinked component, S4R2-F2 the protected path an index entry could spell
+another way (F2a) or the working tree could spell another way (F2b), S4R2-F3
+the root identity that was two numbers a filesystem may hand to another
+directory, S4R2-F4 the configured path handed to ``git ls-tree`` as a
+pathspec rather than as a name.
 
 The fixture is a local git repository built from scratch — no network, no
 witnesses, no signatures. Its release tree holds a README and no manifests, so
@@ -74,6 +76,7 @@ import pathlib
 import shutil
 import signal
 import subprocess
+import tempfile
 import unicodedata
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
@@ -160,6 +163,29 @@ GATE_SPEC = AppendGateSpec(
 PREFIX_LINE_COUNT = 1
 BASE_ROW_COUNT = 2
 GATE_FILE = "scripts/check_append.py"
+
+
+def _filesystem_conflates(spelled: str, with_other: str) -> bool:
+    """Whether the filesystem holding temporary files folds two spellings.
+
+    Asked of the filesystem the fixtures are built on, because that is what
+    decides whether a spelling case can be constructed at all: where names are
+    compared exactly, a name that resolves is a name its directory lists, so a
+    working tree cannot hold one spelling and answer to another. APFS and HFS+
+    fold both case and Unicode normalisation; ext4 — and so CI — folds
+    neither.
+    """
+
+    with tempfile.TemporaryDirectory() as name:
+        directory = pathlib.Path(name)
+        (directory / spelled).mkdir()
+        return (directory / with_other).exists()
+
+
+CASE_IS_FOLDED = _filesystem_conflates("receipt-probe", "RECEIPT-PROBE")
+NORMALISATION_IS_FOLDED = _filesystem_conflates(
+    unicodedata.normalize("NFD", "receipt-probé"), "receipt-probé"
+)
 
 
 @dataclass(frozen=True)
@@ -4145,4 +4171,214 @@ def test_an_index_alias_is_refused_against_a_base_as_well(
     assert str(refusal.value) == (
         "index carries an alias of a protected path: Releases/README.md "
         "(for releases)"
+    )
+
+
+def an_outside_release_tree(tmp_path: pathlib.Path, holding: str) -> pathlib.Path:
+    """A release tree outside the candidate, with a manifest directory in it.
+
+    A manifest is what makes the difference visible: the push path decides
+    whether a chain exists by asking ``is_dir()`` about the manifest
+    directory, which follows every component of the path it is given, so a
+    root pointing here made this chain the one the verdict spoke for.
+    """
+
+    outside = tmp_path / "outside"
+    manifests = outside / holding
+    manifests.mkdir(parents=True)
+    (manifests / "0000-0000000000000000.json").write_text("{}\n", encoding="utf-8")
+    return outside
+
+
+def test_a_symlinked_release_root_is_refused_on_the_push_path(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S4R2-F1: on the push path everything the gate knows about a
+    release tree it learns by joining the configured root onto the candidate
+    root and reading what the join lands on — ``initialized`` is
+    ``manifest_directory.is_dir()``, which follows links — and nothing asked
+    what the join went through. So an untracked ``releases`` pointing at a
+    directory outside the checkout made the chain inside *that* directory the
+    one ``verify_release_chain`` was run against, and the verdict spoke for a
+    release history that is no part of the tree under review, no part of the
+    commit under review, and diffable against no base.
+
+    The root's index scan cannot say so: it refuses a symlinked root only
+    when the index records entries under that root, and an untracked one
+    records none, so it returns. Walking the root's own components before
+    anything reads through them is what answers it, in the words this package
+    has always refused a symlinked ``releases`` with.
+
+    Without the walk this run reaches ``verify_release_chain`` and refuses —
+    or accepts — on the strength of the outside manifest."""
+
+    candidate = base_repository(tmp_path)
+    shutil.rmtree(candidate.root / "releases")
+    candidate = commit_all(candidate, "a base with no release tree")
+    outside = an_outside_release_tree(tmp_path, "manifests")
+    (candidate.root / "releases").symlink_to(outside)
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate)
+    assert str(refusal.value) == "releases must be a real directory, not a symlink"
+
+
+def test_a_symlinked_parent_of_a_nested_release_root_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S4R2-F1 for a component above the root, which is the same substitution
+    without the root itself being a link: a spec whose release root is
+    ``data/releases`` reaches it through ``data``, and a link there redirects
+    the whole subtree exactly as a link at the leaf does. The leaf's own
+    refusal cannot see it — ``releases`` under the link is a real directory —
+    and the index scan again records nothing for an untracked root.
+
+    The component that redirects is named, in the shape the state-path walk
+    uses for the same fact."""
+
+    spec = spec_with_release_root("data/releases")
+    candidate = base_repository(tmp_path, "data/releases")
+    shutil.rmtree(candidate.root / "data")
+    candidate = commit_all(candidate, "a base with no release tree")
+    outside = an_outside_release_tree(tmp_path, "releases/manifests")
+    (candidate.root / "data").symlink_to(outside)
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate, spec=spec)
+    assert str(refusal.value) == (
+        "release root path traverses a symlink at 'data': data/releases"
+    )
+
+
+def test_the_base_ref_path_keeps_its_symlinked_release_root_refusal(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S4R2-F1's placement against a base, which is the order this pins. With
+    a base ref a symlinked ``releases`` was already refused, by
+    ``_working_release_files`` at the top of the release-history pass, and the
+    walk now runs ahead of that pass. It says the same sentence, so the
+    refusal for this tree is unchanged — that is the point of borrowing the
+    enumeration's words rather than minting new ones. This passes either way,
+    deliberately."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    outside = tmp_path / "outside"
+    shutil.move(str(candidate.root / "releases"), str(outside))
+    (candidate.root / "releases").symlink_to(outside)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == "releases must be a real directory, not a symlink"
+
+
+@pytest.mark.parametrize("path", ["push", "base-ref"])
+def test_a_release_root_spelled_differently_on_disk_is_refused(
+    tmp_path: pathlib.Path, path: str
+) -> None:
+    """Binds S4R2-F2b: every component of a configured path was checked by
+    resolving its name, and resolution is exactly where a case- or
+    normalisation-insensitive filesystem answers with a directory this package
+    never named. A checkout whose release directory is spelled ``Releases``
+    answers to ``releases``: the enumeration walks it, the index scan
+    reconciles against it, the manifests are read out of it, and the whole
+    verdict is about a release tree whose name is neither the one the spec
+    pins nor the one the index records. The directory's own listing is the
+    question that does not go through resolution, and it says ``Releases``.
+
+    On a filesystem that compares names exactly the rename is a deletion, so
+    the spelling case cannot exist there at all — a name that resolves is a
+    name its directory lists — and this tree is refused for being gone
+    instead. Both answers are fail-closed and both are asserted, because the
+    finding is about the filesystems where the first one is reachable. Without
+    the check, a case-folding filesystem accepts this tree on both paths."""
+
+    candidate = base_repository(tmp_path)
+    (candidate.root / "releases").rename(candidate.root / "Releases")
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate) if path == "push" else run_gate(candidate)
+    if CASE_IS_FOLDED:
+        expected = (
+            "path component releases is not spelled by its directory: releases"
+        )
+    elif path == "push":
+        expected = (
+            "release root is not a directory while the index records 1 entry "
+            "under it"
+        )
+    else:
+        expected = (
+            f"existing release file was deleted relative to {candidate.base}: "
+            "releases/README.md"
+        )
+    assert str(refusal.value) == expected
+
+
+def test_a_nested_release_root_component_in_another_normalisation_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S4R2-F2b for Unicode normalisation and for a component above the leaf,
+    which is the same hole without any change of case: APFS and HFS+ compare
+    names normalisation-insensitively, so a spec naming ``donnée/releases`` in
+    NFC is answered by a directory stored in NFD, and every read below is of a
+    subtree the spec does not name. The listing spells it one way, and the
+    component that is not that spelling is refused.
+
+    Where names are compared exactly the NFD rename is again a deletion, and
+    the tree is refused for that instead."""
+
+    composed = "donnée"
+    decomposed = unicodedata.normalize("NFD", composed)
+    assert composed != decomposed
+    spec = spec_with_release_root(f"{composed}/releases")
+    candidate = base_repository(tmp_path, f"{composed}/releases")
+    (candidate.root / composed).rename(candidate.root / decomposed)
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate, spec=spec)
+    if NORMALISATION_IS_FOLDED:
+        expected = (
+            f"path component {composed} is not spelled by its directory: "
+            f"{composed}/releases"
+        )
+    else:
+        expected = (
+            "release root is not a directory while the index records 1 entry "
+            "under it"
+        )
+    assert str(refusal.value) == expected
+
+
+@pytest.mark.skipif(
+    not CASE_IS_FOLDED,
+    reason="a name that resolves is a name its directory lists here",
+)
+def test_a_state_path_component_spelled_differently_on_disk_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S4R2-F2b for the two state paths, which reach their file through the
+    same kind of walk and had the same gap. ``ledger/`` resolves to a
+    ``Ledger/`` on disk, the descent opens it component by component and never
+    asks whether the component it opened is the one the directory holds, and
+    the bytes this verdict speaks for come out of a directory the index does
+    not record and no surface pattern names.
+
+    ``assert_state_path_tracked`` cannot answer it: the index entry it asks
+    about is there and is exactly right, which is the point — the index is
+    correct and the working tree is answering for it with something else.
+    Where names are compared exactly this refusal is unreachable, so the test
+    is skipped rather than asserting a different tree's answer; what covers
+    the index side there, on every filesystem, is
+    ``assert_index_carries_no_protected_alias``. Without the check this tree
+    is accepted, with the ledger read out of ``Ledger/``."""
+
+    candidate = base_repository(tmp_path)
+    (candidate.root / "ledger").rename(candidate.root / "Ledger")
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate)
+    assert str(refusal.value) == (
+        "path component ledger is not spelled by its directory: "
+        "ledger/official_observations.jsonl"
     )

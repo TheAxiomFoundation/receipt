@@ -31,7 +31,13 @@ case- or normalisation-insensitive filesystem answers one entry's question
 with another entry's file; the whole-index read that refuses an entry spelled
 as another spelling of a protected path, which every one of those
 reconciliations is blind to because each compares by exact spelling; the
-state-path guards ``append_gate`` calls;
+release root's own path walk, which the gate runs before anything reads
+through that root, since every check that would meet a link there is
+downstream of following it; the
+state-path guards ``append_gate`` calls, whose walk — like the release
+root's — now also requires each component to be spelled by the directory
+holding it, because what a component *is* is learned by resolving its name
+and a name-folding filesystem resolves a name this package never wrote;
 the anchor-set digest in the result) run beside the extracted checks without
 altering any of their refusals, and carry their own tests. Every one of those
 index reads names its path as a literal pathspec, so git is asked about the
@@ -1085,6 +1091,56 @@ def _is_reparse_point(path: pathlib.Path) -> bool:
     return stat.S_ISLNK(entry.st_mode) or bool(getattr(entry, "st_reparse_tag", 0))
 
 
+def _assert_component_spelled(
+    parent: pathlib.Path,
+    segment: str,
+    walked: tuple[str, ...],
+    relative: pathlib.PurePosixPath,
+) -> None:
+    """Require a directory to spell the component this walk is descending to.
+
+    Both walks below check what each component *is*, which they learn by
+    resolving the name — and resolution is where a case- or
+    normalisation-insensitive filesystem answers about a directory this
+    package never named. ``releases`` resolves to a ``Releases`` on disk, every
+    check that follows reads that directory, and the verdict is about a
+    release tree whose name is not the one the spec pins or the one the index
+    records. The directory's own listing is the question that does not go
+    through resolution: a directory holds the spelling it holds, and a
+    component that resolves but is not in the listing is a component this
+    verifier reached by a name the filesystem folded onto another.
+
+    A component that is not there at all is not this check's business — an
+    absent release root is legal, and an absent state file is the reader's
+    refusal — so it returns and lets the check after the walk say so. A
+    directory this verifier cannot list is not one that can answer either:
+    refusing there would take back the search-only descent that
+    ``confined_state_descriptor`` exists to allow, where a directory above a
+    state file is traversable and deliberately not listable. What answers for
+    the index in that case is ``assert_index_carries_no_protected_alias``,
+    which compares spellings and reads no directory at all.
+
+    On a filesystem that compares names exactly this refusal is unreachable by
+    construction: a name that resolves is a name the directory lists. It is
+    the fold-insensitive case it exists for.
+    """
+
+    try:
+        names = os.listdir(parent)
+    except OSError:
+        return
+    if segment in names:
+        return
+    try:
+        os.lstat(parent / segment)
+    except OSError:
+        return
+    raise ReleaseChainError(
+        f"path component {'/'.join(walked)} is not spelled by its directory: "
+        f"{relative.as_posix()}"
+    )
+
+
 def assert_no_symlinked_state_component(
     root: pathlib.Path, relative: pathlib.PurePosixPath
 ) -> None:
@@ -1100,16 +1156,82 @@ def assert_no_symlinked_state_component(
     The anchor path is walked this way at the top of ``verify_release_chain``;
     this is the same walk for the two state paths. (Mirrors
     ``corpus._assert_no_symlinked_component``.)
+
+    Each component's spelling is bound here too, after its own symlink check
+    so that a linked component keeps that answer: what a component *is* comes
+    from resolving its name, and resolution is what a name-folding filesystem
+    answers with another directory's entry. See ``_assert_component_spelled``.
     """
 
     current = root
     walked: tuple[str, ...] = ()
     for segment in relative.parts:
-        current = current / segment
+        child = current / segment
         walked = (*walked, segment)
         # A dangling link is still a link, and still refuses.
-        if _is_reparse_point(current):
+        if _is_reparse_point(child):
             raise _symlinked_component_error(relative, walked)
+        _assert_component_spelled(current, segment, walked, relative)
+        current = child
+
+
+def assert_no_symlinked_release_root(root: pathlib.Path, spec: ChainSpec) -> None:
+    """Refuse a release root reached through a link, before anything reads it.
+
+    Everything this package knows about a candidate's release tree it learns
+    by joining the configured root onto the candidate root and reading what
+    the join lands on. Nothing asked what the join went through. On the push
+    path that was the whole of it: ``initialized`` is
+    ``manifest_directory.is_dir()``, which follows links, so an untracked
+    ``releases`` pointing at a directory outside the checkout made the chain
+    inside *that* directory the one ``verify_release_chain`` verified, and the
+    verdict spoke for a release history no part of which is in the tree under
+    review, in the commit under review, or diffable against any base. The
+    root's index scan does not catch it: it refuses a symlinked root only when
+    the index holds entries under that root, and an untracked one holds none,
+    so it returns.
+
+    So every component of the release root, the root itself included, is
+    walked from the candidate root with ``lstat`` before anything reads
+    through it, and a link at any of them refuses. The leaf is refused in
+    ``_working_release_files``'s own words, because that is the same fact this
+    package has always refused a symlinked ``releases`` for and the base-ref
+    path reaches it there anyway; a component above the leaf gets the shape
+    the state-path walk uses, naming the component that redirects.
+
+    Each component's spelling is bound as well, for the reason the state
+    walk's is: ``lstat`` resolves a name, and on a name-folding filesystem a
+    root the spec spells one way is answered for by a directory spelled
+    another. See ``_assert_component_spelled``.
+
+    The gate calls this at the top of both of its release-proposal paths,
+    ahead of the reads, rather than after the comparisons the way the index
+    checks run: a root that is not in the candidate tree is not a release root
+    this verdict can be about, so there is nothing for a later refusal to be
+    more specific about. For a single-component root — every consumer's, and
+    the fixtures' — the only refusal that reaches an input the enumeration
+    would also have refused is the leaf link, and that one is word for word
+    what the enumeration says.
+    """
+
+    relative = spec.release_root_relative
+    parts = relative.parts
+    current = root
+    walked: tuple[str, ...] = ()
+    for depth, segment in enumerate(parts, start=1):
+        child = current / segment
+        walked = (*walked, segment)
+        if _is_reparse_point(child):
+            if depth == len(parts):
+                raise ReleaseChainError(
+                    "releases must be a real directory, not a symlink"
+                )
+            raise ReleaseChainError(
+                "release root path traverses a symlink at "
+                f"{'/'.join(walked)!r}: {relative.as_posix()}"
+            )
+        _assert_component_spelled(current, segment, walked, relative)
+        current = child
 
 
 STATE_OPEN_FLAGS = (
