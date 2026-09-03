@@ -84,7 +84,11 @@ to it. It is tracked as #43, and it is not done here.
 
 Additions since the extraction close confinement gaps the upstream battery
 never presented: a gate-only proposal is confined to the surfaces its verdict
-speaks for, classified from what the candidate index records as well as from
+speaks for — the release root, everything under it, and every proper ancestor
+of it, since with a root of ``data/releases`` a proposal replacing ``data``
+decides whether there is a release root for that confinement to be about, and
+a change there is a change on the release surface however little it looks like
+one — classified from what the candidate index records as well as from
 what its working tree shows — and from the *ignored* files on those surfaces,
 which the untracked half of that listing excludes by construction, so that a
 gate change carrying its own ignore rule cannot add a second ledger under the
@@ -256,7 +260,10 @@ rather than this gate's, again at the top of ``verify_release_chain``, so that
 earlier call is kept because it is the one that stands ahead of the
 release-history pass and the push path's type decision, and because
 ``hold_release_root`` opens the directory that walk approves and holds it for
-the whole proposal — each ahead of every read through the path it
+the whole proposal; and once more on the base-ref path immediately before a
+gate-only verdict is returned, which is the one exit that claims a confinement
+over the release root while reading nothing through it, and which therefore
+reached no walk at all — each ahead of every read through the path it
 walks, because a path reached through a linked component — or under a spelling
 the candidate tree does not hold — is not the path this verdict is about, and
 nothing read through it is evidence about this proposal. The second walks
@@ -420,6 +427,19 @@ path must be listable by this verifier. That is stated in ``README.md``, and
 it is what the price above buys — asking the question before the read, when
 the read is what the folded name would have answered.
 
+On the gate-only exit that walk pre-empts one refusal, and it is one of this
+branch's own: ``check_gate_only_confinement`` refuses a change on the release
+surface, and an untracked link at an ancestor of a nested root is such a
+change, so both the walk and the confinement are true about that tree. The
+walk answers, because it names the component that redirects rather than saying
+only that a path on the release surface changed. Nothing pre-existing moves —
+that exit reached no release-root check at all before this, which is the
+finding — and a tree the walk passes is left to the confinement exactly as it
+was: a regular file standing where the root's parent was is not a link, a
+listing of it fails with ``ENOTDIR``, which is the absence answer both walks
+pass on, and it is refused as an unclassified change on the release surface.
+Both cases are measured in the tests that bind them.
+
 And the release root's walk is a pathname preflight, so it is asked again
 at the end. Everything that reads through that root resolves its whole name
 afresh — ``manifest_directory.is_dir()`` and ``iterdir()`` on the push path,
@@ -535,6 +555,7 @@ from receipt.release_chain import (
     ChainSpec,
     MANIFEST_RE,
     ReleaseChainError,
+    assert_no_symlinked_release_root,
     assert_no_symlinked_state_component,
     assert_release_root_unchanged,
     assert_release_root_index_regular,
@@ -840,12 +861,39 @@ def _classify_surfaces(
     return data_changes, gate_changes, changed - data_changes - gate_changes
 
 
+def _release_root_ancestors(candidate: _CandidateTree) -> tuple[str, ...]:
+    """Every proper ancestor of the configured release root, shallowest first.
+
+    ``data`` for a root of ``data/releases``; nothing at all for a root of one
+    component, which is every consumer's. The candidate root itself is not
+    among them: it is the tree, not a path inside it, and a change is always
+    at some path under it.
+    """
+
+    parts = candidate.spec.chain.release_root_relative.parts
+    return tuple("/".join(parts[:depth]) for depth in range(1, len(parts)))
+
+
 def _is_protected(path: str, candidate: _CandidateTree) -> bool:
     """Whether one path lies on a surface this verdict speaks for.
 
-    The two surfaces the spec names, plus the release root, which is neither
-    but is read by the release verification all the same and is the one place
-    ``check_gate_only_confinement`` refuses an unclassified change.
+    The two surfaces the spec names, plus the release root and everything
+    under it, which is neither but is read by the release verification all the
+    same and is the one place ``check_gate_only_confinement`` refuses an
+    unclassified change.
+
+    And the release root's own ancestors, which are on that surface for the
+    reason the root is: the root's existence as a real directory is the
+    premise of every check made about the release tree, and a path above it
+    decides that premise. With a root of ``data/releases``, replacing ``data``
+    with a regular file or with a link to a tree outside the checkout changes
+    what ``data/releases`` is or where it lives, while ``data`` itself matched
+    no surface pattern, was not the root and was not under it — so it
+    classified as an ordinary unclassified change, and a proposal carrying it
+    beside a gate file was told ``DATA_SURFACE unchanged`` with the release
+    root's own walk, the enumeration and the index scan all skipped. A change
+    there is a change on the release surface, and a proposal making one is not
+    gate-only.
     """
 
     release_root = candidate.spec.chain.release_root_relative.as_posix()
@@ -854,6 +902,7 @@ def _is_protected(path: str, candidate: _CandidateTree) -> bool:
         or _matches_surface(path, candidate.spec.gate_surface)
         or path == release_root
         or path.startswith(f"{release_root}/")
+        or path in _release_root_ancestors(candidate)
     )
 
 
@@ -1230,22 +1279,33 @@ def check_gate_only_confinement(
     covered the changed set, so a proposal that added a gate file AND
     rewrote an unclassified file under the release root — say
     ``releases/README.md`` — was accepted with none of those checks run.
-    An unclassified change
-    inside the release root is refused here; the rest are returned for the
+    An unclassified change on the release surface
+    is refused here; the rest are returned for the
     caller to name in its success text, so an unclassified change riding a
     gate-only proposal is never silent.
+
+    The surface is ``_is_protected``'s, which is the release root, everything
+    under it, and every proper ancestor of it. The last is what a nested root
+    needs: with ``data/releases`` configured, a proposal replacing ``data``
+    changes what the release root is — or moves it outside the checkout
+    entirely — while ``data`` is at the root and under it, and so was named in
+    the success text as an ordinary unclassified change beside ``DATA_SURFACE
+    unchanged``. An unclassified change everywhere else is still reported
+    rather than refused, because everywhere else is ground this verdict makes
+    no claim about; on the release surface the verdict claims exactly this
+    confinement. The two surfaces the spec names cannot appear here at all —
+    a path matching either is classified, not unclassified — so the set this
+    refuses is the release root, its subtree, and its ancestors, which is what
+    the sentence names.
     """
 
-    release_root = candidate.spec.chain.release_root_relative.as_posix()
-    inside_release_root = sorted(
-        path
-        for path in unclassified
-        if path == release_root or path.startswith(f"{release_root}/")
+    on_the_release_surface = sorted(
+        path for path in unclassified if _is_protected(path, candidate)
     )
-    if inside_release_root:
+    if on_the_release_surface:
         raise AppendError(
             "gate-only proposal changes unclassified release path(s): "
-            f"{inside_release_root}"
+            f"{on_the_release_surface}"
         )
     return set(unclassified)
 
@@ -2155,6 +2215,37 @@ def _bind_new_release_files(
             raise AppendError(str(exc)) from exc
 
 
+def _assert_release_tree_confined(candidate: _CandidateTree) -> None:
+    """Walk the release tree's configured paths without opening anything.
+
+    ``_hold_release_root`` below is the same walk with the approved directory
+    held open for the reads that follow it, and it is what both release
+    proposal paths use. This is for the one exit that makes a claim about the
+    release tree and reads nothing through it: the gate-only verdict, which
+    returns ``DATA_SURFACE unchanged`` and a confinement over the release root
+    after classifying, and which used to run no release-root check whatsoever.
+    A root reached through a linked component is not this proposal's release
+    root, and the confinement ``check_gate_only_confinement`` reports is then
+    a statement about a directory outside the tree under review — measured at
+    427e08d on a ``data/releases`` spec whose ``data`` was an untracked link
+    to a valid release tree outside the checkout: ``thesis-facts append check
+    OK: gate-only proposal; DATA_SURFACE unchanged; GATE_SURFACE
+    changes=['scripts/check_append.py']; unclassified changes=['data']``.
+
+    Nothing is held, because nothing is read: the walk is the whole of what
+    this exit needs, and a descriptor held across no read would establish
+    nothing. It runs ahead of ``check_gate_only_confinement`` so that a linked
+    component is answered in the walk's own words, which name the component
+    that redirects, rather than in the confinement's, which would only say
+    that some path on the release surface changed.
+    """
+
+    try:
+        assert_no_symlinked_release_root(candidate.root, candidate.spec.chain)
+    except ReleaseChainError as exc:
+        raise AppendError(str(exc)) from exc
+
+
 def _hold_release_root(candidate: _CandidateTree) -> int | None:
     """Walk the release root's paths, then hold the directory they name open.
 
@@ -2636,6 +2727,13 @@ def _verify_selected_tree(
                 f"{sorted(gate_changes)}; split them into separate pull requests"
             )
         if gate_changes:
+            # And before that verdict is reported: this exit claims a
+            # confinement over the release root while reading nothing through
+            # it, so the root's own components are walked here. A linked or
+            # otherwise unreachable component means the tree this confinement
+            # would speak for is not the candidate's release tree; see
+            # _assert_release_tree_confined.
+            _assert_release_tree_confined(candidate)
             reported = check_gate_only_confinement(
                 tree_unclassified | staged_unclassified, candidate
             )
