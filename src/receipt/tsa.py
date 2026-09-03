@@ -36,7 +36,10 @@ sets each anchor's has just been required to equal); a pending bundle anchor
 reusing an active anchor ID under a different code-pinned root, which is a
 new authority and so must carry a supplemental outcome before the transition
 can activate it -- the ported supplemental-outcome refusal, reaching a case
-the baseline let through because it took the ID alone for the identity; an
+the baseline let through because it took the ID alone for the identity,
+while a pending anchor whose signer any active anchor already allows is that
+active authority under a new name and is skipped for the same reason a
+bundle may not allow one signer under two of its anchors; an
 unavailable witness of either schema whose reason is not a string, or that
 carries token evidence at the witness level (the v2 per-anchor outcome has
 always refused both); an unavailable legacy witness that names a bundle by
@@ -1953,17 +1956,48 @@ def _anchor_authority(anchor: dict[str, Any]) -> tuple[str, str]:
     return str(anchor["id"]), str(declared_root)
 
 
+def _anchor_signer_fingerprints(anchor: dict[str, Any]) -> set[str]:
+    """The signer SPKI fingerprints an anchor allows.
+
+    Read off ``allowedSigners``, which ``_load_trust_bundle`` has already
+    required to equal the fingerprints of the identity the verifier code pins
+    for that anchor.  An entry carrying no fingerprint is dropped rather than
+    kept as a value of its own: an anchor with one has already been refused at
+    load, because the identity's fingerprints are strings and the two sets
+    have to be equal.
+    """
+
+    signers = anchor.get("allowedSigners")
+    if not isinstance(signers, list):
+        return set()
+    return {
+        signer["spkiSha256"]
+        for signer in signers
+        if isinstance(signer, dict) and isinstance(signer.get("spkiSha256"), str)
+    }
+
+
 def _active_anchor_identities(
     records: Path,
     trusted_bundles: Mapping[str, dict[str, Any]],
     *,
     spec: TsaSpec,
-) -> set[tuple[str, str]]:
+) -> tuple[set[tuple[str, str]], set[str]]:
+    """What the active bundles already stand for: authorities, and signers.
+
+    Two answers because a pending anchor can be an authority already active
+    in two different ways -- under the same name, or under a new one with the
+    same signing key.  ``_supplemental_candidates`` says why each is needed.
+    """
+
     active: set[tuple[str, str]] = set()
+    signers: set[str] = set()
     for reference in trusted_bundles.values():
         _path, trust = _load_trust_bundle(records, reference, spec=spec)
-        active.update(_anchor_authority(anchor) for anchor in trust["anchors"])
-    return active
+        for anchor in trust["anchors"]:
+            active.add(_anchor_authority(anchor))
+            signers.update(_anchor_signer_fingerprints(anchor))
+    return active, signers
 
 
 def _supplemental_candidates(
@@ -1973,7 +2007,40 @@ def _supplemental_candidates(
     *,
     spec: TsaSpec,
 ) -> dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any]]]:
-    active_authorities = _active_anchor_identities(
+    """The pending anchors a transition must produce a supplemental token for.
+
+    An anchor is skipped -- already active, so it has nothing new to prove --
+    when either half of its identity says it is one the chain already trusts,
+    and both halves are needed.
+
+    By ``(id, root SPKI)``, because an ID alone names a slot.  A pending
+    bundle that reuses an active anchor ID under a different code-pinned root
+    is a new authority wearing a familiar name; taking the ID as the identity
+    let both bundles pass their own checks while that authority was never
+    asked for a supplemental outcome before the transition activated it (peer
+    review, fresh gate).  A signer rotation reuses the ID under the same root,
+    so this half is also what keeps a rotation from demanding one.
+
+    And by signer, because a name is not an authority either.  A pending
+    anchor with a new ID over the active root and the active signer is the
+    active authority renamed: ``_load_trust_bundle`` already refuses two
+    anchors of one bundle that allow the same signer for exactly that reason,
+    and here the same shape spread across an active bundle and a pending one
+    made one authority's two stamps look like coverage by two (peer review,
+    fifth gate round one).  The signing key is what a token is bound to -- the
+    ported allowed-signer check compares the certificate a verified token was
+    signed with against the anchor's pins -- so an already-active key has
+    nothing left to demonstrate, whatever root or ID a pending bundle files it
+    under.
+
+    Neither half alone would do.  Signer overlap alone would make every
+    rotation a new authority, because a rotation is precisely a new signer
+    under an active ID and root, and the ported refusal would then demand a
+    supplemental outcome for every one of them.  ``(id, root SPKI)`` alone
+    lets a renamed anchor pose as new.
+    """
+
+    active_authorities, active_signers = _active_anchor_identities(
         records, trusted_bundles, spec=spec
     )
     candidates: dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any]]] = {}
@@ -1984,16 +2051,11 @@ def _supplemental_candidates(
         _path, trust = _load_trust_bundle(records, reference, spec=spec)
         for anchor in trust["anchors"]:
             anchor_id = str(anchor["id"])
-            # Skipped by ID and root together, not by ID alone.  A pending
-            # bundle that reuses an active anchor ID under a different
-            # code-pinned root is a new authority wearing a familiar name;
-            # taking the ID as the identity let both bundles pass their own
-            # checks while the new authority was never asked for a
-            # supplemental outcome before the transition activated it (peer
-            # review).  A signer rotation keeps the root and is still
-            # skipped, as it was.
-            if _anchor_authority(anchor) not in active_authorities:
-                candidates[(bundle_path, anchor_id)] = (reference, anchor)
+            if _anchor_authority(anchor) in active_authorities:
+                continue
+            if _anchor_signer_fingerprints(anchor) & active_signers:
+                continue
+            candidates[(bundle_path, anchor_id)] = (reference, anchor)
     return candidates
 
 

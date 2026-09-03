@@ -1106,6 +1106,7 @@ def add_bundle_version(
     version: int,
     signers: Mapping[str, dict[str, str]] | None = None,
     mutate_anchor: Callable[[dict[str, Any]], None] | None = None,
+    base: TsaSpec | None = None,
 ) -> tuple[dict[str, Any], TsaSpec]:
     """Write a further immutable bundle version into the tree.
 
@@ -1114,11 +1115,14 @@ def add_bundle_version(
     it carries a trust transition. ``signers`` replaces an anchor's allowed
     signer with the given certificate pins, in the bundle and in the new
     identity together, which is how a rotated signing key enters: as a new
-    version, never as an edit.
+    version, never as an edit. ``base`` is the spec to extend, for a test that
+    writes two versions and needs one spec pinning both; without it each call
+    extends the tree's own spec and the second would drop the first.
     """
 
     from receipt.canonical import canonical_sha256
 
+    base = base or tree.spec
     signers = signers or {}
     bundle_id = f"tsa-anchors-v{version}"
     logical = f"records/trust/{bundle_id}.json"
@@ -1156,7 +1160,7 @@ def add_bundle_version(
     )
     spec = TsaSpec(
         trust_bundles=(
-            *tree.spec.trust_bundles,
+            *base.trust_bundles,
             TrustBundleSpec(
                 bundle_id=bundle_id,
                 path=logical,
@@ -1165,8 +1169,8 @@ def add_bundle_version(
                 canonical_json_sha256=str(reference["canonicalJsonSha256"]),
             ),
         ),
-        tsa_identities=(*tree.spec.tsa_identities, *identities),
-        legacy_witness_bundle_id=tree.spec.legacy_witness_bundle_id,
+        tsa_identities=(*base.tsa_identities, *identities),
+        legacy_witness_bundle_id=base.legacy_witness_bundle_id,
     )
     return reference, spec
 
@@ -1740,6 +1744,14 @@ def test_requires_a_supplemental_outcome_for_a_reused_id_under_a_new_root(
     Without the fix the pair below is skipped exactly as the control is, and
     the witness verifies. The control is what keeps the rule narrow: a signer
     rotation reuses the ID under the same root and is still skipped.
+
+    The second authority arrives with its own signing certificate as well as
+    its own root, because the later signer rule (S5-F2) reads an anchor whose
+    signing key is already active as that active authority under a new name
+    and skips it whatever root it is filed under. So a root swapped alone is
+    no longer the shape either rule calls new; a whole authority behind a
+    familiar ID is, and it is still this rule that has to notice, since the
+    signer rule only ever skips.
     """
 
     alpha, beta = local_anchors[0], local_anchors[1]
@@ -1755,6 +1767,7 @@ def test_requires_a_supplemental_outcome_for_a_reused_id_under_a_new_root(
         tree,
         local_anchors[:1],
         version=2,
+        signers={alpha.anchor_id: certificate_pins(beta.tsa.signer_pem)},
         mutate_anchor=put_betas_root_behind_alphas_id,
     )
     # The v2 identity pins the root the v2 bundle actually declares, so the
@@ -1778,6 +1791,10 @@ def test_requires_a_supplemental_outcome_for_a_reused_id_under_a_new_root(
     }
     assert pending["anchors"][0]["rootCertificate"]["spkiSha256"] != (
         active["anchors"][0]["rootCertificate"]["spkiSha256"]
+    )
+    # And a signing key of its own, so the signer rule has nothing to skip on.
+    assert pending["anchors"][0]["allowedSigners"] != (
+        active["anchors"][0]["allowedSigners"]
     )
     with pytest.raises(TsaError) as caught:
         verify_witness(
@@ -3147,24 +3164,43 @@ def test_refuses_two_outcomes_that_name_one_response_path(
     assert [claim["tsaAnchorId"] for claim in verified] == [alpha.anchor_id]
 
 
+def pending_authority(
+    tree: WitnessTree,
+    anchor: LocalAnchor,
+    *,
+    version: int,
+    base: TsaSpec | None = None,
+) -> tuple[dict[str, Any], TsaSpec]:
+    """A further bundle version introducing ``anchor`` as a pending authority.
+
+    Its root goes into the tree's trust directory, which the tree stocked for
+    its active anchors alone. A pending anchor is a supplemental candidate
+    only where the chain does not already trust it -- neither under its
+    ``(id, root SPKI)`` pair nor through a signer an active anchor allows --
+    so every caller here passes an authority with a root and a signing
+    certificate of its own.
+    """
+
+    (tree.records / "trust" / anchor.tsa.root_pem.name).write_bytes(
+        anchor.tsa.root_pem.read_bytes()
+    )
+    return add_bundle_version(tree, [anchor], version=version, base=base)
+
+
 def supplemental_outcome(
     tree: WitnessTree,
     pending: Mapping[str, Any],
     anchor: LocalAnchor,
     token: pathlib.Path,
-    primary: Mapping[str, Any],
 ) -> dict[str, Any]:
     """One ``supplementalOutcomes`` member offering ``token`` for ``anchor``.
 
-    Everything the primary outcome says about its response except the response
-    itself. The pending anchor in both tests below is the active authority
-    under a second id, so the policy and the signer really are the same and
-    the response is the only thing that may differ -- which is what makes the
-    reuse cases below the shape a coverage rule has to catch.
+    Everything a witness says about a response, for the anchor a pending
+    bundle introduces: the bundle it belongs to, the anchor it answers for,
+    the file, and what that anchor's own authority stamped it with.
     """
 
     return {
-        **{field: primary[field] for field in _TOKEN_FIELDS},
         "role": "pending_trust_bundle",
         "status": "available",
         "trustBundleId": pending["bundleId"],
@@ -3174,6 +3210,10 @@ def supplemental_outcome(
         "tsa": anchor.endpoint,
         "tokenPath": logical_path(tree.records, token),
         "tokenSha256": sha256_bytes(token.read_bytes()),
+        "tsaPolicyOid": anchor.tsa.policy_oid,
+        "tsaImprintAlgorithmOid": SHA256_IMPRINT_OID,
+        "tsaSignerCertificateSha256": anchor.signer_pins["certificateSha256"],
+        "tsaSignerSpkiSha256": anchor.signer_pins["spkiSha256"],
     }
 
 
@@ -3182,29 +3222,40 @@ def test_refuses_a_token_reused_between_a_primary_and_a_supplemental_outcome(
     local_anchors: tuple[LocalAnchor, ...],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """S3-F2: the rule spans the primary and supplemental outcomes together.
+    """S3-F2: the rules span the primary and supplemental outcomes together.
 
     A supplemental outcome answers for an authority a pending trust transition
-    is about to activate, and the shared-signer rule is per bundle, so a
-    pending bundle may legitimately put the active authority's root and signer
-    behind a new anchor id. One response then satisfies the active anchor's
-    primary outcome and the pending anchor's supplemental outcome at once, and
-    both verify: the control below stamps a second, distinct token for the
-    pending anchor and the same witness verifies with one token and one
-    supplemental token -- distinct as files and distinct as signed tokens,
-    which is what says the rules count responses and not issuances. Reuse the
-    first token instead and, without this rule, the pending authority is
-    admitted on evidence it never produced.
+    is about to activate, and it is evidence about the same record, so a
+    response that has already stood for a primary outcome cannot stand for it
+    too. The control below is the transition as it should arrive: the pending
+    authority answers with a response of its own, and the witness verifies
+    with one token and one supplemental token. Offer the primary outcome's
+    response instead and, without a rule counting across both lists, the
+    pending authority is admitted on evidence it never produced.
+
+    Two of the three rules see this reuse -- one file named twice, one digest
+    declared twice -- and the digest rule speaks, because it is checked first
+    and both are checked before either outcome's response is read. What
+    neither would see if they were scoped to one list is the point: the seen
+    sets are built across the primary loop and the supplemental one.
+
+    The pending anchor is the *second* authority, root and signing certificate
+    both, because a pending anchor whose signer an active anchor already
+    allows is that active authority under a new name and is no longer a
+    candidate at all (S5-F2). That also means the reused response cannot
+    verify under the pending anchor even if the rules let it through -- its
+    signer is not pinned there -- so what this binds is the coverage rule and
+    the point in the sequence it fires at, which is before any of that.
     """
 
-    alpha = local_anchors[0]
-    mirror = alias_of(alpha, anchor_id="alpha-mirror-2026")
+    alpha, beta = local_anchors[0], local_anchors[1]
+    incoming = alias_of(beta, anchor_id="beta-incoming-2026")
     tree = build_witness_tree(tmp_path, local_anchors[:1])
-    pending, spec = add_bundle_version(tree, [mirror], version=2)
+    pending, spec = pending_authority(tree, incoming, version=2)
     primary = json.loads(tree.witness.read_text())["anchorOutcomes"][0]
 
     def supplemental_over(token: pathlib.Path) -> dict[str, Any]:
-        return supplemental_outcome(tree, pending, mirror, token, primary)
+        return supplemental_outcome(tree, pending, incoming, token)
 
     def transition() -> WitnessEvidence:
         return verify_witness(
@@ -3215,10 +3266,10 @@ def test_refuses_a_token_reused_between_a_primary_and_a_supplemental_outcome(
             transition_bundle_updates=[pending],
         )
 
-    # The control: the pending anchor answers with a response of its own, and
-    # the transition verifies. Two stamps of one digest are distinct tokens.
-    own_token = tree.records / RECORD_DAY / "record-0001.alpha-mirror-2026.tsr"
-    alpha.tsa.stamp(sha256_bytes(tree.record.read_bytes()), own_token)
+    # The control: the pending authority answers with a response of its own,
+    # and the transition verifies.
+    own_token = tree.records / RECORD_DAY / "record-0001.beta-incoming-2026.tsr"
+    beta.tsa.stamp(sha256_bytes(tree.record.read_bytes()), own_token)
     assert sha256_bytes(own_token.read_bytes()) != primary["tokenSha256"]
     rewrite_witness(
         tree,
@@ -3230,16 +3281,16 @@ def test_refuses_a_token_reused_between_a_primary_and_a_supplemental_outcome(
     assert evidence.status == "available"
     assert [token.anchor_id for token in evidence.tokens] == [alpha.anchor_id]
     assert [token.anchor_id for token in evidence.supplemental_tokens] == [
-        mirror.anchor_id
+        incoming.anchor_id
     ]
-    # Two genuine issuances by one authority over one digest are two tokens by
-    # either identity: distinct files, and distinct signed TSTInfos.
+    # Two authorities' stamps of one digest are two tokens by every identity:
+    # distinct paths, distinct files, distinct signed TSTInfos.
     assert (
         evidence.tokens[0].signed_timestamp_sha256
         != evidence.supplemental_tokens[0].signed_timestamp_sha256
     )
 
-    # And the reuse the rule refuses.
+    # And the reuse the rules refuse.
     rewrite_witness(
         tree,
         lambda payload: payload.__setitem__(
@@ -3255,6 +3306,151 @@ def test_refuses_a_token_reused_between_a_primary_and_a_supplemental_outcome(
     )
     assert [claim["tsaAnchorId"] for claim in verified] == [alpha.anchor_id]
 
+
+def test_a_pending_anchor_renaming_an_active_authority_is_not_supplemental(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S5-F2: a new name over an active signing key is not a new authority.
+
+    ``_supplemental_candidates`` keyed the active set by ``(anchor id, root
+    SPKI)``, so a pending bundle putting the active root and the active signer
+    behind a *new* id was a candidate. ``_load_trust_bundle`` already refuses
+    two anchors of one bundle that allow the same signer -- one authority
+    under two names -- and this is that same shape spread across an active
+    bundle and a pending one: the transition then demanded a supplemental
+    outcome the active authority could satisfy by stamping twice, and one
+    authority's two stamps read as coverage by two.
+
+    Without the signer half of the rule, the witness below is refused for
+    carrying no supplemental outcome for the rename, and a witness that offers
+    one -- with a second genuine stamp by the active authority -- verifies and
+    reports two authorities' worth of evidence. With it the rename is skipped,
+    the witness needs nothing extra, and an offered supplemental outcome is
+    refused by the ported message for an outcome no pending transition
+    introduces. The recorder shows that refusal arrives before the second
+    stamp is put to OpenSSL at all.
+    """
+
+    alpha = local_anchors[0]
+    renamed = alias_of(alpha, anchor_id="alpha-renamed-2026")
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    pending, spec = add_bundle_version(tree, [renamed], version=2)
+    active = json.loads(tree.bundle.read_text())["anchors"]
+    incoming = json.loads(
+        (tree.records / "trust" / "tsa-anchors-v2.json").read_text()
+    )["anchors"]
+    # The premise: a new id over the active root and the active signer.
+    assert incoming[0]["id"] != active[0]["id"]
+    assert incoming[0]["rootCertificate"] == active[0]["rootCertificate"]
+    assert incoming[0]["allowedSigners"] == active[0]["allowedSigners"]
+
+    def transition() -> WitnessEvidence:
+        return verify_witness(
+            tree.record,
+            spec=spec,
+            records=tree.records,
+            trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+            transition_bundle_updates=[pending],
+        )
+
+    # Nothing supplemental is required of the witness as it stands.
+    evidence = transition()
+    assert evidence.status == "available"
+    assert [token.anchor_id for token in evidence.tokens] == [alpha.anchor_id]
+    assert evidence.supplemental_tokens == ()
+
+    # And a second genuine stamp by the active authority, offered as the
+    # rename's own evidence, is refused as an outcome no transition introduces.
+    second_stamp = tree.records / RECORD_DAY / "record-0001.alpha-renamed-2026.tsr"
+    alpha.tsa.stamp(sha256_bytes(tree.record.read_bytes()), second_stamp)
+    rewrite_witness(
+        tree,
+        lambda payload: payload.__setitem__(
+            "supplementalOutcomes",
+            [supplemental_outcome(tree, pending, renamed, second_stamp)],
+        ),
+    )
+    verified = record_token_verifications(monkeypatch)
+    with pytest.raises(TsaError) as caught:
+        transition()
+    assert str(caught.value) == (
+        "supplemental TSA outcome is not introduced by a pending trust "
+        f"transition: ('{pending['path']}', '{renamed.anchor_id}')"
+    )
+    assert [claim["tsaAnchorId"] for claim in verified] == [alpha.anchor_id]
+
+
+def test_a_genuinely_new_authority_is_still_a_supplemental_candidate(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_alpha: LocalTsa,
+) -> None:
+    """S5-F2: the signer rule skips a rename, and stops exactly there.
+
+    Three pending anchors, one per shape the rule has to tell apart. A second
+    authority with a root and a signing certificate of its own shares no
+    signer with anything active and is a candidate, so the transition is
+    refused until the witness answers for it -- which is the whole mechanism
+    the rename above must not be able to walk around. A signer rotation
+    reuses the active id under the active root and is skipped by the
+    ``(id, root SPKI)`` half, as it always was; that half is why the signer
+    rule cannot simply be "any signer not already active is new", because a
+    rotation's signer is exactly that and every rotation would then demand a
+    supplemental outcome. And a new id over the active root with a *rotated*
+    signer is a candidate too: the id and root pair is new, and the signing
+    key is one no active anchor allows.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    rotated = certificate_pins(rotated_alpha.signer_pem)
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    stranger = alias_of(beta, anchor_id="beta-arriving-2026")
+    unrelated, spec = pending_authority(tree, stranger, version=2)
+    rotation, rotation_spec = add_bundle_version(
+        tree,
+        local_anchors[:1],
+        version=3,
+        signers={alpha.anchor_id: rotated},
+        base=spec,
+    )
+    renamed_and_rotated, spec = add_bundle_version(
+        tree,
+        [alias_of(alpha, anchor_id="alpha-renamed-2026")],
+        version=4,
+        signers={"alpha-renamed-2026": rotated},
+        base=rotation_spec,
+    )
+
+    def candidates_for(*pending: dict[str, Any]) -> set[tuple[str, str]]:
+        return set(
+            tsa_module._supplemental_candidates(
+                tree.records,
+                {BUNDLE_LOGICAL: tree.reference},
+                list(pending),
+                spec=spec,
+            )
+        )
+
+    assert candidates_for(unrelated) == {(unrelated["path"], stranger.anchor_id)}
+    assert candidates_for(rotation) == set()
+    assert candidates_for(renamed_and_rotated) == {
+        (renamed_and_rotated["path"], "alpha-renamed-2026")
+    }
+    # And the candidate really does reach the ported refusal.
+    with pytest.raises(TsaError) as caught:
+        verify_witness(
+            tree.record,
+            spec=spec,
+            records=tree.records,
+            trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+            transition_bundle_updates=[unrelated],
+        )
+    assert str(caught.value) == (
+        "supplemental TSA outcome mismatch: "
+        f"missing=[('{unrelated['path']}', '{stranger.anchor_id}')], extra=[]"
+    )
 
 
 def swap_the_token_at_the_first_read(
@@ -3493,6 +3689,28 @@ def add_certificate_to_token_bag(response: bytes, certificate: bytes) -> bytes:
     )
 
 
+def two_pending_authorities(
+    tree: WitnessTree, anchor: LocalAnchor
+) -> tuple[dict[str, Any], LocalAnchor, dict[str, Any], LocalAnchor, TsaSpec]:
+    """Two pending bundles, each introducing ``anchor`` under its own id.
+
+    The one shape in which two outcomes of one witness can both be satisfied
+    by one response and both verify. A bundle may not allow one signer under
+    two of its anchors, and a pending anchor whose signer an active anchor
+    already allows is that authority renamed and never becomes a candidate at
+    all (S5-F2) -- so the two outcomes that can share a signer are two
+    *supplemental* ones, introduced by two separate pending bundles, neither
+    of which the active chain knows. Both are candidates, both demand their
+    own response, and whether they get two is what the duplicate rules decide.
+    """
+
+    first = alias_of(anchor, anchor_id=f"{anchor.anchor_id}-first")
+    second = alias_of(anchor, anchor_id=f"{anchor.anchor_id}-second")
+    pending_first, spec = pending_authority(tree, first, version=2)
+    pending_second, spec = pending_authority(tree, second, version=3, base=spec)
+    return pending_first, first, pending_second, second, spec
+
+
 def test_refuses_a_re_wrapped_response_offered_as_a_second_token(
     tmp_path: pathlib.Path,
     local_anchors: tuple[LocalAnchor, ...],
@@ -3505,33 +3723,34 @@ def test_refuses_a_re_wrapped_response_offered_as_a_second_token(
     optional ``statusString`` inserted into it changes the file's SHA-256 and
     nothing the authority signed. So counting responses by ``tokenSha256``
     counted files, and one genuine token in two wrappers was two tokens by
-    that count -- enough to cover a pending authority's supplemental outcome
-    with the active authority's response, which is the case the coverage rule
-    exists for and the one place a reused token is otherwise accepted.
+    that count -- enough to cover two pending authorities' outcomes with one
+    response, which is the case the coverage rules exist for. The path rule
+    cannot see it either: two files, two paths.
 
     Both halves of the premise are asked of OpenSSL directly below: the two
     files have different digests, and ``ts -reply -token_out`` extracts
-    identical bytes from them. Without the signed-token identity the transition
-    verifies with one token and one supplemental token, both resting on one
-    response; with it the second outcome is refused by the digest of what was
-    actually signed, after its token is verified because that is the earliest
-    the identity is known -- the recorder shows both verifications ran.
+    identical bytes from them. Without the signed-token identity the
+    transition verifies with two supplemental tokens resting on one response;
+    with it the second is refused by the digest of what was actually signed,
+    after its token is verified because that is the earliest the identity is
+    known -- the recorder shows all three verifications ran.
     """
 
-    alpha = local_anchors[0]
-    mirror = alias_of(alpha, anchor_id="alpha-mirror-2026")
+    beta = local_anchors[1]
     tree = build_witness_tree(tmp_path, local_anchors[:1])
-    pending, spec = add_bundle_version(tree, [mirror], version=2)
-    primary = json.loads(tree.witness.read_text())["anchorOutcomes"][0]
-    claimed = tree.tokens[alpha.anchor_id]
-    rewrapped = tree.records / RECORD_DAY / "record-0001.alpha-mirror-2026.tsr"
+    pending_first, first, pending_second, second, spec = two_pending_authorities(
+        tree, beta
+    )
+    claimed = tree.records / RECORD_DAY / "record-0001.beta-first.tsr"
+    beta.tsa.stamp(sha256_bytes(tree.record.read_bytes()), claimed)
+    rewrapped = tree.records / RECORD_DAY / "record-0001.beta-second.tsr"
     rewrapped.write_bytes(
         rewrap_timestamp_response(
             claimed.read_bytes(), "re-wrapped, and signed by nobody"
         )
     )
     # The premise, from OpenSSL directly: two files, one signed token.
-    assert sha256_bytes(rewrapped.read_bytes()) != primary["tokenSha256"]
+    assert sha256_bytes(rewrapped.read_bytes()) != sha256_bytes(claimed.read_bytes())
     assert extracted_token_of(tmp_path, rewrapped) == extracted_token_of(
         tmp_path, claimed
     )
@@ -3542,7 +3761,10 @@ def test_refuses_a_re_wrapped_response_offered_as_a_second_token(
         tree,
         lambda payload: payload.__setitem__(
             "supplementalOutcomes",
-            [supplemental_outcome(tree, pending, mirror, rewrapped, primary)],
+            [
+                supplemental_outcome(tree, pending_first, first, claimed),
+                supplemental_outcome(tree, pending_second, second, rewrapped),
+            ],
         ),
     )
     verified = record_token_verifications(monkeypatch)
@@ -3552,17 +3774,17 @@ def test_refuses_a_re_wrapped_response_offered_as_a_second_token(
             spec=spec,
             records=tree.records,
             trusted_bundles={BUNDLE_LOGICAL: tree.reference},
-            transition_bundle_updates=[pending],
+            transition_bundle_updates=[pending_first, pending_second],
         )
     assert str(caught.value) == (
         f"duplicate TSA timestamp across anchor outcomes: {sha256_bytes(signed)}"
     )
-    # The file rule cannot see this one: the two outcomes name different bytes.
+    # Neither earlier rule can see this one: two paths, two file digests.
     assert [claim["tsaAnchorId"] for claim in verified] == [
-        alpha.anchor_id,
-        mirror.anchor_id,
+        local_anchors[0].anchor_id,
+        first.anchor_id,
+        second.anchor_id,
     ]
-
 
 
 def test_refuses_a_re_bagged_token_offered_as_a_second_timestamp(
@@ -3579,8 +3801,7 @@ def test_refuses_a_re_bagged_token_offered_as_a_second_timestamp(
     root is appended to the certificate bag. Both the response file's digest
     and the digest of the token ``ts -reply -token_out`` extracts move with
     it, so a coverage rule keyed on either counts encodings rather than
-    issuances, and one stamp covers a pending anchor's supplemental outcome
-    as well as the active anchor's.
+    issuances, and one stamp covers two pending authorities' outcomes.
 
     The ``TSTInfo`` is the one thing that cannot move: it is the signed
     content, so any change to it breaks the signature the ``-CAfile``
@@ -3591,33 +3812,37 @@ def test_refuses_a_re_bagged_token_offered_as_a_second_timestamp(
     """
 
     alpha, beta = local_anchors[0], local_anchors[1]
-    mirror = alias_of(alpha, anchor_id="alpha-mirror-2026")
     tree = build_witness_tree(tmp_path, local_anchors[:1])
-    pending, spec = add_bundle_version(tree, [mirror], version=2)
-    primary = json.loads(tree.witness.read_text())["anchorOutcomes"][0]
-    claimed = tree.tokens[alpha.anchor_id]
-    rebagged = tree.records / RECORD_DAY / "record-0001.alpha-mirror-2026.tsr"
+    pending_first, first, pending_second, second, spec = two_pending_authorities(
+        tree, beta
+    )
+    claimed = tree.records / RECORD_DAY / "record-0001.beta-first.tsr"
+    beta.tsa.stamp(sha256_bytes(tree.record.read_bytes()), claimed)
+    rebagged = tree.records / RECORD_DAY / "record-0001.beta-second.tsr"
     rebagged.write_bytes(
         add_certificate_to_token_bag(
             claimed.read_bytes(),
-            der_certificate(beta.tsa.root_pem, tmp_path / "beta-root.der"),
+            der_certificate(alpha.tsa.root_pem, tmp_path / "alpha-root.der"),
         )
     )
     # The premise, from OpenSSL directly.
-    assert sha256_bytes(rebagged.read_bytes()) != primary["tokenSha256"]
+    assert sha256_bytes(rebagged.read_bytes()) != sha256_bytes(claimed.read_bytes())
     assert extracted_token_of(tmp_path, rebagged) != extracted_token_of(
         tmp_path, claimed
     )
     signed = signed_timestamp_of(tmp_path, claimed)
     assert signed_timestamp_of(tmp_path, rebagged) == signed
-    assert openssl_ts_verifies(tree.record, claimed, alpha.tsa.root_pem)
-    assert openssl_ts_verifies(tree.record, rebagged, alpha.tsa.root_pem)
+    assert openssl_ts_verifies(tree.record, claimed, beta.tsa.root_pem)
+    assert openssl_ts_verifies(tree.record, rebagged, beta.tsa.root_pem)
 
     rewrite_witness(
         tree,
         lambda payload: payload.__setitem__(
             "supplementalOutcomes",
-            [supplemental_outcome(tree, pending, mirror, rebagged, primary)],
+            [
+                supplemental_outcome(tree, pending_first, first, claimed),
+                supplemental_outcome(tree, pending_second, second, rebagged),
+            ],
         ),
     )
     verified = record_token_verifications(monkeypatch)
@@ -3627,14 +3852,15 @@ def test_refuses_a_re_bagged_token_offered_as_a_second_timestamp(
             spec=spec,
             records=tree.records,
             trusted_bundles={BUNDLE_LOGICAL: tree.reference},
-            transition_bundle_updates=[pending],
+            transition_bundle_updates=[pending_first, pending_second],
         )
     assert str(caught.value) == (
         f"duplicate TSA timestamp across anchor outcomes: {sha256_bytes(signed)}"
     )
     assert [claim["tsaAnchorId"] for claim in verified] == [
         alpha.anchor_id,
-        mirror.anchor_id,
+        first.anchor_id,
+        second.anchor_id,
     ]
 
 

@@ -151,14 +151,20 @@ Deliberately outside the mutation contract:
   three refusals fires on any case here;
 - the baseline takes an anchor ID alone for the active identity when deciding
   which anchors of a pending bundle need a supplemental outcome, so a pending
-  anchor reusing an active ID under a different root is skipped; the port
-  keys the active set by ID and declared root SPKI together, which makes such
-  an anchor a candidate and so brings it under the ported
-  supplemental-outcome refusal.  ``tsa-anchors-v2`` reuses
-  ``freetsa-root-2016`` under the same root SPKI as ``tsa-anchors-v1``
-  (``52c54ba3...``) and introduces ``digicert-trusted-root-g4`` under a new
-  ID, so the candidate set at the pinned transition is identical either way
-  and no refusal here changes;
+  anchor reusing an active ID under a different root is skipped, while one
+  renaming an active authority is not; the port keys the active set by ID and
+  declared root SPKI together, which makes the first a candidate and so
+  brings it under the ported supplemental-outcome refusal, and skips a
+  pending anchor any of whose allowed signers an active anchor already
+  allows, which is the active authority under a new name and has nothing to
+  prove by stamping again (peer review, fifth gate round one).
+  ``tsa-anchors-v2`` reuses ``freetsa-root-2016`` under the same root SPKI as
+  ``tsa-anchors-v1`` (``52c54ba3...``) and the same allowed signer
+  (``fa02bd55...``), so both halves skip it, and introduces
+  ``digicert-trusted-root-g4`` under a new ID, a new root and a signer
+  (``7abda95e...``) no active anchor allows, so neither half skips it.  The
+  candidate set at the pinned transition is therefore identical under all
+  three keyings and no refusal here changes;
 - the baseline ignores bundle-claim fields on an unavailable v1 witness;
   the port resolves and counts a named bundle.  The genesis witness names
   none;
