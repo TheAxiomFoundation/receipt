@@ -17,7 +17,9 @@ aborted run, and a result that cannot be rendered all included. A machine
 consumer that keys on ``verdict`` therefore fails closed with the command.
 
 The text renderer is the verdict's last boundary, so every string it takes
-from the result goes through :func:`_terminal_safe` before it reaches a line.
+from the result goes through :func:`_rendered` — escaped by
+:func:`_terminal_safe`, then bounded by :func:`_bounded` — before it reaches
+a line.
 Not every string in a verdict is written by someone the verdict is about, but
 enough of them are: a filename in the release manifest directory, a path under
 a content root, a pass failure quoting either. One carrying
@@ -48,8 +50,16 @@ The JSON renderer needs nothing of the kind. ``json.dumps`` with
 controls included — and every code point below 0x20 with it, so a machine
 consumer receives them as data and no terminal ever sees them raw.
 
-What both renderers do share is a bound on length rather than on content:
-see :data:`MAX_RENDERED_FIELD`.
+What both renderers do share is a bound on length rather than on content.
+The schema bounds in ``receipt.corpus`` cover corpus-derived output only, so
+a release manifest with a million-character ``schemaVersion`` scrolled the
+verdict away through the custody half instead (peer review, round eight).
+Every result-derived string either renderer prints is therefore truncated at
+:data:`MAX_RENDERED_FIELD` characters with the marker
+``receipt.corpus._quoted`` uses. The bound is on what this command *prints*,
+not on what the library raises: ``receipt.release_chain`` and
+``receipt.corpus`` still raise their full text, and a machine consumer that
+needs all of it can call the library rather than parse a verdict.
 """
 
 from __future__ import annotations
@@ -195,10 +205,11 @@ _TERMINAL_ESCAPES = {chr(code): _python_escape(code) for code in _TERMINAL_UNSAF
 def _terminal_safe(text: str) -> str:
     """Replace every code point that must not reach a terminal with its escape.
 
-    Applied to every string the text verdict takes from the result — pass
-    names, details and failures, the spec's name and path, the root, gate
-    ids, evidence keys and values, and the abort message ``_refuse`` prints —
-    and to nothing else. The fixed lines of the verdict are literals in this
+    Applied — through :func:`_rendered`, which bounds the result afterwards
+    — to every string the text verdict takes from the result: pass names,
+    details and failures, the spec's name and path, the root, gate ids,
+    evidence keys and values, and the abort message ``_refuse`` prints, and
+    to nothing else. The fixed lines of the verdict are literals in this
     module and carry none of these characters, so they are left alone.
 
     Four classes:
@@ -252,13 +263,94 @@ def _terminal_safe(text: str) -> str:
     return "".join(escaped)
 
 
+#: The most characters of any one result-derived string either renderer
+#: prints. The corpus schema bounds what a *producer* can put in a verdict —
+#: ``MAX_EVIDENCE_TEXT`` per string, ``MAX_GATE_TEXT`` and
+#: ``MAX_REMOVED_TEXT`` per section — and those bounds cover corpus-derived
+#: output only. Nothing bounded the custody half: a release manifest whose
+#: ``schemaVersion`` is a million characters puts that value into a
+#: ``ReleaseChainError`` before the signature is ever checked, and the text
+#: renderer printed it twice — once on the pass line and once after
+#: ``VERDICT: FAIL`` — while the JSON printed it once (peer review, round
+#: eight). Bounding at the schema boundary of every library this command
+#: calls is not the answer: ``receipt.release_chain``'s wording is pinned
+#: byte for byte by a differential harness. So the bound is here, at the one
+#: place a verdict is rendered, and it is global — every result-derived
+#: string in either renderer, not a list of the fields someone thought of.
+#:
+#: What is bounded is what the command *prints*, not what the library
+#: raises. ``receipt.release_chain`` and ``receipt.corpus`` still raise their
+#: full text, and a machine consumer that needs all of it can call the
+#: library directly rather than parse the command's output.
+#:
+#: Four thousand and ninety-six is generous for anything a verdict
+#: legitimately carries — sixteen times the 256 ``receipt.corpus._quoted``
+#: allows a refusal to quote — and small enough that the whole verdict stays
+#: readable in a terminal.
+MAX_RENDERED_FIELD = 4096
+
+
+def _bounded(text: str) -> str:
+    """Truncate one rendered string to :data:`MAX_RENDERED_FIELD` characters.
+
+    The marker is ``receipt.corpus._quoted``'s, so a truncation reads the
+    same wherever an auditor meets one, and it names the number of
+    characters omitted rather than merely saying that something was.
+
+    Applied *after* :func:`_terminal_safe` in the text renderer, so what is
+    counted is what the terminal receives: an escape sequence is six
+    characters of output and is charged as six. In the JSON renderer it is
+    applied to the payload's string values before ``json.dumps``, which is
+    the same rule one step earlier — the escaping there is the encoder's own
+    and cannot be applied first.
+    """
+
+    if len(text) <= MAX_RENDERED_FIELD:
+        return text
+    omitted = len(text) - MAX_RENDERED_FIELD
+    return f"{text[:MAX_RENDERED_FIELD]}…[{omitted} more characters]"
+
+
+def _rendered(text: str) -> str:
+    """Escape a result-derived string and then bound it: the text renderer's rule.
+
+    One function so the two policies cannot be applied to different sets of
+    strings. Every string ``_format_text`` and :func:`_refuse` take from a
+    result go through this and nothing else does.
+    """
+
+    return _bounded(_terminal_safe(text))
+
+
+def _bounded_payload(value: object) -> object:
+    """The JSON payload with every string value bounded, structure unchanged.
+
+    Walked rather than listed, for the reason :data:`MAX_RENDERED_FIELD`
+    gives: a field-by-field bound covers the fields someone thought of.
+    Dictionary *keys* are deliberately left alone. Two long keys truncated to
+    the same text would collide and one would silently replace the other,
+    turning a length policy into a data-loss policy; the keys that reach this
+    payload are the module's own literals, the spec's configured anchor
+    filenames, and gate evidence keys, which the corpus schema already bounds
+    at ``MAX_EVIDENCE_TEXT``.
+    """
+
+    if isinstance(value, str):
+        return _bounded(value)
+    if isinstance(value, dict):
+        return {key: _bounded_payload(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_bounded_payload(item) for item in value]
+    return value
+
+
 def _format_text(result: VerifyResult) -> str:
     lines: list[str] = []
-    version = _terminal_safe(result.receipt_version)
-    lines.append(f"receipt {version} — {_terminal_safe(result.spec_name)}")
-    lines.append(f"  root  {_terminal_safe(str(result.root))}")
-    lines.append(f"  spec  {_terminal_safe(str(result.spec_path))}")
-    lines.append(f"        sha256 {_terminal_safe(result.spec_sha256)}")
+    version = _rendered(result.receipt_version)
+    lines.append(f"receipt {version} — {_rendered(result.spec_name)}")
+    lines.append(f"  root  {_rendered(str(result.root))}")
+    lines.append(f"  spec  {_rendered(str(result.spec_path))}")
+    lines.append(f"        sha256 {_rendered(result.spec_sha256)}")
     lines.append("")
 
     if result.ok:
@@ -267,14 +359,14 @@ def _format_text(result: VerifyResult) -> str:
         lines.append("PASSES")
     for item in result.passes:
         mark = "ok  " if item.ok else "FAIL"
-        lines.append(f"  [{mark}] {_terminal_safe(item.name)}")
+        lines.append(f"  [{mark}] {_rendered(item.name)}")
         if item.ok:
-            lines.append(f"         {_terminal_safe(item.detail)}")
+            lines.append(f"         {_rendered(item.detail)}")
         else:
             # str(), not "or ''": a failed pass always carries a failure
             # string, and rendering a hypothetical None as "None" is what
             # this line did before the escaping was added to it.
-            lines.append(f"         {_terminal_safe(str(item.failure))}")
+            lines.append(f"         {_rendered(str(item.failure))}")
 
     corpus = result.corpus
     if corpus is not None and corpus.gates:
@@ -298,11 +390,11 @@ def _format_text(result: VerifyResult) -> str:
                     # shows sixteen characters of the value rather than
                     # sixteen characters of its escaping.
                     waiver = gate.evidence.get("waiverSetSha256", "")[:16]
-                    suffix = f"  [WAIVED under waiver set {_terminal_safe(waiver)}…]"
+                    suffix = f"  [WAIVED under waiver set {_rendered(waiver)}…]"
                 elif gate.outcome == "not-run":
-                    reason = _terminal_safe(gate.evidence.get("reason", ""))
+                    reason = _rendered(gate.evidence.get("reason", ""))
                     suffix = f"  [DID NOT RUN — {reason}]"
-                lines.append(f"    - {_terminal_safe(gate.gate_id)}{suffix}")
+                lines.append(f"    - {_rendered(gate.gate_id)}{suffix}")
 
     lines.append("")
     if result.ok:
@@ -311,7 +403,7 @@ def _format_text(result: VerifyResult) -> str:
         # The anchor names come from the consumer's committed spec rather
         # than from a producer, but they are result data and the rule here
         # admits no exceptions: nothing reaches a line unescaped.
-        witnesses = [_terminal_safe(name) for name in sorted(result.witness_times())]
+        witnesses = [_rendered(name) for name in sorted(result.witness_times())]
         count = len(witnesses)
         noun = "authorities" if count != 1 else "authority"
         # Whether a trusted base reference was verified changes what the
@@ -390,9 +482,9 @@ def _format_text(result: VerifyResult) -> str:
     else:
         failure = next((item for item in result.passes if not item.ok), None)
         detail = failure.failure if failure is not None else "unknown failure"
-        name = _terminal_safe(failure.name) if failure else "verification"
+        name = _rendered(failure.name) if failure else "verification"
         lines.append(f"VERDICT: FAIL — {name}")
-        lines.append(f"  {_terminal_safe(str(detail))}")
+        lines.append(f"  {_rendered(str(detail))}")
     return "\n".join(lines)
 
 
@@ -420,14 +512,21 @@ def _refuse(as_json: bool, stage: str, message: str, code: int) -> int:
     The text half is the abort counterpart of :func:`_fail_payload`, and it
     is a verdict line like any other: the message can quote a spec path, an
     exception's text, or a filename that came off the disk, so it is escaped
-    on its way to the terminal. The JSON half takes the message unescaped —
-    ``json.dumps`` escapes it there — so a machine consumer still receives
-    exactly what the exception said.
+    and bounded on its way to the terminal. The JSON half takes the message
+    unescaped — ``json.dumps`` escapes it there — but bounded by the same
+    policy, because an abort message can carry a producer's flood as readily
+    as a completed verdict can.
     """
 
-    print(f"receipt verify: {_terminal_safe(message)}", file=sys.stderr)
+    print(f"receipt verify: {_rendered(message)}", file=sys.stderr)
     if as_json:
-        print(json.dumps(_fail_payload(stage, message), indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                _bounded_payload(_fail_payload(stage, message)),
+                indent=2,
+                sort_keys=True,
+            )
+        )
     return code
 
 
@@ -490,7 +589,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     # even when the passes themselves succeeded.
     if as_json:
         try:
-            rendered = json.dumps(result_to_dict(result), indent=2, sort_keys=True)
+            rendered = json.dumps(
+                _bounded_payload(result_to_dict(result)), indent=2, sort_keys=True
+            )
         except Exception as exc:  # noqa: BLE001 - rendering is inside the contract
             return _refuse(
                 as_json,

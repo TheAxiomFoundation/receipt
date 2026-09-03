@@ -1303,3 +1303,166 @@ def test_terminal_safe_escapes_lone_surrogates_and_format_controls() -> None:
     # Untouched: ordinary text, including characters that merely look exotic.
     for text in ("rules/tax/rate.yaml", "café", "中文", "\U0001F600", "a\\b", ""):
         assert _terminal_safe(text) == text
+
+
+# --- second fresh gate, round one: a bound on what the verdict prints -------
+
+
+def _flood_the_manifest_schema(repo: pathlib.Path, characters: int) -> str:
+    """Give the single release manifest a ``schemaVersion`` of that length.
+
+    ``validate_manifest_schema`` compares the field against the spec's and
+    quotes it back on a mismatch, and it runs before the manifest digest and
+    the producer signature are checked — so this value reaches a
+    ``ReleaseChainError``, and the verdict, without any key material at all.
+    Returns the refusal text the library produces for it.
+    """
+
+    manifest = manifest_stem(repo)
+    payload = json.loads(manifest.read_text())
+    payload["schemaVersion"] = "x" * characters
+    manifest.write_text(json.dumps(payload))
+    return f"unsupported manifest schema {payload['schemaVersion']!r}"
+
+
+def test_a_flooded_manifest_field_is_bounded_in_both_renderers(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Binds S5-F6: the schema budgets bound the corpus half and nothing else.
+
+    ``receipt.corpus`` bounds what a producer can put in a verdict — per
+    string, and per rendered section — and every one of those bounds is on
+    corpus-derived output. The custody half had none. A release manifest
+    whose ``schemaVersion`` is a million characters puts that value into a
+    ``ReleaseChainError`` before the signature is checked, and the text
+    renderer printed it *twice*: once on the pass line and once after
+    ``VERDICT: FAIL``. Two million characters of a producer's choosing, in
+    front of an auditor, with no key material involved.
+
+    ``receipt.release_chain``'s wording is pinned byte for byte by a
+    differential harness, so the fix is not in the library. It is a global
+    bound at the rendering boundary: every result-derived string in either
+    renderer, truncated at ``MAX_RENDERED_FIELD`` with the marker
+    ``receipt.corpus._quoted`` uses, which names the number of characters
+    omitted rather than merely saying that some were.
+
+    Without the fix the text verdict is over two million characters and the
+    JSON ``failure`` field is over one million.
+    """
+
+    from receipt.cli import MAX_RENDERED_FIELD
+
+    flood = 1_000_000
+    failure = _flood_the_manifest_schema(repo, flood)
+    omitted = len(failure) - MAX_RENDERED_FIELD
+    marker = f"…[{omitted} more characters]"
+
+    assert run(repo) == EXIT_FAIL
+    text = capsys.readouterr().err
+    # The failure is the only unbounded string in this verdict, and the text
+    # renderer prints it twice; everything else is fixed lines. So the whole
+    # verdict is two bounded fields plus a few hundred characters of text no
+    # producer controls.
+    assert text.count(marker) == 2
+    assert len(text) <= 2 * (MAX_RENDERED_FIELD + len(marker)) + 1024
+    assert len(text) < len(failure) // 100
+    assert "VERDICT: FAIL — custody" in text
+
+    assert run(repo, "--json") == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    custody = [item for item in payload["passes"] if item["name"] == "custody"]
+    assert len(custody) == 1
+    rendered = custody[0]["failure"]
+    assert len(rendered) == MAX_RENDERED_FIELD + len(marker)
+    assert rendered.endswith(marker)
+    assert rendered.startswith("unsupported manifest schema 'xxx")
+    # The marker is inside the string: no key was added to say so, because a
+    # consumer keying on the schema must not have to learn a new one.
+    assert set(custody[0]) == {"name", "ok", "detail", "failure"}
+
+
+def test_an_ordinary_failure_is_unchanged_by_the_rendering_bound(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Binds S5-F6, the other side: the bound must not touch a real verdict.
+
+    Every refusal a corpus of ordinary size produces is far inside
+    ``MAX_RENDERED_FIELD`` — ``receipt.corpus`` already bounds what a
+    refusal quotes at 256 characters — so the policy has to be invisible
+    here. A bound applied to the wrong thing, or applied twice, or one that
+    truncated on a byte count rather than a character count, would show up
+    as a marker in this output or as a refusal that no longer reads whole.
+
+    This test passes on the head as well: it is the control that keeps the
+    bound from being tightened into something that costs an auditor the text
+    they need.
+    """
+
+    (repo / "rules/tax/rate.yaml").write_text("name: rate\nvalue: 0.99\n")
+    assert run(repo) == EXIT_FAIL
+    text = capsys.readouterr().err
+    assert "…[" not in text
+    assert "does not match its witnessed digest" in text
+    assert "VERDICT: FAIL — binding" in text
+
+
+def test_the_rendering_bound_truncates_at_its_own_edge_and_not_before() -> None:
+    """Binds S5-F6: the boundary itself, and what the marker says.
+
+    A string of exactly ``MAX_RENDERED_FIELD`` characters renders whole; one
+    character more renders as the first ``MAX_RENDERED_FIELD`` plus a marker
+    naming exactly one omitted character. An off-by-one here would either
+    truncate text that fits or let one character past the bound, and the
+    end-to-end tests above are too coarse to see either.
+    """
+
+    from receipt.cli import MAX_RENDERED_FIELD, _bounded
+
+    assert _bounded("") == ""
+    exact = "x" * MAX_RENDERED_FIELD
+    assert _bounded(exact) == exact
+    over = "x" * (MAX_RENDERED_FIELD + 1)
+    assert _bounded(over) == exact + "…[1 more characters]"
+    assert _bounded("x" * (MAX_RENDERED_FIELD + 500)).endswith("…[500 more characters]")
+
+
+def test_the_json_bound_walks_values_and_leaves_keys_alone() -> None:
+    """Binds S5-F6: the JSON half is a walk, and it changes no structure.
+
+    Bounding a field-by-field list would cover the fields someone thought
+    of, so the payload is walked and every string *value* is bounded
+    wherever it sits — nested objects, lists of objects, lists of strings.
+    Keys are deliberately not bounded: two long keys truncated to the same
+    text would collide and one would silently replace the other, turning a
+    length policy into a data-loss policy, and every key that reaches this
+    payload is already bounded by the corpus schema or is a literal in the
+    module.
+
+    Non-strings pass through unchanged, so a consumer's types do not move.
+    """
+
+    from receipt.cli import MAX_RENDERED_FIELD, _bounded_payload
+
+    flood = "y" * (MAX_RENDERED_FIELD + 7)
+    marker = "…[7 more characters]"
+    payload = {
+        "verdict": "FAIL",
+        "count": 3,
+        "ok": False,
+        "nothing": None,
+        "passes": [{"failure": flood, "ok": False}],
+        "removedPaths": [flood, "short"],
+        "evidence": {flood: flood},
+    }
+    bounded = _bounded_payload(payload)
+
+    assert bounded["verdict"] == "FAIL"
+    assert bounded["count"] == 3 and bounded["ok"] is False
+    assert bounded["nothing"] is None
+    assert bounded["passes"][0]["failure"].endswith(marker)
+    assert bounded["passes"][0]["ok"] is False
+    assert bounded["removedPaths"][0].endswith(marker)
+    assert bounded["removedPaths"][1] == "short"
+    # The key is untouched; only its value is bounded.
+    assert list(bounded["evidence"]) == [flood]
+    assert bounded["evidence"][flood].endswith(marker)
