@@ -52,8 +52,9 @@ is bound in tests/test_release_chain.py, where the public custody path and
 ``receipt verify`` itself are driven.
 
 Docstrings labelled S4R2-F1 onward name that fourth gate's second round,
-numbering from one again: S4R2-F4 the configured path handed to ``git
-ls-tree`` as a pathspec rather than as a name.
+numbering from one again: S4R2-F3 the root identity that was two numbers a
+filesystem may hand to another directory, S4R2-F4 the configured path handed
+to ``git ls-tree`` as a pathspec rather than as a name.
 
 The fixture is a local git repository built from scratch — no network, no
 witnesses, no signatures. Its release tree holds a README and no manifests, so
@@ -64,6 +65,7 @@ test are the ones that run before it.
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import json
 import os
@@ -345,6 +347,22 @@ def add_gate_file(candidate: Candidate) -> None:
     script = candidate.root / GATE_FILE
     script.parent.mkdir(parents=True, exist_ok=True)
     script.write_text("# gate fixture\n", encoding="utf-8")
+
+
+@contextlib.contextmanager
+def selected_tree(candidate: Candidate) -> Iterator[Any]:
+    """``_set_root``'s candidate tree, with its root descriptor closed after.
+
+    ``verify_append_gate`` holds the candidate root open for the whole verdict
+    and closes it once, in one place. A test that drives a single check on its
+    own has to do the same or leak the descriptor.
+    """
+
+    tree = append_gate._set_root(candidate.root, GATE_SPEC)
+    try:
+        yield tree
+    finally:
+        os.close(tree.root_descriptor)
 
 
 def run_gate(
@@ -1818,9 +1836,8 @@ def test_the_push_path_hands_the_release_verification_its_snapshots(
         raise ReleaseChainError("stop before verifying anything")
 
     monkeypatch.setattr(append_gate, "verify_release_chain", capture)
-    tree = append_gate._set_root(candidate.root, GATE_SPEC)
 
-    with pytest.raises(AppendError):
+    with selected_tree(candidate) as tree, pytest.raises(AppendError):
         append_gate.check_release_chain_without_base(
             candidate=tree,
             ledger_bytes=b"ledger snapshot",
@@ -2485,10 +2502,10 @@ def test_check_state_modes_takes_the_mode_from_the_snapshot(
         "thesis-facts append check OK: 3 rows, immutable prefix 1, "
         "+1 appended vs base"
     )
-    with pytest.raises(AppendError) as refusal:
+    with selected_tree(candidate) as tree, pytest.raises(AppendError) as refusal:
         append_gate.check_state_modes(
             append_gate._BaseCommit(ref=candidate.base, commit=candidate.base),
-            append_gate._set_root(candidate.root, GATE_SPEC),
+            tree,
         )
     assert str(refusal.value) == (
         "state file mode changed relative to base: "
@@ -3015,10 +3032,10 @@ def test_check_state_modes_refuses_a_symlinked_state_file_on_its_own(
     ledger.symlink_to(outside)
     git(candidate.root, "add", "--", CHAIN_SPEC.state_relative.as_posix())
 
-    with pytest.raises(AppendError) as refusal:
+    with selected_tree(candidate) as tree, pytest.raises(AppendError) as refusal:
         append_gate.check_state_modes(
             append_gate._BaseCommit(ref=candidate.base, commit=candidate.base),
-            append_gate._set_root(candidate.root, GATE_SPEC),
+            tree,
         )
     assert str(refusal.value) == (
         "state file is a symlink: ledger/official_observations.jsonl"
@@ -3916,3 +3933,118 @@ def test_the_base_enumeration_refuses_a_path_outside_the_root_it_asked_for(
     assert str(refusal.value) == (
         "git tree enumeration returned a path outside releases: outside/x"
     )
+
+
+def test_a_root_deleted_and_recreated_in_place_is_refused(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S4R2-F3: the recorded root identity was ``(st_dev, st_ino)`` from
+    an ``lstat``, and that pair is not a name for a directory over time. A
+    POSIX filesystem is free to give a deleted directory's inode number to the
+    next directory — or symlink — created in its place, so a root removed
+    outright and replaced could be handed the number this run wrote down, and
+    both comparisons against it then pass for a tree the run never selected.
+    The tests above cannot show that: they rename the original aside, which
+    keeps its inode live and therefore guarantees the replacement a different
+    one. Here the original is deleted, which is the only way the number
+    becomes available.
+
+    What binds it is not a comparison but a descriptor: ``_set_root`` opens
+    the resolved root and the gate holds it for the whole verdict, so the
+    inode stays allocated to the directory this verdict is about and no other
+    directory can be given its number while the run lasts. The assertions
+    inside the swap say exactly that — the recreated root is not the recorded
+    identity, and the held descriptor still is — and the gate then refuses.
+    Without the descriptor the refusal depends on the filesystem's allocator:
+    on APFS, whose inode numbers are not reused, this passes with the change
+    reverted; where they are, it does not."""
+
+    candidate = base_repository(tmp_path)
+    add_gate_file(candidate)
+    replacement = a_replacement_repository(candidate, tmp_path)
+    # Its first row is not the frozen one, so a run that really did read this
+    # tree would refuse it: the acceptance would not merely be about the
+    # wrong tree, it would be about a tree this gate rejects.
+    rows = [observation_row(number) for number in range(1, BASE_ROW_COUNT + 1)]
+    rows[0] = observation_row(99)
+    write_ledger(replacement, rows)
+    staged = append_gate._staged_surface_changes
+
+    def recreate_the_root_after_classifying(
+        base: append_gate._BaseCommit, tree: append_gate._CandidateTree
+    ) -> tuple[set[str], set[str], set[str]]:
+        classified = staged(base, tree)
+        shutil.rmtree(candidate.root)
+        # Created at the path, not moved there: this is the moment the freed
+        # inode number could be handed out again.
+        shutil.copytree(replacement, candidate.root, symlinks=True)
+        recreated = os.lstat(candidate.root)
+        assert (recreated.st_dev, recreated.st_ino) != tree.root_identity
+        held = os.fstat(tree.root_descriptor)
+        assert (held.st_dev, held.st_ino) == tree.root_identity
+        return classified
+
+    monkeypatch.setattr(
+        append_gate, "_staged_surface_changes", recreate_the_root_after_classifying
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == "candidate root changed during verification"
+
+
+@pytest.mark.parametrize("verdict", ["accepted", "refused"])
+def test_the_root_descriptor_does_not_outlive_the_verdict(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, verdict: str
+) -> None:
+    """S4R2-F3's other half. The root descriptor is held for exactly the run
+    it speaks for: opened as the candidate tree is selected and closed once,
+    on the way out, whichever way the verdict goes. A descriptor kept past the
+    verdict is a directory this process is still holding open — and one leaked
+    per call in a caller that verifies many trees.
+
+    Both exits are covered because they are different code paths out of the
+    same run, and the ``finally`` is what makes them the same for the
+    descriptor. Without the change there is no descriptor to close."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    if verdict == "refused":
+        # An ordinary refusal from the middle of the run, after the root is
+        # opened and well before the end.
+        (candidate.root / CHAIN_SPEC.prefix_relative).write_text(
+            "{}\n", encoding="utf-8"
+        )
+    trees: list[append_gate._CandidateTree] = []
+    real_set_root = append_gate._set_root
+    closed: list[int] = []
+    real_close = os.close
+
+    def capture(root: pathlib.Path, spec: AppendGateSpec) -> Any:
+        tree = real_set_root(root, spec)
+        trees.append(tree)
+        return tree
+
+    def record(descriptor: int) -> None:
+        closed.append(descriptor)
+        real_close(descriptor)
+
+    monkeypatch.setattr(append_gate, "_set_root", capture)
+    monkeypatch.setattr(os, "close", record)
+
+    if verdict == "refused":
+        with pytest.raises(AppendError):
+            run_gate(candidate)
+    else:
+        assert run_gate(candidate) == (
+            "thesis-facts append check OK: 3 rows, immutable prefix 1, "
+            "+1 appended vs base"
+        )
+
+    (tree,) = trees
+    # Exactly once: no descriptor this run opened afterwards can have been
+    # given the root's number while the root was still holding it.
+    assert closed.count(tree.root_descriptor) == 1
+    with pytest.raises(OSError) as after:
+        os.fstat(tree.root_descriptor)
+    assert after.value.errno == errno.EBADF

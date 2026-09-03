@@ -58,7 +58,12 @@ refuses outright rather than falling back to a pathname open where ``os.open``
 takes no ``dir_fd`` — a requirement of the package rather than of any one
 caller, since every state read in it comes through here: on Windows
 ``verify_release_chain``, and so ``receipt verify``'s custody pass, refuses
-exactly as the append gate does, and ``README.md`` states it. It opens each
+exactly as the append gate does, and ``README.md`` states it. Both of that
+root open's refusals are named here rather than at either caller, because
+``append_gate._set_root`` performs the same open for the same confinement —
+it holds the candidate root open for the whole of a verdict, so the identity
+it records is a directory it still has rather than a number the filesystem
+may hand to the next directory created in that root's place. It opens each
 directory component with search rights alone where the platform offers them
 (``O_PATH`` on Linux, ``O_SEARCH`` on Darwin), which is all it uses them for,
 so a POSIX search-only directory above a readable state file is descended as
@@ -1127,6 +1132,43 @@ DIRECTORY_OPEN_FLAGS = (
 DESCENT_REQUIRES_DIRECTORY_READ = not SEARCH_ONLY_DIRECTORY_FLAG
 
 
+def assert_secure_descent_supported() -> None:
+    """Refuse where ``os.open`` takes no ``dir_fd``, in the descent's words.
+
+    One sentence for one fact, said wherever it is found: the descent below
+    asks it before opening anything, and ``append_gate._set_root`` asks it
+    before opening the candidate root, which it holds open for the whole
+    verdict with the same flags and for the same confinement. Neither can be
+    done on a platform without ``dir_fd``, and a verifier that quietly
+    weakens its confinement there states an invariant it does not hold.
+    """
+
+    if os.open not in os.supports_dir_fd:
+        raise ReleaseChainError(
+            "state files cannot be read with secure descent on this platform "
+            "(os.open lacks dir_fd support); receipt requires a POSIX platform"
+        )
+
+
+def unreadable_directory_error(
+    named: object, relative: pathlib.PurePosixPath
+) -> ReleaseChainError:
+    """The refusal for a directory the descent may traverse but not read.
+
+    Only reachable where the platform offers neither ``O_PATH`` nor
+    ``O_SEARCH`` and the open therefore has to ask for read permission it
+    does not use. Shared by the descent and by the root open that precedes
+    it, so the candidate root gets this answer rather than one about having
+    changed — it did not change, it cannot be read.
+    """
+
+    return ReleaseChainError(
+        f"state path component {named} is not readable by this verifier; "
+        "secure descent requires read permission on every directory above a "
+        f"state file on this platform: {relative.as_posix()}"
+    )
+
+
 def _is_symlink_at(name: str, parent: int) -> bool:
     """Whether one directory entry is a symlink, asked of the open parent.
 
@@ -1236,11 +1278,7 @@ def confined_state_descriptor(
     of the leaf's stat untouched.
     """
 
-    if os.open not in os.supports_dir_fd:
-        raise ReleaseChainError(
-            "state files cannot be read with secure descent on this platform "
-            "(os.open lacks dir_fd support); receipt requires a POSIX platform"
-        )
+    assert_secure_descent_supported()
     directory_flags = DIRECTORY_OPEN_FLAGS
     try:
         parent = os.open(root, directory_flags)
@@ -1248,12 +1286,7 @@ def confined_state_descriptor(
         if DESCENT_REQUIRES_DIRECTORY_READ and exc.errno == errno.EACCES:
             # Before the identity answer below: a root this verifier cannot
             # open for want of read permission is unreadable, not changed.
-            raise ReleaseChainError(
-                f"state path component {root} is not readable by this "
-                "verifier; secure descent requires read permission on every "
-                "directory above a state file on this platform: "
-                f"{relative.as_posix()}"
-            ) from exc
+            raise unreadable_directory_error(root, relative) from exc
         if root_identity is None:
             raise
         # A caller that recorded an identity established this directory when
@@ -1279,11 +1312,8 @@ def confined_state_descriptor(
                 if _is_symlink_at(segment, parent):
                     raise _symlinked_component_error(relative, walked) from exc
                 if DESCENT_REQUIRES_DIRECTORY_READ and exc.errno == errno.EACCES:
-                    raise ReleaseChainError(
-                        f"state path component {'/'.join(walked)} is not "
-                        "readable by this verifier; secure descent requires "
-                        "read permission on every directory above a state "
-                        f"file on this platform: {relative.as_posix()}"
+                    raise unreadable_directory_error(
+                        "/".join(walked), relative
                     ) from exc
                 raise
             os.close(parent)
