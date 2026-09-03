@@ -129,9 +129,8 @@ Three row kinds, one journal:
     lookup, while the exact ``lstat`` misses it on POSIX and its fold key
     differs from the tombstone's — and it is refused as a non-portable name
     wherever a listing emits it. The pair is asked twice per verification,
-    for the reason the paragraph on pass order below gives, and the second
-    asking shares no listing between one tombstone and the next, so a
-    directory read for an earlier tombstone cannot answer for a later one.
+    for the reason the paragraph on pass order below gives, over two indexes,
+    so a listing read for the first asking cannot answer for the second.
     The second question walks the tree, so it is bounded: every entry taken
     from a listing and every candidate a search visits is charged against
     one budget for both askings together, and a listing wider than what is
@@ -229,19 +228,27 @@ walk — the longest traversal here — so that both are inside the window they
 close; a pass that ran between them and the return would be time in which the
 tree could change with nothing left to notice.
 
-The tombstone pass is the one that runs twice, and the second run caches
-nothing whatever. It has to be that way twice over. The first run decides
-absence from directory listings it caches and never re-reads, so a survivor
-that appears after its parent has been listed is invisible to every later
-search in that run — two tombstones sharing a parent is enough — and nothing
-afterwards looked at a removed path at all: the re-checks close their window
-over content and over the bound bytes, not over the paths the verdict calls
-removed (peer review, round five). A second run that cached within itself
-would then reproduce exactly that staleness one pass later, inside the pass
-added to close it (peer review, round six), so every tombstone in it lists its
-own directories. Both runs charge one budget, carried across, and a re-read is
-charged like any other read, so re-establishing absence cannot buy the tree a
-second walk's worth of budget.
+The tombstone pass is the one that runs twice, over an index each. The first
+run decides absence from directory listings it caches and never re-reads, so a
+survivor that appears after its parent has been listed is invisible to every
+later search in that run — two tombstones sharing a parent is enough — and
+nothing afterwards looked at a removed path at all: the re-checks close their
+window over content and over the bound bytes, not over the paths the verdict
+calls removed (peer review, round five). The second run starts with nothing
+cached and asks the host again, after everything else has finished touching
+the tree. Both runs charge one budget, carried across, so re-establishing
+absence cannot buy the tree a second walk's worth of budget.
+
+Within a run a directory is still listed once and shared. Listing it once per
+tombstone instead closed one more window — a survivor arriving in a parent the
+run had already listed, with a tombstone under it still to check — and the
+price was the pass going quadratic again in the one place a budget on a sum
+cannot bound it: 1,692 files in one directory with 154 tombstones beside them,
+a completely static tree with no writer in sight, spent 262,145 units of a
+262,144 cap and was refused as unverifiable (peer review, Sol round 8). That
+window is closed by the generation stamps below instead. A survivor has to
+arrive on disk to be one, arriving moves its parent's mtime and ctime, and the
+parent was stamped before the listing and is re-stated after the run.
 
 Putting that run last used to cost a window: no membership re-sweep follows
 it, so a content file inserted while it walked, or a bound file rewritten by
@@ -916,11 +923,29 @@ MAX_SWEEP_WORK = 262144
 #: as the work done with what it named (peer review, round five). The two
 #: tombstone passes share the total: the second index is constructed with
 #: what the first one spent, so the pass that re-establishes absence cannot
-#: buy the tree a second walk's worth of budget. That second pass shares no
-#: listing between one tombstone and the next (peer review, round six), so it
-#: costs more than the first — a directory on the path of R removed paths is
-#: read R times rather than once — and every one of those reads is charged
-#: here, which is the point: a re-read is work, and the cap is on work.
+#: buy the tree a second walk's worth of budget.
+#:
+#: So what this bounds is two walks of the directories the tombstones touch,
+#: not one: R removed paths whose components lie in directories holding E
+#: entries between them cost about 2×(E + R×D) for paths of depth D — E for
+#: each pass's listings, R×D for the candidates each search visits on its way
+#: down — and the second pass is the same price as the first rather than R
+#: times it. It was R times it while that pass listed every directory afresh
+#: for every removed path, and the product is what a cap on a sum cannot
+#: bound: 1,692 files in one directory with 154 tombstones beside them — the
+#: shape rulespec-us's widest directory really has, at 2,004 journal rows and
+#: with no writer in sight — spent 1,848 units on the first pass and 262,145
+#: on the second and was refused as unverifiable (peer review, Sol round 8).
+#: That corpus now spends 3,696 of this budget, and what it gives up inside
+#: the second pass is stated on :class:`_TombstoneIndex`.
+#:
+#: Read beside ``MAX_JOURNAL_ROWS`` as ``MAX_SWEEP_WORK`` is: a journal is
+#: refused above 4,096 rows by default, so a default-capacity corpus reaches
+#: this cap only if the directories its tombstones walk hold about 131,000
+#: entries between them, less one for every component a search descends —
+#: more than seventy-five times the widest directory in the reference
+#: consumer's tree. A consumer that pins a larger capacity buys tombstones,
+#: not width: each one adds twice its own depth and no listings.
 MAX_TOMBSTONE_WORK = 262144
 #: The most directory entries the attested spelling walk may read before it
 #: is refused as unbindable, counted once for the verification rather than
@@ -2252,10 +2277,9 @@ class _DirectoryGenerations:
 
     The first reading of a directory wins. A directory listed repeatedly —
     by the two membership sweeps, by the spelling walk's two passes, or by
-    the uncached tombstone pass — is therefore held against what it looked
-    like the first time anything in the run read it, not the last, so the
-    window the check closes is the widest one available rather than the
-    narrowest.
+    the two tombstone passes — is therefore held against what it looked like
+    the first time anything in the run read it, not the last, so the window
+    the check closes is the widest one available rather than the narrowest.
 
     A directory that could not be stat-ed is kept as ``None``, and the
     re-check passes over it rather than reading it as a mutation. What a
@@ -2467,15 +2491,31 @@ class _TombstoneIndex:
     work budget belongs to the verification rather than to the index, so the
     second one is constructed with ``charged`` set to what the first spent.
 
-    The second index caches nothing at all — ``cache=False``. A fresh index
-    that still caches within itself repeats the first pass's own staleness on
-    a smaller scale: one tombstone lists a shared parent, a survivor of the
-    next tombstone appears in it, and the next tombstone reads the listing
-    the first one left behind. Two tombstones under one directory is enough,
-    and it is the exact defect the second pass exists to close (peer review,
-    round six). So every tombstone in that pass lists its own directories,
-    and every entry of every one of those listings is charged against the
-    same carried budget — a re-read is work, and the budget bounds work.
+    Within a pass a directory is listed once and shared, in the second pass
+    as in the first, so a pass costs the tree it touches rather than the tree
+    times the tombstones. Listing it once per tombstone instead put the pass
+    back at the R×E the budget exists to refuse, and charged every re-read
+    against the same running total: a corpus of the reference consumer's own
+    shape — 1,692 files in one directory, 154 tombstones beside them, 2,004
+    journal rows, no writer anywhere near it — spent 1,848 units on the first
+    pass and 262,145 on the second and was refused as unverifiable (peer
+    review, Sol round 8). What the cap bounds is two passes over the
+    directories the tombstones touch.
+
+    What sharing a listing inside the second pass gives up is stated rather
+    than rounded up. One tombstone lists a shared parent, a survivor of the
+    next tombstone appears in it, and that next tombstone reads the listing
+    the first one left behind (peer review, round six). The survivor has to
+    arrive on disk to be a survivor, and arriving moves its parent's
+    ``st_mtime_ns`` and ``st_ctime_ns``; the parent is stamped an instant
+    before it is listed and re-stated after the pass, so
+    :class:`_DirectoryGenerations` refuses that verdict — under its own
+    message rather than by naming the path. The residual is the one that
+    stamp always carries and no re-listing choreography removes: a filesystem
+    whose directory timestamps are coarser than the interval between the
+    listing and the re-read. Closing it by re-listing costs the refusal
+    above, which a consumer of a wide and entirely static corpus pays on
+    every run.
 
     ``generations`` is told what each directory looked like an instant
     before it was listed, and both passes are given the run's recorder. See
@@ -2492,13 +2532,11 @@ class _TombstoneIndex:
         root: pathlib.Path,
         *,
         charged: int = 0,
-        cache: bool = True,
         generations: "_DirectoryGenerations | None",
     ) -> None:
         self.root = root
         self._directories: dict[str, dict[str, list[pathlib.Path]] | None] = {}
         self._work = charged
-        self._cache = cache
         self._generations = generations
 
     @property
@@ -2534,7 +2572,7 @@ class _TombstoneIndex:
         refusal this raises.
         """
 
-        if self._cache and key in self._directories:
+        if key in self._directories:
             return self._directories[key]
         if self._generations is not None:
             self._generations.record(directory, key)
@@ -2554,8 +2592,7 @@ class _TombstoneIndex:
                     self.charge(relative)
                     names.append(entry.name)
         except (FileNotFoundError, NotADirectoryError):
-            if self._cache:
-                self._directories[key] = None
+            self._directories[key] = None
             return None
         except OSError as exc:
             raise CorpusError(
@@ -2580,8 +2617,7 @@ class _TombstoneIndex:
             # round 2).
             _assert_portable_name(name, "tree entry examined for a tombstone")
             folded.setdefault(_path_fold(name), []).append(directory / name)
-        if self._cache:
-            self._directories[key] = folded
+        self._directories[key] = folded
         return folded
 
 
@@ -2716,8 +2752,8 @@ def _assert_tombstones_absent(
 
     The index arrives as a parameter rather than being built here because
     :func:`verify_corpus_binding` runs this twice over two of them, and the
-    whole point of the second is that it has cached nothing. One function
-    serves both calls so the two passes cannot drift apart.
+    whole point of the second is that it starts with nothing cached. One
+    function serves both calls so the two passes cannot drift apart.
 
     ``appeared`` says which of them is speaking, and changes nothing but the
     first clause of a refusal. On the second pass every path here was proven
@@ -3829,7 +3865,7 @@ def verify_corpus_binding(
                 "verdict is refused"
             )
 
-    # And the tombstones once more, over an index that has cached nothing.
+    # And the tombstones once more, over an index that has cached nothing yet.
     # Absence was the one claim in the verdict that nothing re-established:
     # the re-checks above close their window over content membership and over
     # the bound bytes, and neither looks at a removed path. The first pass
@@ -3844,20 +3880,17 @@ def verify_corpus_binding(
     # Charged against the same budget, carried across from the first pass, so
     # a tree cannot be walked twice for the price of the cap once.
     #
-    # It caches nothing within itself either. An index that cached would
-    # repeat the first pass's staleness inside the pass meant to close it:
-    # one tombstone lists the shared parent, the next tombstone's survivor
-    # appears in it, and the next tombstone reads the listing the first one
-    # left behind (peer review, round six).
+    # Fresh, but not listing-per-tombstone. Re-reading each directory once
+    # per removed path made this pass cost R×E and charged all of it here,
+    # which refused a completely static corpus of the shape the reference
+    # consumer has (peer review, Sol round 8). What remains open inside the
+    # pass — a survivor arriving in a parent this pass has already listed —
+    # arrives on disk, so it moves that parent's stamps and ``generations``
+    # below refuses it. :class:`_TombstoneIndex` states both halves.
     _assert_tombstones_absent(
         root,
         removed,
-        _TombstoneIndex(
-            root,
-            charged=tombstones.work,
-            cache=False,
-            generations=generations,
-        ),
+        _TombstoneIndex(root, charged=tombstones.work, generations=generations),
         appeared=True,
     )
 

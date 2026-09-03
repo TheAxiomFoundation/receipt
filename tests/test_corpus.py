@@ -2635,31 +2635,20 @@ def _tombstone_pass_entries(tmp_path: pathlib.Path) -> int:
 
 
 def _tombstone_pass_work(tmp_path: pathlib.Path) -> int:
-    """Budget units the *first* two-tombstone pass charges, counting each once.
+    """Budget units *one* two-tombstone pass charges, counting each entry once.
 
     Two directories are listed — the tree root and ``.axiom`` — and every
     entry consumed from a listing is one unit. Each of the two searches then
     visits the ``.axiom`` candidate on its way down, and a visited candidate
     is charged as well (F2), which is the two units added here.
 
-    Only the first pass costs this. The second caches nothing (R6-F2), so it
-    pays the helper below instead, and both are charged against one budget.
+    Both passes cost this, and both are charged against one budget, so a
+    verification of this fixture spends twice what this returns. The second
+    pass used to cost ``2 x (entries + 1)`` because it re-listed every
+    directory for every removed path; that is the product S8-F1 removed.
     """
 
     return _tombstone_pass_entries(tmp_path) + 2
-
-
-def _uncached_tombstone_pass_work(tmp_path: pathlib.Path) -> int:
-    """Budget units the *second* two-tombstone pass charges, sharing nothing.
-
-    The second pass lists every directory afresh for every tombstone, which
-    is the point of it: a listing left behind by an earlier search in the
-    same pass is exactly the staleness that pass exists to close. So each of
-    the two searches pays for both listings itself, plus the one candidate it
-    visits on the way down.
-    """
-
-    return 2 * (_tombstone_pass_entries(tmp_path) + 1)
 
 
 def test_the_tombstone_budget_counts_entries_not_listings(
@@ -2688,20 +2677,22 @@ def test_the_tombstone_budget_counts_entries_not_listings(
 def test_the_tombstone_index_is_shared_across_removed_paths(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Binds F3: two tombstones must not pay twice for the same directory.
+    """Binds F3, and S8-F1: neither pass may pay twice for the same directory.
 
-    The budget is set to exactly what the two passes charge between them —
-    the first sharing its listings, the second sharing nothing. Both removed
-    paths start at the tree root and share their parent, so this passes only
-    because the *first* index reads each directory once and hands the listing
-    to the second search. Re-listing per removed path there too — what the
-    module did before — would push that pass from five to eight and refuse.
+    The budget is set to exactly what the two passes charge between them,
+    each of them reading the tree once. Both removed paths start at the tree
+    root and share their parent, so this passes only because an index reads
+    each directory once and hands the listing to every later search in its
+    own pass. Re-listing per removed path pushes a pass from five units to
+    eight, which is three over this budget in the first pass and three over
+    it in the second: the module did the former before F3 and the latter
+    before S8-F1, and either one refuses here.
     """
 
     write_tree(tmp_path)
     monkeypatch.setattr(
         "receipt.corpus.MAX_TOMBSTONE_WORK",
-        _tombstone_pass_work(tmp_path) + _uncached_tombstone_pass_work(tmp_path),
+        2 * _tombstone_pass_work(tmp_path),
     )
     verification = verify_corpus_binding(
         tmp_path, render_journal(_two_tombstone_rows()), spec=corpus_spec()
@@ -3093,6 +3084,34 @@ def _after_searching(after: str, act):
     return _after_nth_search(after, 1, act)
 
 
+def _before_nth_search(before: str, occurrence: int, act):
+    """A ``_fold_survivor`` firing ``act`` just before the nth search for ``before``.
+
+    One instant earlier than the helper above, and it is the instant that
+    isolates the directory stamp. Every tombstone is checked by an exact
+    ``os.lstat`` of its own spelling and then by the fold search; firing
+    between the two means the host's own lookup has already answered
+    "absent", so a survivor written here is invisible to a search reading a
+    listing its pass took earlier — on a case-sensitive host and on a
+    case-insensitive one alike. What is left to refuse it is the stamp
+    ``_DirectoryGenerations`` took before that listing (S8-F1).
+    """
+
+    import receipt.corpus
+
+    real = receipt.corpus._fold_survivor
+    seen: list[str] = []
+
+    def fold_survivor(index, relative):
+        if relative == before:
+            seen.append(relative)
+            if len(seen) == occurrence:
+                act()
+        return real(index, relative)
+
+    return fold_survivor
+
+
 def _late_survivor_scandir(directory_name: str, survivor: str, planted: list[str]):
     """A scan that reports one more entry once ``planted`` is non-empty.
 
@@ -3133,9 +3152,9 @@ def test_a_survivor_planted_after_a_shared_parent_was_cached_refuses(
     The change fires after the search for ``.axiom/a.json``, which is exactly
     the moment the shared parent has been cached and ``.axiom/b.json`` has
     not yet been looked for, so the first pass genuinely misses it. The pass
-    now runs a second time over an index that has cached nothing, and that is
-    what refuses. Without the fix this verification returns a
-    CorpusVerification with both paths among its removed paths.
+    now runs a second time over a fresh index, which lists ``.axiom`` again
+    for itself, and that is what refuses. Without the fix this verification
+    returns a CorpusVerification with both paths among its removed paths.
     """
 
     planted: list[str] = []
@@ -3192,6 +3211,86 @@ def test_a_removed_file_written_back_after_the_first_pass_refuses(
             tmp_path, render_journal(_two_tombstone_rows()), spec=corpus_spec()
         )
     assert ".axiom/b.json" in str(caught.value)
+
+
+def test_a_wide_static_corpus_verifies_within_the_real_tombstone_budget(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S8-F1: the shipped budget refused a corpus nobody was writing to.
+
+    Every other test of this budget monkeypatches the constant down to a
+    handful of entries, which binds the counting and says nothing about the
+    number. The number was wrong: the second pass listed every directory on
+    every tombstone's path once *per tombstone*, and all of it was charged
+    against the same 262,144 the first pass had already spent from, so the
+    pass was O(R x E) again and the cap bounded the product.
+
+    The shape here is the reference consumer's own. ``rulespec-us`` holds
+    1,692 tracked files in ``us-co/statutes/39/``, which is what ``WIDTH``
+    is; a journal that has retired 160 paths from such a directory is an
+    ordinary append-only history, at 2,016 rows against a default capacity
+    of 4,096. Against the real constant, unpatched, with no writer anywhere
+    near the tree, that verification refused: ``rules/t00153.yaml`` was
+    reported unverifiable with the total at 262,145. It now costs 3,708 —
+    1,854 for each pass — because each pass lists the directory once.
+
+    The counter is read off the indexes the module builds rather than
+    recomputed here, so what is asserted is the module's own arithmetic. The
+    ceiling asserted is a fortieth of the budget: not "it fits", which the
+    old code also managed for 153 tombstones, but "it is nowhere near".
+    """
+
+    import receipt.corpus
+
+    width = 1692
+    tombstones = 160
+    built: list[object] = []
+    real_index = receipt.corpus._TombstoneIndex
+
+    class Recording(real_index):  # type: ignore[misc, valid-type]
+        def __init__(self, *arguments: object, **keywords: object) -> None:
+            super().__init__(*arguments, **keywords)
+            built.append(self)
+
+    monkeypatch.setattr("receipt.corpus._TombstoneIndex", Recording)
+
+    (tmp_path / "rules").mkdir()
+    (tmp_path / ".axiom").mkdir()
+    (tmp_path / ".axiom/toolchain.toml").write_text(ATTESTED[".axiom/toolchain.toml"])
+    content = {}
+    for index in range(width):
+        relative = f"rules/f{index:05d}.yaml"
+        body = f"name: f{index}\n"
+        (tmp_path / relative).write_text(body)
+        content[relative] = body
+    rows = journal_rows(content=content)
+    removed = [f"rules/t{index:05d}.yaml" for index in range(tombstones)]
+    for state in ("present", "removed"):
+        for relative in removed:
+            rows.append(
+                {
+                    "schemaVersion": JOURNAL_SCHEMA,
+                    "kind": "content",
+                    "path": relative,
+                    "sha256": sha256_text("gone\n"),
+                    "state": state,
+                }
+            )
+    rows = reindex(rows)
+    assert len(rows) < MAX_JOURNAL_ROWS
+
+    verification = verify_corpus_binding(
+        tmp_path, render_journal(rows), spec=corpus_spec()
+    )
+
+    assert verification.removed_paths == tuple(removed)
+    assert len(verification.content) == width
+    # Two indexes, the second carrying the first's total, so the last one
+    # holds what the verification spent between them.
+    assert len(built) == 2
+    spent = built[-1].work  # type: ignore[attr-defined]
+    assert spent == 2 * built[0].work  # type: ignore[attr-defined]
+    assert spent < receipt.corpus.MAX_TOMBSTONE_WORK // 40
 
 
 def test_the_two_tombstone_passes_charge_one_budget(
@@ -4306,47 +4405,52 @@ def test_an_ordinary_non_content_file_under_a_content_root_still_verifies(
 def test_a_survivor_planted_inside_the_second_tombstone_pass_refuses(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Binds R6-F2: the second pass repeated the first pass's own staleness.
+    """Binds S8-F1: what the second pass gives up by sharing a listing again.
 
-    Round five gave the second pass a fresh index, which closed the window
-    the first pass left open. It did not close the same window *inside*
-    itself: a fresh index that still cached listed the shared parent once for
-    the first tombstone and handed that listing to every tombstone after it.
-    So the defect the second pass exists to refuse — a survivor appearing
-    after its parent has been listed, with another tombstone still to be
-    checked under it — survived one pass later, and the verdict still named
-    the path under removedPaths while the file answered to it.
+    Round six had that pass list every directory afresh for every removed
+    path, so a survivor appearing in a parent it had already listed was found
+    by the next search rather than missed. That cost R x E and refused a
+    static corpus of the reference consumer's shape (S8-F1), so the pass
+    shares a listing within itself once more — and the window round six
+    closed by re-listing is closed here by the directory stamp instead.
 
-    The change fires after the *second* pass's search for ``.axiom/a.json``,
-    which is exactly when that pass has cached the shared parent and has not
-    yet looked for ``.axiom/b.json``. The index now caches nothing, so the
-    second search lists ``.axiom`` again and finds the survivor. Without the
-    fix it reads the listing the first search left behind, finds nothing, and
-    the verification returns both paths as removed.
+    The survivor is written to disk inside the *second* pass, after that pass
+    has listed the shared parent for ``.axiom/a.json`` and after
+    ``.axiom/b.json``'s own exact-spelling ``os.lstat`` has answered
+    "absent" — which is what ``_before_nth_search`` is for, and what makes
+    the outcome the same on a case-sensitive host and a case-insensitive one.
+    So b.json's search reads the listing its pass took before the write and
+    finds nothing. The write moved ``.axiom``'s mtime and ctime, that
+    directory was stamped an instant before it was first listed, and the
+    closing re-statement refuses. Without the stamp — replacing
+    ``_DirectoryGenerations.assert_unchanged`` with a no-op leaves the rest
+    of the module intact — this verification returns a CorpusVerification
+    naming ``.axiom/b.json`` as removed while the file sits on disk under a
+    spelling that aliases it.
 
-    The survivor is declared rather than written, for the reason
-    ``_late_survivor_scandir`` gives, and it is also what isolates this
-    finding from its sibling: a name that is not on disk moves no directory's
-    mtime, so the generation check below cannot be what refuses here.
+    So the refusal is the recorder's rather than the search's, and the
+    message says so. That is the whole of the trade: what a real host cannot
+    do is add an entry to a directory without moving its stamps, and the
+    residual is a filesystem whose directory timestamps are coarser than the
+    interval between the listing and the re-read — the stamp's own residual,
+    not this pass's.
     """
 
-    planted: list[str] = []
     write_tree(tmp_path)
     monkeypatch.setattr(
-        os, "scandir", _late_survivor_scandir(".axiom", "B.JSON", planted)
-    )
-    monkeypatch.setattr(
         "receipt.corpus._fold_survivor",
-        _after_nth_search(".axiom/a.json", 2, lambda: planted.append("B.JSON")),
+        _before_nth_search(
+            ".axiom/b.json",
+            2,
+            lambda: (tmp_path / ".axiom/B.JSON").write_text('{"applied": true}\n'),
+        ),
     )
     with pytest.raises(CorpusError) as caught:
         verify_corpus_binding(
             tmp_path, render_journal(_two_tombstone_rows()), spec=corpus_spec()
         )
     assert str(caught.value) == (
-        "removed path appeared during verification under a spelling that "
-        "aliases it on a case- or normalization-insensitive filesystem: "
-        ".axiom/b.json ('.axiom/B.JSON')"
+        "the tree changed during verification; the closed-world verdict is refused"
     )
 
 
