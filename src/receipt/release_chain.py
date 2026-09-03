@@ -53,7 +53,14 @@ resolves again; the manifest path's own type, decided for a caller that
 decides whether a tree has a chain by asking the filesystem, because
 ``is_dir()`` is false for a blob standing where that directory was, for an
 empty link and for a dangling one alike, and the enumeration whose words
-refuse such a path only runs once something has decided to enumerate; the
+refuse such a path only runs once something has decided to enumerate — and
+decided component by component, so that absence, a non-directory *ancestor*
+and a path this verifier cannot ``lstat`` at all are three answers rather than
+one: a single ``lstat`` of the whole path answers ``ENOTDIR`` below an
+untracked regular file at the release root and ``EACCES`` below an
+unsearchable one, and a bare ``except OSError`` read both as "there is no
+manifest directory here", which on the push path is an acceptance with no
+chain over a tree whose release history is a text file; the
 state-path guards
 ``append_gate`` calls, whose walk — like the release root's — now also
 requires each component to be spelled by the directory holding it, because
@@ -509,19 +516,66 @@ def assert_manifest_directory_regular(root: pathlib.Path, spec: ChainSpec) -> No
     check's business: an absent chain is legal, and "no chain" is the true
     answer for it.
 
-    A path this verifier cannot ``lstat`` returns too, which is what
-    ``exists()`` does for the enumeration and what ``is_dir()`` does for the
-    caller: the answer for it is unchanged rather than newly favourable.
+    Absence is the only thing that returns, and it is asked component by
+    component so that it can be told apart from the two facts that used to be
+    folded into it. One ``lstat`` of the whole path answers ``ENOTDIR`` when an
+    *ancestor* is a regular file — a release root that is an untracked blob,
+    or any component of a multi-component manifest path — and ``EACCES`` when
+    an ancestor is unsearchable, and catching ``OSError`` turned both into "no
+    manifest directory here". On the push path that is an acceptance with no
+    chain: ``initialized`` is false, nothing is enumerated, the index scan has
+    no entry under an untracked root to object to, and ``verify_release_chain``
+    is never called, while the commit under review may carry the whole chain.
+
+    So the components are walked. ``FileNotFoundError`` at any of them is
+    absence — nothing stands there, so nothing stands at the leaf either, and
+    an absent chain is legal — and every other outcome is named for what it
+    is: a component above the leaf that is not a directory refuses ``release
+    manifest path ancestor is not a directory``, and a component this verifier
+    cannot ``lstat`` at all refuses ``cannot stat release manifest path``,
+    carrying the ``strerror`` so a permission answer is not reported as a type
+    answer. The ``ENOTDIR`` branch below is reachable only as a race — the
+    walk asks each ancestor's type directly, so a file standing at one is
+    refused by type before its child is ``lstat``-ed — and it is kept because
+    an ancestor that becomes a file between two of those calls is the same
+    fact arriving late.
+
+    The leaf keeps exactly the refusal it had, in the same words, for the same
+    three shapes: an ``lstat``, so a symlink is not a directory here however it
+    resolves, which is the enumeration's ``is_symlink() or not is_dir()`` in
+    one question.
     """
 
-    directory = root / spec.manifest_relative
-    try:
-        entry = os.lstat(directory)
-    except OSError:
-        return
-    if not stat.S_ISDIR(entry.st_mode):
+    relative = spec.manifest_relative
+    parts = relative.parts
+    current = root
+    walked: tuple[str, ...] = ()
+    for depth, segment in enumerate(parts, start=1):
+        current = current / segment
+        walked = (*walked, segment)
+        try:
+            entry = os.lstat(current)
+        except FileNotFoundError:
+            return
+        except NotADirectoryError as exc:
+            raise ReleaseChainError(
+                "release manifest path ancestor is not a directory: "
+                f"{'/'.join(walked)}"
+            ) from exc
+        except OSError as exc:
+            raise ReleaseChainError(
+                "cannot stat release manifest path: "
+                f"{'/'.join(walked)} ({exc.strerror})"
+            ) from exc
+        if stat.S_ISDIR(entry.st_mode):
+            continue
+        if depth == len(parts):
+            raise ReleaseChainError(
+                f"release manifest path is not a regular directory: {current}"
+            )
         raise ReleaseChainError(
-            f"release manifest path is not a regular directory: {directory}"
+            "release manifest path ancestor is not a directory: "
+            f"{'/'.join(walked)}"
         )
 
 

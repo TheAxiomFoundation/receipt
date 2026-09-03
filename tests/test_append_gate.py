@@ -88,7 +88,8 @@ classification-only refusal a push verification was held to.
 
 Docstrings labelled S5-R2-F1 onward name that fifth gate's second round,
 numbering from one again: S5-R2-F1 the untracked and ignored listings that
-took git's exit status for a complete enumeration.
+took git's exit status for a complete enumeration, S5-R2-F2 the manifest
+path's type decision that read every ``OSError`` as absence.
 
 The fixture is a local git repository built from scratch, and no network is
 used anywhere here. Most of it holds a README and no manifests, so the gate's
@@ -2995,7 +2996,22 @@ def test_the_push_path_refuses_a_tracked_file_standing_for_the_release_root(
     is no ``releases/manifests`` to find — and the gate accepted the tree with
     the whole chain gone, naming no release. The index says otherwise, and is
     now read against the filesystem: an entry under the root with no
-    directory to hold it refuses."""
+    directory to hold it refuses.
+
+    S5-R2-F2 answers the same tree one step earlier, and both are asserted
+    here the way the base-ref sibling below asserts both of its. The manifest
+    path's own type is decided before ``initialized`` asks the filesystem
+    whether there is a chain, and with the components walked rather than
+    ``lstat``-ed whole, a regular file standing at ``releases`` is a
+    non-directory ancestor rather than an ``ENOTDIR`` read as absence.
+    Measured at this round's head with ``assert_manifest_directory_regular``
+    put back to its single ``lstat`` and bare ``except OSError``: ``release
+    root is not a directory while the index records 1 entry under it`` — the
+    scan's own sentence, which the scan still gives for this tree and which is
+    asserted directly below, so the order between the two is pinned rather
+    than assumed. R6-F1's finding is untouched: this pre-emption needs a
+    *tracked* entry under the root, and the tree S5-R2-F2 is actually about
+    leaves the scan nothing to say at all."""
 
     candidate = base_repository(tmp_path)
     replace_release_root_with_a_tracked_file(candidate)
@@ -3006,6 +3022,11 @@ def test_the_push_path_refuses_a_tracked_file_standing_for_the_release_root(
     with pytest.raises(AppendError) as refusal:
         run_push_gate(candidate)
     assert str(refusal.value) == (
+        "release manifest path ancestor is not a directory: releases"
+    )
+    with pytest.raises(ReleaseChainError) as scanned:
+        release_chain.assert_release_root_index_regular(candidate.root, CHAIN_SPEC)
+    assert str(scanned.value) == (
         "release root is not a directory while the index records 1 entry "
         "under it"
     )
@@ -5647,6 +5668,152 @@ def test_a_manifest_path_that_is_absent_is_still_no_chain(
     assert run_push_gate(candidate) == (
         "thesis-facts append check OK: 2 rows, immutable prefix 1"
     )
+
+
+def test_an_untracked_file_at_the_release_root_is_not_no_chain(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5-R2-F2. ``assert_manifest_directory_regular`` decided the
+    manifest path's type with one ``lstat`` of the whole path and a bare
+    ``except OSError: return``, and that turned two different facts into
+    absence. A regular file standing where the release root is answers
+    ``ENOTDIR`` for every path below it, so ``releases/manifests`` was read as
+    "not there" — which on the push path is an acceptance with no chain:
+    ``initialized`` is false, nothing is enumerated, ``verify_release_chain``
+    is never called, and the release root's index scan has no entry under an
+    *untracked* root to object to, so it returns as well.
+
+    Measured at this round's head with the single ``lstat`` and bare
+    ``except OSError`` put back in place: ``thesis-facts append check OK: 2
+    rows, immutable prefix 1`` — a verdict naming no release at all, over a
+    tree whose whole release history has been replaced by a text file. With
+    the components walked, absence and wrong type are different answers."""
+
+    candidate = base_repository(tmp_path)
+    shutil.rmtree(candidate.root / CHAIN_SPEC.release_root_relative)
+    candidate = commit_all(candidate, "no release tree yet")
+    (candidate.root / CHAIN_SPEC.release_root_relative).write_text(
+        "not a directory\n", encoding="utf-8"
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate)
+    assert str(refusal.value) == (
+        "release manifest path ancestor is not a directory: releases"
+    )
+
+
+def test_an_untracked_file_at_the_release_root_is_refused_with_a_base(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S5-R2-F2 on the base-ref path, where a pre-existing refusal already
+    gets there and must keep doing so. ``_working_release_files`` enumerates
+    the working release tree before anything on this PR's side and refuses a
+    root that is not a real directory, in the extraction's own words — so the
+    hole S5-R2-F2 closes is the push path's alone, and this pins that the
+    other path's answer is unchanged by the fix. (The sentence names a symlink
+    for a regular file; that wording is the extraction's and is not this
+    round's to rewrite.)"""
+
+    candidate = base_repository(tmp_path)
+    shutil.rmtree(candidate.root / CHAIN_SPEC.release_root_relative)
+    candidate = commit_all(candidate, "no release tree yet")
+    (candidate.root / CHAIN_SPEC.release_root_relative).write_text(
+        "not a directory\n", encoding="utf-8"
+    )
+    append_one_row(candidate)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "releases must be a real directory, not a symlink"
+    )
+
+
+def test_a_file_above_a_nested_manifest_path_is_not_no_chain(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S5-R2-F2 one component further down, which is the shape S4R3-F4 named
+    for the walk and this decision had the same gap in. A spec whose manifest
+    directory sits below an interior component — ``releases/journal/manifests``
+    — reads ``ENOTDIR`` for a regular file at *any* ancestor, and the single
+    ``lstat`` could not tell which component it was about or that it was a
+    type answer at all.
+
+    Measured at this round's head with the single ``lstat`` and bare
+    ``except OSError`` put back: ``thesis-facts append check OK: 2 rows,
+    immutable prefix 1``. The component walk names the ancestor it refused
+    for."""
+
+    spec = spec_with_release_root("releases/journal")
+    candidate = base_repository(tmp_path, "releases/journal")
+    shutil.rmtree(candidate.root / "releases")
+    candidate = commit_all(candidate, "no release tree yet")
+    (candidate.root / "releases").write_text("not a directory\n", encoding="utf-8")
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate, spec=spec)
+    assert str(refusal.value) == (
+        "release manifest path ancestor is not a directory: releases"
+    )
+
+
+def test_an_absent_ancestor_of_a_nested_manifest_path_is_still_no_chain(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S5-R2-F2's other side, beside the single-component case
+    ``test_a_manifest_path_that_is_absent_is_still_no_chain`` already binds.
+    ``FileNotFoundError`` at any component is absence: nothing stands there,
+    so nothing stands at the leaf either, and an absent chain is legal. Only
+    the two facts that are not absence changed answers."""
+
+    spec = spec_with_release_root("releases/journal")
+    candidate = base_repository(tmp_path, "releases/journal")
+    shutil.rmtree(candidate.root / "releases")
+    candidate = commit_all(candidate, "no release tree yet")
+    assert not (candidate.root / "releases").exists()
+
+    assert run_push_gate(candidate, spec=spec) == (
+        "thesis-facts append check OK: 2 rows, immutable prefix 1"
+    )
+
+
+@pytest.mark.skipif(
+    os.getuid() == 0, reason="root searches a directory it has no rights on"
+)
+def test_a_manifest_path_this_verifier_cannot_stat_is_not_no_chain(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S5-R2-F2's third fact, which the bare ``except OSError`` folded into
+    absence along with the type answer: a manifest path under an unsearchable
+    ancestor cannot be ``lstat``-ed at all, and "I could not ask" is not "there
+    is nothing there". Measured at this round's head with the single ``lstat``
+    and bare ``except OSError`` put back, on this exact directory: the call
+    returns ``None`` — the acceptance the push path reads as no chain.
+
+    Driven directly rather than through the gate, because the gate cannot
+    reach it: a release root at mode 0o444 is readable, so
+    ``_assert_component_spelled`` binds every spelling and the walk passes,
+    and then ``hold_release_root``'s ``os.open`` of that root with search
+    rights fails first — measured on this tree as a bare ``PermissionError:
+    [Errno 13] Permission denied: 'releases'``, which is that open's own
+    answer and not this decision's to give. What is bound here is that the
+    type decision no longer reports an unaskable question as an answer."""
+
+    candidate = base_repository(tmp_path)
+    releases = candidate.root / CHAIN_SPEC.release_root_relative
+    releases.chmod(0o444)
+    try:
+        with pytest.raises(ReleaseChainError) as refusal:
+            release_chain.assert_manifest_directory_regular(
+                candidate.root, CHAIN_SPEC
+            )
+        assert str(refusal.value) == (
+            "cannot stat release manifest path: releases/manifests "
+            "(Permission denied)"
+        )
+    finally:
+        releases.chmod(0o755)
 
 
 def test_an_anchor_path_that_is_not_a_directory_keeps_its_own_refusal(
