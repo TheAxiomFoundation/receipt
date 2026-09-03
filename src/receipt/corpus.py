@@ -185,31 +185,31 @@ mapping's length before any entry of it is validated.
 
 Decoding is bounded a level above all three, and every step of it happens on
 the bytes rather than on text. ``MAX_JOURNAL_BYTES`` is checked on the raw
-payload first; ``MAX_JOURNAL_ROWS`` is checked by counting line feeds in it,
-which walks the payload without building a list; the rows are then found by
-splitting the raw bytes, which finds exactly the rows splitting the decoded
-text would because a line feed cannot occur inside a UTF-8 multi-byte
-sequence; and ``MAX_JOURNAL_ROW_BYTES`` is checked on each row's own bytes
-before that row is decoded, let alone handed to ``json.loads`` to build an
-object graph out of. Counting rows bounded how many there were and nothing
-about how large one of them was, so a single row of arbitrary size was
-decoded, split out and parsed with no budget consulted (peer review, Sol
-round 3); and checking the row cap on decoded *text* left the allocation it
-exists to stop already made, because the payload was decoded whole and split
-whole before the first row was measured (peer review, Sol round 4).
+payload first; the consumer-pinned :attr:`CorpusSpec.journal_row_capacity` is
+checked by counting line feeds in it, which walks the payload without building
+a list; the rows are then found by splitting the raw bytes, which finds exactly
+the rows splitting the decoded text would because a line feed cannot occur
+inside a UTF-8 multi-byte sequence; and ``MAX_JOURNAL_ROW_BYTES`` is checked on
+each row's own bytes before that row is decoded, let alone handed to
+``json.loads`` to build an object graph out of. Counting rows bounded how many
+there were and nothing about how large one of them was, so a single row of
+arbitrary size was decoded, split out and parsed with no budget consulted
+(peer review, Sol round 3); and checking the row cap on decoded *text* left
+the allocation it exists to stop already made, because the payload was
+decoded whole and split whole before the first row was measured (peer review,
+Sol round 4).
 
-Two of those three are derived and the third is stated, which is the
-difference between a bound and a number. ``MAX_JOURNAL_ROWS`` comes from the
-gate cap plus an equal margin for the other row kinds, and
-``MAX_JOURNAL_ROW_BYTES`` from the largest row this schema admits; both
-arithmetics are written out beside the constants and pinned by a test.
-``MAX_JOURNAL_BYTES`` is neither derived nor derived from: it is a stated
-ceiling of 64 MiB on what a corpus journal may be at all, and nothing here
-computes anything from it. It was the product of the other two — eight
-gibibytes, the product of two worst cases no journal reaches at once — which
-is not a ceiling on the one input it exists for, an input that is not a
-journal (peer review, Sol round 4). A real corpus journal is kilobytes: one
-row per bound path per revision, plus its gates and tombstones.
+The default row capacity, ``MAX_JOURNAL_ROWS``, comes from the gate cap plus
+an equal margin for the other row kinds; consumers pin the capacity in their
+spec because an append-only journal eventually outgrows that default through
+revisions and tombstones (peer review, Sol round 7). The pin cannot exceed
+``MAX_JOURNAL_ROWS_CEILING``, derived from the total byte ceiling divided by
+the smallest valid row. ``MAX_JOURNAL_ROW_BYTES`` is derived from the largest
+row this schema admits. ``MAX_JOURNAL_BYTES`` itself is stated: 64 MiB on what
+a corpus journal may be at all. It used to be the product of the default row
+count and per-row maximum — eight gibibytes, two worst cases no journal
+reaches at once — which is not a ceiling on the one input it exists for, an
+input that is not a journal (peer review, Sol round 4).
 
 One residual is outside this module and is stated rather than fixed:
 ``receipt.release_chain.jsonl_line_offsets`` splits the whole journal before
@@ -432,7 +432,10 @@ a change to five.
 
 Every trust anchor arrives from the consumer's committed :class:`CorpusSpec`.
 The module ships no defaults: not a content root, not a required gate, not an
-accepted tier.
+accepted tier. Its one convenience default is not an anchor but a resource
+pin: ``journal_row_capacity`` begins at :data:`MAX_JOURNAL_ROWS`, and a
+consumer whose append-only history outgrows it commits a larger value without
+changing a process-global constant.
 """
 
 from __future__ import annotations
@@ -652,40 +655,38 @@ REMOVED_PATH_RENDER_STRUCTURE = 8
 #: constants moved; a test pins the arithmetic so a change to either fails
 #: a test rather than quietly reviving or burying it.
 MAX_GATE_DECLARATIONS = 2048
-#: The most rows one journal may carry, checked by counting line feeds
-#: before any row is parsed. Every other budget here bounds what a *valid*
-#: journal costs; this one bounds what an invalid one can make the parser
-#: allocate before a single row has been decoded, so the memory a journal
-#: can ask for is a stated function of its stated size.
+#: The default number of rows a consumer lets one journal carry, checked by
+#: counting line feeds before any row is parsed. Every other budget here bounds
+#: what a *valid* journal costs; this one defaults the bound on what an invalid
+#: one can make the parser allocate before a single row has been decoded.
 #:
 #: Derived rather than picked: the gate cap above is 2,048 declarations, and
 #: the other three row kinds — content, attested and removed — get an equal
 #: margin of 2,048 between them, which is 4,096.
 #:
-#: That margin bounds the whole *journal*, not the tree it describes, and
-#: the journal is append-only: a corpus of five hundred rule files that has
-#: cut four releases has written more than two thousand content rows,
-#: whatever its tree holds today. So what a consumer has to watch is bound
-#: paths times revisions plus tombstones, and a corpus that outgrows it
-#: raises this constant. The number is stated here rather than left
-#: implicit precisely so that raising it is a visible change to a
-#: consumer-facing bound rather than a silent one.
+#: That margin bounds the whole *journal*, not the tree it describes, and the
+#: journal is append-only: a corpus of five hundred rule files that has cut
+#: four releases has written more than two thousand content rows, whatever its
+#: tree holds today. So what a consumer has to watch is bound paths times
+#: revisions plus tombstones. A corpus that outgrows the default pins a larger
+#: ``CorpusSpec.journal_row_capacity`` in committed consumer code rather than
+#: editing this process-global default (peer review, Sol round 7).
 MAX_JOURNAL_ROWS = 4096
 #: The most bytes one journal row may occupy, checked on the row's own bytes
 #: before the row is decoded and before ``json.loads`` is asked to build
 #: anything out of it.
 #:
-#: ``MAX_JOURNAL_ROWS`` bounds how many rows a journal may carry and says
+#: The pinned row capacity bounds how many rows a journal may carry and says
 #: nothing about how large one of them is, so a single row of arbitrary size
 #: was decoded, split out, and handed to ``json.loads`` — which materialises
 #: the whole object graph — before any budget had been consulted (peer
-#: review, Sol round 3). Checking it on the *decoded* text then left the
-#: allocation this bound exists to stop already made: the journal was decoded
-#: whole and split whole before the first row was measured, so the row bound
-#: bounded ``json.loads`` and nothing else (peer review, Sol round 4). The
-#: rows are found by splitting the raw bytes on ``b"\n"`` — which is exact,
-#: because a line feed cannot occur inside a UTF-8 multi-byte sequence — and
-#: each row is measured as bytes before it is turned into text.
+#: review, Sol round 3). Checking this cap on the *decoded* text then left the
+#: allocation it exists to stop already made: the journal was decoded whole
+#: and split whole before the first row was measured, so the row bound bounded
+#: ``json.loads`` and nothing else (peer review, Sol round 4). The rows are
+#: found by splitting the raw bytes on ``b"\n"`` — which is exact, because a
+#: line feed cannot occur inside a UTF-8 multi-byte sequence — and each row is
+#: measured as bytes before it is turned into text.
 #:
 #: Derived from the largest row this schema admits, which is a gate
 #: declaration. Its evidence may carry ``MAX_EVIDENCE_ENTRIES`` = 64 entries
@@ -709,22 +710,31 @@ MAX_JOURNAL_ROW_BYTES = 2097152
 #: not one at all, whose size is the only thing about it knowable before it
 #: is decoded.
 #:
-#: Stated rather than derived, and nothing derives from it. It was the
-#: product of the two constants above — 4,096 rows times two megabytes, or
-#: eight gibibytes — which is the product of two worst cases no journal
-#: reaches at once, and a ceiling of eight gibibytes on the one input this
-#: module cannot recognise is not a ceiling (peer review, Sol round 4).
-#: Sixty-four mebibytes is a statement about what a corpus journal may be at
-#: all: a real one is kilobytes, because it carries one row per bound path
-#: per revision plus its gates and tombstones, and a corpus large enough to
-#: approach this has outgrown ``MAX_JOURNAL_ROWS`` many times over. Raising
-#: it is a visible change to a consumer-facing bound.
+#: Stated rather than derived. It was the product of the two constants above
+#: — 4,096 rows times two megabytes, or eight gibibytes — which is the product
+#: of two worst cases no journal reaches at once, and a ceiling of eight
+#: gibibytes on the one input this module cannot recognise is not a ceiling
+#: (peer review, Sol round 4). Sixty-four mebibytes is a statement about what
+#: a corpus journal may be at all: a real one is kilobytes, because it carries
+#: one row per bound path per revision plus its gates and tombstones. The hard
+#: row-capacity ceiling below is derived *from* this stated input bound; this
+#: bound itself is not derived from the row limits. Raising it is a visible
+#: change to a consumer-facing bound.
 #:
 #: The bytes are already in the caller's hand by then —
 #: :func:`verify_corpus_binding` is passed the same bytes the release chain
 #: verified — so what this bounds is the decode and everything downstream of
 #: it, not the read.
 MAX_JOURNAL_BYTES = 64 * 1024 * 1024
+#: The largest row capacity any consumer may pin. The shortest valid row is a
+#: compact gate declaration with one-character ``schemaVersion`` and ``gateId``,
+#: ``entryIndex`` zero, tier ``public``, outcome ``pass`` and evidence
+#: ``{"": ""}``: 115 bytes plus its required LF, or 116. No valid journal of
+#: at most 64 MiB can carry more than 67,108,864 // 116 = 578,524 such rows
+#: (remainder 80), so a larger pin could weaken no byte-bound journal and would
+#: only invite an invalid input to allocate more row slots (peer review, Sol
+#: round 7).
+MAX_JOURNAL_ROWS_CEILING = MAX_JOURNAL_BYTES // 116
 #: The most characters one journal path may carry. Paths are quoted in
 #: refusals and, for removed paths, rendered in the verdict; the bound is
 #: checked before any other path rule so no refusal quotes a flood. A count
@@ -788,14 +798,16 @@ MAX_REMOVED_TEXT = 262144
 #: theirs.
 #:
 #: Generous for any real corpus, and it has to be read beside
-#: ``MAX_JOURNAL_ROWS``. A journal carries at most 4,096 rows of all kinds
-#: together, and the closed world is refused unless the tree's content set
-#: equals the journal's, so a tree whose *content* files approach this number
-#: cannot verify whatever this constant says. What the number bounds is
-#: everything else a content root may hold: the directories, the
-#: suffix-excluded siblings, and the entries a producer adds precisely because
-#: the sweep must look at them. The package's own fixture spends fourteen
-#: entry visits over both sweeps.
+#: the default ``MAX_JOURNAL_ROWS``. At that default a journal carries at most
+#: 4,096 rows of all kinds together, and the closed world is refused unless the
+#: tree's content set equals the journal's, so a tree whose *content* files
+#: approach this number cannot verify whatever this constant says. A consumer
+#: may pin a larger journal capacity, but still gets sixty-four sweep visits
+#: per default row before this separate cap is reached. What the number bounds
+#: in ordinary use is everything else a content root may hold: directories,
+#: suffix-excluded siblings, and entries a producer adds precisely because the
+#: sweep must look at them. The package's own fixture spends fourteen entry
+#: visits over both sweeps.
 MAX_SWEEP_WORK = 262144
 #: The most directory entries the whole tombstone pass may touch before it is
 #: refused as unverifiable rather than allowed to run on. Counted in entries
@@ -880,8 +892,10 @@ class CorpusSpec:
 
     The producer chooses what to write into the journal. The consumer chooses
     what the journal must cover before a verdict is allowed to pass. Every
-    field here is the second kind of choice, which is why none of them have
-    package defaults.
+    field here is the second kind of choice. Trust anchors have no package
+    defaults. ``journal_row_capacity`` is the resource pin and alone defaults
+    to :data:`MAX_JOURNAL_ROWS`, preserving every existing consumer spec while
+    letting one with a longer append-only history raise its own capacity.
     """
 
     schema_version: str
@@ -890,10 +904,19 @@ class CorpusSpec:
     required_attested_paths: frozenset[str]
     accepted_gate_tiers: frozenset[str]
     required_gates: frozenset[str]
+    journal_row_capacity: int = MAX_JOURNAL_ROWS
 
     def __post_init__(self) -> None:
         if type(self.schema_version) is not str or not self.schema_version:
             raise CorpusError("CorpusSpec schema_version must be a non-empty string")
+        if (
+            type(self.journal_row_capacity) is not int
+            or not 1 <= self.journal_row_capacity <= MAX_JOURNAL_ROWS_CEILING
+        ):
+            raise CorpusError(
+                "CorpusSpec journal_row_capacity must be an integer from 1 to "
+                f"{MAX_JOURNAL_ROWS_CEILING}"
+            )
         if type(self.content_roots) is not tuple or not self.content_roots:
             raise CorpusError("CorpusSpec must declare at least one content root")
         for root in self.content_roots:
@@ -1690,6 +1713,10 @@ def parse_journal(
     is a claim about the tree as well as the journal: verification refuses a
     tombstoned path that is still on disk. A file that stays in the
     repository stays bound; the only way to stop binding it is to remove it.
+
+    Row capacity is the consumer's committed resource pin, not a process-wide
+    corpus limit. It defaults to :data:`MAX_JOURNAL_ROWS` and is validated
+    against :data:`MAX_JOURNAL_ROWS_CEILING` when the spec is constructed.
     """
 
     # Before the decode, because the decode is the allocation every later
@@ -1708,10 +1735,10 @@ def parse_journal(
     # this function allocate — and everything downstream of it — is bounded
     # by a stated input size before a single row has been read.
     row_count = journal_bytes.count(b"\n")
-    if row_count > MAX_JOURNAL_ROWS:
+    if row_count > spec.journal_row_capacity:
         raise CorpusError(
             f"corpus journal carries {row_count} rows, over the parser "
-            f"budget of {MAX_JOURNAL_ROWS}"
+            f"budget of {spec.journal_row_capacity}"
         )
     # Split on the raw bytes, and every question below asked of a row before
     # it becomes text. A line feed cannot occur inside a UTF-8 multi-byte
