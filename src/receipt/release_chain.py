@@ -3000,6 +3000,22 @@ def assert_index_carries_no_protected_alias(
     genuinely under a protected path keeps its own refusals — a second cased
     spelling of a release *file* is the release root's scan to answer, in the
     words it already uses, because the root itself is spelled correctly.
+
+    Every prefix depth is compared, not the protected path's own depth alone.
+    A protected path names each of its ancestors as much as its leaf: the
+    directory ``ledger`` is where the state file is read from, and an entry
+    spelled ``Ledger`` — a file standing where that directory is, or
+    ``Ledger/notes.txt`` under a second spelling of it — is a second committed
+    object that a name-folding checkout materialises in the same directory the
+    state path is read through, or over it. Comparing only at the full depth
+    saw neither: ``Ledger`` is shorter than the state path and
+    ``Ledger/notes.txt`` differs from it at the leaf, so both folded onto no
+    protected path at that one depth and no other check names them, since
+    every one of them asks the index about a path by its exact spelling. The
+    refusal names the prefix the alias is of, which is the shallowest one the
+    entry misspells; an entry spelled exactly right that far down is compared
+    one component deeper instead, so an ordinary path under a protected
+    directory is untouched.
     """
 
     protected = (
@@ -3008,22 +3024,33 @@ def assert_index_carries_no_protected_alias(
         spec.prefix_relative.as_posix(),
     )
     folded = {path: _folded_parts(path) for path in protected}
+    exact = {path: tuple(path.split("/")) for path in protected}
     records = sorted(
         _all_index_entries(root), key=lambda entry: (entry.path, entry.stage)
     )
     for record in records:
         listed = record.path
-        parts = listed.split("/")
+        parts = tuple(listed.split("/"))
         listed_folded = _folded_parts(listed)
         for path in protected:
-            depth = len(folded[path])
-            if len(parts) < depth or listed_folded[:depth] != folded[path]:
-                continue
-            if "/".join(parts[:depth]) == path:
-                continue
-            raise ReleaseChainError(
-                f"index carries an alias of a protected path: {listed} (for {path})"
-            )
+            for depth in range(1, len(folded[path]) + 1):
+                if (
+                    len(parts) < depth
+                    or listed_folded[:depth] != folded[path][:depth]
+                ):
+                    # A prefix that does not fold onto this one cannot have a
+                    # longer prefix that does, and an entry shorter than the
+                    # depth has no components left to compare.
+                    break
+                if parts[:depth] == exact[path][:depth]:
+                    # Spelled exactly right this far down; the question is
+                    # whether the next component is.
+                    continue
+                prefix = "/".join(exact[path][:depth])
+                raise ReleaseChainError(
+                    f"index carries an alias of a protected path: {listed} "
+                    f"(for {path} at {prefix})"
+                )
     # A second pass over the same records rather than a second condition in
     # the loop above, so a tree an alias already refused keeps that refusal
     # and this adds nothing to a message anyone has seen.
