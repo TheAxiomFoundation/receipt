@@ -46,6 +46,18 @@ Three row kinds, one journal:
     cannot answer this: only one of the two names is declared, so there is no
     pair of declared paths to compare.
 
+    And the sweep as a whole is bounded, which it was not. Every other walk
+    in this module charges a budget; this one read a directory of any width
+    into a sorted list, descended into every directory it found, and
+    re-listed every parent of every pinned root beside it, so a tree
+    carrying arbitrarily many portable, suffix-excluded entries made the
+    verifier allocate and ``lstat`` for as long as the tree was wide (peer
+    review, Sol round 5). Every entry either sweep or a root-component check
+    visits is charged against :data:`MAX_SWEEP_WORK`, one running total for
+    the whole verification, and a listing wider than what is left of it is
+    abandoned as it arrives — read no further than the batch in hand, and
+    sorted only after the charge has let it through.
+
     One spelling decides membership that no listing emits, and the sweep
     screens the names it is handed for it. An NTFS volume generating 8.3
     short names gives a long name a second, addressable spelling whose
@@ -702,6 +714,40 @@ MAX_PATH_TEXT = 1024
 #: renderer puts around each path are charged too, so this bounds the
 #: section rather than the strings inside it (peer review, round seven).
 MAX_REMOVED_TEXT = 262144
+#: The most directory entries the closed-world sweep may visit before the tree
+#: is refused as unclosable, counted once for the verification rather than once
+#: per sweep.
+#:
+#: The sweep was the one walk here with no ceiling at all.
+#: :func:`_list_directory` materialised and sorted a whole directory whatever
+#: its width; :func:`_tree_content_paths` descends into every directory that
+#: listing names; and :func:`_assert_no_aliasing_root_component` re-lists every
+#: parent of every pinned root beside it, with no counter shared between them.
+#: So a tree carrying arbitrarily many portable, suffix-excluded entries —
+#: names the sweep must look at and the journal need never mention — forced
+#: unbounded allocation and ``lstat`` work out of a verifier that had already
+#: budgeted its two other walks (peer review, Sol round 5).
+#:
+#: The same number as ``MAX_TOMBSTONE_WORK`` and ``MAX_SPELLING_WORK``, and the
+#: same shape of bound, because it answers the same question about the same
+#: tree. An entry is charged as it arrives from ``os.scandir``, inside the
+#: ``with``, so a directory wider than what is left is abandoned part-way
+#: rather than fetched, sorted and screened whole — and what survives the
+#: charge is what is sorted. Both sweeps and every root-component check charge
+#: one running total, so re-deriving the set at the end cannot buy the tree a
+#: second walk's worth of budget, exactly as the two tombstone passes share
+#: theirs.
+#:
+#: Generous for any real corpus, and it has to be read beside
+#: ``MAX_JOURNAL_ROWS``. A journal carries at most 4,096 rows of all kinds
+#: together, and the closed world is refused unless the tree's content set
+#: equals the journal's, so a tree whose *content* files approach this number
+#: cannot verify whatever this constant says. What the number bounds is
+#: everything else a content root may hold: the directories, the
+#: suffix-excluded siblings, and the entries a producer adds precisely because
+#: the sweep must look at them. The package's own fixture spends fourteen
+#: entry visits over both sweeps.
+MAX_SWEEP_WORK = 262144
 #: The most directory entries the whole tombstone pass may touch before it is
 #: refused as unverifiable rather than allowed to run on. Counted in entries
 #: rather than listings, and once for the pass rather than once per removed
@@ -1781,10 +1827,40 @@ def parse_journal(
     return content, attested, tuple(gates), removed_paths
 
 
+class _SweepWork:
+    """The one budget both closed-world sweeps charge against.
+
+    A counter rather than an index: the sweep caches no listing, so there is
+    nothing here but the running total and the refusal it raises. See
+    :data:`MAX_SWEEP_WORK` for why the two sweeps and the root-component
+    checks share it.
+    """
+
+    def __init__(self) -> None:
+        self._work = 0
+
+    @property
+    def work(self) -> int:
+        """Entry visits charged so far, across both sweeps."""
+
+        return self._work
+
+    def charge(self) -> None:
+        """Charge one directory entry, refusing when the budget is spent."""
+
+        self._work += 1
+        if self._work > MAX_SWEEP_WORK:
+            raise CorpusError(
+                f"the closed-world sweep would read more than {MAX_SWEEP_WORK} "
+                "directory entries; the tree cannot be closed"
+            )
+
+
 def _list_directory(
     directory: pathlib.Path,
     relative: str,
     *,
+    work: "_SweepWork",
     generations: "_DirectoryGenerations",
 ) -> list[pathlib.Path]:
     """List one directory, refusing to continue if it cannot be read.
@@ -1801,16 +1877,36 @@ def _list_directory(
     looks that way. It has no default: every read the run makes carries the
     run's one recorder, and the earliest stamp of a directory is the one that
     is kept. See :class:`_DirectoryGenerations`.
+
+    ``work`` is the verification's one sweep budget, charged one entry at a
+    time as the entry arrives. It has no default either: a listing nothing
+    pays for is a listing of any width. See :data:`MAX_SWEEP_WORK`.
+
+    The scan is ``os.scandir`` inside a ``with`` rather than
+    ``pathlib.Path.iterdir``, for the reason :class:`_TombstoneIndex` gives:
+    ``iterdir`` materialises the whole directory before it yields anything,
+    so a per-entry charge against it would bound what this module did with
+    the names and not the read that exhausts the verifier. ``scandir``
+    fetches in batches as they are consumed, and the refusal is raised from
+    inside the loop, so what is read past the charge is the batch in hand and
+    nothing more. The names are sorted afterwards — what is sorted is what
+    the budget allowed through — and the entries are rebuilt as
+    ``directory / name``, which is the same joining every refusal here quotes.
     """
 
     generations.record(directory, relative)
+    names: list[str] = []
     try:
-        return sorted(directory.iterdir(), key=lambda entry: entry.name)
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                work.charge()
+                names.append(entry.name)
     except OSError as exc:
         raise CorpusError(
             f"cannot enumerate a directory under a content root, so the file "
             f"set cannot be closed: {_quoted(relative or '.')} ({exc.strerror})"
         ) from exc
+    return [directory / name for name in sorted(names)]
 
 
 def _assert_no_merging_entries(
@@ -2455,6 +2551,7 @@ def _tree_content_paths(
     root: pathlib.Path,
     spec: CorpusSpec,
     *,
+    work: "_SweepWork",
     generations: "_DirectoryGenerations",
 ) -> dict[str, pathlib.Path]:
     """Enumerate every regular file the spec calls content.
@@ -2487,6 +2584,11 @@ def _tree_content_paths(
     the opening sweep read is held against what it looked like *then* and not
     against what the closing sweep found (peer review, Sol round 5);
     :class:`_DirectoryGenerations` says what it is for.
+
+    ``work`` is the verification's sweep budget, charged by every listing
+    this walk and the root-component check beside it make. Both sweeps are
+    handed the same one, so the closing re-derivation is paid for out of what
+    the opening one left; see :data:`MAX_SWEEP_WORK`.
     """
 
     found: dict[str, pathlib.Path] = {}
@@ -2502,7 +2604,9 @@ def _tree_content_paths(
             work=None,
             generations=generations,
         )
-        _assert_no_aliasing_root_component(root, base_relative, generations=generations)
+        _assert_no_aliasing_root_component(
+            root, base_relative, work=work, generations=generations
+        )
         if not base.exists():
             raise CorpusError(
                 f"pinned content root is absent from the tree: {base_relative}"
@@ -2514,7 +2618,7 @@ def _tree_content_paths(
         while pending:
             directory, directory_relative = pending.pop()
             entries = _list_directory(
-                directory, directory_relative, generations=generations
+                directory, directory_relative, work=work, generations=generations
             )
             # Before anything is classified, because what a case-insensitive
             # volume merges is decided by the pair and not by either entry:
@@ -2598,6 +2702,7 @@ def _assert_no_aliasing_root_component(
     root: pathlib.Path,
     relative: str,
     *,
+    work: "_SweepWork",
     generations: "_DirectoryGenerations",
 ) -> None:
     """Refuse a tree entry that aliases a component of a pinned content root.
@@ -2617,6 +2722,13 @@ def _assert_no_aliasing_root_component(
     absent and not-a-directory refusals in :func:`_tree_content_paths`, which
     say something more useful, and a symlinked parent has already been
     refused by :func:`_assert_no_symlinked_component`.
+
+    Each of those listings is charged against the sweep's own budget, and
+    against the same running total the sweep proper charges. This walk reads
+    the repository root, which is the widest directory a consumer is likely
+    to have and the one an adversary can fill most easily, and it re-reads it
+    for every pinned content root; nothing counted any of that (peer review,
+    Sol round 5). See :data:`MAX_SWEEP_WORK`.
     """
 
     current = root
@@ -2626,7 +2738,7 @@ def _assert_no_aliasing_root_component(
             return
         walked_relative = "/".join(walked)
         entries = _list_directory(
-            current, walked_relative, generations=generations
+            current, walked_relative, work=work, generations=generations
         )
         for entry in entries:
             # Screened, and not only for the fold question below: an entry
@@ -3103,6 +3215,12 @@ def verify_corpus_binding(
     # the directory that carried it was first stamped after the mutation, so
     # its stamp matched too (peer review, Sol round 5).
     generations = _DirectoryGenerations()
+    # One sweep budget for the whole verification, charged by both membership
+    # sweeps and by every root-component listing beside them. The sweep read
+    # a directory of any width into a sorted list and descended into every
+    # directory it found, with nothing counting any of it (peer review, Sol
+    # round 5); every other walk here has been budgeted for rounds.
+    sweep = _SweepWork()
     content, attested, gates, removed = parse_journal(journal_bytes, spec=spec)
 
     # Two declared paths that a case- or normalization-insensitive filesystem
@@ -3118,7 +3236,7 @@ def verify_corpus_binding(
     # in one merged directory (peer review, Sol round 3).
     _reject_aliasing_paths(list(content) + list(attested))
 
-    tree = _tree_content_paths(root, spec, generations=generations)
+    tree = _tree_content_paths(root, spec, work=sweep, generations=generations)
     journal_paths = set(content)
     tree_paths = set(tree)
 
@@ -3243,7 +3361,10 @@ def verify_corpus_binding(
     # and ctime and is refused — the check no third re-sweep could give,
     # because a third re-sweep would only move the boundary again (peer
     # review, round six).
-    if set(_tree_content_paths(root, spec, generations=generations)) != tree_paths:
+    if (
+        set(_tree_content_paths(root, spec, work=sweep, generations=generations))
+        != tree_paths
+    ):
         raise CorpusError(
             "the content tree changed during verification; the closed-world "
             "set is not stable and the verdict is refused"
