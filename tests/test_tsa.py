@@ -12,6 +12,8 @@ still refuses anything at all.
 
 from __future__ import annotations
 
+import builtins
+import collections
 import dataclasses
 import inspect
 import json
@@ -2881,6 +2883,171 @@ def test_the_one_reads_parse_refuses_exactly_as_the_ported_reader_does(
     with pytest.raises(TsaError) as one_read:
         tsa_module._record_payload(payload, path)
     assert str(one_read.value) == str(ported.value)
+
+
+def record_opens(monkeypatch: pytest.MonkeyPatch) -> collections.Counter[str]:
+    """Count every open of every path, by each door Python opens files through.
+
+    Three doors, and the test below proves all three are watched rather than
+    assuming it: ``os.open``, which ``_read_file_once`` uses; the built-in
+    ``open``; and ``pathlib.Path.open``, which ``read_bytes`` and
+    ``read_text`` are written in terms of and which reaches the file through
+    ``io.open`` -- a binding in the ``io`` module that a patched ``builtins``
+    never sees, so the three counts do not overlap. Nothing here can see a
+    subprocess opening a file, which is what the OpenSSL recorder is for.
+    """
+
+    opens: collections.Counter[str] = collections.Counter()
+    real_os_open = os.open
+    real_builtin_open = builtins.open
+    real_path_open = pathlib.Path.open
+
+    def counting_os_open(path: Any, *arguments: Any, **keywords: Any) -> int:
+        opens[os.fsdecode(path)] += 1
+        return real_os_open(path, *arguments, **keywords)
+
+    def counting_builtin_open(file: Any, *arguments: Any, **keywords: Any) -> Any:
+        if isinstance(file, (str, bytes, os.PathLike)):
+            opens[os.fsdecode(file)] += 1
+        return real_builtin_open(file, *arguments, **keywords)
+
+    def counting_path_open(self: pathlib.Path, *arguments: Any, **keywords: Any) -> Any:
+        opens[str(self)] += 1
+        return real_path_open(self, *arguments, **keywords)
+
+    monkeypatch.setattr(os, "open", counting_os_open)
+    monkeypatch.setattr(builtins, "open", counting_builtin_open)
+    monkeypatch.setattr(pathlib.Path, "open", counting_path_open)
+    return opens
+
+
+def record_root_validations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> collections.Counter[str]:
+    """Count how often each pinned root is put through ``_root_material``."""
+
+    original = tsa_module._root_material
+    validated: collections.Counter[str] = collections.Counter()
+
+    def recording(
+        records: pathlib.Path, anchor: dict[str, Any], **keywords: Any
+    ) -> Any:
+        declared = str(anchor["rootCertificate"]["path"])
+        validated[str(tsa_module.physical_path(records, declared))] += 1
+        return original(records, anchor, **keywords)
+
+    monkeypatch.setattr(tsa_module, "_root_material", recording)
+    return validated
+
+
+def record_openssl_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[list[str]]:
+    """Every argument list ``_run_openssl`` is given, in order."""
+
+    original = tsa_module._run_openssl
+    invocations: list[list[str]] = []
+
+    def recording(arguments: list[str], **keywords: Any) -> Any:
+        invocations.append(list(arguments))
+        return original(arguments, **keywords)
+
+    monkeypatch.setattr(tsa_module, "_run_openssl", recording)
+    return invocations
+
+
+def test_one_verification_opens_each_judged_file_exactly_as_often_as_it_judges_it(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S5-F6: bind the one-read rules by observation, not one swap each.
+
+    The swap regressions show that a writer arriving at one moment cannot
+    change what is trusted, but each of them binds one consumer of the
+    captured bytes: revert the certificate count, or the identity
+    extraction, or the record parse, or only the CMS ``-CAfile`` to the
+    repository path, and every one of them stays green. The rule they are
+    all instances of is simpler than any of them -- nothing reads a
+    repository path twice, and OpenSSL is never given one -- and it is
+    observable directly.
+
+    Two recorders, because no one vantage point sees both halves. The first
+    counts opens inside this process, by all three doors; it cannot see a
+    subprocess. The second reads every argument ``_run_openssl`` is given,
+    which is the only way a file under the records tree could reach OpenSSL.
+    Each of the four reverts trips one of them, and nothing else in the
+    suite: the certificate count handed the repository path puts 14 of its
+    paths into OpenSSL arguments, the identity extraction 42, the CMS
+    ``-CAfile`` alone 2, and the record parse re-reading its path takes the
+    record's open count from one to three.
+
+    What the counts are and why. The record and each token are read once for
+    the whole verification: one descriptor each, whose bytes are hashed,
+    parsed, and copied for OpenSSL. Each root is read once per
+    ``_root_material`` call and no more -- which is seven times per root
+    here, not once, because validating a root is what ``_root_material``
+    does and a two-anchor witness asks for it seven times. Five are bundle
+    loads, each of which validates every anchor of the bundle: the genesis
+    bootstrap, the witness's own bundle claim, one inside each of the two
+    token verifications, and the scan for supplemental candidates. Two are
+    selections that land on this particular root: the outcome's own
+    ``_select_anchor`` and the one inside its ``verify_timestamp_token``.
+    The rule is not "one open per file" but "one open per judgement", and
+    this asserts the two numbers are equal, which is what makes the bytes
+    judged the bytes used. A refactor that changes the seven should recount
+    it here rather than loosen the equality beside it.
+    """
+
+    tree = build_witness_tree(tmp_path, local_anchors[:2])
+    roots = {
+        str(tree.records.resolve() / "trust" / anchor.tsa.root_pem.name)
+        for anchor in local_anchors[:2]
+    }
+    tokens = {
+        str(tree.records.resolve() / RECORD_DAY / token.name)
+        for token in tree.tokens.values()
+    }
+    probe = tmp_path / "probe-every-door.txt"
+    probe.write_bytes(b"counted three times")
+
+    validated = record_root_validations(monkeypatch)
+    invocations = record_openssl_arguments(monkeypatch)
+    opens = record_opens(monkeypatch)
+
+    # The recorder watches all three doors, and each of them exactly once.
+    assert probe.read_bytes() == b"counted three times"
+    with open(probe, "rb") as handle:
+        handle.read()
+    os.close(os.open(probe, os.O_RDONLY))
+    assert opens[str(probe)] == 3
+    opens.clear()
+
+    evidence = verify_tree(tree)
+    assert [token.anchor_id for token in evidence.tokens] == [
+        anchor.anchor_id for anchor in local_anchors[:2]
+    ]
+
+    assert opens[str(tree.record)] == 1
+    assert {token: opens[token] for token in tokens} == dict.fromkeys(tokens, 1)
+    assert {root: opens[root] for root in roots} == {
+        root: validated[root] for root in roots
+    }
+    assert set(validated) == roots
+    assert {validated[root] for root in roots} == {7}
+
+    # And no file under the records tree ever reaches OpenSSL by name.
+    named = [
+        argument
+        for invocation in invocations
+        for argument in invocation
+        if str(tree.records) in argument
+    ]
+    assert named == []
+    # Not vacuous: OpenSSL really did run, and really was given files.
+    assert len(invocations) > 10
+    assert any(argument == "-CAfile" for invocation in invocations
+               for argument in invocation)
 
 
 def alias_of(anchor: LocalAnchor, *, anchor_id: str) -> LocalAnchor:
