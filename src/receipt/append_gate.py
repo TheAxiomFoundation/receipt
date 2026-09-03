@@ -383,8 +383,11 @@ Permission denied`` on stderr and omit that subtree from stdout, and the
 untracked file inside it — a second ledger, a file under the release root —
 is then in neither half of the changed set. So every protected surface is
 walked here with ``os.scandir``, no symlink descended and the work bounded by
-``MAX_SURFACE_WALK_ENTRIES``, and a protected directory this run cannot list
-refuses: not being able to say what is on a surface is not the same as there
+``MAX_SURFACE_WALK_ENTRIES`` — charged per entry as each listing is consumed,
+because the directories being bounded are the candidate's own and a bound
+checked only after the whole listing was built is not a bound on the work —
+and a protected directory this run cannot list refuses: not being able to
+say what is on a surface is not the same as there
 being nothing on it, and it is the classification rather than any one file
 that cannot be made. Absence is the other answer and it passes, as it does in
 both component walks — ``ENOENT`` and ``ENOTDIR`` from a listing mean there is
@@ -929,6 +932,13 @@ def _is_protected(path: str, candidate: _CandidateTree) -> bool:
 # release tree of a few hundred files. A tree that exceeds it is refused in the
 # walk's own terms rather than answered from a walk that stopped early, because
 # stopping early is the silent omission this whole check exists to refuse.
+#
+# It is charged per entry as each listing is consumed, rather than once per
+# directory against a list already built. The directories it bounds are ones
+# the candidate controls, and a bound consulted only after the whole listing
+# has been materialised is not a bound on the work: one protected directory
+# holding millions of entries cost the memory and the time to name all of them
+# before the refusal. See _enumerate_surface_directory.
 MAX_SURFACE_WALK_ENTRIES = 200_000
 
 # git quotes the path it could not read: ``warning: could not open directory
@@ -995,6 +1005,17 @@ def _enumerate_surface_directory(
     behind a link. An entry that is gone by the time the walk reaches it, or
     that turns out not to be a directory, is not this check's business; every
     other ``OSError`` from a listing refuses.
+
+    The budget is charged per entry, inside the ``os.scandir`` iteration and
+    before the name is kept, so the walk stops at the first entry past it. It
+    used to be charged once per directory, against ``len(names)`` -- which
+    means the whole listing had already been materialised into a list before
+    the bound was consulted, and the bound is on a directory a candidate
+    controls: one protected directory holding millions of entries cost the
+    memory and the time to name all of them before the refusal that says the
+    surface is too wide to enumerate. Measured at 1275847 with the budget
+    lowered to 20 and 500 files under ``ledger/wide``: the walk consumed 508
+    entries to refuse, where the whole tree it is allowed to look at is 20.
     """
 
     pending = [relative]
@@ -1009,20 +1030,25 @@ def _enumerate_surface_directory(
             raise _unenumerable_surface(current, exc.strerror) from exc
         if not stat.S_ISDIR(entry.st_mode):
             continue
+        names: list[str] = []
         try:
             with os.scandir(path) as listing:
-                names = [item.name for item in listing]
+                for item in listing:
+                    # Charged here, before the name is kept, so that a
+                    # directory wider than what is left of the budget costs
+                    # one entry past it rather than all of them.
+                    budget -= 1
+                    if budget < 0:
+                        raise AppendError(
+                            "protected surface enumeration exceeded "
+                            f"{MAX_SURFACE_WALK_ENTRIES} entries, so the "
+                            f"proposal cannot be classified: {current or '.'}"
+                        )
+                    names.append(item.name)
         except OSError as exc:
             if exc.errno in {errno.ENOENT, errno.ENOTDIR}:
                 continue
             raise _unenumerable_surface(current, exc.strerror) from exc
-        budget -= len(names)
-        if budget < 0:
-            raise AppendError(
-                "protected surface enumeration exceeded "
-                f"{MAX_SURFACE_WALK_ENTRIES} entries, so the proposal cannot "
-                f"be classified: {current or '.'}"
-            )
         if descend:
             pending.extend(
                 f"{current}/{name}" if current else name for name in names
