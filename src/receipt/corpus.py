@@ -83,9 +83,10 @@ Three row kinds, one journal:
     ``readme.md`` to the ``README.md`` it stores is refused rather than
     hashed. Without that, the same corpus verified on the auditor who cloned
     onto APFS and refused as a missing file on the auditor who cloned onto
-    ext4 (peer review, Sol round 2). Content files were already found by the
-    spelled names the sweep enumerates; the walk asks it of them too, so one
-    rule covers both kinds.
+    ext4 (peer review, Sol round 2). Asked of attested paths, because nothing
+    else enumerates them: a content path is already known to be spelled the
+    way a listing emits it, since the sweep builds its set out of listing
+    names and the membership comparison proves the two sets equal.
     Retiring one is recorded by a ``removed`` row, and the file has to leave
     the tree with it: a removed path still on disk refuses, whichever kind
     it was. Two questions are asked about a tombstone, in this order — does
@@ -1223,23 +1224,26 @@ def _strips_to_another_name(segment: str) -> bool:
 def _alias_capable_suffix(suffix: str) -> bool:
     """Whether an 8.3 alias extension could ever be this pinned suffix.
 
-    An alias extension is at most three characters, so a pin whose own
-    extension is longer can be carried by no alias at all. What is measured
-    is the *fold key*, not the written pin, because the fold key is what
-    every comparison in this module uses: the NFD spelling of ``.éml`` is
-    five characters written and four folded, so a raw-length test called it
-    incapable, skipped the ASCII rule that would have refused it at
-    construction, and then skipped the alias comparison too — leaving
-    ``smuggled.émlx`` non-content here while its alias ends ``.ÉML`` on a
-    code page 850 volume and folds onto that very pin (adversarial review
-    of the Sol round 2 fix).
+    An alias extension is one to three characters, so a carryable pin is a
+    dot and one to three characters — a folded length of two to four. Both
+    ends matter. A pin longer than that can be the extension of no alias; a
+    bare ``"."``, which the schema accepts, can be the extension of no alias
+    either, because a derived extension is never empty, and counting it
+    capable made ``notes.é`` raise the OEM refusal for a configuration whose
+    answer is False on every code page — the exact over-refusal S5R2-F5 set
+    out to remove.
 
-    Folding can only lengthen a pin, never shorten it below what an ASCII
-    alias extension folds to, so measuring the fold is also the answer that
-    cannot admit a pin the comparison would then miss.
+    What is measured is the *fold key*, not the written pin, because the
+    fold key is what every comparison in this module uses: the NFD spelling
+    of ``.éml`` is five characters written and four folded, so a raw-length
+    test called it incapable, skipped the ASCII rule that would have refused
+    it at construction, and then skipped the alias comparison too — leaving
+    ``smuggled.émlx`` non-content here while its alias ends ``.ÉML`` on a
+    code page 850 volume and folds onto that very pin (adversarial review of
+    the Sol round 2 fix).
     """
 
-    return len(_path_fold(suffix)) <= 4
+    return 2 <= len(_path_fold(suffix)) <= 4
 
 
 def _short_name_extension(name: str) -> str | None:
@@ -2651,13 +2655,17 @@ def _assert_spelled_by_its_directory(
     standing rule (see :func:`_list_directory`): a parent that resolves the
     component but cannot be enumerated leaves the question unanswered.
 
-    The cost is one listing per component of each bound path, twice per
-    verification — :func:`_regular_file_digest` walks every bound path and
-    the closing identity re-check walks it again — and it is not shared
-    between paths or between the two walks. A cached listing would answer a
-    later question with an earlier look, which is the staleness the second
-    tombstone pass exists to avoid; the walk is already re-run for the same
-    reason.
+    The cost is one listing per component, and it is asked once per
+    *attested* path only. Asking it of content paths as well answered a
+    question the sweep had already answered — every content path that
+    survives the membership comparison came verbatim out of an
+    ``os.scandir`` listing — at a price of one listing per component per
+    file, which for a wide content directory is quadratic in the files it
+    holds and unbudgeted, in a module that budgets its other walks
+    (adversarial review of the Sol round 2 fix). Nothing is cached between
+    paths: a cached listing would answer a later question with an earlier
+    look, which is the staleness the second tombstone pass exists to
+    avoid.
     """
 
     try:
@@ -2753,7 +2761,9 @@ class _FileIdentity(NamedTuple):
     ctime_ns: int
 
 
-def _regular_file_digest(root: pathlib.Path, relative: str) -> tuple[str, _FileIdentity]:
+def _regular_file_digest(
+    root: pathlib.Path, relative: str, *, spelled: bool = True
+) -> tuple[str, _FileIdentity]:
     """Hash a bound file, closing the check/open race at the final component.
 
     Validating the path then opening it by name leaves a window in which a
@@ -2786,9 +2796,20 @@ def _regular_file_digest(root: pathlib.Path, relative: str) -> tuple[str, _FileI
     change time is not. What stays beneath their resolution is a rewrite
     landing after that re-check has already run, which is one reason the
     verdict speaks of the bytes as they existed when hashed.
+
+    ``spelled`` says whether the component walk should also bind each
+    component to the spelling its directory emits. Content paths pass
+    ``False``, and not to save work alone: the closed-world sweep built the
+    tree set out of ``os.scandir`` names and the membership comparison
+    proved the journal's set equal to it, so every content path here was
+    *already* emitted by a listing under exactly this spelling, and asking
+    again would answer a question already answered — at a cost of one
+    listing per component per file, which for a wide content directory is
+    quadratic and unbudgeted in a module that budgets its other walks.
+    Attested paths pass ``True``, because nothing enumerates them.
     """
 
-    path = _assert_no_symlinked_component(root, relative)
+    path = _assert_no_symlinked_component(root, relative, spelled=spelled)
     try:
         before = os.lstat(path)
     except OSError as exc:
@@ -2949,7 +2970,11 @@ def verify_corpus_binding(
     hashed: dict[str, _FileIdentity] = {}
 
     for path in sorted(journal_paths):
-        digest, identity = _regular_file_digest(root, path)
+        # spelled=False: the sweep above built its set from listing names and
+        # the membership comparison proved the two sets equal, so each of
+        # these paths is already known to be spelled the way a listing emits
+        # it. See _regular_file_digest.
+        digest, identity = _regular_file_digest(root, path, spelled=False)
         if digest != content[path].sha256:
             raise CorpusError(
                 f"content file {_quoted(path)} does not match its witnessed digest: "
@@ -3017,7 +3042,13 @@ def verify_corpus_binding(
 
     for path in sorted(hashed):
         try:
-            after = os.lstat(_assert_no_symlinked_component(root, path))
+            # This walk re-asks the symlink question and not the spelling
+            # one: the spelling of every bound path was established before
+            # it was hashed, and re-establishing it here would cost a
+            # listing per component of every bound file a second time.
+            after = os.lstat(
+                _assert_no_symlinked_component(root, path, spelled=False)
+            )
         except OSError as exc:
             raise CorpusError(
                 f"bound file {_quoted(path)} disappeared during verification; the "
