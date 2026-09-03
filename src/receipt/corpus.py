@@ -656,8 +656,8 @@ def _reject_control_characters(value: str, label: str) -> str:
     here:
 
     - Every code point in Unicode category Cf, as of Unicode 16.0 and pinned
-      in this module (``_FORMAT_CONTROL_RANGES``), or in the running
-      interpreter's own table. These render as nothing while
+      in :data:`receipt._unicode_repertoire.FORMAT_CONTROL_RANGES`, or in
+      the running interpreter's own table. These render as nothing while
       changing what the reader sees: U+202E RIGHT-TO-LEFT OVERRIDE reverses
       the remainder of the line, so a gate declared not-run can be spelled to
       read as passed, and U+200B lets two evidence keys print identically.
@@ -795,14 +795,24 @@ def _assert_assigned(value: str, label: str) -> str:
 
 #: The basenames Win32 resolves to a character device instead of to a file,
 #: in every directory and whatever extension follows them: ``rules/NUL.yaml``
-#: opens the null device, not the bytes a journal bound. The list is the one
-#: Microsoft documents for Windows 11 in "Naming Files, Paths, and
-#: Namespaces" (learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file),
-#: including the superscript spellings COM¹ COM² COM³ and LPT¹ LPT² LPT³,
-#: which Win32 resolves as their ASCII-digit counterparts do. Pinned here
-#: rather than derived, because it is a Win32 fact and not a Unicode one.
+#: opens the null device, not the bytes a journal bound. Pinned here rather
+#: than derived, because it is a Win32 fact and not a Unicode one, and taken
+#: from two sources that are named separately because they do not agree.
+#:
+#: Microsoft documents CON, PRN, AUX, NUL, COM0-COM9, LPT0-LPT9 and the
+#: superscript COM¹ COM² COM³ and LPT¹ LPT² LPT³ for Windows 11, in "Naming
+#: Files, Paths, and Namespaces"
+#: (learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file).
+#:
+#: ``ntdll``'s own matcher, ``RtlIsDosDeviceName_U``, resolves two more —
+#: CONIN$ and CONOUT$ — and does *not* resolve COM0 or LPT0 (its digit test
+#: is ``> '0'``) or the superscripts. Wine's implementation of it carries a
+#: conformance table run against real Windows, which is where that reading
+#: comes from. Where the two disagree this table takes the union, because
+#: refusing a name Windows might resolve is the fail-closed side and no
+#: corpus has a reason to carry any of them.
 WIN32_RESERVED_DEVICE_NAMES = frozenset(
-    {"CON", "PRN", "AUX", "NUL"}
+    {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
     | {f"COM{digit}" for digit in range(10)}
     | {f"LPT{digit}" for digit in range(10)}
     | {f"COM{superscript}" for superscript in "\u00b9\u00b2\u00b3"}
@@ -825,6 +835,37 @@ def _ascii_upper(text: str) -> str:
         chr(ord(character) - 32) if "a" <= character <= "z" else character
         for character in text
     )
+
+
+def _win32_device_basename(component: str) -> str:
+    """What Win32 compares against its device table, for one path component.
+
+    Two rules, in this order, because the order is what decides the answer.
+    The component is truncated at its first period *or colon*, and only then
+    are trailing spaces removed from what is left. So ``NUL.yaml``,
+    ``NUL .yaml``, ``nul  ....``, ``NUL:stream`` and a bare ``nul`` all
+    present ``NUL`` to the table.
+
+    Taking the text before the first period and nothing else was not enough,
+    and the module already held both halves of the rule without composing
+    them: :func:`_strips_to_another_name` exists because Win32 strips
+    trailing spaces, but it only fires when the space is at the end of the
+    *component*, and ``NUL .yaml`` ends in ``l``. One space was therefore
+    enough to walk a bound path past the device screen (peer review, round
+    eight). The composition here is ``ntdll``'s ``RtlIsDosDeviceName_U``,
+    which truncates at ``.`` or ``:`` and then removes trailing spaces
+    before it matches.
+
+    Leading spaces are *not* removed, because that matcher does not remove
+    them: `` NUL.yaml`` is an ordinary name on Win32 and is one here.
+    """
+
+    head = component
+    for index, character in enumerate(component):
+        if character in ".:":
+            head = component[:index]
+            break
+    return _ascii_upper(head.rstrip(" "))
 
 
 #: The Turkic dotted capital I and dotless small i. NTFS's upcase table maps
@@ -894,9 +935,12 @@ def _assert_foldable(value: str, label: str) -> str:
     (peer review, round eight). This is not an aliasing question — the name
     does not resolve to some *other* file — but it has the same shape and
     the same answer: the spelling means one thing to this verifier and
-    another to the host that will use it. Matched on the component up to
-    its first period, ASCII-uppercased, against
-    :data:`WIN32_RESERVED_DEVICE_NAMES`.
+    another to the host that will use it. What is matched against
+    :data:`WIN32_RESERVED_DEVICE_NAMES` is what Win32's own matcher
+    compares, which :func:`_win32_device_basename` derives — the text
+    before the first period or colon, with trailing spaces then removed —
+    because taking the text before the first period alone let ``NUL .yaml``
+    through.
 
     ``value`` may be a whole relative path or a single component; every
     message quotes it whole through :func:`_quoted`, so a refusal names what
@@ -926,10 +970,10 @@ def _assert_foldable(value: str, label: str) -> str:
                 f"this fold key keeps it distinct: {_quoted(value)}"
             )
     for component in value.split("/"):
-        # The basename is the component up to its first period, because that
-        # is how Win32 matches a device: "NUL", "NUL.yaml" and "NUL.tar.gz"
-        # all open the null device.
-        if _ascii_upper(component.split(".", 1)[0]) in WIN32_RESERVED_DEVICE_NAMES:
+        # The basename is what Win32's own matcher compares, which is not
+        # simply the text before the first period; _win32_device_basename
+        # composes both of its rules.
+        if _win32_device_basename(component) in WIN32_RESERVED_DEVICE_NAMES:
             raise CorpusError(
                 f"{label} carries a Win32 reserved device name in a "
                 f"component: {_quoted(value)}"

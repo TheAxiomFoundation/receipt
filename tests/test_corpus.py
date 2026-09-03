@@ -4280,8 +4280,10 @@ def test_the_shipped_ignorable_table_is_what_its_generator_produces() -> None:
 
     — so the check runs offline and the source text sits beside the claim it
     supports. Parsing them must reproduce the shipped tuple exactly: 17
-    ranges, 4,174 code points, with the four Mongolian lines merged into one
-    range and the seven tag-and-variation-selector lines into another.
+    ranges and 4,174 code points, the 27 lines merging in exactly three
+    places — three Mongolian lines into U+180B..U+180F, three word-joiner
+    and invisible-operator lines into U+2060..U+206F, and seven tag and
+    variation-selector lines into U+E0000..U+E0FFF.
 
     Without the fix there is no table to check. A hand-edited one is what
     this catches: an entry dropped, a range widened, or the merge done wrong.
@@ -4555,3 +4557,109 @@ def test_names_that_merely_begin_with_a_device_name_still_verify(
         tmp_path, render_journal(journal_rows()), spec=corpus_spec()
     )
     assert len(verification.content) == len(CONTENT)
+
+
+def test_refuses_a_device_name_padded_with_spaces_before_its_extension(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5-F4: the device match is two Win32 rules, not one.
+
+    Win32 truncates a component at its first period *or colon* and only then
+    removes trailing spaces from what is left, so ``NUL .yaml`` — device
+    name, one space, extension — presents ``NUL`` to the device table and
+    opens the null device. Taking the text before the first period and
+    nothing else missed that: the component does not end in a space, so the
+    trailing-strip screen this module already had never fired either, and
+    one keystroke walked a bound path straight past the device refusal
+    (found by adversarial review of the round-eight fix).
+
+    The composition is ``ntdll``'s own ``RtlIsDosDeviceName_U``, whose
+    conformance table — ``"c:nul . . :"`` and ``"c:NUL  ....  "`` among
+    them — is run against real Windows.
+
+    Without the composition this journal verifies: the file is a regular
+    file, its digest matches, and the sweep calls the world closed, while a
+    Win32 consumer reading the same path gets nothing at all.
+    """
+
+    content = dict(CONTENT)
+    content["rules/NUL .yaml"] = "name: null\nvalue: 0\n"
+    write_tree(tmp_path, content=content)
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows(content=content)), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        "journal row 1 path carries a Win32 reserved device name in a "
+        "component: 'rules/NUL .yaml'"
+    )
+
+
+def test_refuses_a_tree_entry_whose_device_name_is_cut_short_by_a_colon(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5-F4: the truncation is at a period *or* a colon.
+
+    ``RtlIsDosDeviceName_U`` stops at whichever comes first, so
+    ``CON:stream.yml`` is the console device on Win32. A declared path is
+    saved from this by the separate colon refusal in
+    ``_validate_relative_path``; a *tree entry* is not screened for colons
+    anywhere, and POSIX allows the name, so the sweep is where this one has
+    to be caught.
+
+    Trailing spaces are removed after that truncation and not before, which
+    ``nul  .txt`` pins in the same breath. Without the composition both
+    entries are skipped as ordinary non-content files and the verification
+    passes.
+    """
+
+    write_tree(tmp_path)
+    (tmp_path / "rules/CON:stream.yml").write_text("scratch\n")
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        "tree entry 'rules/CON:stream.yml' carries a Win32 reserved device "
+        "name in a component: 'CON:stream.yml'"
+    )
+
+
+def test_the_device_basename_is_derived_the_way_win32_derives_it() -> None:
+    """Binds S5-F4: the two rules and their order, and what is not a rule.
+
+    Truncate at the first period or colon, then strip trailing spaces. Every
+    accepted case below is a name Win32 does *not* resolve to a device, and
+    a screen that applied the rules in the other order, or stripped leading
+    spaces as well, or stripped anything but spaces, would fail one of them.
+
+    ``CONIN$`` and ``CONOUT$`` are in the table because ``ntdll``'s matcher
+    resolves them, although Microsoft's naming page does not list them; the
+    table takes the union of the two sources, which its own comment states.
+    """
+
+    from receipt.corpus import (
+        WIN32_RESERVED_DEVICE_NAMES,
+        _win32_device_basename,
+    )
+
+    for name in (
+        "NUL.yaml",
+        "NUL .yaml",
+        "nul  ....",
+        "NUL:stream",
+        "nul",
+        "nul ",
+        "COM1 .txt",
+        "conin$.log",
+    ):
+        assert _win32_device_basename(name) in WIN32_RESERVED_DEVICE_NAMES, name
+    for name in (
+        " NUL.yaml",  # a leading space is not stripped, and Win32 does not
+        "nul2.yml",
+        "aux-notes.yml",
+        "NULL.yaml",
+        "nul\t.yml",  # only spaces are stripped, and Win32 strips only spaces
+        "notes.yaml",
+    ):
+        assert _win32_device_basename(name) not in WIN32_RESERVED_DEVICE_NAMES, name
