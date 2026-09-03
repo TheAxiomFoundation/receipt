@@ -4442,3 +4442,116 @@ def test_the_spec_refuses_a_non_ascii_content_suffix_at_construction() -> None:
         "CorpusSpec content suffix must be ASCII, because an 8.3 alias "
         "extension cannot be derived against a non-ASCII one: '.éml'"
     )
+
+
+def test_refuses_a_declared_path_naming_a_win32_reserved_device(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5-F4: a bound path Win32 resolves to a device, not to a file.
+
+    ``CON``, ``PRN``, ``AUX``, ``NUL`` and the ``COM``/``LPT`` series name
+    character devices in every directory on Win32, whatever extension
+    follows them. So a journal binding ``rules/NUL.yaml`` and a POSIX file
+    of that name verified here — the file is a regular file, its digest
+    matches, the sweep finds exactly it — while an ordinary Win32 lookup of
+    the same path opens the null device and reads nothing the verdict
+    covered.
+
+    That is the module's standing hazard in a new shape: the spelling means
+    one thing to the verifier and another to the host that will use the
+    tree. Without the fix this row is accepted and the verdict claims a
+    binding no Win32 consumer can rely on.
+    """
+
+    content = dict(CONTENT)
+    content["rules/NUL.yaml"] = "name: null\nvalue: 0\n"
+    write_tree(tmp_path, content=content)
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows(content=content)), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        "journal row 1 path carries a Win32 reserved device name in a "
+        "component: 'rules/NUL.yaml'"
+    )
+
+
+def test_refuses_a_tree_entry_named_for_a_win32_reserved_device(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5-F4: the sweep meets the name the journal never mentions.
+
+    ``rules/con.yml`` is not content under a ``.yaml`` pin, so the sweep
+    skipped it and the closed world was reported closed around it. On Win32
+    that entry is the console device, and anything opening it under a
+    content root reads a stream rather than a file — the same reason a FIFO
+    under a content root is refused here, arriving under a name instead of
+    under a mode.
+
+    Matched case-insensitively on the text before the first period, so the
+    lowercase spelling and the extension change nothing. Without the fix
+    this verification passes with the entry in the tree.
+    """
+
+    write_tree(tmp_path)
+    (tmp_path / "rules/con.yml").write_text("scratch\n")
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        "tree entry 'rules/con.yml' carries a Win32 reserved device name in "
+        "a component: 'con.yml'"
+    )
+
+
+def test_refuses_a_tree_entry_named_for_a_superscript_com_port(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5-F4: the superscript spellings are on Microsoft's own list.
+
+    ``COM¹``, ``COM²``, ``COM³`` and the ``LPT`` equivalents resolve exactly
+    as their ASCII-digit counterparts do, and they are the half of the list
+    a from-memory implementation leaves out. Pinned separately because a
+    screen built from ``CON PRN AUX NUL COM0-9 LPT0-9`` alone satisfies
+    every other test here and leaves six device names reachable.
+
+    The name is ASCII-uppercased rather than ``str.upper``-ed, so U+00B9 is
+    compared as written; that is why the superscripts are table entries and
+    not a mapping. Without the fix this verification passes.
+    """
+
+    write_tree(tmp_path)
+    (tmp_path / "rules/COM¹.yml").write_text("scratch\n")
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        "tree entry 'rules/COM¹.yml' carries a Win32 reserved device "
+        "name in a component: 'COM¹.yml'"
+    )
+
+
+def test_names_that_merely_begin_with_a_device_name_still_verify(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5-F4, the other side: the match is the basename, not a prefix.
+
+    ``nul2.yml`` and ``aux-notes.yml`` are ordinary files. Win32 resolves
+    neither to a device — the match is on the whole component up to its
+    first period — and a screen that took a prefix instead would refuse a
+    corpus that is exactly what it claims to be while every refusal test
+    above still passed.
+
+    This test passes on the head as well, which is the point: the screen
+    must not close the closed world it is protecting.
+    """
+
+    write_tree(tmp_path)
+    (tmp_path / "rules/nul2.yml").write_text("scratch\n")
+    (tmp_path / "rules/aux-notes.yml").write_text("scratch\n")
+    verification = verify_corpus_binding(
+        tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+    )
+    assert len(verification.content) == len(CONTENT)
