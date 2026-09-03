@@ -1120,7 +1120,11 @@ def _assert_component_spelled(
 
     On a filesystem that compares names exactly this refusal is unreachable by
     construction: a name that resolves is a name the directory lists. It is
-    the fold-insensitive case it exists for.
+    the fold-insensitive case it exists for — and there, because both walks
+    stand ahead of the read they guard, this refusal stands where a
+    pre-existing refusal about the content behind the folded name would have.
+    ``append_gate``'s module docstring states that with the two cases
+    measured.
     """
 
     try:
@@ -1207,13 +1211,17 @@ def assert_no_symlinked_release_root(root: pathlib.Path, spec: ChainSpec) -> Non
     checks run: a root that is not in the candidate tree is not a release root
     this verdict can be about, so there is nothing for a later refusal to be
     more specific about. For a single-component root — every consumer's, and
-    the fixtures' — a link the enumeration would itself have met is answered
-    word for word as the enumeration answers it. The one link it would not
-    have met is a dangling one, which ``_working_release_files`` answers by
-    returning nothing at all, so against a base it was refused a file later as
-    a release file deleted relative to the base commit; that refusal is
-    pre-empted here, deliberately, and both the gate's docstring and a test
-    say so.
+    every fixture's but the two the gate's tests build for a nested root — a
+    link the enumeration would itself have met is answered word for word as
+    the enumeration answers it. The one link it would not have met is a
+    dangling one, which ``_working_release_files`` answers by returning
+    nothing at all, so against a base it was refused a file later as a release
+    file deleted relative to the base commit; that refusal is pre-empted here,
+    deliberately. So is whatever the content behind a folded name would have
+    been refused for, wherever ``_assert_component_spelled`` fires: standing
+    ahead of the read is the whole point of both walks, and the read is what
+    the folded name would have answered. ``append_gate``'s module docstring
+    enumerates all of it with the cases measured, and tests pin them.
 
     What this walks is the release root's own path, and the configured paths
     that descend from it have their own answers: ``_enumerate_manifest_files``
@@ -1383,9 +1391,13 @@ def confined_state_descriptor(
     and the refusal says that secure descent needs read permission on every
     directory above a state file on this platform. That covers the root as
     well, and is asked of it before the identity comparison below, because an
-    unreadable root is not a changed one and saying so would misname the
-    fact — ``_set_root`` records the root with ``lstat`` and never establishes
-    that it was openable with these flags.
+    unreadable root is not a changed one and saying so would misname the fact.
+    A caller that recorded an identity does establish that the root was
+    openable with these flags when it recorded one — ``append_gate._set_root``
+    performs this same open — but permissions can change between that moment
+    and this one, so the two answers stay in this order and this one stays
+    first: it names the fact it finds rather than the fact that would have
+    been true a moment earlier.
 
     Where ``dir_fd`` is unsupported — Windows, where ``os.open`` is not in
     ``os.supports_dir_fd`` — this refuses rather than falling back to the
@@ -2129,15 +2141,19 @@ def git_tree_entries(
 
     Glob magic is the other half of what a pathspec means, and this command
     is where the two callers differ: ``git ls-tree`` does not glob a bare
-    pathspec (checked on the git this repository is verified with —
-    ``rel[e]ases`` matches only the directory of that name, while ``git
-    ls-files`` with the same pathspec also returns a sibling ``releases/``).
-    That is a property of one command's default in one version of git, not of
-    anything this package controls, and git's pathspec-mode variables rewrite
-    it for every command — ``_git_environment`` drops those, and
-    ``:(literal)`` then says what is meant here whatever the default is: this
-    exact path, matched as written. ``git ls-tree`` accepts the magic, checked
-    the same way. The diagnostics keep naming the path itself, not the magic.
+    pathspec, while ``git ls-files`` does. Both checked on the git this
+    repository is verified with, in a tree holding a directory ``rel[e]ases``
+    beside a top-level file named ``releases``: ``ls-files`` returns the file
+    too, ``ls-tree`` returns only the directory's own entries. Neither command
+    matches a *sibling directory's* contents that way — a wildcard pathspec is
+    matched against whole index paths, and ``rel[e]ases`` cannot match
+    ``releases/unrelated.md``. What globs and what does not is a property of
+    one command's default in one version of git, not of anything this package
+    controls, and git's pathspec-mode variables rewrite it for every command —
+    ``_git_environment`` drops those, and ``:(literal)`` then says what is
+    meant here whatever the default is: this exact path, matched as written.
+    ``git ls-tree`` accepts the magic, checked the same way. The diagnostics
+    keep naming the path itself, not the magic.
 
     What comes back is then held to the same claim: every entry must be the
     requested path or lie under it. Nothing git returns for a literal pathspec
@@ -2330,13 +2346,20 @@ def _split_index_debug(chunk: bytes, unparseable: str) -> tuple[bytes, bytes]:
 
 
 def _parse_index_records(
-    stdout: bytes, unparseable: str
+    stdout: bytes, unparseable: str, *, path_errors: str = "strict"
 ) -> list[tuple[str, str, str, bool]]:
     """Parse ``git ls-files -s --debug -z`` output into its records.
 
     Split from ``_index_entries`` so the read of one path and the read of the
     whole index are the same parse, reporting an index this cannot read in the
-    same words; only the sentence naming what was being read differs.
+    same words. Two things differ: the sentence naming what was read, and how
+    a path that is not valid UTF-8 is treated, which is the one thing the two
+    reads cannot share. Git stores index paths as bytes and ``-z`` emits them
+    verbatim. A read *about* a configured path answers with records for that
+    path or for paths under it, so one this cannot decode is a record about
+    the thing being asked after, and refusing is right; the whole-index read
+    answers with every path in the repository, where refusing would be a
+    refusal about a file no check here is about. See ``_all_index_entries``.
     """
 
     entries: list[tuple[str, str, str, bool]] = []
@@ -2350,7 +2373,7 @@ def _parse_index_records(
                 raise ValueError("no flag word")
             metadata, raw_path = record.split(b"\t", 1)
             mode, _object_id, stage = metadata.decode("ascii").split(" ")
-            listed = raw_path.decode("utf-8")
+            listed = raw_path.decode("utf-8", path_errors)
         except (ValueError, UnicodeDecodeError) as exc:
             raise ReleaseChainError(unparseable) from exc
         intent = bool(int(flags.group(1), 16) & CE_INTENT_TO_ADD)
@@ -2431,14 +2454,28 @@ def _all_index_entries(root: pathlib.Path) -> list[tuple[str, str, str, bool]]:
     question for asking what *else* the index holds: a pathspec answers with
     the entries matching it, and an entry that is not the path asked about
     never appears however close to it it is spelled. This is the whole index,
-    parsed exactly as those reads are.
+    parsed exactly as those reads are but for one thing: a path that is not
+    valid UTF-8 is carried through with ``surrogateescape`` rather than
+    refused. Git stores index paths as bytes, one undecodable filename
+    anywhere in a repository is legal and ordinary in a history authored under
+    a non-UTF-8 locale, and this read is about every path there is — so
+    refusing over one would refuse every proposal at entry over a file no
+    check here is about. It cannot hide an alias either: the only caller
+    compares against paths the spec supplies, which are ``str``, and a
+    name-folding filesystem is one that requires valid UTF-8 filenames, so a
+    record this cannot decode is not a spelling of a protected path on any
+    tree that could exist.
     """
 
     completed = _git_run(root, ["ls-files", "-s", "--debug", "-z"])
     if completed.returncode != 0:
         diagnostic = completed.stderr.decode("utf-8", errors="replace").strip()
         raise ReleaseChainError(f"cannot read the candidate index: {diagnostic}")
-    return _parse_index_records(completed.stdout, "cannot parse the candidate index")
+    return _parse_index_records(
+        completed.stdout,
+        "cannot parse the candidate index",
+        path_errors="surrogateescape",
+    )
 
 
 def _fold_component(component: str) -> str:
