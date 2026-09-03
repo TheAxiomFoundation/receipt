@@ -156,7 +156,7 @@ work and is not done here.
 They run beside the extracted checks without altering any of their refusals,
 and every new refusal runs after every pre-existing file-level refusal — with
 three stated exceptions at entry, all saying that a comparison cannot be made
-here rather than making one, and two further placements stated after them. The
+here rather than making one, and three further placements stated after them. The
 checkout-level ``release_chain.assert_file_modes_authoritative`` runs ahead of
 the release-history file checks (and after the base ref is resolved, so a
 false setting cannot mask a base that names nothing). Beside it, sharing that
@@ -204,8 +204,8 @@ classified is not the tree this verdict was asked about; it runs again before
 the gate-only return, which is the one exit reached without a state read and
 therefore without the descent that would otherwise make the comparison.
 
-Two component walks are placed by the same rule those three follow rather
-than being further entry-level exceptions.
+Two component walks and one type decision are placed by the same rule those
+three follow rather than being further entry-level exceptions.
 ``release_chain.assert_no_symlinked_state_component`` runs at the top of each
 state read and ``release_chain.assert_no_symlinked_release_root`` at the top
 of both release-proposal paths, each ahead of every read through the path it
