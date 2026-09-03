@@ -32,6 +32,20 @@ Three row kinds, one journal:
     junction is not a symlink on Windows, and descending one would sweep a
     directory outside the clone.
 
+    Entries are screened in pairs as well as one at a time. Every other
+    screen judges one name — the repertoire, the symlink, the kind, the
+    suffix — and none of them can see that two entries of one directory are
+    one entry on the consumer's volume. A declared ``rules/tax/x.yaml``
+    beside an undeclared ``rules/TAX/notes.txt`` is two directories on a
+    case-sensitive checkout, where the sweep descends the declared one and
+    calls the world closed, and one merged directory carrying both files on
+    a case-insensitive one (peer review, Sol round 4). So wherever the sweep
+    lists a directory — under a content root, and beside each component of a
+    pinned root — two entries whose fold keys agree refuse, directories and
+    files alike and before either is classified. The journal-side guard
+    cannot answer this: only one of the two names is declared, so there is no
+    pair of declared paths to compare.
+
     One spelling decides membership that no listing emits, and the sweep
     screens the names it is handed for it. An NTFS volume generating 8.3
     short names gives a long name a second, addressable spelling whose
@@ -74,7 +88,12 @@ Three row kinds, one journal:
     file on the auditor who cloned onto ext4 (peer review, Sol round 2);
     without the second, the listing was consumed only as far as the exact
     spelling and the coexisting one was never seen (peer review, Sol round
-    3). Asked of attested paths, because nothing else enumerates them: a
+    3). Each entry of that listing is screened for the portable repertoire
+    before it is compared, because a fold key pairs two spellings that
+    differ in case and nothing else: a ``toolchain.toml.`` beside the bound
+    ``toolchain.toml`` folds to a different key and *is* the bound name on
+    Win32, which strips the trailing period before it resolves (peer review,
+    Sol round 4). Asked of attested paths, because nothing else enumerates them: a
     content path is already known to be spelled the way a listing emits it,
     since the sweep builds its set out of listing names and the membership
     comparison proves the two sets equal.
@@ -1708,6 +1727,56 @@ def _list_directory(
         ) from exc
 
 
+def _assert_no_merging_entries(
+    entries: list[pathlib.Path], directory: str
+) -> None:
+    """Refuse a directory holding two entries a case-insensitive host merges.
+
+    Every entry the sweep meets is screened one at a time — for the portable
+    repertoire, for a symlink, for what kind of thing it is — and nothing
+    compared two of them to each other. Two entries whose fold keys agree are
+    two things on the auditor's volume and one on the consumer's, and it is
+    the *directory* that decides which: a declared ``rules/tax/x.yaml`` beside
+    an undeclared ``rules/TAX/notes.txt`` passes a case-sensitive sweep, which
+    walks two directories and finds one content file, while a case-insensitive
+    checkout holds one merged directory carrying both files and the closed
+    world the sweep just called closed is open (peer review, Sol round 4).
+
+    :func:`_reject_aliasing_paths` asks the same question of the *journal* and
+    cannot answer this one: only one of the two names is declared, so there is
+    no pair of declared paths to compare. Only the listing has both.
+
+    Directories and files alike, and before either is classified: what merges
+    on the consumer's volume is the name, whatever it names, and a collision
+    between a directory and a file is as ambiguous as one between two
+    directories.
+
+    Compared over the fold key, which under the portable-name policy is ASCII
+    case-insensitivity. The entries come sorted from :func:`_list_directory`,
+    so the pair a refusal names is a property of the directory rather than of
+    the order the host enumerated it in, and each name is quoted with the
+    directory it sits in so an auditor can go to it.
+    """
+
+    seen: dict[str, str] = {}
+    for entry in entries:
+        key = _path_fold(entry.name)
+        previous = seen.get(key)
+        if previous is not None:
+            raise CorpusError(
+                "directory holds two entries a case-insensitive filesystem "
+                f"would merge: {_quoted(_under(directory, previous))} and "
+                f"{_quoted(_under(directory, entry.name))}"
+            )
+        seen[key] = entry.name
+
+
+def _under(directory: str, name: str) -> str:
+    """One entry's path relative to the tree root, given its directory's."""
+
+    return f"{directory}/{name}" if directory else name
+
+
 def _directory_generation(
     directory: pathlib.Path,
 ) -> tuple[int, int, int, int] | None:
@@ -2331,9 +2400,15 @@ def _tree_content_paths(
         pending: list[tuple[pathlib.Path, str]] = [(base, base_relative)]
         while pending:
             directory, directory_relative = pending.pop()
-            for candidate in _list_directory(
+            entries = _list_directory(
                 directory, directory_relative, generations=generations
-            ):
+            )
+            # Before anything is classified, because what a case-insensitive
+            # volume merges is decided by the pair and not by either entry:
+            # every screen below judges one name at a time and none of them
+            # can see that two of them are one file somewhere else.
+            _assert_no_merging_entries(entries, directory_relative)
+            for candidate in entries:
                 relative = candidate.relative_to(root).as_posix()
                 # Before the suffix predicate folds this name, and before
                 # the 8.3 model below reads its extension, and before
@@ -2436,9 +2511,11 @@ def _assert_no_aliasing_root_component(
     for component in relative.split("/"):
         if current.is_symlink() or not current.is_dir():
             return
-        for entry in _list_directory(
-            current, "/".join(walked), generations=generations
-        ):
+        walked_relative = "/".join(walked)
+        entries = _list_directory(
+            current, walked_relative, generations=generations
+        )
+        for entry in entries:
             # Screened, and not only for the fold question below: an entry
             # named "rules." beside the pinned "rules" is that root on
             # Windows, holding whatever a producer put in it, while a POSIX
@@ -2457,6 +2534,12 @@ def _assert_no_aliasing_root_component(
                     f"root component {_quoted(component)} on a case- or "
                     "normalization-insensitive filesystem"
                 )
+        # After that loop rather than before it, which is the one place the
+        # order of these two questions matters. An entry that folds onto the
+        # pinned component is a merging sibling too, and the refusal above
+        # names the component a consumer's spec pins — which is what the
+        # auditor has to act on — where this one could only name two entries.
+        _assert_no_merging_entries(entries, walked_relative)
         current = current / component
         walked.append(component)
 
