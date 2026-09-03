@@ -23,7 +23,12 @@ harness in tests/test_ledger_equivalence.py. Additions since the extraction
 (the base-ref history pass with its checkout and index guards, which include
 requiring every base release file to still be an entry in the candidate index,
 since both of that pass's comparisons read the working tree and ``git rm
---cached`` leaves it untouched; the release-root guard, which reconciles that
+--cached`` leaves it untouched; the checkout guard's sibling, which refuses a
+checkout whose four caching settings — ``core.fsmonitor``,
+``core.trustctime``, ``core.checkStat``, ``core.untrackedCache`` — make ``git
+diff`` and ``git ls-files --others`` a cache rather than a comparison, since a
+caller that classifies a proposal from those is taking git's word for what
+changed and every one of them lets a rewritten file be reported clean; the release-root guard, which reconciles that
 root's index entries with the working tree in both directions, by the spelling
 the traversal returns and after walking an indexed path's parents, because a
 filesystem traversal does not descend a symlinked directory while resolving
@@ -2556,6 +2561,44 @@ def _git_bool(root: pathlib.Path, key: str) -> bool | None:
     return result.stdout.strip() == "true"
 
 
+def _git_value(root: pathlib.Path, key: str) -> str | None:
+    """One git setting as written, or ``None`` when unset.
+
+    ``_git_bool`` above cannot ask about the settings below: ``core.fsmonitor``
+    takes a hook path as well as a boolean and ``core.untrackedCache`` takes
+    ``keep``, and ``git config --bool`` fails outright on either, which would
+    turn a setting this verifier means to inspect into a refusal about being
+    unable to read it. The raw value is what the checks want anyway — they ask
+    whether a setting is off, not whether it is a boolean.
+    """
+
+    result = subprocess.run(
+        ["git", "-C", str(root), "config", "--get", key],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_git_environment(),
+    )
+    if result.returncode == 1 and not result.stdout.strip():
+        return None
+    if result.returncode != 0:
+        raise ReleaseChainError(
+            f"cannot read {key} for {root}: {result.stderr.strip()[-500:]}"
+        )
+    return result.stdout.strip()
+
+
+# The spellings git reads as a false boolean, and the empty value it also
+# treats as unset for these settings. Anything else — ``true``, ``keep``, a
+# hook path — leaves the setting doing something, which is what the checks
+# below ask about.
+GIT_FALSE_VALUES = frozenset({"", "false", "no", "off", "0"})
+
+
+def _git_setting_is_off(value: str | None) -> bool:
+    return value is None or value.strip().lower() in GIT_FALSE_VALUES
+
+
 def assert_file_modes_authoritative(root: pathlib.Path) -> None:
     """Refuse to compare modes and types on a checkout that does not carry them.
 
@@ -2590,6 +2633,77 @@ def assert_file_modes_authoritative(root: pathlib.Path) -> None:
         raise ReleaseChainError(
             "file types cannot be verified: core.symlinks is false in this "
             "checkout, so a symlink entry is materialised as a plain file"
+        )
+
+
+def assert_working_tree_classification_authoritative(root: pathlib.Path) -> None:
+    """Refuse a checkout whose settings let git call a changed file unchanged.
+
+    The sibling above is about what the working tree carries; this is about
+    whether git will look at it. A caller that classifies a proposal from
+    ``git diff`` and ``git ls-files --others`` — ``append_gate``'s surface
+    separation, and the gate-only exit it decides — is taking git's answer for
+    what changed, and four settings make that answer a cache rather than a
+    comparison:
+
+    ``core.fsmonitor`` names a file-system monitor (a hook, or git's own
+    daemon) and git then trusts its "unchanged" verdict for a path instead of
+    re-stating it, so an entry the monitor never saw change — a stale daemon, a
+    monitor a proposal can point anywhere, a rewrite the monitor missed — keeps
+    ``CE_FSMONITOR_VALID`` and is reported clean however the file was rewritten.
+    That is the same fact ``assert_index_carries_no_protected_alias`` refuses
+    an assume-unchanged entry for, arrived at through a setting rather than
+    through a flag on one entry, and it is why refusing the flag alone was not
+    enough.
+
+    ``core.trustctime=false`` drops the inode change time from the stat
+    comparison and ``core.checkStat=minimal`` drops all but size and the whole
+    seconds of mtime, so a rewrite that keeps the file's size and restores its
+    modification time is not a change git will look past the cache for. A
+    ledger rewritten that way beside a gate file is a gate-only proposal, and
+    the ledger is never read.
+
+    ``core.untrackedCache`` answers ``git ls-files --others`` from a cached
+    directory listing, which is the other half of the changed set the
+    classification is built from; a new file under a directory whose cached
+    mtime did not move is not in that listing.
+
+    Each is a property of the checkout rather than of any file, so like the
+    modes guard this runs before any file-level comparison and shares its
+    stated exception: a checkout whose changes cannot be classified says so
+    before any verdict about what changed in it. None of the four is something
+    a proposal under review can want: each exists to make a working copy
+    cheaper to scan, and this verifier's whole subject is what that scan would
+    otherwise find. Read as written rather than as booleans, because
+    ``core.fsmonitor`` takes a hook path and ``core.untrackedCache`` takes
+    ``keep`` — which leaves an existing cache in use, so only an explicitly
+    false or unset setting is off.
+    """
+
+    fsmonitor = _git_value(root, "core.fsmonitor")
+    if not _git_setting_is_off(fsmonitor):
+        raise ReleaseChainError(
+            "working-tree changes cannot be classified: core.fsmonitor is "
+            "enabled in this checkout, and git's classification would trust it"
+        )
+    if _git_bool(root, "core.trustctime") is False:
+        raise ReleaseChainError(
+            "working-tree changes cannot be classified: core.trustctime is "
+            "false in this checkout, so git's stat cache can call a rewritten "
+            "file unchanged"
+        )
+    check_stat = _git_value(root, "core.checkStat")
+    if check_stat is not None and check_stat.strip().lower() == "minimal":
+        raise ReleaseChainError(
+            "working-tree changes cannot be classified: core.checkStat is "
+            "minimal in this checkout, so git's stat cache ignores the fields "
+            "a same-size rewrite changes"
+        )
+    if not _git_setting_is_off(_git_value(root, "core.untrackedCache")):
+        raise ReleaseChainError(
+            "working-tree changes cannot be classified: core.untrackedCache is "
+            "enabled in this checkout, so the untracked listing this "
+            "classification reads would come from a cache"
         )
 
 
