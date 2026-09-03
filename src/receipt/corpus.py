@@ -238,10 +238,13 @@ A *declared* path spelled like a short name is refused outright, and what
 counts as that spelling is the grammar 8.3 generation produces: one to six
 characters from the short-name repertoire, a tilde, one to six digits, the
 stem at most eight characters in all, then at most a three-character
-extension. Accepting a tilde-digit anywhere in any run of non-period
-characters was much wider, and it refused ``A~1B.TXT``, ``~1foo.txt`` and
-``a ~1.txt`` — names no collision counter produces and a corpus may
-legitimately hold (peer review, Sol round 2).
+extension. The repertoire there is the 8.3 punctuation, the ASCII letters
+and digits, and every non-ASCII character, because the 8.3 namespace is an
+OEM code page and ``SMUGGL~1.ÉML`` is a spelling NTFS hands out. Accepting
+a tilde-digit anywhere in any run of non-period characters was much wider,
+and it refused ``A~1B.TXT``, ``~1foo.txt`` and ``a ~1.txt`` — names no
+collision counter produces and a corpus may legitimately hold (peer
+review, Sol round 2).
 
 Every name this module folds is screened first against a *pinned* Unicode
 repertoire, not the running interpreter's. Folding is only stable for
