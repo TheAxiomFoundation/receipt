@@ -129,6 +129,13 @@ Sol round 5). That fallback runs only where the stream's own codec is the
 trusted UTF-8 now, and refuses otherwise, which the render boundary turns
 into the refusal it already has for a verdict it cannot render.
 
+A codec-less, bufferless stream is different: ``io.StringIO`` and equivalent
+in-memory sinks produce no bytes and therefore have no codec that can undo the
+sanitiser (peer review, Sol round 7). :func:`_stream_encoding` classifies that
+shape as a Unicode sink, :func:`_byte_safe_encoding` selects UTF-8 units for
+render bounds, and :func:`_emit` writes the already-rendered text directly.
+A bufferless stream that *does* advertise a non-UTF-8 codec still refuses.
+
 What is written is canonical UTF-8, with no byte-order mark. The stream's
 own spelling used to be handed back to the encoder, and ``utf-8-sig`` is a
 UTF-8 codec that prepends U+FEFF: a ``--json`` verdict written to a stream
@@ -750,6 +757,7 @@ _UTF8_STREAM_ENCODINGS = frozenset({"utf-8", "utf-8-sig"})
 
 _ASCII_LITERAL_PROBE = "".join(chr(code) for code in range(0x20, 0x7F)) + "\n\t"
 _ASCII_LITERAL_BYTES = _ASCII_LITERAL_PROBE.encode("ascii")
+_STREAM_ENCODING_UNSET = object()
 
 
 def _ascii_is_literal(encoding: str) -> bool:
@@ -795,18 +803,41 @@ def _escapes_non_ascii(encoding: str) -> bool:
         return True
 
 
-def _stream_encoding(stream: TextIO) -> str:
-    """The canonical name of this stream's own codec, or ``""`` if it has none.
+def _stream_buffer(stream: TextIO) -> Any | None:
+    """The stream's usable binary layer, or ``None`` when it has none.
+
+    A detached ``TextIOWrapper`` raises ``ValueError`` from ``buffer`` rather
+    than returning ``None``; an in-memory Unicode sink has no attribute at
+    all. Both are bufferless, but :func:`_stream_encoding` distinguishes them
+    by whether a codec is still advertised.
+    """
+
+    try:
+        return stream.buffer  # type: ignore[attr-defined]
+    except (AttributeError, ValueError):
+        return None
+
+
+def _stream_encoding(stream: TextIO) -> str | None:
+    """The canonical codec, ``None`` for a Unicode sink, or ``""`` if unknown.
 
     One place asks the question, so :func:`_byte_safe_encoding` and
     :func:`_emit`'s bufferless guard cannot disagree about what a stream's
     codec is. ``codecs.lookup`` is what canonicalises the spelling, turning
-    ``UTF_8`` and ``utf8`` into ``utf-8``; a stream with no ``encoding``, a
-    non-string one, and an unknown spelling all answer ``""``, which is in no
-    trusted set and so is the fail-closed answer at both call sites.
+    ``UTF_8`` and ``utf8`` into ``utf-8``.
+
+    A stream whose ``encoding`` is absent or ``None`` *and* whose binary
+    buffer is absent is an in-memory Unicode sink: writing text to it produces
+    no bytes for a codec to reinterpret, so ``None`` is a positive
+    classification rather than an unknown value (peer review, Sol round 7).
+    The same missing codec on a stream that has a buffer, a non-string codec,
+    and an unknown spelling answer ``""`` and fail closed. A bufferless stream
+    with an actual non-UTF-8 codec keeps its name and keeps the refusal.
     """
 
     encoding = getattr(stream, "encoding", None)
+    if encoding is None:
+        return None if _stream_buffer(stream) is None else ""
     if not isinstance(encoding, str):
         return ""
     try:
@@ -815,7 +846,11 @@ def _stream_encoding(stream: TextIO) -> str:
         return ""
 
 
-def _byte_safe_encoding(stream: TextIO) -> str:
+def _byte_safe_encoding(
+    stream: TextIO,
+    *,
+    stream_encoding: str | None | object = _STREAM_ENCODING_UNSET,
+) -> str:
     """The encoding to write this stream in, which is not always its own.
 
     :func:`_terminal_safe` escapes every code point that can move a cursor
@@ -848,6 +883,12 @@ def _byte_safe_encoding(stream: TextIO) -> str:
     not one byte per character. Latin-1, cp125x and ISO-8859 codecs pass. A
     failing or unknown codec is refused before any bytes are written (peer
     review, Sol round 7).
+
+    A codec-less, bufferless stream is the exception because it is not a byte
+    stream at all. :func:`_stream_encoding` returns ``None`` for that Unicode
+    sink and this function returns ``"utf-8"`` so the text renderer applies
+    its trusted-Unicode bound; :func:`_emit` then writes the rendered text
+    directly, without an encode/decode round trip (peer review, Sol round 7).
 
     Honoured, and not handed back: what this returns is always ``utf-8`` or
     ``ascii``, never the stream's own spelling. ``utf-8-sig`` is a UTF-8
@@ -894,7 +935,15 @@ def _byte_safe_encoding(stream: TextIO) -> str:
     trusted answer be compared and refused by one set of names.
     """
 
-    name = _stream_encoding(stream)
+    name = (
+        _stream_encoding(stream)
+        if stream_encoding is _STREAM_ENCODING_UNSET
+        else stream_encoding
+    )
+    if name is None:
+        return "utf-8"
+    if not isinstance(name, str):  # pragma: no cover - private cached-call guard
+        raise TypeError("stream encoding decision is not a string or None")
     if name in _UTF8_STREAM_ENCODINGS:
         return "utf-8"
     if _ascii_is_literal(name):
@@ -963,7 +1012,13 @@ def _write_all(target: Any, payload: Any) -> None:
         offset += written
 
 
-def _emit(text: str, stream: TextIO, *, encoding: str) -> None:
+def _emit(
+    text: str,
+    stream: TextIO,
+    *,
+    encoding: str,
+    stream_encoding: str | None | object = _STREAM_ENCODING_UNSET,
+) -> None:
     """Write one rendered verdict to a stream that may not accept every character.
 
     ``print`` hands text to the stream's own codec with the stream's own
@@ -1017,6 +1072,13 @@ def _emit(text: str, stream: TextIO, *, encoding: str) -> None:
     :func:`main` turns that into the refusal it already has for a verdict it
     cannot render.
 
+    A stream with no buffer and no codec is not that fallback. It is an
+    in-memory Unicode sink, so no bytes are produced and no encoder can undo
+    the escaping. The rendered ``text`` and its final newline are written
+    directly through ``write``; ``encoding`` is still ``utf-8`` because that
+    is the unit in which the renderer bounded it. A stream with no buffer but
+    with a non-UTF-8 codec remains refused (peer review, Sol round 7).
+
     ``utf-8-sig`` is refused here although it is honoured as a stream codec
     everywhere else, and for the reason the trusted set gives: what a buffer
     receives is bytes this module encoded, and what the text API receives is
@@ -1042,23 +1104,27 @@ def _emit(text: str, stream: TextIO, *, encoding: str) -> None:
     verdict on the same stream.
     """
 
-    data = (text + "\n").encode(encoding, errors="backslashreplace")
-    try:
-        # Not ``getattr(..., None)``: a detached ``TextIOWrapper`` raises
-        # ValueError from the property rather than being missing it, and a
-        # default only absorbs AttributeError.
-        buffer = stream.buffer
-    except (AttributeError, ValueError):
-        buffer = None
+    buffer = _stream_buffer(stream)
     if buffer is None:
-        if _stream_encoding(stream) not in _TRUSTED_ENCODINGS:
+        own_encoding = (
+            _stream_encoding(stream)
+            if stream_encoding is _STREAM_ENCODING_UNSET
+            else stream_encoding
+        )
+        if own_encoding is None:
+            _write_all(stream, text + "\n")
+            stream.flush()
+            return
+        if own_encoding not in _TRUSTED_ENCODINGS:
             raise OSError(
                 "verdict stream has no binary buffer and its encoding is not "
                 "UTF-8; the verdict cannot be written safely"
             )
+        data = (text + "\n").encode(encoding, errors="backslashreplace")
         _write_all(stream, data.decode(encoding, errors="replace"))
         stream.flush()
         return
+    data = (text + "\n").encode(encoding, errors="backslashreplace")
     stream.flush()
     _write_all(buffer, data)
     buffer.flush()
@@ -1120,18 +1186,21 @@ def _refuse(as_json: bool, stage: str, message: str, code: int) -> int:
         # local, so the codec the message is measured against is the codec
         # its bytes are written in; see :func:`_emit`.
         stream = sys.stderr
-        encoding = _byte_safe_encoding(stream)
+        stream_codec = _stream_encoding(stream)
+        encoding = _byte_safe_encoding(stream, stream_encoding=stream_codec)
         _emit(
             f"receipt verify: {_rendered(message, encoding=encoding)}"
             "\nreceipt verify: FAIL",
             stream,
             encoding=encoding,
+            stream_encoding=stream_codec,
         )
     except Exception:  # noqa: BLE001 - a refusal that cannot print is still a refusal
         pass
     if as_json:
         try:
             stream = sys.stdout
+            stream_codec = _stream_encoding(stream)
             _emit(
                 json.dumps(
                     _bounded_payload(_fail_payload(stage, message)),
@@ -1139,7 +1208,10 @@ def _refuse(as_json: bool, stage: str, message: str, code: int) -> int:
                     sort_keys=True,
                 ),
                 stream,
-                encoding=_byte_safe_encoding(stream),
+                encoding=_byte_safe_encoding(
+                    stream, stream_encoding=stream_codec
+                ),
+                stream_encoding=stream_codec,
             )
         except Exception:  # noqa: BLE001 - as above; the exit code carries it
             pass
@@ -1215,11 +1287,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     if as_json:
         try:
             stream = sys.stdout
-            encoding = _byte_safe_encoding(stream)
+            stream_codec = _stream_encoding(stream)
+            encoding = _byte_safe_encoding(stream, stream_encoding=stream_codec)
             rendered = json.dumps(
                 _bounded_payload(result_to_dict(result)), indent=2, sort_keys=True
             )
-            _emit(rendered, stream, encoding=encoding)
+            _emit(
+                rendered,
+                stream,
+                encoding=encoding,
+                stream_encoding=stream_codec,
+            )
         except Exception as exc:  # noqa: BLE001 - rendering is inside the contract
             return _refuse(
                 as_json,
@@ -1238,9 +1316,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             # 40,960 bytes (peer review, Sol round 4) — and asking the stream
             # a second time inside ``_emit`` let a stream that answered
             # differently twice do the same thing (peer review, Sol round 5).
-            encoding = _byte_safe_encoding(stream)
+            stream_codec = _stream_encoding(stream)
+            encoding = _byte_safe_encoding(stream, stream_encoding=stream_codec)
             text = _format_text(result, encoding=encoding)
-            _emit(text, stream, encoding=encoding)
+            _emit(
+                text,
+                stream,
+                encoding=encoding,
+                stream_encoding=stream_codec,
+            )
         except Exception as exc:  # noqa: BLE001 - rendering is inside the contract
             return _refuse(
                 False,

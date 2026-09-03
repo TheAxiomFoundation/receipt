@@ -15,6 +15,7 @@ whose whole purpose is to be handed to a skeptic, is the more important half.
 from __future__ import annotations
 
 import codecs
+import contextlib
 import hashlib
 import io
 import json
@@ -70,6 +71,81 @@ def test_verifies_a_published_corpus_from_a_clone(
     out = capsys.readouterr().out
     assert "VERDICT: PASS" in out
     assert "custody" in out and "binding" in out
+
+
+def test_json_pass_writes_to_a_redirected_stringio(
+    repo: pathlib.Path,
+) -> None:
+    """Binds S7-F5: a codec-less StringIO is a safe Unicode stdout sink.
+
+    ``redirect_stdout`` installs exactly the bufferless, codec-less stream
+    applications use to capture a command in memory. S7-F5 writes the JSON
+    text directly and preserves the passing exit code. Without it the
+    bufferless guard rejects the verdict, the refusal hits the same guard,
+    stdout stays empty, and ``main`` returns ``EXIT_FAIL``.
+    """
+
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        code = run(repo, "--json")
+
+    assert code == EXIT_OK
+    text = captured.getvalue()
+    assert text.endswith("\n")
+    assert json.loads(text)["verdict"] == "PASS"
+
+
+def test_text_pass_writes_to_a_redirected_stringio(
+    repo: pathlib.Path,
+) -> None:
+    """Binds S7-F5: a Unicode stdout sink must also carry the text verdict.
+
+    The rendered text, including its fixed em dash, is written as Unicode
+    rather than encoded and decoded through a codec that does not exist.
+    Without S7-F5 ``_byte_safe_encoding`` rejects this stream, ``main`` turns
+    the valid PASS into ``EXIT_FAIL``, and the redirected stdout is empty.
+    """
+
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        code = run(repo)
+
+    assert code == EXIT_OK
+    text = captured.getvalue()
+    assert text.startswith("receipt ")
+    assert "VERDICT: PASS — custody and corpus binding" in text
+    assert text.endswith("  digests out of band.\n")
+
+
+def test_refusal_writes_to_a_redirected_stringio_stderr(
+    repo: pathlib.Path,
+) -> None:
+    """Binds S7-F5: the refusal path rejected the same Unicode sink too.
+
+    A missing root refuses before verification and writes the two fixed
+    refusal lines through ``redirect_stderr``. Without S7-F5 the bufferless
+    codec-less stderr is rejected inside ``_refuse`` and swallowed, leaving
+    the caller the exit code but no captured explanation.
+    """
+
+    missing = repo / "missing-root"
+    captured = io.StringIO()
+    with contextlib.redirect_stderr(captured):
+        code = main(
+            [
+                "verify",
+                "--spec",
+                str(repo / "verification/spec.py"),
+                "--root",
+                str(missing),
+            ]
+        )
+
+    assert code == EXIT_USAGE
+    assert captured.getvalue() == (
+        f"receipt verify: root is not a directory: {missing}\n"
+        "receipt verify: FAIL\n"
+    )
 
 
 def test_the_verdict_states_what_it_did_not_establish(
