@@ -57,24 +57,17 @@ that is nobody's --
 which is neither a rename nor a new authority and so is refused rather than
 skipped or admitted, since skipping it activates something with no
 supplemental evidence and admitting it lets an authority the chain already
-trusts produce the very token the new key is supposed to prove; two pending
-bundles that introduce one authority under two anchors, sharing a signer,
-which is one new authority demanding and receiving two supplemental outcomes
-and so counted twice -- every equivalence above is computed against the
-active bundles, whose anchors are grouped into classes: the connected
-components of them, joined wherever two carry one ``(ID, root SPKI)`` or
-share a signing key, each class's signers the union over its members.  Both
-joins are one statement made at two moments, which is why the grouping is
-transitive: an activated rename made two anchors one authority, and a
-rotation under either name extended that one authority's keys, so an
-authority renamed and then rotated is one class holding a key under each of
-its names, and a further rename of it carries the whole class and equals
-neither anchor's own set (peer review, sixth gate round one).  Each
-candidate the walk admits now joins the sets the next is measured against,
-except that a later pending bundle's anchor
-carrying an admitted anchor's ``(ID, root SPKI)`` succeeds it rather than
-colliding with it, one authority keeping its name across two versions of a
-catch-up; a caller-supplied trust transition that omits an update the
+trusts produce the very token the new key is supposed to prove; pending
+history that used to be a rolling set of current candidates, so a skipped
+rename or rotation contributed no edge, succession deleted the predecessor's
+signer ownership, and reversing an anchor array could change the verdict --
+one persistent component graph is now built from every active and pending
+anchor ever seen, joining equal ``(ID, root SPKI)`` authorities and shared
+signing keys whether or not an occurrence is skipped, never deleting a
+historical edge, and choosing at most the newest candidate from a pending-only
+class, which makes classification independent of anchor-array order (peer
+review, sixth gate round two); a caller-supplied trust transition that omits
+an update the
 witnessed record itself carries, which is a transition read from one instant
 of the record and evidence taken from another; a chain genesis file or a
 witness sidecar that is not a readable regular file -- genesis had no
@@ -333,12 +326,11 @@ certificate that response was signed with, and no pairing of anchors that
 could reaches two outcomes -- inside one bundle they are refused at load;
 across an active and a pending bundle the pending one is measured against
 whole classes and is skipped as a rename or refused as a split or a merge,
-so it never becomes a candidate at all; and
-across two pending bundles they are refused as an alias, or, where the two
-are one authority under one name, the later succeeds the earlier and only
-one of them is a candidate.  Its text is new to this branch rather than
-ported, and it is kept because it is the last thing standing if one of those
-rules is lost; its tests reach it by blinding
+so it never becomes a candidate at all; and across pending bundles every
+historical occurrence of one class contributes at most its newest candidate,
+whether the authority kept its name or acquired another.  Its text is new to
+this branch rather than ported, and it is kept because it is the last thing
+standing if one of those rules is lost; its tests reach it by blinding
 ``_anchor_signer_fingerprints``, and say so.
 """
 
@@ -2709,6 +2701,223 @@ def _pending_bundle_version(reference: Mapping[str, Any]) -> int:
     return int(match.group(1)) if match else 0
 
 
+_Authority = tuple[str, str]
+
+
+@dataclass(frozen=True)
+class _AnchorOccurrence:
+    """One anchor as one active or pending bundle version presents it."""
+
+    reference: dict[str, Any]
+    anchor: dict[str, Any]
+    path: str
+    version: int
+    authority: _Authority
+    signers: frozenset[str]
+    active: bool
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return self.path, str(self.anchor["id"])
+
+    @property
+    def order(self) -> tuple[int, str, str, str]:
+        return self.version, self.path, *self.authority
+
+
+class _AuthorityHistory:
+    """Persistent components of every authority and signer ever observed.
+
+    Authority nodes are ``(anchor ID, root SPKI)`` pairs.  Adding an anchor
+    joins its authority node with every authority that has ever carried one of
+    its signing keys.  No edge is removed: a later occurrence may supersede an
+    earlier candidate, but cannot make the earlier signer cease to be part of
+    the authority's history (peer review, sixth gate round two).
+    """
+
+    def __init__(self) -> None:
+        self.parent: dict[_Authority, _Authority] = {}
+        self.signer_owner: dict[str, _Authority] = {}
+        self.occurrences: list[_AnchorOccurrence] = []
+
+    def contains(self, authority: _Authority) -> bool:
+        return authority in self.parent
+
+    def _ensure(self, authority: _Authority) -> None:
+        self.parent.setdefault(authority, authority)
+
+    def find(self, authority: _Authority) -> _Authority:
+        self._ensure(authority)
+        while self.parent[authority] != authority:
+            self.parent[authority] = self.parent[self.parent[authority]]
+            authority = self.parent[authority]
+        return authority
+
+    def _union(self, first: _Authority, second: _Authority) -> None:
+        first_root, second_root = self.find(first), self.find(second)
+        if first_root == second_root:
+            return
+        survivor, joined = sorted((first_root, second_root))
+        self.parent[joined] = survivor
+
+    def add(self, occurrence: _AnchorOccurrence) -> None:
+        self._ensure(occurrence.authority)
+        for fingerprint in sorted(occurrence.signers):
+            previous = self.signer_owner.get(fingerprint)
+            if previous is None:
+                self.signer_owner[fingerprint] = occurrence.authority
+            else:
+                self._union(occurrence.authority, previous)
+        self.occurrences.append(occurrence)
+
+    def signer_roots(self, signers: frozenset[str]) -> set[_Authority]:
+        return {
+            self.find(self.signer_owner[fingerprint])
+            for fingerprint in signers
+            if fingerprint in self.signer_owner
+        }
+
+    def pending_era_sets(self, authority: _Authority) -> set[frozenset[str]]:
+        root = self.find(authority)
+        return {
+            occurrence.signers
+            for occurrence in self.occurrences
+            if not occurrence.active
+            and self.find(occurrence.authority) == root
+        }
+
+    def class_signers(self, authority: _Authority) -> set[str]:
+        root = self.find(authority)
+        return {
+            fingerprint
+            for occurrence in self.occurrences
+            if self.find(occurrence.authority) == root
+            for fingerprint in occurrence.signers
+        }
+
+    def class_authorities(self, authority: _Authority) -> tuple[_Authority, ...]:
+        root = self.find(authority)
+        return tuple(
+            sorted(
+                candidate
+                for candidate in self.parent
+                if self.find(candidate) == root
+            )
+        )
+
+
+def _anchor_occurrences(
+    records: Path,
+    reference: dict[str, Any],
+    *,
+    active: bool,
+    spec: TsaSpec,
+) -> tuple[_AnchorOccurrence, ...]:
+    """Load one bundle as deterministically ordered historical occurrences."""
+
+    _path, trust = _load_trust_bundle(records, reference, spec=spec)
+    bundle_path = str(reference["path"])
+    version = _pending_bundle_version(reference)
+    occurrences = [
+        _AnchorOccurrence(
+            reference=reference,
+            anchor=anchor,
+            path=bundle_path,
+            version=version,
+            authority=_anchor_authority(anchor),
+            signers=frozenset(_anchor_signer_fingerprints(anchor)),
+            active=active,
+        )
+        for anchor in trust["anchors"]
+    ]
+    return tuple(sorted(occurrences, key=lambda occurrence: occurrence.order))
+
+
+def _split_or_merge_message(occurrence: _AnchorOccurrence) -> str:
+    return (
+        f"pending TSA anchor {occurrence.anchor['id']} splits or merges active "
+        "authorities' signers; a pending anchor must carry one active "
+        "anchor's signers exactly, or none of them"
+    )
+
+
+def _build_authority_history(
+    records: Path,
+    trusted_bundles: Mapping[str, dict[str, Any]],
+    transition_bundle_updates: list[dict[str, Any]],
+    *,
+    spec: TsaSpec,
+) -> tuple[
+    _AuthorityHistory,
+    tuple[_AnchorOccurrence, ...],
+    tuple[tuple[_AnchorOccurrence, ...], ...],
+]:
+    """Build one graph from the active anchors and every pending anchor.
+
+    Pending bundles are loaded once in immutable version/path order.  Every
+    bundle is classified as a batch against the history before that version,
+    with its anchors sorted independently of their JSON array order; all of
+    its edges are then retained whether an occurrence is new, a rename, or a
+    skipped rotation.  Semantic errors are remembered until every pending
+    occurrence has entered the graph, so the graph consumed by candidate
+    classification is the complete history for this verification.
+    """
+
+    active_occurrences: list[_AnchorOccurrence] = []
+    for reference in sorted(
+        trusted_bundles.values(),
+        key=lambda value: (_pending_bundle_version(value), str(value.get("path", ""))),
+    ):
+        active_occurrences.extend(
+            _anchor_occurrences(records, reference, active=True, spec=spec)
+        )
+
+    pending_batches: list[tuple[_AnchorOccurrence, ...]] = []
+    for reference in sorted(
+        transition_bundle_updates,
+        key=lambda value: (_pending_bundle_version(value), str(value.get("path", ""))),
+    ):
+        bundle_path = str(reference["path"])
+        if bundle_path in trusted_bundles:
+            continue
+        pending_batches.append(
+            _anchor_occurrences(records, reference, active=False, spec=spec)
+        )
+
+    history = _AuthorityHistory()
+    for occurrence in active_occurrences:
+        history.add(occurrence)
+
+    errors: list[tuple[tuple[int, str, str, str], str]] = []
+    for batch in pending_batches:
+        for occurrence in batch:
+            if history.contains(occurrence.authority):
+                continue
+            roots = history.signer_roots(occurrence.signers)
+            if not roots:
+                continue
+            unknown = occurrence.signers.difference(history.signer_owner)
+            valid_alias = False
+            if len(roots) == 1 and not unknown:
+                root = next(iter(roots))
+                valid_alias = (
+                    occurrence.signers in history.pending_era_sets(root)
+                    or set(occurrence.signers) == history.class_signers(root)
+                )
+            if not valid_alias:
+                errors.append(
+                    (occurrence.order, _split_or_merge_message(occurrence))
+                )
+        # A skipped rotation or rename is history too.  Adding as one batch is
+        # what makes the answer independent of anchor-array order.
+        for occurrence in batch:
+            history.add(occurrence)
+
+    if errors:
+        raise TsaError(min(errors)[1])
+    return history, tuple(active_occurrences), tuple(pending_batches)
+
+
 def _active_anchor_identities(
     records: Path,
     trusted_bundles: Mapping[str, dict[str, Any]],
@@ -2717,80 +2926,19 @@ def _active_anchor_identities(
 ) -> tuple[set[tuple[str, str]], dict[tuple[str, str], set[str]]]:
     """What the active bundles already stand for: authorities, and whose keys.
 
-    Two answers because a pending anchor can be an authority already active
-    in two different ways -- under the same name, or under a new one with the
-    same signing key.  ``_supplemental_candidates`` says why each is needed.
-
-    The second answer is a mapping and not a set.  Flattening every active
-    anchor's signers into one set loses which authority each key belongs to,
-    and that is the whole of what a rename is: an anchor carrying *one*
-    active authority's keys.  With the ownership gone, an active anchor
-    allowing two keys could be split by a pending bundle into two anchors
-    allowing one each, and two active anchors could be merged into one
-    allowing both -- every key in every case already active, so every case
-    skipped as a rename, and one authority became two or two became one with
-    no supplemental evidence anywhere (peer review, fifth gate round three).
-
-    What each authority maps to is its equivalence *class*: the connected
-    components of the active anchors, joined wherever two of them carry one
-    ``(id, root SPKI)`` or share a signing key, with each class's signer set
-    the union over its members.  Both joins are the same statement, made at
-    two moments.  Two anchors carrying one ``(id, root SPKI)`` are one
-    authority described twice, because a rotation leaves both bundle versions
-    active; two anchors sharing a signer are one authority under two names,
-    which is exactly the rename this walk skips -- so an activated rename
-    leaves behind two active anchors that *are* one authority, and a later
-    rotation under either name extends that one authority's keys.
-
-    Which is why the classes have to be transitive.  Take A allowing S1,
-    renamed to B, and then B rotated to S2: the active anchors are A with
-    {S1} and B with {S1, S2}, one authority spelled two ways with two keys
-    between them.  A further rename of it -- C carrying {S1, S2}, the whole
-    of what that authority now is -- is a rename by the same rule that
-    admitted the first one, but measured against the per-anchor sets it
-    equals neither A's {S1} nor, if the rotation retired S1, B's.  Refusing
-    it makes a chain that renamed an authority once and rotated its key
-    unable to rename it again (peer review, sixth gate round one).  Measured
-    against the class, it is the rename it is.
+    This is the active-only view of the same persistent component graph used
+    for pending classification.  The mapping deliberately returns the union
+    of every historical signer in each active class: flattening all classes
+    together would permit splits and merges, while forgetting an older era
+    would make a rename followed by a rotation cease to be transitive.
     """
 
-    active: set[tuple[str, str]] = set()
-    signers_by_authority: dict[tuple[str, str], set[str]] = {}
-    for reference in trusted_bundles.values():
-        _path, trust = _load_trust_bundle(records, reference, spec=spec)
-        for anchor in trust["anchors"]:
-            authority = _anchor_authority(anchor)
-            active.add(authority)
-            signers_by_authority.setdefault(authority, set()).update(
-                _anchor_signer_fingerprints(anchor)
-            )
-    # The components, by union-find over the authorities: keying by
-    # `(id, root SPKI)` has already joined the anchors that share that pair,
-    # and a shared signing key joins what is left.
-    representative: dict[tuple[str, str], tuple[str, str]] = {
-        authority: authority for authority in signers_by_authority
-    }
-
-    def owner(authority: tuple[str, str]) -> tuple[str, str]:
-        while representative[authority] != authority:
-            representative[authority] = representative[representative[authority]]
-            authority = representative[authority]
-        return authority
-
-    holder_of_signer: dict[str, tuple[str, str]] = {}
-    for authority, signers in signers_by_authority.items():
-        for fingerprint in sorted(signers):
-            other = holder_of_signer.setdefault(fingerprint, authority)
-            first, second = owner(authority), owner(other)
-            if first != second:
-                representative[second] = first
-    classes: dict[tuple[str, str], set[str]] = {}
-    for authority, signers in signers_by_authority.items():
-        classes.setdefault(owner(authority), set()).update(signers)
-    # One set object per class, shared by every authority in it, because that
-    # sharing is the statement: these anchors are one authority's names.
+    history, active_occurrences, _pending = _build_authority_history(
+        records, trusted_bundles, [], spec=spec
+    )
+    active = {occurrence.authority for occurrence in active_occurrences}
     return active, {
-        authority: classes[owner(authority)] for authority in signers_by_authority
+        authority: history.class_signers(authority) for authority in active
     }
 
 
@@ -2891,50 +3039,20 @@ def _supplemental_candidates(
     allows a superseded signer beside its replacement from reaching the
     refusal.
 
-    All of that measures a pending anchor against the active bundles, and two
-    pending bundles were measured against nothing but those -- so one
-    authority introduced under two IDs by two pending bundles was two
-    candidates, each demanding and receiving a supplemental outcome of its
-    own, and the transition counted one new authority twice (peer review,
-    fifth gate round two).  What the second outcome shows is that the holder
-    of a key the chain has already asked about can stamp twice, which is what
-    the rename rule refuses when the key is an active one and is no more
-    evidence when it is a pending one.  So each candidate admitted here joins
-    the set the next is measured against, and a later pending anchor sharing a
-    signer with an admitted one is refused, under any overlap and not only a
-    subset: two pending anchors under two names have no rotation relationship
-    to preserve, and a bundle that means to rotate a key can say so under the
-    anchor's own ID and root.
-
-    Under its *own* ID and root, which is what a pending anchor carrying an
-    admitted anchor's ``(ID, root SPKI)`` is doing, and that was refused for a
-    round and should not have been (fifth gate round three).
-    ``trust_bundle_updates`` enumerates every consumer-pinned bundle the chain
-    has not introduced yet, so a record catching up over several versions
-    carries v2 and v3 together, and v3 legitimately retains -- or rotates --
-    the authority v2 introduces.  That is one authority under one name, and
-    the answer is succession: pending bundles are walked in version order, and
-    a later one's anchor replaces its predecessor in the candidate set and
-    releases its predecessor's keys, so a rotation between two pending
-    versions is not read as two anchors sharing a signer.  The highest
-    version's anchor is the one kept, because it is the anchor that will
-    verify tokens once the transition activates -- a v2 witness must use the
-    newest active bundle -- so its key is the one a supplemental outcome
-    should demonstrate.
-
-    Which is the shape of the duplicate rule generally: it is about
-    identities, not versions.  Two pending anchors are one authority when they
-    carry one ``(ID, root SPKI)`` or one signing key, and one authority is
-    either succession, where it keeps its name, or a refusal, where it does
-    not; it is never two candidates.  Version numbers decide nothing about
-    that -- all they say is which of two anchors of one authority is the
-    survivor, and which of two bundles is "later" at all.
-
-    The refusal names both anchors, because the producer's fix is to decide
-    which of the two the authority is filed under.  A pending bundle already
-    active is skipped before any of this (it is in ``trusted_bundles``), and
-    an anchor skipped as a rename is admitted to nothing, so neither can make
-    a later bundle collide.
+    Pending history used to be a mutable set of current candidates.  A
+    skipped rotation contributed no signer edge, and succession deleted the
+    predecessor's ownership before the next anchor was classified.  Besides
+    forgetting history, visiting anchors in the opposite JSON-array order
+    could therefore change an acceptance into a refusal.  The verifier now
+    builds one component graph from every active and pending occurrence,
+    batching anchors at a version boundary and sorting them independently of
+    their array order.  Rename and rotation edges enter the graph even when
+    the occurrence needs no evidence, and no historical signer edge is ever
+    removed.  A component containing an active occurrence needs no
+    supplemental token; a pending-only component has exactly one candidate,
+    its newest occurrence, because succession changes the representation
+    that survives without changing the authority's class (peer review, sixth
+    gate round two).
 
     Between them these rules leave no shape in which two outcomes of one
     witness rest on one authority's signature, which is why
@@ -2946,85 +3064,31 @@ def _supplemental_candidates(
     view of the pending anchors' signers.
     """
 
-    active_authorities, active_class_of = _active_anchor_identities(
-        records, trusted_bundles, spec=spec
+    history, active_occurrences, pending_batches = _build_authority_history(
+        records,
+        trusted_bundles,
+        transition_bundle_updates,
+        spec=spec,
     )
-    candidates: dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any]]] = {}
-    admitted_authorities: dict[tuple[str, str], tuple[str, str]] = {}
-    admitted_anchor_signers: dict[tuple[str, str], set[str]] = {}
-    admitted_signers: dict[str, str] = {}
+    active_classes = {
+        history.find(occurrence.authority) for occurrence in active_occurrences
+    }
+    pending_classes: dict[_Authority, list[_AnchorOccurrence]] = {}
+    for occurrence in (
+        occurrence for batch in pending_batches for occurrence in batch
+    ):
+        pending_classes.setdefault(
+            history.find(occurrence.authority), []
+        ).append(occurrence)
 
-    def admit_a_pending_anchor(
-        authority: tuple[str, str],
-        signers: set[str],
-        key: tuple[str, str],
-        here: str,
-    ) -> None:
-        superseded = admitted_authorities.get(authority)
-        if superseded is not None:
-            # A later pending bundle's anchor with the same (ID, root SPKI):
-            # the same authority, carried forward.  It replaces its
-            # predecessor in the candidate set and releases its predecessor's
-            # keys, so that a rotation between two pending versions is not
-            # read as two anchors sharing a signer.
-            candidates.pop(superseded, None)
-            for fingerprint in admitted_anchor_signers.pop(superseded, set()):
-                admitted_signers.pop(fingerprint, None)
-        earlier = next(
-            (
-                admitted_signers[fingerprint]
-                for fingerprint in sorted(signers)
-                if fingerprint in admitted_signers
-            ),
-            None,
-        )
-        if earlier is not None:
-            raise TsaError(
-                "pending TSA bundles introduce one authority under two "
-                f"anchors: {earlier} and {here}"
-            )
-        admitted_authorities[authority] = key
-        admitted_anchor_signers[key] = set(signers)
-        for fingerprint in signers:
-            admitted_signers[fingerprint] = here
-
-    for reference in sorted(transition_bundle_updates, key=_pending_bundle_version):
-        bundle_path = str(reference["path"])
-        if bundle_path in trusted_bundles:
+    candidates: dict[
+        tuple[str, str], tuple[dict[str, Any], dict[str, Any]]
+    ] = {}
+    for class_root, occurrences in pending_classes.items():
+        if class_root in active_classes:
             continue
-        _path, trust = _load_trust_bundle(records, reference, spec=spec)
-        for anchor in trust["anchors"]:
-            anchor_id = str(anchor["id"])
-            authority = _anchor_authority(anchor)
-            if authority in active_authorities:
-                continue
-            signers = _anchor_signer_fingerprints(anchor)
-            # Every active authority whose *class* this anchor's keys touch.
-            # Two anchors of one class report one set, so this is a rename
-            # exactly when the anchor carries that whole set -- and a merge,
-            # which touches two classes, cannot equal both of them.
-            touched = [
-                active
-                for active, owned in active_class_of.items()
-                if owned & signers
-            ]
-            if touched:
-                if all(
-                    active_class_of[active] == signers for active in touched
-                ):
-                    continue
-                raise TsaError(
-                    f"pending TSA anchor {anchor_id} splits or merges active "
-                    "authorities' signers; a pending anchor must carry one "
-                    "active anchor's signers exactly, or none of them"
-                )
-            admit_a_pending_anchor(
-                authority,
-                signers,
-                (bundle_path, anchor_id),
-                f"{bundle_path}/{anchor_id}",
-            )
-            candidates[(bundle_path, anchor_id)] = (reference, anchor)
+        survivor = max(occurrences, key=lambda occurrence: occurrence.order)
+        candidates[survivor.key] = (survivor.reference, survivor.anchor)
     return candidates
 
 

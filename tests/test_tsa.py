@@ -5301,13 +5301,143 @@ def test_a_rename_and_a_rotation_leave_one_class_a_further_rename_may_carry(
     assert str(witness.value) == splits
 
 
-def test_two_pending_bundles_may_not_introduce_one_authority_twice(
+def test_a_skipped_pending_rotation_is_history_for_a_later_rename(
     tmp_path: pathlib.Path,
     local_anchors: tuple[LocalAnchor, ...],
     rotated_alpha: LocalTsa,
+) -> None:
+    """S6-R2-F3: even a skipped rotation contributes its signer edge.
+
+    A/S1 is active, pending v2 rotates A to S2, and pending v3 files S2
+    under the new name B.  The rolling implementation skips A/S2 before it
+    records anything, so B/S2 looks disjoint and becomes a new supplemental
+    candidate.  In the persistent graph the skipped rotation joins S2 to A's
+    historical class and B is the alias it is, leaving no new candidate.
+    """
+
+    alpha = local_anchors[0]
+    rotated = certificate_pins(rotated_alpha.signer_pem)
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    rotation, spec = add_bundle_version(
+        tree,
+        [alpha],
+        version=2,
+        signers={alpha.anchor_id: rotated},
+    )
+    renamed = alias_of(alpha, anchor_id="alpha-after-rotation-2026")
+    rename, spec = add_bundle_version(
+        tree,
+        [renamed],
+        version=3,
+        signers={renamed.anchor_id: rotated},
+        base=spec,
+    )
+
+    assert tsa_module._supplemental_candidates(
+        tree.records,
+        {BUNDLE_LOGICAL: tree.reference},
+        [rotation, rename],
+        spec=spec,
+    ) == {}
+
+
+def test_succession_keeps_the_predecessors_signer_in_pending_history(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_beta: LocalTsa,
+) -> None:
+    """S6-R2-F3: succession changes the candidate, not its class history.
+
+    Pending B/S1 is succeeded by B/S2 and a later C/S1 names the first era
+    again.  The rolling maps delete S1 when B/S2 replaces B/S1, so C/S1 is
+    admitted as a second candidate.  A persistent component never deletes
+    that signer edge: all three occurrences are one class and only its newest
+    representation survives as the single candidate.
+    """
+
+    beta = local_anchors[1]
+    rotated = certificate_pins(rotated_beta.signer_pem)
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    incoming = alias_of(beta, anchor_id="beta-history-2026")
+    first, spec = pending_authority(tree, incoming, version=2)
+    successor, spec = add_bundle_version(
+        tree,
+        [incoming],
+        version=3,
+        signers={incoming.anchor_id: rotated},
+        base=spec,
+    )
+    renamed = alias_of(beta, anchor_id="charlie-history-2026")
+    latest, spec = add_bundle_version(
+        tree, [renamed], version=4, base=spec
+    )
+
+    assert set(
+        tsa_module._supplemental_candidates(
+            tree.records,
+            {BUNDLE_LOGICAL: tree.reference},
+            [first, successor, latest],
+            spec=spec,
+        )
+    ) == {(latest["path"], renamed.anchor_id)}
+
+
+def test_pending_anchor_array_order_does_not_change_the_class_verdict(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_beta: LocalTsa,
+) -> None:
+    """S6-R2-F3: one prebuilt history makes anchor-array order irrelevant.
+
+    After pending B/S1, one bundle contains successor B/S2 and alias C/S1.
+    The rolling implementation accepts two candidates when B is visited first
+    because succession deletes S1, but raises the pending-alias refusal when C
+    is visited first because S1 still has an owner.  Sorting cannot repair a
+    state machine whose answer depends on deletion; both permutations must
+    instead produce the same class verdict and the same one candidate.
+    """
+
+    beta = local_anchors[1]
+    rotated = certificate_pins(rotated_beta.signer_pem)
+    incoming = alias_of(beta, anchor_id="beta-ordered-2026")
+    renamed = alias_of(beta, anchor_id="charlie-ordered-2026")
+
+    def verdict(order: Sequence[LocalAnchor], name: str) -> tuple[str, Any]:
+        tree = build_witness_tree(tmp_path / name, local_anchors[:1])
+        first, spec = pending_authority(tree, incoming, version=2)
+        latest, spec = add_bundle_version(
+            tree,
+            order,
+            version=3,
+            signers={incoming.anchor_id: rotated},
+            base=spec,
+        )
+        try:
+            candidates = tsa_module._supplemental_candidates(
+                tree.records,
+                {BUNDLE_LOGICAL: tree.reference},
+                [first, latest],
+                spec=spec,
+            )
+        except TsaError as exc:
+            return "refused", str(exc)
+        return "accepted", tuple(sorted(candidates))
+
+    forward = verdict([incoming, renamed], "forward")
+    reverse = verdict([renamed, incoming], "reverse")
+    assert forward == reverse
+    assert forward == (
+        "accepted",
+        (("records/trust/tsa-anchors-v3.json", renamed.anchor_id),),
+    )
+
+
+def test_two_pending_bundles_contribute_one_candidate_for_one_class(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """S5R2-F5: the candidate walk has to remember what it has admitted.
+    """S5R2-F5/S6-R2-F3: one historical class contributes one candidate.
 
     Every equivalence the walk computed was against the *active* bundles, so
     two pending bundles were measured against nothing but those and against
@@ -5319,13 +5449,13 @@ def test_two_pending_bundles_may_not_introduce_one_authority_twice(
     new authority twice, which is the thing supplemental outcomes exist to
     count.
 
-    The witness below is exactly that, and the harm is asserted rather than
-    assumed: with the walk's view of the pending signers blinded, it verifies
-    and reports two supplemental tokens whose signing certificate is one
-    certificate. With the rule, the second anchor is refused where it is
-    admitted, before either supplemental outcome is read, and the message
-    names both anchors because the producer has to decide which one the
-    authority is filed under.
+    The rolling fix refused the second name.  The persistent graph makes the
+    stronger statement directly: both occurrences are one pending-only class,
+    and only its newest representation is the candidate.  The witness below
+    first answers for that survivor and verifies once.  With the graph's
+    signer edges blinded, both names become candidates and two genuine stamps
+    by one authority are counted, demonstrating the old harm rather than
+    assuming it.
 
     The control is the case the rule must not touch: two pending bundles
     introducing two genuinely different authorities -- a stranger with a root
@@ -5354,18 +5484,16 @@ def test_two_pending_bundles_may_not_introduce_one_authority_twice(
         tmp_path, responses[first.anchor_id]
     ) != signed_timestamp_of(tmp_path, responses[second.anchor_id])
 
+    first_outcome = supplemental_outcome(
+        tree, pending_first, first, responses[first.anchor_id]
+    )
+    second_outcome = supplemental_outcome(
+        tree, pending_second, second, responses[second.anchor_id]
+    )
     rewrite_witness(
         tree,
         lambda payload: payload.__setitem__(
-            "supplementalOutcomes",
-            [
-                supplemental_outcome(
-                    tree, pending_first, first, responses[first.anchor_id]
-                ),
-                supplemental_outcome(
-                    tree, pending_second, second, responses[second.anchor_id]
-                ),
-            ],
+            "supplementalOutcomes", [second_outcome]
         ),
     )
 
@@ -5378,21 +5506,26 @@ def test_two_pending_bundles_may_not_introduce_one_authority_twice(
             transition_bundle_updates=[pending_first, pending_second],
         )
 
-    verified = record_token_verifications(monkeypatch)
-    with pytest.raises(TsaError) as caught:
-        transition()
-    assert str(caught.value) == (
-        "pending TSA bundles introduce one authority under two anchors: "
-        f"{pending_first['path']}/{first.anchor_id} and "
-        f"{pending_second['path']}/{second.anchor_id}"
-    )
-    # Refused where the second anchor is admitted: neither supplemental
-    # outcome was read.
-    assert [claim["tsaAnchorId"] for claim in verified] == [
-        local_anchors[0].anchor_id
+    assert set(
+        tsa_module._supplemental_candidates(
+            tree.records,
+            {BUNDLE_LOGICAL: tree.reference},
+            [pending_first, pending_second],
+            spec=spec,
+        )
+    ) == {(pending_second["path"], second.anchor_id)}
+    evidence = transition()
+    assert [token.anchor_id for token in evidence.supplemental_tokens] == [
+        second.anchor_id
     ]
 
     # The harm, with the rule's input taken away: one authority, counted twice.
+    rewrite_witness(
+        tree,
+        lambda payload: payload.__setitem__(
+            "supplementalOutcomes", [first_outcome, second_outcome]
+        ),
+    )
     blind_the_pending_signer_reader(monkeypatch)
     evidence = transition()
     assert evidence.status == "available"
@@ -5410,10 +5543,10 @@ def test_two_pending_bundles_may_introduce_two_authorities(
     local_anchors: tuple[LocalAnchor, ...],
     rotated_alpha: LocalTsa,
 ) -> None:
-    """S5R2-F5: the walk's memory refuses aliases and nothing else.
+    """S5R2-F5/S6-R2-F3: graph components collapse aliases and nothing else.
 
-    The rule above compares each admitted candidate with the ones after it, so
-    the case it must not reach is two pending bundles that introduce two
+    The persistent graph leaves one candidate per pending-only class, so the
+    case it must not collapse is two pending bundles that introduce two
     authorities. A stranger with a root and a signing key of its own shares
     nothing with anything; a new id over the *active* root with a rotated
     signing key shares its root certificate with the active anchor and its id
@@ -5465,18 +5598,17 @@ def test_a_later_pending_bundle_succeeds_the_authority_an_earlier_one_introduced
     Succession is the answer, and it is what says the duplicate rule is about
     identities and not versions. Pending bundles are walked in version order;
     a later one's anchor carrying an admitted anchor's ``(id, root SPKI)``
-    replaces it in the candidate set and releases its keys, so a rotation
-    between two pending versions is not read as two anchors sharing a signer.
+    replaces it in the candidate set without releasing any historical signer
+    edge, so a rotation between two pending versions remains one class.
     The anchor kept is the highest version's, because that is the anchor that
     will verify tokens once the transition activates -- a v2 witness must use
     the newest active bundle -- so it is the one whose key a supplemental
     outcome should demonstrate, and the witness below is refused when it
     answers for the superseded version instead.
 
-    What succession does not touch is two names: v3 filing v2's signing key
-    under a new ``(id, root SPKI)`` is still one authority under two anchors
-    and still refused. Without the change the first two cases below are that
-    refusal too.
+    A rename in a later version is the same class too.  It supersedes the
+    earlier representation just as a same-name rotation does; without the
+    persistent graph it was instead treated as a second authority.
     """
 
     beta = local_anchors[1]
@@ -5579,16 +5711,13 @@ def test_a_later_pending_bundle_succeeds_the_authority_an_earlier_one_introduced
         (latest["path"], incoming.anchor_id)
     }
 
-    # v3 files v2's signing key under a new (id, root SPKI): two names.
+    # v3 files v2's signing key under a new (id, root SPKI): one historical
+    # class, represented by the newest anchor.
     elsewhere = alias_of(beta, anchor_id="beta-elsewhere-2026")
     tree, second, latest, spec = catch_up("aliased", [elsewhere])
-    with pytest.raises(TsaError) as caught:
-        candidates(tree, spec, second, latest)
-    assert str(caught.value) == (
-        "pending TSA bundles introduce one authority under two anchors: "
-        f"{second['path']}/{incoming.anchor_id} and "
-        f"{latest['path']}/{elsewhere.anchor_id}"
-    )
+    assert candidates(tree, spec, second, latest) == {
+        (latest["path"], elsewhere.anchor_id)
+    }
 
 
 def give_the_record_its_own_updates(
@@ -6379,11 +6508,13 @@ def two_pending_authorities(
     *supplemental* ones, introduced by two separate pending bundles, neither
     of which the active chain knows.
 
-    That shape is itself refused now: the candidate walk carries what it has
-    admitted, and the second bundle's anchor shares a signer with the first's
-    (S5R2-F5). So this builds a witness whose verdict is that refusal, and the
-    two tests that bind the duplicate-timestamp rule reach it by blinding the
-    walk's view of the pending signers -- see ``blind_the_pending_signer_reader``.
+    The rolling walk used to refuse that shape when it reached the second
+    anchor (S5R2-F5).  The persistent graph states the same identity directly:
+    both occurrences form one class, whose newest occurrence is its only
+    candidate (S6-R2-F3).  So this builds a witness whose obsolete first
+    outcome is refused; the two tests that bind the duplicate-timestamp rule
+    reach it by blinding the graph's signer edges -- see
+    ``blind_the_pending_signer_reader``.
     """
 
     first = alias_of(anchor, anchor_id=f"{anchor.anchor_id}-first")
@@ -6396,20 +6527,18 @@ def two_pending_authorities(
 def blind_the_pending_signer_reader(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make every anchor look as though it allowed no signer at all.
 
-    ``_anchor_signer_fingerprints`` is what ``_active_anchor_identities`` and
-    ``_supplemental_candidates`` read an anchor's signers through, and nothing
-    else in the module uses it: the bundle load computes its own set inline,
-    and the ported allowed-signer check reads ``allowedSigners`` off the
-    anchor directly. So blinding it removes exactly the three signer rules --
-    the rename skip, the mixed-anchor refusal, and the pending-alias refusal
-    -- and leaves every verification of a token as it was.
+    ``_anchor_signer_fingerprints`` is what the authority-history graph reads
+    an anchor's signers through, and nothing else in the module uses it: the
+    bundle load computes its own set inline, and the ported allowed-signer
+    check reads ``allowedSigners`` off the anchor directly. So blinding it
+    removes exactly the graph's signer edges and leaves every verification of
+    a token as it was.
 
     Which is the only way left to reach the duplicate-timestamp rule. Two
     outcomes rest on one authority's signature only if two anchors both pin
     the certificate that response was signed with, and every pairing of
-    anchors that could is now refused before an outcome is read: inside one
-    bundle at load, across an active and a pending bundle by the rename and
-    mixed rules, and across two pending bundles by the alias rule. The
+    anchors that could is collapsed into one historical class before an
+    outcome is read (and two such anchors in one bundle are refused). The
     timestamp rule is therefore defence in depth, kept for the same reason
     ``_select_anchor``'s identity refusal is kept, and these two tests say
     what it would catch if one of the rules in front of it were lost.
@@ -6442,11 +6571,11 @@ def test_refuses_a_re_wrapped_response_offered_as_a_second_token(
     after its token is verified because that is the earliest the identity is
     known -- the recorder shows all three verifications ran.
 
-    S5R2-F5 put a rule in front of this one: two pending bundles introducing
-    one authority under two anchors are now refused at the candidate walk,
-    which is this witness's actual verdict and is asserted first. The
-    timestamp rule is what remains if that rule is lost, so the second half
-    reaches it through ``blind_the_pending_signer_reader``.
+    S5R2-F5 and S6-R2-F3 put a rule in front of this one: two pending bundles
+    introducing one authority form one class and therefore one candidate.
+    The extra outcome for the superseded representation is refused first.
+    The timestamp rule is what remains if those signer edges are lost, so the
+    second half reaches it through ``blind_the_pending_signer_reader``.
     """
 
     beta = local_anchors[1]
@@ -6490,14 +6619,12 @@ def test_refuses_a_re_wrapped_response_offered_as_a_second_token(
             transition_bundle_updates=[pending_first, pending_second],
         )
 
-    # The rule in front: two pending bundles, one authority, and no outcome
-    # of either read.
+    # The rule in front: two pending bundles, one authority, one survivor.
     with pytest.raises(TsaError) as first_refusal:
         transition()
     assert str(first_refusal.value) == (
-        "pending TSA bundles introduce one authority under two anchors: "
-        f"{pending_first['path']}/{first.anchor_id} and "
-        f"{pending_second['path']}/{second.anchor_id}"
+        "supplemental TSA outcome is not introduced by a pending trust "
+        f"transition: ('{pending_first['path']}', '{first.anchor_id}')"
     )
 
     blind_the_pending_signer_reader(monkeypatch)
@@ -6632,9 +6759,9 @@ def test_refuses_a_re_bagged_token_offered_as_a_second_timestamp(
     ``TSTInfo``, and both files still verifying against the pinned root --
     and the refusal names the digest of what the authority signed.
 
-    As with the re-wrapping above, S5R2-F5 refuses this witness's two pending
-    bundles before either supplemental outcome is read, and that is asserted
-    first; the timestamp rule is reached through
+    As with the re-wrapping above, S5R2-F5 and S6-R2-F3 collapse this
+    witness's two pending occurrences to one class and refuse the obsolete
+    outcome first; the timestamp rule is reached through
     ``blind_the_pending_signer_reader``, which is what is left of the defence
     if the rule in front of it is lost.
     """
@@ -6686,9 +6813,8 @@ def test_refuses_a_re_bagged_token_offered_as_a_second_timestamp(
     with pytest.raises(TsaError) as first_refusal:
         transition()
     assert str(first_refusal.value) == (
-        "pending TSA bundles introduce one authority under two anchors: "
-        f"{pending_first['path']}/{first.anchor_id} and "
-        f"{pending_second['path']}/{second.anchor_id}"
+        "supplemental TSA outcome is not introduced by a pending trust "
+        f"transition: ('{pending_first['path']}', '{first.anchor_id}')"
     )
 
     blind_the_pending_signer_reader(monkeypatch)
