@@ -1188,7 +1188,10 @@ def _assert_component_spelled(
 
     A component that is not there at all is not this check's business — an
     absent release root is legal, and an absent state file is the reader's
-    refusal — so it returns and lets the check after the walk say so.
+    refusal — so it returns and lets the check after the walk say so. That
+    covers the parent as well as the component: a listing that fails because
+    the parent is absent or is a file has no directory to withhold, and it is
+    the checks after the walk that answer for what stands there.
 
     A directory this verifier cannot list cannot answer the question, which is
     a different thing from answering it favourably, so it refuses. That is a
@@ -1226,7 +1229,15 @@ def _assert_component_spelled(
 
     try:
         names = os.listdir(parent)
-    except OSError:
+    except OSError as exc:
+        if exc.errno in {errno.ENOENT, errno.ENOTDIR}:
+            # There is no directory here to withhold a listing: the parent is
+            # absent, or is a file. Neither is this check's business, for the
+            # reason an absent component is not — an absent release root is
+            # legal, a state path that is not there is the reader's refusal,
+            # and a regular file standing where a directory should be is
+            # answered by the checks after the walk, in their own words.
+            return
         raise ReleaseChainError(
             f"cannot bind the spelling of {'/'.join(walked)}: its directory "
             f"cannot be listed: {relative.as_posix()}"
