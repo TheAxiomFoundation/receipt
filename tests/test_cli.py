@@ -1431,13 +1431,16 @@ def test_the_json_bound_walks_values_and_leaves_keys_alone() -> None:
     """Binds S5-F6: the JSON half is a walk, and it changes no structure.
 
     Bounding a field-by-field list would cover the fields someone thought
-    of, so the payload is walked and every string *value* is bounded
-    wherever it sits — nested objects, lists of objects, lists of strings.
-    Keys are deliberately not bounded: two long keys truncated to the same
-    text would collide and one would silently replace the other, turning a
-    length policy into a data-loss policy, and every key that reaches this
-    payload is already bounded by the corpus schema or is a literal in the
-    module.
+    of, so the payload is walked and every string is bounded wherever it
+    sits — nested objects, lists of objects, lists of strings.
+
+    Keys are bounded too, which is the half S5R2-F6 added. They were left
+    alone because two long keys truncated to the same text would collide
+    and one would silently replace the other — a real objection with the
+    wrong conclusion, since a gate evidence key is 1,024 characters under
+    the corpus schema and renders to over twelve thousand. A bounded key
+    carries the first sixteen hex characters of the whole key's SHA-256 in
+    its marker, so the collision the objection named cannot happen.
 
     Non-strings pass through unchanged, so a consumer's types do not move.
     """
@@ -1464,6 +1467,110 @@ def test_the_json_bound_walks_values_and_leaves_keys_alone() -> None:
     assert bounded["passes"][0]["ok"] is False
     assert bounded["removedPaths"][0].endswith(marker)
     assert bounded["removedPaths"][1] == "short"
-    # The key is untouched; only its value is bounded.
-    assert list(bounded["evidence"]) == [flood]
-    assert bounded["evidence"][flood].endswith(marker)
+    # The key is bounded as well, and its marker names the digest of the
+    # whole key, so two keys sharing a bounded prefix stay distinct.
+    import hashlib
+
+    digest = hashlib.sha256(flood.encode("utf-8")).hexdigest()[:16]
+    bounded_key = f"{'y' * MAX_RENDERED_FIELD}…[7 more characters; sha256 {digest}]"
+    assert list(bounded["evidence"]) == [bounded_key]
+    assert bounded["evidence"][bounded_key].endswith(marker)
+
+
+def _json_length(text: str) -> int:
+    """What ``json.dumps`` emits for this string, its quotes excluded."""
+
+    return len(json.dumps(text)) - 2
+
+
+def test_the_json_bound_measures_a_value_as_the_encoder_will_emit_it() -> None:
+    """Binds S5R2-F6: the bound counted code points, the verdict emits escapes.
+
+    ``json.dumps`` runs with ``ensure_ascii`` at its default, so one code
+    point outside the BMP leaves as a surrogate pair spelled twelve
+    characters. A 4,097-emoji value was bounded to 4,096 code points — which
+    the old bound called compliant — and rendered as 49,152 characters,
+    twelve times the bound and out of a string the bound had already
+    accepted. The whole point of the bound is that a verdict stays readable,
+    and a factor of twelve defeats it.
+
+    Each character is measured as the encoder will emit it now, and the
+    truncation is by that length. Without the fix the rendered value is over
+    ten times ``MAX_RENDERED_FIELD``.
+    """
+
+    from receipt.cli import MAX_RENDERED_FIELD, _bounded_payload
+
+    value = "\U0001F600" * (MAX_RENDERED_FIELD + 1)
+    # What the old, code-point bound would have produced and what it renders.
+    assert _json_length(value[:MAX_RENDERED_FIELD]) == 12 * MAX_RENDERED_FIELD
+    assert _json_length(value[:MAX_RENDERED_FIELD]) > 10 * MAX_RENDERED_FIELD
+
+    bounded = _bounded_payload({"failure": value})["failure"]
+    head, _, marker = bounded.partition("…")
+    assert _json_length(head) <= MAX_RENDERED_FIELD
+    assert _json_length(bounded) <= MAX_RENDERED_FIELD + _json_length("…" + marker)
+    assert _json_length("…" + marker) < 128
+    assert marker == f"[{len(value) - len(head)} more characters]"
+
+
+def test_the_json_bound_covers_keys_and_keeps_them_distinct() -> None:
+    """Binds S5R2-F6: evidence keys bypassed the bound entirely.
+
+    ``_bounded_payload`` walked values and left keys alone, on the reasoning
+    that two long keys truncated to the same text would collide. The
+    objection was right and the conclusion was not: ``MAX_EVIDENCE_TEXT``
+    lets a gate evidence key be 1,024 characters, and 1,024 characters
+    outside the BMP render as 12,288 — a key alone scrolls the verdict away,
+    which is the flood ``MAX_RENDERED_FIELD`` exists to stop.
+
+    Keys are bounded the same way values are, and the collision is closed
+    rather than avoided: the marker carries the first sixteen hex characters
+    of the whole key's SHA-256, so two keys sharing a bounded prefix differ
+    in the marker and neither can replace the other. Both halves are
+    asserted. Without the fix the rendered key is over twelve thousand
+    characters.
+    """
+
+    from receipt.cli import MAX_RENDERED_FIELD, _bounded_payload
+
+    key = "\U0001F600" * 1024
+    assert _json_length(key) == 12 * 1024 > 2 * MAX_RENDERED_FIELD
+
+    bounded = _bounded_payload({key: "value"})
+    (rendered_key,) = list(bounded)
+    head, _, marker = rendered_key.partition("…")
+    assert _json_length(head) <= MAX_RENDERED_FIELD
+    assert _json_length(rendered_key) <= MAX_RENDERED_FIELD + _json_length(
+        "…" + marker
+    )
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+    assert marker.endswith(f"; sha256 {digest}]")
+
+    # Two keys sharing every character the bound keeps still render apart.
+    shared = "\U0001F600" * 400
+    first, second = shared + "a", shared + "b"
+    walked = _bounded_payload({first: "1", second: "2"})
+    assert len(walked) == 2
+    assert walked[_bounded_payload({first: ""}).popitem()[0]] == "1"
+
+
+def test_the_text_bound_still_counts_the_characters_it_prints() -> None:
+    """Binds S5R2-F6, the other side: the text renderer's units did not move.
+
+    A terminal receives characters, not JSON escapes, so what bounds the
+    text half is the count of what it prints — an escape sequence charged
+    the six characters it draws. The encoded measure belongs to the JSON
+    half alone, and applying it to both would have bounded ordinary
+    non-ASCII prose at a sixth of its stated length.
+
+    This test passes with the S5R2-F6 change disabled, which is the point:
+    it is here to catch the new measure being applied to the wrong half.
+    """
+
+    from receipt.cli import MAX_RENDERED_FIELD, _bounded
+
+    bmp = "é" * (MAX_RENDERED_FIELD + 5)
+    bounded = _bounded(bmp)
+    assert bounded == "é" * MAX_RENDERED_FIELD + "…[5 more characters]"
+    assert _bounded("é" * MAX_RENDERED_FIELD) == "é" * MAX_RENDERED_FIELD

@@ -55,17 +55,32 @@ The schema bounds in ``receipt.corpus`` cover corpus-derived output only, so
 a release manifest with a million-character ``schemaVersion`` scrolled the
 verdict away through the custody half instead (peer review, round eight).
 Every result-derived string either renderer prints is therefore truncated at
-:data:`MAX_RENDERED_FIELD` characters with the marker
-``receipt.corpus._quoted`` uses. The bound is on what this command *prints*,
-not on what the library raises: ``receipt.release_chain`` and
-``receipt.corpus`` still raise their full text, and a machine consumer that
-needs all of it can call the library rather than parse a verdict.
+:data:`MAX_RENDERED_FIELD` with the marker ``receipt.corpus._quoted`` uses.
+The bound is on what this command *prints*, not on what the library raises:
+``receipt.release_chain`` and ``receipt.corpus`` still raise their full
+text, and a machine consumer that needs all of it can call the library
+rather than parse a verdict.
+
+Each renderer counts in the units it emits, which is not the same count.
+The text renderer counts the characters it prints, so an escape sequence is
+charged the six characters a terminal receives. The JSON renderer counts
+what ``json.dumps`` will emit: with ``ensure_ascii`` on, a value bounded to
+4,096 code points outside the BMP rendered as 49,152 characters, twelve
+times the bound and out of a string the bound had already accepted (peer
+review, Sol round 2). And it bounds object *keys*, which it did not: a gate
+evidence key is 1,024 characters under the corpus schema, so a key alone
+rendered over twelve thousand. A truncated key could collide with another
+truncated key and silently replace its value, so a bounded key carries the
+first sixteen hex characters of the whole key's SHA-256 in its marker and
+two keys sharing a prefix stay distinct.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import json.encoder
 import pathlib
 import sys
 import unicodedata
@@ -322,23 +337,101 @@ def _rendered(text: str) -> str:
     return _bounded(_terminal_safe(text))
 
 
+def _encoded_length(character: str) -> int:
+    """What ``json.dumps`` emits for one character, its quotes excluded.
+
+    Taken from the escaper ``json.dumps`` applies rather than guessed at,
+    the way ``receipt.corpus._rendered_length`` takes it: with
+    ``ensure_ascii`` at its default one BMP character outside ASCII leaves
+    as six characters and one outside the BMP as twelve, a surrogate pair
+    spelled ``\\uXXXX\\uXXXX``.
+    """
+
+    return len(json.encoder.encode_basestring_ascii(character)) - 2
+
+
+def _encoded_split(text: str) -> tuple[str, int] | None:
+    """The longest prefix whose encoding fits the bound, and what it dropped.
+
+    ``None`` when the whole string fits. Accumulated one character at a time
+    and stopped at the first character that carries the total over, so the
+    work is bounded by the limit rather than by the length of the string.
+    """
+
+    total = 0
+    for index, character in enumerate(text):
+        total += _encoded_length(character)
+        if total > MAX_RENDERED_FIELD:
+            return text[:index], len(text) - index
+    return None
+
+
+def _bounded_encoded(text: str) -> str:
+    """Truncate one JSON string value to :data:`MAX_RENDERED_FIELD` *encoded*.
+
+    The bound counted Python characters on both sides of the renderer, and
+    on the JSON side that is not what the verdict carries. ``json.dumps``
+    escapes with ``ensure_ascii`` on, so a value bounded to 4,096 code
+    points outside the BMP renders as 49,152 characters — a flood twelve
+    times the bound, assembled out of a string the bound had already
+    accepted (peer review, Sol round 2). This measures each character as
+    the encoder will emit it and truncates by that length, so no string
+    value's rendering exceeds the bound plus the marker.
+
+    The text renderer keeps counting the characters it prints, because
+    that is what a terminal receives: see :func:`_bounded`.
+    """
+
+    split = _encoded_split(text)
+    if split is None:
+        return text
+    prefix, omitted = split
+    return f"{prefix}…[{omitted} more characters]"
+
+
+def _bounded_key(key: str) -> str:
+    """The same bound for a JSON object key, made collision-proof by digest.
+
+    Keys were left unbounded, and the reason given was a real one: two long
+    keys truncated to the same text collide, and one silently replaces the
+    other, which turns a length policy into a data-loss policy. What was
+    wrong was the conclusion. A gate evidence key may be 1,024 characters
+    under ``receipt.corpus.MAX_EVIDENCE_TEXT``, and 1,024 characters outside
+    the BMP render as 12,288 — a key alone can scroll the verdict away, and
+    ``_bounded_payload`` never looked at one (peer review, Sol round 2).
+
+    So a key is bounded like a value and then made unambiguous: the marker
+    carries the first sixteen hex characters of the key's SHA-256, so two
+    keys sharing a bounded prefix differ in the marker and cannot merge.
+    The digest is over the key's UTF-8 with ``surrogatepass``, because a key
+    that reached here from a filesystem name may carry a lone surrogate and
+    a digest that raises would defeat the renderer it protects.
+    """
+
+    split = _encoded_split(key)
+    if split is None:
+        return key
+    prefix, omitted = split
+    digest = hashlib.sha256(key.encode("utf-8", "surrogatepass")).hexdigest()
+    return f"{prefix}…[{omitted} more characters; sha256 {digest[:16]}]"
+
+
 def _bounded_payload(value: object) -> object:
-    """The JSON payload with every string value bounded, structure unchanged.
+    """The JSON payload with every string bounded, structure unchanged.
 
     Walked rather than listed, for the reason :data:`MAX_RENDERED_FIELD`
     gives: a field-by-field bound covers the fields someone thought of.
-    Dictionary *keys* are deliberately left alone. Two long keys truncated to
-    the same text would collide and one would silently replace the other,
-    turning a length policy into a data-loss policy; the keys that reach this
-    payload are the module's own literals, the spec's configured anchor
-    filenames, and gate evidence keys, which the corpus schema already bounds
-    at ``MAX_EVIDENCE_TEXT``.
+    Values go through :func:`_bounded_encoded` and keys through
+    :func:`_bounded_key`, both of which measure what ``json.dumps`` will
+    emit rather than what Python holds.
     """
 
     if isinstance(value, str):
-        return _bounded(value)
+        return _bounded_encoded(value)
     if isinstance(value, dict):
-        return {key: _bounded_payload(item) for key, item in value.items()}
+        return {
+            _bounded_key(key): _bounded_payload(item) for key, item in value.items()
+        }
     if isinstance(value, list):
         return [_bounded_payload(item) for item in value]
     return value
