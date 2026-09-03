@@ -13,8 +13,8 @@ The port is stricter than the baseline in fourteen places, each refusing an
 input the pinned tree never presents and so each outside the differential
 contract: a record under witness that is not a readable regular file, which
 the baseline let raise out of the hash; a legacy witness over a bundle
-configuring more than one anchor; a
-bundle configuring an anchor the spec carries no identity for, or one whose
+configuring more than one anchor; a bundle configuring an anchor the spec
+carries no identity for, or one whose
 declared root SPKI or allowed signers differ from that identity, or whose
 referenced root material fails the ported material checks or carries an SPKI
 other than the identity's (all compared at load for every anchor, not only
@@ -76,11 +76,11 @@ record in place for the digest and the time checks, substitute another for
 that read with a token genuinely stamped over the substitute, and put the
 first back, and the evidence then named a record OpenSSL had never seen.
 
-So is the claimed response.  Its ``tokenSha256`` was taken from one open of
-its pathname and ``openssl ts -reply`` and ``openssl ts -verify`` then made
-two more, so the digest reported as evidence described the file at an earlier
-instant than the one the verifications read; the bytes that were hashed are
-now the bytes both of them are given.
+The claimed response is read once for the same reason.  Its ``tokenSha256``
+was taken from one open of its pathname and ``openssl ts -reply`` and
+``openssl ts -verify`` then made two more, so the digest reported as evidence
+described the file at an earlier instant than the one the verifications read;
+the bytes that were hashed are now the bytes both of them are given.
 
 Because OpenSSL is given the copies and never a repository path, the command
 text quoted in a failure names temporary files; every refusal of this
@@ -1200,8 +1200,9 @@ def _read_pinned_root(path: Path) -> bytes:
     ``_root_material`` used to open this repository path five separate times
     -- once to count its certificates, once to hash it, and three times to
     describe its first certificate -- and ``verify_timestamp_token`` then
-    opened it twice more as a ``-CAfile``.  Between any two of those a writer with access to the
-    repository could substitute another file, so what was validated need not
+    opened it twice more as a ``-CAfile``.  Between any two of those a writer
+    with access to the repository could substitute another file, so what was
+    validated need not
     be what was trusted: a ``TRUSTED CERTIFICATE`` that rejects the
     timestamping purpose could become the plain form of the same certificate
     with the rejection gone (every declared hash still matching), or a
@@ -1508,8 +1509,15 @@ def verify_timestamp_token(
         token_sha256 = hashlib.sha256(token_bytes).hexdigest()
         if token_sha256 != token_claim.get("tokenSha256"):
             raise TsaError(f"witness token hash mismatch for {path}")
+        # The two private copies OpenSSL is given in place of the two paths.
+        # Neither is re-encoded: `openssl ts -reply` and `openssl ts -verify`
+        # read the response exactly as the digest above was taken over it, and
+        # `-data` hashes the record exactly as it would have hashed the file
+        # in the repository.
         token_response = temp / "token.tsr"
         token_response.write_bytes(token_bytes)
+        record_snapshot = temp / "record.bin"
+        record_snapshot.write_bytes(record)
         root_snapshot = pinned_root.path
         assert root_snapshot is not None
         token_der = temp / "token.der"
@@ -1557,14 +1565,6 @@ def verify_timestamp_token(
         policy_oid, imprint_algorithm_oid, hashed_message, gen_time = _parse_tst_info(
             tst_info.read_bytes()
         )
-        # The bytes `openssl ts -verify -data` recomputes the imprint over are
-        # the caller's one read of the record, written where only this process
-        # can reach it.  -data is still -data: OpenSSL hashes the file it is
-        # given exactly as it did the repository path, and this is a
-        # byte-for-byte copy of the read the witness digest was taken from.
-        record_snapshot = temp / "record.bin"
-        record_snapshot.write_bytes(record)
-
         allowed_policies = anchor.get("allowedPolicyOids")
         if not isinstance(allowed_policies, list) or policy_oid not in allowed_policies:
             raise TsaError(
