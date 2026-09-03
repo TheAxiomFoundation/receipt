@@ -298,6 +298,16 @@ restores with ``os.utime``; on POSIX the inode change time is not settable
 from userspace at all, so a rewrite in place through the same inode is visible
 even when everything else about the file has been put back.
 
+The descriptor's first ``fstat`` also fixes the hashing horizon. The reader
+hashes exactly that ``st_size`` in bounded chunks, refuses an EOF before it as
+"file shrank while being read", and probes one byte past it to refuse "file
+grew while being read". The old live-EOF loop let a writer sparsely extend the
+file into arbitrary hashing work or keep appending so the identity re-check
+was never reached (peer review, Sol round 7). Concurrent-writer *correctness*
+is still part of the residual class tracked by receipt#44; what this closes is
+the resource bound. Whatever a writer does, the read terminates after at most
+the captured ``st_size`` bytes plus one probe.
+
 What that check gives is a contract worth stating exactly, because the
 obvious stronger one is false. The stamps are re-stated twice — forwards in
 sorted order and then backwards — and a mismatch in either pass refuses. A
@@ -3253,6 +3263,16 @@ def _regular_file_digest(
       ``O_NOFOLLOW``, a name swapped between the two calls resolves to a
       different inode and refuses.
 
+    That ``fstat`` fixes a hard read horizon as well. Exactly its ``st_size``
+    bytes are hashed in chunks: EOF before the horizon means the file shrank,
+    and one byte available in a final probe means it grew. The probe is not
+    hashed. Reading to the descriptor's live EOF let a writer sparsely extend
+    the file into arbitrary work or append forever, so the post-read identity
+    check was never reached. This change closes the bound — the reader always
+    terminates after ``st_size`` bytes plus one probe — while correctness
+    against a writer active during verification remains in the residual class
+    recorded on receipt#44.
+
     Residual, bounded: an intermediate directory swapped to a symlink
     *between* the component guard and this open is not caught here. Closing
     that fully needs descent by ``dir_fd``; it is left because the
@@ -3316,11 +3336,17 @@ def _regular_file_digest(
                 f"bound file changed identity while being opened: {relative}"
             )
         digest = hashlib.sha256()
-        while True:
-            chunk = os.read(fd, 1 << 20)
+        remaining = info.st_size
+        while remaining:
+            chunk = os.read(fd, min(1 << 20, remaining))
             if not chunk:
-                break
+                raise CorpusError(
+                    f"bound file shrank while being read: {relative}"
+                )
             digest.update(chunk)
+            remaining -= len(chunk)
+        if os.read(fd, 1):
+            raise CorpusError(f"bound file grew while being read: {relative}")
         identity = _FileIdentity(
             info.st_dev,
             info.st_ino,
