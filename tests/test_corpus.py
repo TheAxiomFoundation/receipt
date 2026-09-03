@@ -1156,6 +1156,139 @@ def test_refuses_a_file_swapped_between_lstat_and_open(
         )
 
 
+def test_an_appender_cannot_make_hashing_chase_the_live_eof(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S7-F3: the digest loop followed a writer's moving live EOF.
+
+    Reads are shortened to eight bytes and four bytes are appended after each
+    one. S7-F3 hashes exactly the size captured by ``fstat``, then its one-byte
+    probe sees growth and refuses. Without that fixed horizon the reader
+    consumes the append, reaches another append, and never reaches EOF; the
+    twelve-call sentinel turns the old hang into a deterministic failure.
+    """
+
+    import receipt.corpus as corpus_module
+
+    write_tree(tmp_path)
+    victim = tmp_path / "rules/tax/rate.yaml"
+    initial = victim.stat()
+    real_read = corpus_module.os.read
+    calls: list[tuple[int, int]] = []
+
+    def appending_read(fd: int, amount: int) -> bytes:
+        info = os.fstat(fd)
+        if (info.st_dev, info.st_ino) != (initial.st_dev, initial.st_ino):
+            return real_read(fd, amount)
+        if len(calls) >= 12:
+            pytest.fail("S7-F3: hashing chased the file's live EOF")
+        data = real_read(fd, min(amount, 8))
+        calls.append((amount, len(data)))
+        with victim.open("ab") as stream:
+            stream.write(b"grow")
+        return data
+
+    monkeypatch.setattr(corpus_module.os, "read", appending_read)
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+
+    assert str(caught.value) == (
+        "bound file grew while being read: rules/tax/rate.yaml"
+    )
+    assert sum(received for _, received in calls[:-1]) == initial.st_size
+    assert calls[-1] == (1, 1)
+
+
+def test_a_sparse_extension_after_fstat_is_probed_not_hashed(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S7-F3: a sparse grow after ``fstat`` forced arbitrary hashing.
+
+    The first target read extends the file to one GiB. S7-F3 requests only
+    the captured size and then one probe byte, which refuses the growth.
+    Without it the live-EOF loop immediately asks for a one-MiB chunk from
+    the sparse extension; the request-size sentinel fails before the hole is
+    hashed, keeping the regression itself bounded.
+    """
+
+    import receipt.corpus as corpus_module
+
+    write_tree(tmp_path)
+    victim = tmp_path / "rules/tax/rate.yaml"
+    initial = victim.stat()
+    real_read = corpus_module.os.read
+    requests: list[int] = []
+    extended = [False]
+
+    def extending_read(fd: int, amount: int) -> bytes:
+        info = os.fstat(fd)
+        if (info.st_dev, info.st_ino) != (initial.st_dev, initial.st_ino):
+            return real_read(fd, amount)
+        if not extended[0]:
+            extended[0] = True
+            os.truncate(victim, 1 << 30)
+        if amount > initial.st_size:
+            pytest.fail("S7-F3: hashing tried to consume the sparse extension")
+        requests.append(amount)
+        return real_read(fd, amount)
+
+    monkeypatch.setattr(corpus_module.os, "read", extending_read)
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+
+    assert extended == [True]
+    assert victim.stat().st_size == 1 << 30
+    assert requests == [initial.st_size, 1]
+    assert str(caught.value) == (
+        "bound file grew while being read: rules/tax/rate.yaml"
+    )
+
+
+def test_a_short_read_before_the_captured_size_refuses_as_shrinkage(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S7-F3: early EOF used to become only a later digest mismatch.
+
+    The target shrinks by one byte on its first read after ``fstat``. The
+    captured-size loop consumes the short positive read, asks for the final
+    byte, and names shrinkage when EOF arrives. Without S7-F3 the live-EOF
+    loop treats that EOF as success and eventually reports the generic wrong
+    digest, so the exact refusal asserted here fails.
+    """
+
+    import receipt.corpus as corpus_module
+
+    write_tree(tmp_path)
+    victim = tmp_path / "rules/tax/rate.yaml"
+    initial = victim.stat()
+    real_read = corpus_module.os.read
+    shrunk = [False]
+
+    def shrinking_read(fd: int, amount: int) -> bytes:
+        info = os.fstat(fd)
+        if (info.st_dev, info.st_ino) != (initial.st_dev, initial.st_ino):
+            return real_read(fd, amount)
+        if not shrunk[0]:
+            shrunk[0] = True
+            os.truncate(victim, initial.st_size - 1)
+        return real_read(fd, amount)
+
+    monkeypatch.setattr(corpus_module.os, "read", shrinking_read)
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+
+    assert shrunk == [True]
+    assert str(caught.value) == (
+        "bound file shrank while being read: rules/tax/rate.yaml"
+    )
+
+
 def test_refuses_paths_that_alias_under_unicode_normalization_alone(
     tmp_path: pathlib.Path,
 ) -> None:
