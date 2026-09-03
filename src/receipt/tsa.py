@@ -3382,6 +3382,19 @@ def _supplemental_candidates(
     the import instead, the anchor's familiar identity no longer exempting it
     from that question (peer review, sixth gate round three).
 
+    Both rules answer for the bundle that broke them, and for the same
+    reason.  The guard raises where it is asked.  A batch's split-or-merge and
+    adoption verdicts are recorded rather than raised, so that every anchor of
+    the bundle is classified before any of them speaks, but they are raised at
+    that batch too, after the guard and before the next bundle is walked.  A
+    refused occurrence's edges are in the graph whatever the verdict, so a
+    later bundle carrying both of the authorities an earlier one merged --
+    each under its own name, with its own key, merging nothing -- resolves to
+    the class that earlier bundle made and would meet the guard: held to the
+    end of the walk, the verdict naming the anchor that merged is discarded
+    for one naming two anchors of a bundle that did not (peer review, sixth
+    gate round three).
+
     Between them these rules leave no shape in which two outcomes of one
     witness rest on one authority's signature, which is why
     ``_v2_witness_evidence``'s duplicate-timestamp refusal is now defence in
