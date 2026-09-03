@@ -2623,6 +2623,44 @@ def test_a_bufferless_utf8_stream_still_gets_the_verdict(
     assert "VERDICT: PASS" in "".join(stream.text)
 
 
+def test_a_bufferless_literal_ascii_codec_still_meets_the_buffer_guard(
+    repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Binds S6-F3's own sentence, which S7-F4 left this as the only path to.
+
+    The bufferless guard refuses a stream with no binary layer whose codec is
+    not the trusted UTF-8, because writing through the text API re-encodes
+    with that codec. Until this round the cp037 case above was what reached
+    it; S7-F4 now refuses cp037 one step earlier, at the literal-ASCII probe,
+    so the guard's own refusal is reachable only for a codec that *passes*
+    the probe and still is not UTF-8. Latin-1 is exactly that: every probed
+    byte is literal, so ``_byte_safe_encoding`` answers ``ascii`` — and the
+    text API would then hand those characters back to Latin-1, which is not
+    the codec the bytes were encoded in.
+
+    Without the guard this stream receives Latin-1 text for a verdict this
+    module encoded as ASCII, and the run reports PASS over it. With S7-F4
+    alone and no guard, nothing refuses at all.
+    """
+
+    from receipt.cli import _ascii_is_literal
+
+    stream = _BufferlessStdout("latin-1")
+    assert _ascii_is_literal("iso8859-1")
+    monkeypatch.setattr(sys, "stdout", stream)
+    assert run(repo) == EXIT_FAIL
+    assert stream.text == []
+    error = capsys.readouterr().err
+    assert "verdict could not be rendered; treat the run as unverified" in error
+    assert (
+        "OSError: verdict stream has no binary buffer and its encoding is not "
+        "UTF-8; the verdict cannot be written safely" in error
+    )
+    assert error.rstrip("\n").endswith("receipt verify: FAIL")
+
+
 @pytest.mark.parametrize("as_json", [True, False])
 def test_a_utf8_sig_stream_receives_no_byte_order_mark(
     repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch, as_json: bool
