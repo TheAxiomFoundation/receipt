@@ -146,11 +146,12 @@ stream can have: ``codecs.getwriter("cp1252")(...)`` forwards both lookups to
 the binary stream underneath it and encodes everything written to it, so it
 wore that shape and turned the verdict's U+203A into the single byte 0x9B —
 CSI — followed by the producer's text (peer review, Sol round 7, round 3). So
-:func:`_is_unicode_sink` admits ``io.StringIO`` and its subclasses by
-construction, and anything else only if it offers the ``getvalue`` returning
-``str`` that protocol is and is not a ``codecs.StreamWriter``. A bufferless
-stream that advertises a non-UTF-8 codec, and one no sink test recognises,
-both refuse.
+:func:`_is_unicode_sink` admits ``io.StringIO``, the type, and nothing else.
+A ``getvalue`` returning ``str`` was admitted too, and that readmitted the
+same hazard: a ``TextIOBase`` subclass forwarding to a cp1252 byte stream and
+also keeping the text behind ``getvalue`` passed the probe and put 0x9B back
+on the wire (peer review, Sol round 8). A bufferless stream that advertises a
+non-UTF-8 codec, and one that is not that type, both refuse.
 
 What is written is canonical UTF-8, with no byte-order mark. The stream's
 own spelling used to be handed back to the encoder, and ``utf-8-sig`` is a
@@ -979,32 +980,33 @@ def _is_unicode_sink(stream: TextIO) -> bool:
     subclass that counts what it is given has the same shape and the same
     problem if it encodes.
 
-    So a sink is recognised rather than inferred. ``io.StringIO`` and its
-    subclasses are sinks by construction. Anything else must offer a
-    ``getvalue`` that returns ``str`` — the in-memory-text protocol
-    ``StringIO`` itself defines — and must not be a ``codecs.StreamWriter``,
-    which forwards ``getvalue`` to the binary stream it wraps and would
-    answer with ``bytes`` there anyway. Everything else is not a sink, and
-    :func:`_stream_encoding` reports it as a stream with no usable codec,
-    which refuses.
+    So a sink is one type: :class:`io.StringIO`. That covers what a host
+    actually substitutes — ``contextlib.redirect_stdout(io.StringIO())``,
+    which every test in this suite and every embedding caller uses — and it
+    covers nothing by shape.
 
-    ``getvalue`` is called, so this is a probe rather than a type test; it is
-    reached only for a stream that has already answered "no codec" and "no
-    buffer", and a raising or non-``str`` answer means "not a sink" rather
-    than an error. The cost of misclassifying in that direction is a refusal.
+    A ``getvalue`` returning ``str`` was accepted here too, as "the
+    in-memory-text protocol ``StringIO`` defines". It is not a protocol, it
+    is a method name, and it readmitted the very class this function was
+    written to refuse: a ``TextIOBase`` subclass forwarding to a cp1252 byte
+    stream *and* keeping the text behind ``getvalue`` — a tee, a progress
+    wrapper, a stream a host substituted — passed the probe, answered
+    "utf-8" from :func:`_byte_safe_encoding`, and put the escaper's approved
+    U+203A on the wire as the single byte 0x9B (peer review, Sol round 8).
+    Adding one method to the refused class walked it back in. The test that
+    the shape was standing in for — does writing text here produce bytes? —
+    has no answer a probe can give, so the type is asked instead.
+
+    What that gives up is stated. A ``StringIO`` subclass overriding
+    ``write`` to encode is a sink here and is not one in fact; that is the
+    host's own doing, inside a type whose contract is in-memory text, and
+    nothing this module can read distinguishes it from the base class. An
+    in-memory sink of some other type is refused rather than trusted, and
+    the cost of misclassifying in that direction is a refusal:
+    :func:`_stream_encoding` reports it as a stream with no usable codec.
     """
 
-    if isinstance(stream, codecs.StreamWriter):
-        return False
-    if isinstance(stream, io.StringIO):
-        return True
-    getvalue = getattr(stream, "getvalue", None)
-    if getvalue is None:
-        return False
-    try:
-        return isinstance(getvalue(), str)
-    except Exception:  # noqa: BLE001 - a stream that will not answer is not a sink
-        return False
+    return isinstance(stream, io.StringIO)
 
 
 def _stream_encoding(stream: TextIO) -> str | None:

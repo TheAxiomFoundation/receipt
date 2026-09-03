@@ -236,6 +236,77 @@ def test_a_text_io_base_subclass_without_an_encoding_is_refused(
     )
 
 
+def test_a_tee_that_offers_getvalue_is_not_a_unicode_sink(
+    repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Binds S8-F2: ``getvalue`` is a method name, not a byte-freeness proof.
+
+    S7-R3-F4 refused the counting ``TextIOBase`` subclass above and then
+    admitted anything offering a ``getvalue`` that returns ``str``, calling
+    that "the in-memory-text protocol ``StringIO`` defines". Adding one
+    method to the refused class walked it straight back in. This is that
+    class with the method: a tee that keeps the text in memory *and*
+    forwards it to a cp1252 byte stream — which is exactly the "progress
+    wrapper, a tee, a stream a host substituted" the test above says must
+    refuse.
+
+    Restore the probe and the classification assertion below fails first —
+    ``_stream_encoding`` answers ``None``, the positive sink verdict — and
+    the two after it fail with it: ``_byte_safe_encoding`` answers utf-8,
+    the verdict is written through the stream, the run reports PASS, and the
+    byte stream holds cp1252 where the escaper had approved U+203A. Measured
+    with the probe restored and this line removed: ``run`` returns EXIT_OK.
+
+    A sink is ``io.StringIO`` and nothing else now, so this refuses at the
+    render boundary before anything is written.
+    """
+
+    from receipt.cli import _stream_encoding
+
+    class _TeeingTextStream(io.TextIOBase):
+        """In-memory text, and the same text encoded to a byte stream."""
+
+        def __init__(self, binary: io.BytesIO) -> None:
+            self._text: list[str] = []
+            self._binary = binary
+
+        def write(self, text: str) -> int:  # type: ignore[override]
+            self._text.append(text)
+            self._binary.write(text.encode("cp1252", "replace"))
+            return len(text)
+
+        def getvalue(self) -> str:
+            return "".join(self._text)
+
+    binary = io.BytesIO()
+
+    # The shape the probe read as a guarantee, and what it hides. Shown on
+    # its own instance so the stream the run is given starts empty.
+    probe = _TeeingTextStream(binary)
+    assert probe.encoding is None
+    assert isinstance(probe.getvalue(), str)
+    probe.write("\u203a[2J")
+    assert binary.getvalue() == b"\x9b[2J"
+    binary.seek(0)
+    binary.truncate()
+
+    stream = _TeeingTextStream(binary)
+    assert _stream_encoding(stream) == ""
+
+    monkeypatch.setattr(sys, "stdout", stream)
+    assert run(repo, "--json") == EXIT_FAIL
+    assert binary.getvalue() == b""
+    assert stream.getvalue() == ""
+    error = capsys.readouterr().err
+    assert "verdict could not be rendered; treat the run as unverified" in error
+    assert (
+        "OSError: verdict stream has no binary buffer and its encoding is "
+        "not UTF-8; the verdict cannot be written safely" in error
+    )
+
+
 def test_a_string_io_subclass_is_still_a_unicode_sink(
     repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -243,8 +314,9 @@ def test_a_string_io_subclass_is_still_a_unicode_sink(
 
     S7-F5 exists because ``redirect_stdout(StringIO())`` is how an
     application captures this command in memory, and a subclass of it is the
-    same object with a name. Both are recognised by construction rather than
-    by probing ``getvalue``.
+    same object with a name. Both are recognised by type rather than by
+    probing ``getvalue``, which is all that is left of the recognition after
+    S8-F2 deleted the probe.
 
     This test passes with S7-R3-F4 disabled, which is the point: it is what
     keeps the narrowing from turning every bufferless stream back into a
