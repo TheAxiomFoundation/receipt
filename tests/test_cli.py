@@ -15,9 +15,11 @@ whose whole purpose is to be handed to a skeptic, is the more important half.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import pathlib
 import shutil
+import sys
 
 import pytest
 
@@ -1662,3 +1664,111 @@ def test_a_refusal_ends_with_the_trusted_sentinel(
     assert rows[-1] == "receipt verify: FAIL"
     assert not [row for row in rows[:-1] if row == "receipt verify: FAIL"]
     assert forged.strip() in captured.err
+
+
+class _StrictAsciiStdout(io.TextIOWrapper):
+    """A stdout whose codec refuses everything outside ASCII, as a pipe can.
+
+    ``PYTHONIOENCODING=ascii``, and a POSIX locale with output redirected,
+    both give the command exactly this: a text stream whose ``encoding`` is
+    ASCII and whose error handler is ``strict``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(io.BytesIO(), encoding="ascii", errors="strict", newline="")
+
+    def written(self) -> str:
+        self.flush()
+        return self.buffer.getvalue().decode("ascii")
+
+
+def test_a_strict_ascii_stdout_still_gets_the_text_verdict(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S5R2-F8: the emission sat outside the fail-closed boundary.
+
+    The rendering of the verdict is wrapped in a boundary that turns any
+    failure into a render refusal. The ``print`` that wrote the rendered
+    text out was not inside it, and it is the call that fails: ``print``
+    hands the text to the stream's codec with the stream's error handler,
+    and a strict ASCII one raises on the em dash in this module's own fixed
+    lines. Not producer text — the header line's own dash. So the command
+    that promises a fail-closed verdict on every exit path printed a
+    traceback instead, on any host that runs it into a pipe under a POSIX
+    locale.
+
+    ``_emit`` encodes with ``backslashreplace`` and writes bytes to the
+    stream's buffer, so the dash arrives as ``\\u2014`` and the verdict
+    arrives whole. Without the fix this call raises ``UnicodeEncodeError``.
+    """
+
+    stdout = _StrictAsciiStdout()
+    monkeypatch.setattr(sys, "stdout", stdout)
+    assert run(repo) == EXIT_OK
+    written = stdout.written()
+    assert written.startswith("receipt ")
+    assert "VERDICT: PASS" in written
+    # The em dash of "receipt <version> — <spec name>", spelled the way an
+    # ASCII stream can carry it.
+    assert "\\u2014" in written
+    assert "—" not in written
+
+
+def test_a_strict_ascii_stdout_still_gets_the_json_verdict(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S5R2-F8: the JSON emission was outside the boundary as well.
+
+    ``json.dumps`` with ``ensure_ascii`` produces ASCII, so this path
+    survives an ASCII stream on its own merits — but it survived by
+    accident, not by contract, and the boundary is what makes it a
+    contract. The verdict is emitted through the same guarded writer, and
+    the JSON a machine consumer keys on arrives intact.
+
+    This test passes with the S5R2-F8 change disabled, which is the point:
+    it is the control that keeps the guarded writer from changing what a
+    machine consumer parses.
+    """
+
+    stdout = _StrictAsciiStdout()
+    monkeypatch.setattr(sys, "stdout", stdout)
+    assert run(repo, "--json") == EXIT_OK
+    payload = json.loads(stdout.written())
+    assert payload["verdict"] == "PASS"
+
+
+def test_an_emission_that_raises_becomes_the_render_refusal(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Binds S5R2-F8: everything about the write is inside the boundary now.
+
+    Encoding is the failure this finding was about, and it is not the only
+    way a write fails: a closed stream, a full disk, a pipe whose reader has
+    gone. With the emission outside the boundary every one of those left
+    :func:`main` by exception. Inside it, they are the refusal the module
+    already has for a verdict it cannot render — the same stage, the same
+    exit code, and the JSON contract kept.
+
+    Without the fix this call raises ``OSError``.
+    """
+
+    class _Failing(io.TextIOWrapper):
+        """A stdout that fails at both layers, so no writer escapes it."""
+
+        def __init__(self) -> None:
+            super().__init__(io.BytesIO(), encoding="utf-8", newline="")
+
+        def write(self, text: str) -> int:  # type: ignore[override]
+            raise OSError(28, "No space left on device")
+
+        @property
+        def buffer(self):  # type: ignore[override]
+            raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(sys, "stdout", _Failing())
+    assert run(repo) == EXIT_FAIL
+    error = capsys.readouterr().err
+    assert "verdict could not be rendered; treat the run as unverified" in error
+    assert "OSError" in error
+    assert error.rstrip("\n").endswith("receipt verify: FAIL")
