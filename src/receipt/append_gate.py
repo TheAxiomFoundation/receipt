@@ -282,10 +282,35 @@ untracked link, and for a dangling one. Each of those was this path's word for
 receipt read — while the commit under review may carry the chain still. So
 that type is decided before the question is asked, in the enumeration's own
 words (``release_chain.assert_manifest_directory_regular``). It stands ahead
-of the push path's reads because it decides whether there are any, and it
-pre-empts nothing: the enumeration is the only thing that would have spoken
-for such a leaf, it does so for exactly one of the three shapes — a link to a
-populated directory — and this says the same sentence for it. The anchor
+of the push path's reads because it decides whether there are any, and for the
+leaf it pre-empts nothing: the enumeration is the only thing that would have
+spoken for such a leaf, it does so for exactly one of the three shapes — a
+link to a populated directory — and this says the same sentence for it.
+
+What that decision could not tell apart was absence from the two other things
+an ``lstat`` of the whole path answers with. ``ENOTDIR`` comes back for every
+path below a regular file, so a release root that is an untracked blob — or
+any interior component of a manifest path configured more than one level down
+— made ``releases/manifests`` read as "not there"; ``EACCES`` comes back for a
+path under an unsearchable ancestor, and "I could not ask" was read the same
+way. Both were then this path's acceptance with no chain, over a tree whose
+whole release history had been replaced by a text file, and nothing else on
+the push path says otherwise: the root's index scan finds no entry under an
+untracked root and returns. So the components are walked and each answer is
+named — absence returns, a non-directory ancestor and a component that cannot
+be ``lstat``-ed refuse, each in its own sentence, with the leaf's own refusal
+unchanged. Measured at 54b589e, both trees: ``thesis-facts append check OK: 2
+rows, immutable prefix 1``.
+
+That does pre-empt one addition of this branch's, on one tree. Where the file
+standing at the release root is *tracked*, the root's index scan used to be
+what refused it (``release root is not a directory while the index records 1
+entry under it``, measured), and the ancestor's type is now decided first,
+because the type is what decides whether anything is enumerated at all. The
+scan still gives that sentence for that tree and a test asserts it directly
+beside the gate's, so the order between the two is pinned. On the base-ref
+path nothing moves: ``_working_release_files`` refuses a root that is not a
+real directory before any of this, in the extraction's own words. The anchor
 directory's leaf is not the same case and gets no such check: nothing decides
 whether the anchors are read, so the first read through that path meets them,
 and a non-directory there is already refused as ``missing or non-regular
