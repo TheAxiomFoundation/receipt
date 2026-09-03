@@ -439,6 +439,22 @@ def rotated_alpha(
     )
 
 
+@pytest.fixture(scope="module")
+def rotated_beta(
+    tmp_path_factory: pytest.TempPathFactory, local_anchors: tuple[LocalAnchor, ...]
+) -> LocalTsa:
+    """A second signing certificate for the second authority, same root.
+
+    The first authority's rotation is what an *active* anchor's rotation is
+    tested with; this is for rotating an authority that is still pending, one
+    bundle version after the version that introduced it.
+    """
+
+    return rotate_tsa_signer(
+        local_anchors[1].tsa, tmp_path_factory.mktemp("tsa-rotated-beta") / "beta"
+    )
+
+
 def build_witness_tree(
     root: pathlib.Path,
     anchors: Sequence[LocalAnchor],
@@ -4764,6 +4780,152 @@ def test_two_pending_bundles_may_introduce_two_authorities(
         (arrival["path"], stranger.anchor_id),
         (renamed_and_rotated["path"], "alpha-renamed-2026"),
     }
+
+
+def test_a_later_pending_bundle_succeeds_the_authority_an_earlier_one_introduced(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_beta: LocalTsa,
+) -> None:
+    """S5R3-F3: v2 and v3 in one catch-up are one authority, not two.
+
+    ``trust_bundle_updates`` enumerates every consumer-pinned bundle the chain
+    has not introduced yet, so a record that catches up over several versions
+    carries v2 and v3 together -- and v3 legitimately retains, or rotates, the
+    authority v2 introduces. The walk's memory of what it had admitted keyed
+    an anchor by ``(id, root SPKI)`` and refused a second anchor carrying the
+    same pair, which is exactly that shape: a producer whose transition spans
+    two versions could not write a witness at all, because the second version
+    of an authority it had just introduced was refused as a second name for
+    it.
+
+    Succession is the answer, and it is what says the duplicate rule is about
+    identities and not versions. Pending bundles are walked in version order;
+    a later one's anchor carrying an admitted anchor's ``(id, root SPKI)``
+    replaces it in the candidate set and releases its keys, so a rotation
+    between two pending versions is not read as two anchors sharing a signer.
+    The anchor kept is the highest version's, because that is the anchor that
+    will verify tokens once the transition activates -- a v2 witness must use
+    the newest active bundle -- so it is the one whose key a supplemental
+    outcome should demonstrate, and the witness below is refused when it
+    answers for the superseded version instead.
+
+    What succession does not touch is two names: v3 filing v2's signing key
+    under a new ``(id, root SPKI)`` is still one authority under two anchors
+    and still refused. Without the change the first two cases below are that
+    refusal too.
+    """
+
+    beta = local_anchors[1]
+    rotated = certificate_pins(rotated_beta.signer_pem)
+    incoming = alias_of(beta, anchor_id="beta-arriving-2026")
+
+    def catch_up(
+        name: str,
+        third: Sequence[LocalAnchor],
+        *,
+        signers: Mapping[str, dict[str, str]] | None = None,
+    ) -> tuple[WitnessTree, dict[str, Any], dict[str, Any], TsaSpec]:
+        """v1 active, v2 introducing ``incoming``, v3 as the caller describes."""
+
+        tree = build_witness_tree(tmp_path / name, local_anchors[:1])
+        second, spec = pending_authority(tree, incoming, version=2)
+        for anchor in third:
+            (tree.records / "trust" / anchor.tsa.root_pem.name).write_bytes(
+                anchor.tsa.root_pem.read_bytes()
+            )
+        latest, spec = add_bundle_version(
+            tree, third, version=3, base=spec, signers=signers
+        )
+        return tree, second, latest, spec
+
+    def candidates(
+        tree: WitnessTree, spec: TsaSpec, *pending: dict[str, Any]
+    ) -> set[tuple[str, str]]:
+        return set(
+            tsa_module._supplemental_candidates(
+                tree.records,
+                {BUNDLE_LOGICAL: tree.reference},
+                list(pending),
+                spec=spec,
+            )
+        )
+
+    # v3 retains the authority v2 introduced: one candidate, and it is v3's.
+    tree, second, latest, spec = catch_up("retained", [incoming])
+    assert candidates(tree, spec, second, latest) == {
+        (latest["path"], incoming.anchor_id)
+    }
+    # The order the caller happens to supply them in decides nothing; the
+    # version order does, and it is the same walk either way.
+    assert candidates(tree, spec, latest, second) == {
+        (latest["path"], incoming.anchor_id)
+    }
+    # And either version alone is its own candidate.
+    assert candidates(tree, spec, second) == {(second["path"], incoming.anchor_id)}
+
+    # The witness answers for the surviving anchor, and only for that one.
+    supplemental_token = (
+        tree.records / RECORD_DAY / f"record-0001.{incoming.anchor_id}.tsr"
+    )
+    beta.tsa.stamp(sha256_bytes(tree.record.read_bytes()), supplemental_token)
+
+    def answering(pending: dict[str, Any]) -> WitnessEvidence:
+        rewrite_witness(
+            tree,
+            lambda payload: payload.__setitem__(
+                "supplementalOutcomes",
+                [supplemental_outcome(tree, pending, incoming, supplemental_token)],
+            ),
+        )
+        return verify_witness(
+            tree.record,
+            spec=spec,
+            records=tree.records,
+            trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+            transition_bundle_updates=[second, latest],
+        )
+
+    evidence = answering(latest)
+    assert evidence.status == "available"
+    assert [token.anchor_id for token in evidence.supplemental_tokens] == [
+        incoming.anchor_id
+    ]
+    with pytest.raises(TsaError) as superseded:
+        answering(second)
+    assert str(superseded.value) == (
+        "supplemental TSA outcome is not introduced by a pending trust "
+        f"transition: ('{second['path']}', '{incoming.anchor_id}')"
+    )
+
+    # v3 rotates the authority's signing key: still one candidate, still v3's.
+    tree, second, latest, spec = catch_up(
+        "rotated", [incoming], signers={incoming.anchor_id: rotated}
+    )
+    rotating = json.loads(
+        (tree.records / "trust" / "tsa-anchors-v3.json").read_text()
+    )["anchors"][0]
+    # The premise: same anchor, same root, a signing key the earlier version
+    # does not allow.
+    assert rotating["id"] == incoming.anchor_id
+    assert {signer["spkiSha256"] for signer in rotating["allowedSigners"]} == {
+        rotated["spkiSha256"]
+    }
+    assert rotated["spkiSha256"] != beta.signer_pins["spkiSha256"]
+    assert candidates(tree, spec, second, latest) == {
+        (latest["path"], incoming.anchor_id)
+    }
+
+    # v3 files v2's signing key under a new (id, root SPKI): two names.
+    elsewhere = alias_of(beta, anchor_id="beta-elsewhere-2026")
+    tree, second, latest, spec = catch_up("aliased", [elsewhere])
+    with pytest.raises(TsaError) as caught:
+        candidates(tree, spec, second, latest)
+    assert str(caught.value) == (
+        "pending TSA bundles introduce one authority under two anchors: "
+        f"{second['path']}/{incoming.anchor_id} and "
+        f"{latest['path']}/{elsewhere.anchor_id}"
+    )
 
 
 def give_the_record_its_own_updates(

@@ -227,6 +227,9 @@ except ImportError:  # pragma: no cover - Windows has no fcntl, and no O_NONBLOC
 from receipt.canonical import canonical_bytes, canonical_sha256
 
 TRUST_BUNDLE_RE = re.compile(r"records/trust/tsa-anchors-v[1-9][0-9]*\.json")
+
+#: The same path, with the immutable version it carries captured.
+_BUNDLE_VERSION_RE = re.compile(r"records/trust/tsa-anchors-v([1-9][0-9]*)\.json")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 UTC = timezone.utc
 SHA256_OID = "2.16.840.1.101.3.4.2.1"
@@ -2269,6 +2272,22 @@ def _anchor_signer_fingerprints(anchor: dict[str, Any]) -> set[str]:
     }
 
 
+def _pending_bundle_version(reference: Mapping[str, Any]) -> int:
+    """The version a pending bundle reference's path carries, or ``0``.
+
+    Pending bundles are walked in this order, because succession between two
+    of them is a question about which came later.  A reference whose path is
+    not a versioned trust bundle path sorts first and is refused by
+    ``_load_trust_bundle`` the moment it is reached, in that function's own
+    words, so no ordering here decides anything but the order of two refusals
+    that would both fire.
+    """
+
+    path = reference.get("path")
+    match = _BUNDLE_VERSION_RE.fullmatch(path) if isinstance(path, str) else None
+    return int(match.group(1)) if match else 0
+
+
 def _active_anchor_identities(
     records: Path,
     trusted_bundles: Mapping[str, dict[str, Any]],
@@ -2401,13 +2420,35 @@ def _supplemental_candidates(
     of a key the chain has already asked about can stamp twice, which is what
     the rename rule refuses when the key is an active one and is no more
     evidence when it is a pending one.  So each candidate admitted here joins
-    the sets the next is measured against: a later pending anchor carrying an
-    admitted anchor's ``(ID, root SPKI)``, or sharing a signer with one, is
-    refused.  Any overlap and not a subset, because two pending anchors have
-    no rotation relationship to preserve -- neither is active, so neither
-    supersedes the other, and a bundle that means to rotate a pending
-    anchor's key can say so under that anchor's own ID and root once it is
-    active.
+    the set the next is measured against, and a later pending anchor sharing a
+    signer with an admitted one is refused, under any overlap and not only a
+    subset: two pending anchors under two names have no rotation relationship
+    to preserve, and a bundle that means to rotate a key can say so under the
+    anchor's own ID and root.
+
+    Under its *own* ID and root, which is what a pending anchor carrying an
+    admitted anchor's ``(ID, root SPKI)`` is doing, and that was refused for a
+    round and should not have been (fifth gate round three).
+    ``trust_bundle_updates`` enumerates every consumer-pinned bundle the chain
+    has not introduced yet, so a record catching up over several versions
+    carries v2 and v3 together, and v3 legitimately retains -- or rotates --
+    the authority v2 introduces.  That is one authority under one name, and
+    the answer is succession: pending bundles are walked in version order, and
+    a later one's anchor replaces its predecessor in the candidate set and
+    releases its predecessor's keys, so a rotation between two pending
+    versions is not read as two anchors sharing a signer.  The highest
+    version's anchor is the one kept, because it is the anchor that will
+    verify tokens once the transition activates -- a v2 witness must use the
+    newest active bundle -- so its key is the one a supplemental outcome
+    should demonstrate.
+
+    Which is the shape of the duplicate rule generally: it is about
+    identities, not versions.  Two pending anchors are one authority when they
+    carry one ``(ID, root SPKI)`` or one signing key, and one authority is
+    either succession, where it keeps its name, or a refusal, where it does
+    not; it is never two candidates.  Version numbers decide nothing about
+    that -- all they say is which of two anchors of one authority is the
+    survivor, and which of two bundles is "later" at all.
 
     The refusal names both anchors, because the producer's fix is to decide
     which of the two the authority is filed under.  A pending bundle already
@@ -2429,32 +2470,45 @@ def _supplemental_candidates(
         records, trusted_bundles, spec=spec
     )
     candidates: dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any]]] = {}
-    admitted_authorities: dict[tuple[str, str], str] = {}
+    admitted_authorities: dict[tuple[str, str], tuple[str, str]] = {}
+    admitted_anchor_signers: dict[tuple[str, str], set[str]] = {}
     admitted_signers: dict[str, str] = {}
 
-    def refuse_an_equivalent_pending_anchor(
-        authority: tuple[str, str], signers: set[str], here: str
+    def admit_a_pending_anchor(
+        authority: tuple[str, str],
+        signers: set[str],
+        key: tuple[str, str],
+        here: str,
     ) -> None:
-        earlier = admitted_authorities.get(authority)
-        if earlier is None:
-            earlier = next(
-                (
-                    admitted_signers[fingerprint]
-                    for fingerprint in sorted(signers)
-                    if fingerprint in admitted_signers
-                ),
-                None,
-            )
+        superseded = admitted_authorities.get(authority)
+        if superseded is not None:
+            # A later pending bundle's anchor with the same (ID, root SPKI):
+            # the same authority, carried forward.  It replaces its
+            # predecessor in the candidate set and releases its predecessor's
+            # keys, so that a rotation between two pending versions is not
+            # read as two anchors sharing a signer.
+            candidates.pop(superseded, None)
+            for fingerprint in admitted_anchor_signers.pop(superseded, set()):
+                admitted_signers.pop(fingerprint, None)
+        earlier = next(
+            (
+                admitted_signers[fingerprint]
+                for fingerprint in sorted(signers)
+                if fingerprint in admitted_signers
+            ),
+            None,
+        )
         if earlier is not None:
             raise TsaError(
                 "pending TSA bundles introduce one authority under two "
                 f"anchors: {earlier} and {here}"
             )
-        admitted_authorities[authority] = here
+        admitted_authorities[authority] = key
+        admitted_anchor_signers[key] = set(signers)
         for fingerprint in signers:
             admitted_signers[fingerprint] = here
 
-    for reference in transition_bundle_updates:
+    for reference in sorted(transition_bundle_updates, key=_pending_bundle_version):
         bundle_path = str(reference["path"])
         if bundle_path in trusted_bundles:
             continue
@@ -2481,8 +2535,11 @@ def _supplemental_candidates(
                     "authorities' signers; a pending anchor must carry one "
                     "active anchor's signers exactly, or none of them"
                 )
-            refuse_an_equivalent_pending_anchor(
-                authority, signers, f"{bundle_path}/{anchor_id}"
+            admit_a_pending_anchor(
+                authority,
+                signers,
+                (bundle_path, anchor_id),
+                f"{bundle_path}/{anchor_id}",
             )
             candidates[(bundle_path, anchor_id)] = (reference, anchor)
     return candidates
