@@ -36,7 +36,7 @@ receipt verify --spec path/to/your/spec.py
 
 ## Install
 
-Requires Python 3.11+, `git`, and `openssl` on the path. The append gate's state reads require an `os.open` that accepts `dir_fd`, which is every POSIX platform CPython supports and not Windows; on Windows the gate refuses to verify rather than reading state through a weaker path.
+Requires Python 3.11+, `git`, and `openssl` on the path. receipt requires a POSIX platform: its state reads open through directory descriptors (`os.open` with `dir_fd`, which every POSIX platform CPython supports and Windows does not), so on Windows `receipt verify` and the append gate refuse rather than reading state through a weaker path.
 
 ```bash
 uv pip install receipt

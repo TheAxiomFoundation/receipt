@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -25,6 +26,7 @@ from receipt.release_chain import (
     _observe_anchor_bytes,
     verify_release_chain,
 )
+from receipt.cli import EXIT_FAIL, main
 from receipt.verify import load_spec, run_verification
 
 from corpus_fixture import CONTENT, append_release, build_corpus
@@ -1234,3 +1236,58 @@ def test_state_bytes_must_map_exact_strings_to_exact_bytes(
     assert str(not_exact.value) == (
         "state_bytes must map exact str state paths to exact bytes"
     )
+
+
+PLATFORM_REFUSAL = (
+    "state files cannot be read with secure descent on this platform "
+    "(os.open lacks dir_fd support); receipt requires a POSIX platform"
+)
+
+
+def without_dir_fd(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Present a platform whose ``os.open`` takes no ``dir_fd``, as Windows is."""
+
+    monkeypatch.setattr(
+        os, "supports_dir_fd", frozenset(os.supports_dir_fd) - {os.open}
+    )
+
+
+def test_the_custody_state_read_refuses_a_platform_without_dir_fd(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S4-F6: the ``dir_fd`` requirement was documented as the append
+    gate's, but ``_regular_file_bytes`` is where it lives and this verifier is
+    that function's other caller — so ``verify_release_chain`` stops on the
+    same refusal, on the public path, with no append gate anywhere in the
+    picture. The restriction is the package's, and the refusal now says so.
+    Without that sentence the message names only ``os.open`` and a reader is
+    left to infer how far it reaches."""
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    without_dir_fd(monkeypatch)
+
+    with pytest.raises(ReleaseChainError) as refusal:
+        verify_release_chain(repo, spec=spec.chain)
+    assert str(refusal.value) == PLATFORM_REFUSAL
+
+
+def test_receipt_verify_reports_the_platform_refusal_as_the_custody_failure(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """S4-F6 end to end. ``receipt verify`` is the outside auditor's command
+    and its first pass is custody, which reads both state files through the
+    same descent — so on Windows the default verification stops there too,
+    not only the append gate. The verdict names the pass and carries the
+    refusal verbatim, so an auditor is told what the platform costs rather
+    than left with a failure they cannot place."""
+
+    without_dir_fd(monkeypatch)
+
+    assert main(
+        ["verify", "--spec", str(repo / "verification/spec.py"), "--root", str(repo)]
+    ) == EXIT_FAIL
+    # A failing verdict is rendered on stderr; the text is the same either way.
+    rendered = capsys.readouterr().err
+    assert "VERDICT: FAIL — custody" in rendered
+    assert PLATFORM_REFUSAL in rendered
