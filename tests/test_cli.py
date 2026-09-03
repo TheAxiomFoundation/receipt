@@ -2190,29 +2190,33 @@ def test_a_one_unit_writer_costs_the_payload_and_not_its_square() -> None:
     assert sum(target.offered) == len(payload) * (len(payload) + 1) // 2
 
 
-def test_a_one_unit_text_writer_still_writes_the_whole_verdict() -> None:
-    """Binds S6-F5, the text half: the same loop, the other payload type.
+def test_a_one_unit_text_writer_materialises_only_bounded_chunks() -> None:
+    """Binds S6-F5 and S7-F6: text offset slices still copied quadratically.
 
-    ``_emit``'s bufferless fallback hands this loop a ``str``, and ``str``
-    has no buffer protocol to take a view of, so the remainder is a copy per
-    short write there and the docstring says so. What must hold either way is
-    that the offset drives the loop and the payload arrives whole: a bug in
-    the offset arithmetic truncates or repeats a verdict, which is the defect
-    the loop was added for.
-
-    This test passes with the S6-F5 change disabled, which is the point: it
-    is the control that keeps the rewrite from changing what a short-writing
-    text stream receives.
+    ``_emit``'s bufferless fallback hands this loop a ``str``, which has no
+    zero-copy view. The old offset branch offered its entire remainder on
+    every one-character short write, materialising N + (N−1) + … + 1
+    characters: 137,439,215,616 for this 524,288-character near-cap payload.
+    S7-F6 bounds the first slice at 8,192 and adapts later offers to the one
+    character the writer accepted, while preserving the S6-F5 whole-payload
+    result. Without S7-F6 the materialised-character bound fails by five
+    orders of magnitude.
     """
 
-    from receipt.cli import _write_all
+    from receipt.cli import TEXT_WRITE_CHUNK, _write_all
+    from receipt.corpus import MAX_GATE_TEXT, MAX_REMOVED_TEXT
 
-    payload = "VERDICT: FAIL \u2014 binding\nreceipt verify: FAIL"
+    payload = "x" * (MAX_GATE_TEXT + MAX_REMOVED_TEXT)
+    assert len(payload) == 524288
     target = _OneUnitTarget()
     _write_all(target, payload)
 
     assert "".join(target.data) == payload
     assert len(target.offered) == len(payload)
+    assert target.materialised < 2 * len(payload) + TEXT_WRITE_CHUNK
+    assert target.offered[0] == TEXT_WRITE_CHUNK == 8192
+    assert max(target.offered) == TEXT_WRITE_CHUNK
+    assert target.materialised == sum(target.offered)
 
 
 def test_a_stream_that_takes_no_bytes_becomes_the_render_refusal(

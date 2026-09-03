@@ -81,6 +81,13 @@ payload, because re-slicing copied what was left after every call and made
 the loop quadratic on precisely the streams it exists for (peer review, Sol
 round 5).
 
+The bufferless Unicode-sink path hands the same loop a ``str``, which has no
+zero-copy view. Its remainder is offered in chunks of at most 8,192
+characters, and after a short write the next chunk is capped at the count the
+writer just accepted. A one-character writer therefore materialises one
+initial bounded chunk and then one character per call, rather than copying a
+near-cap verdict's whole remainder on every call (peer review, Sol round 7).
+
 *Which* encoding it uses is the command's decision and not the stream's,
 because escaping characters and then handing them to an arbitrary codec
 leaves the escaping to be undone by the encoder. Under cp1252 the
@@ -954,6 +961,14 @@ def _byte_safe_encoding(
     )
 
 
+#: The largest ``str`` slice one short-write call may materialise. Text has no
+#: zero-copy view, so the first offer is bounded here and the loop shrinks later
+#: offers to what a short writer demonstrated it can accept. Eight kibichars is
+#: small beside the roughly 512 KiB maximum corpus-derived verdict payload and
+#: large enough that an ordinary text writer still gets one call.
+TEXT_WRITE_CHUNK = 8192
+
+
 def _write_all(target: Any, payload: Any) -> None:
     """Write the whole payload, or raise; a short write is not a success.
 
@@ -976,11 +991,11 @@ def _write_all(target: Any, payload: Any) -> None:
     :func:`main` turns into the refusal, and what :func:`_refuse` guards
     against separately.
 
-    Written over an offset so the same loop serves both layers: ``payload``
-    is ``bytes`` for the buffer and ``str`` for the text fallback, and the
-    counts each ``write`` returns are in the units of what it was handed.
+    Written over offsets in both layers: ``payload`` is ``bytes`` for the
+    buffer and ``str`` for the text fallback, and the counts each ``write``
+    returns are in the units of what it was handed.
 
-    The offset is what makes the loop linear. Rebinding ``payload`` to
+    Rebinding ``payload`` to
     ``payload[written:]`` after every call copied the whole remainder each
     time, so a writer that takes one unit per call copied N + (N−1) + … + 1
     units to write N — quadratic in the length of a verdict on exactly the
@@ -990,25 +1005,40 @@ def _write_all(target: Any, payload: Any) -> None:
     time and copies nothing, so what is offered on each call is a window on
     the one buffer.
 
-    The text fallback keeps the same offset over the string itself, which is
-    a copy per short write in CPython — ``str`` has no buffer protocol to
-    take a view of. What that costs is bounded twice over: the path is
-    reachable only for a stream with no binary buffer whose own codec is the
-    trusted UTF-8, and what it writes is a verdict every field of which the
-    render policy has already bounded. The bytes path — every stream that
-    has a buffer, which is every stream this command normally meets — copies
-    nothing at all.
+    A ``str`` has no buffer protocol, so even offset slicing copies. That
+    branch offers at most :data:`TEXT_WRITE_CHUNK` characters and, after any
+    short write, caps the next offer at the number just accepted. A
+    one-character writer therefore copies one initial 8,192-character slice
+    and one character thereafter: less than ``2 * len(payload) + CHUNK`` in
+    total, rather than N + (N−1) + … + 1. Copying is linear in the bounded
+    payload times a constant (peer review, Sol round 7).
     """
 
-    window = memoryview(payload) if isinstance(payload, bytes) else payload
+    if isinstance(payload, bytes):
+        window = memoryview(payload)
+        offset = 0
+        while offset < len(payload):
+            written = target.write(window[offset:])
+            if not written:
+                raise OSError(
+                    "the verdict stream accepted none of the bytes offered; "
+                    "the verdict cannot be written"
+                )
+            offset += written
+        return
+
     offset = 0
+    chunk = TEXT_WRITE_CHUNK
     while offset < len(payload):
-        written = target.write(window[offset:])
+        piece = payload[offset : offset + chunk]
+        written = target.write(piece)
         if not written:
             raise OSError(
                 "the verdict stream accepted none of the bytes offered; "
                 "the verdict cannot be written"
             )
+        if written < len(piece):
+            chunk = written
         offset += written
 
 
