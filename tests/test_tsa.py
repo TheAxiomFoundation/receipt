@@ -2531,31 +2531,26 @@ def test_a_shared_root_with_disjoint_signers_is_still_two_anchors(
 
     rotated_token = tree.records / RECORD_DAY / "record-0001.alpha-sibling-2026.tsr"
     rotated_alpha.stamp(sha256_bytes(tree.record.read_bytes()), rotated_token)
-    tokens = {
-        alpha.anchor_id: (alpha, tree.tokens[alpha.anchor_id], alpha.signer_pins),
-        sibling.anchor_id: (sibling, rotated_token, rotated),
-    }
-    for anchor_id, (anchor, token, signer) in tokens.items():
-        evidence = verify_timestamp_token(
+    own = ((alpha, tree.tokens[alpha.anchor_id], alpha.signer_pins),
+           (sibling, rotated_token, rotated))
+
+    def verified_by(
+        anchor: LocalAnchor, token: pathlib.Path, signer: dict[str, str]
+    ) -> TokenEvidence:
+        return verify_timestamp_token(
             tree.record,
             claim_against(tree, reference, anchor, token, signer=signer),
             reference,
             spec=spec,
             records=tree.records,
         )
-        assert evidence.anchor_id == anchor_id
-    # Neither anchor's outcome can be met by the other's response.
-    for anchor, (_other, token, signer) in zip(
-        (alpha, sibling), reversed(list(tokens.values()))
-    ):
+
+    for anchor, token, signer in own:
+        assert verified_by(anchor, token, signer).anchor_id == anchor.anchor_id
+    # And neither anchor's outcome can be met by the other's response.
+    for anchor, (_owner, token, signer) in ((alpha, own[1]), (sibling, own[0])):
         with pytest.raises(TsaError, match="RFC 3161 token signer is not pinned"):
-            verify_timestamp_token(
-                tree.record,
-                claim_against(tree, reference, anchor, token, signer=signer),
-                reference,
-                spec=spec,
-                records=tree.records,
-            )
+            verified_by(anchor, token, signer)
 
 
 def test_refuses_one_token_supplied_under_two_anchor_outcomes(

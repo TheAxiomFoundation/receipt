@@ -9,62 +9,67 @@ through a frozen :class:`TsaSpec` supplied by consumer code.  This module
 ships no repository-specific trust defaults and performs no chain walk or
 producer signature verification.
 
-The port is stricter than the baseline in twelve places, each refusing an input
-the pinned tree never presents and so each outside the differential contract:
-a legacy witness over a bundle configuring more than one anchor; a bundle
-configuring an anchor the spec carries no identity for, or one whose declared
-root SPKI or allowed signers differ from that identity, or whose referenced
-root material fails the ported material checks or carries an SPKI other than
-the identity's (all compared at load for every anchor, not only the one a
-witness selects); a pinned root PEM that OpenSSL's own parser (``openssl
-storeutl -noout -certs``) does not count exactly one certificate in, or whose
-certificates it cannot count at all -- the declared certificate hash and SPKI
-describe only the first certificate, while a ``-CAfile`` trusts every
-certificate it is given, so with exactly one counted what the identity pins
-is the whole of what the two verifications trust.  That root is read from the
-repository exactly once and every check runs on those bytes; the count and
-the identity are taken by running OpenSSL on a private byte-for-byte copy of
-them, and the two ``-CAfile`` verifications are handed that same copy rather
-than the path.  So a writer who substitutes another file between validation
-and use -- the plain form of a ``TRUSTED CERTIFICATE`` that rejects the
-timestamping purpose, or a second authority appended after the count --
-changes what is on disk and not what is trusted, and because nothing is
-re-encoded a pinned root's auxiliary trust settings apply as pinned.  Next: a
-bundle whose configured anchors are
-not exactly the anchors the spec's identities for that bundle name, so an
-identity the consumer scoped to it cannot be quietly absent from it; a bundle
-two of whose anchors allow the same signer, which is one authority under two
-names -- the ported allowed-signer check binds a token to the signers of the
-anchor its outcome selects, so a shared signer is exactly what lets one RFC
-3161 response satisfy two outcomes, while a shared root with disjoint signers
-does not and stays allowed (the same rule covers the identities the spec
-scopes to the bundle, whose signer sets each anchor's has just been required
-to equal); a
-pending bundle anchor reusing an active anchor ID under a different
-code-pinned root, which is a new authority and so must carry a supplemental
-outcome before the transition can activate it -- the ported
-supplemental-outcome refusal, reaching a case the baseline let through
-because it took the ID alone for the identity; an unavailable witness of
-either schema whose reason is not a string, or that carries token evidence at
-the witness level (the v2 per-anchor outcome has always refused both); and an
-unavailable legacy witness that names a bundle by any of its three claim
-fields, whose claim is then resolved and counted where the baseline ignored
-those fields; and a v2 witness that offers one token under two of its
-outcomes, counted across the primary and supplemental outcomes together, so
-that one response cannot stand for a bundle that configures more than one
-anchor -- refused at the second outcome, before that outcome's token is
-verified, which places it ahead of the ported refusals inside
-``verify_timestamp_token`` and is admissible because no witness in the pinned
-tree names one token twice.  The port also corrects one baseline defect: ``_decode_oid``
-read only the first octet of a policy OID as its combined first two arcs, so
-a first subidentifier spanning several octets (2.999.3) decoded wrongly.
-The port also has a prerequisite the baseline did not: ``openssl`` on the
-path must be OpenSSL 1.1.1 or newer, checked once per process before any
-trust bundle is read, because the certificate count above is OpenSSL's own
-``storeutl`` and LibreSSL -- the stock ``/usr/bin/openssl`` on macOS -- has
-no such subcommand.  A machine that fails the check is refused there rather
-than told that its root PEM cannot be counted; no portable count is offered
-in its place.
+The port is stricter than the baseline in twelve places, each refusing an
+input the pinned tree never presents and so each outside the differential
+contract: a legacy witness over a bundle configuring more than one anchor; a
+bundle configuring an anchor the spec carries no identity for, or one whose
+declared root SPKI or allowed signers differ from that identity, or whose
+referenced root material fails the ported material checks or carries an SPKI
+other than the identity's (all compared at load for every anchor, not only
+the one a witness selects); a pinned root PEM that OpenSSL's own parser
+(``openssl storeutl -noout -certs``) does not count exactly one certificate
+in, or whose certificates it cannot count at all -- the declared certificate
+hash and SPKI describe only the first certificate, while a ``-CAfile`` trusts
+every certificate it is given, so with exactly one counted what the identity
+pins is the whole of what the two verifications trust; a bundle whose
+configured anchors are not exactly the anchors the spec's identities for that
+bundle name, so an identity the consumer scoped to it cannot be quietly
+absent from it; a bundle two of whose anchors allow the same signer, which is
+one authority under two names -- the ported allowed-signer check binds a
+token to the signers of the anchor its outcome selects, so a shared signer is
+exactly what lets one RFC 3161 response satisfy two outcomes, while a shared
+root with disjoint signers does not and stays allowed (one check on the
+anchors covers the identities the spec scopes to the bundle as well, whose
+signer sets each anchor's has just been required to equal); a pending bundle
+anchor reusing an active anchor ID under a different code-pinned root, which
+is a new authority and so must carry a supplemental outcome before the
+transition can activate it -- the ported supplemental-outcome refusal,
+reaching a case the baseline let through because it took the ID alone for the
+identity; an unavailable witness of either schema whose reason is not a
+string, or that carries token evidence at the witness level (the v2
+per-anchor outcome has always refused both); an unavailable legacy witness
+that names a bundle by any of its three claim fields, whose claim is then
+resolved and counted where the baseline ignored those fields; and a v2
+witness that offers one token under two of its outcomes, counted across the
+primary and supplemental outcomes together, so that one response cannot stand
+for a bundle configuring more than one anchor -- refused at the outcome that
+repeats a digest, before that outcome's token is verified, which places it
+ahead of the ported refusals inside ``verify_timestamp_token`` and is
+admissible because no witness in the pinned tree names one token twice.
+
+The pinned root behind the two counting refusals is read from the repository
+exactly once, and every check runs on those bytes: the PEM hash over the
+bytes themselves, the count and the certificate identity by running OpenSSL
+on a private byte-for-byte copy of them, and the two ``-CAfile``
+verifications on that same copy rather than on the path.  So a writer who
+substitutes another file between validation and use -- the plain form of a
+``TRUSTED CERTIFICATE`` that rejects the timestamping purpose, or a second
+authority appended after the count -- changes what is on disk and not what is
+trusted; and because nothing is re-encoded, a pinned root's auxiliary trust
+settings apply exactly as pinned.  This module's own refusals go on naming
+the repository path.
+
+The port also corrects one baseline defect: ``_decode_oid`` read only the
+first octet of a policy OID as its combined first two arcs, so a first
+subidentifier spanning several octets (2.999.3) decoded wrongly.
+
+And it has a prerequisite the baseline did not: ``openssl`` on the path must
+be OpenSSL 1.1.1 or newer, checked once per process before any trust bundle
+is read, because the certificate count above is OpenSSL's own ``storeutl``
+and LibreSSL -- the stock ``/usr/bin/openssl`` on macOS -- has no such
+subcommand.  A machine that fails the check is refused there rather than told
+that its root PEM cannot be counted; no portable count is offered in its
+place.
 
 ``tests/test_tsa.py`` binds all of these.  Because every bundle anchor is now
 identity-checked at load, ``_select_anchor``'s own identity refusal can no
@@ -1101,8 +1106,12 @@ def _write_root_snapshot(directory: Path, pem: bytes) -> Path:
         os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_CLOEXEC", 0),
         0o600,
     )
-    with os.fdopen(descriptor, "wb") as handle:
-        handle.write(pem)
+    try:
+        written = 0
+        while written < len(pem):
+            written += os.write(descriptor, pem[written:])
+    finally:
+        os.close(descriptor)
     return snapshot
 
 
@@ -1774,7 +1783,9 @@ def _v2_witness_evidence(
     seen_token_digests: set[str] = set()
 
     def refuse_a_reused_token(declared: Any) -> None:
-        if declared in seen_token_digests:
+        # Only a string can have been recorded, and a claim carrying anything
+        # else is left to the ported witness-token-hash refusal below.
+        if isinstance(declared, str) and declared in seen_token_digests:
             raise TsaError(f"duplicate TSA token across anchor outcomes: {declared}")
 
     for outcome in outcomes:
