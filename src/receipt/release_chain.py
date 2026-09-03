@@ -30,19 +30,24 @@ filesystem traversal does not descend a symlinked directory while resolving
 the whole name does — and because a case- or normalisation-insensitive
 filesystem answers one entry's question with another entry's file; the
 whole-index read that refuses an entry spelled as another spelling of a
-protected path, which every one of those reconciliations is blind to because
-each compares by exact spelling; its sibling read, which refuses an
-entry marked assume-unchanged or skip-worktree, since that tells git to stop
-comparing the path against the working tree and so hides a rewrite from the
-``git diff`` a caller's surface classification is built on — a separate
-function from the alias refusal because it is about that classification and is
-asked only where one happens, which in ``append_gate`` is the base-ref path; the content
+protected path — the three this module reads for itself, and every path a
+caller's own configured surfaces name, which it passes in — since every one of
+those reconciliations is blind to such an entry because each compares by exact
+spelling, and so is a caller's surface classification; its sibling read,
+which refuses an entry marked assume-unchanged or skip-worktree, since that
+tells git to stop comparing the path against the working tree and so hides a
+rewrite from the ``git diff`` a caller's surface classification is built on —
+a separate function from the alias refusal because it is about that
+classification and is asked only where one happens, which in ``append_gate``
+is the base-ref path; the content
 binding, which requires the blob the index records for a path to be either the
 base's — the commit under review
 does not change it — or the git blob id of the bytes the caller just verified,
 because every comparison here reads the working tree and none of them ever
 looked at what the commit would carry; the release root's own path walk,
-which the gate runs before anything reads through that root and
+which the gate runs before anything reads through that root — and once more
+before it returns a gate-only verdict, the one exit that claims a confinement
+over that root while reading nothing through it — and
 ``verify_release_chain`` runs again at its own top — so the public verifier
 and ``receipt verify`` are confined by it too, rather than certifying a chain
 reached through a symlinked interior component of a configured path — since
@@ -159,7 +164,7 @@ import stat
 import subprocess
 import tempfile
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -3053,8 +3058,30 @@ def _folded_parts(path: str) -> tuple[str, ...]:
     return tuple(_fold_component(component) for component in path.split("/"))
 
 
+def _surface_alias_paths(surfaces: Iterable[str]) -> list[str]:
+    """The protected paths one caller's configured surface patterns name.
+
+    A pattern is either an exact path — ``scripts/check_append.py`` — or a
+    ``dir/**`` prefix, which puts every file anywhere beneath ``dir`` on the
+    surface. The first is protected as itself, the second as its directory,
+    and the alias scan compares every prefix depth of each, so their ancestors
+    come with them. This is the same derivation ``append_gate``'s
+    ``_surface_directories`` makes for the enumeration, asked for names rather
+    than for directories to walk: there it is the *holding* directory of an
+    exact pattern that has to be listable, here it is the exact path itself
+    that must not be spelled two ways in one index.
+    """
+
+    paths = set()
+    for pattern in surfaces:
+        named = pattern[: -len("/**")] if pattern.endswith("/**") else pattern
+        if named:
+            paths.add(named)
+    return sorted(paths)
+
+
 def assert_index_carries_no_protected_alias(
-    root: pathlib.Path, spec: ChainSpec
+    root: pathlib.Path, spec: ChainSpec, *, surfaces: Iterable[str] = ()
 ) -> None:
     """The whole-index read, and the fact only it can establish about a path.
 
@@ -3097,6 +3124,29 @@ def assert_index_carries_no_protected_alias(
     spelling of a release *file* is the release root's scan to answer, in the
     words it already uses, because the root itself is spelled correctly.
 
+    ``surfaces`` is how a caller with configured surfaces of its own — the
+    append gate's gate and data patterns — adds them to that set, and it is
+    the whole of the difference between the two. The three paths a
+    ``ChainSpec`` carries are the ones this module reads for itself, and they
+    were all this scan compared against; a caller that classifies a proposal
+    by surface patterns protects more paths than that. An index entry spelled
+    ``Scripts/check_append.py`` under a gate pattern of
+    ``scripts/check_append.py`` is a second committed object over the gate
+    surface, and exact classification — which every surface match is — reads
+    it as merely unclassified, so beside a ledger change it did not make the
+    proposal mixed and the run went down the data path with the alias in the
+    commit. The same holds for a ``dir/**`` prefix, whose directory is what
+    the pattern protects. Nothing else changes: the paths are compared by the
+    same rule at the same place, and the sentence names both spellings as it
+    always did.
+
+    Order is the three ``ChainSpec`` paths first and the surface-derived paths
+    after them, sorted. An entry that aliases two protected paths at once is
+    named for the first of them, and that is the sentence the trees already
+    pinned before ``surfaces`` existed — ``Ledger`` is an alias of
+    ``ledger/official_observations.jsonl`` at ``ledger``, not of the ``ledger``
+    that ``ledger/**`` names, and it keeps saying so.
+
     Every prefix depth is compared, not the protected path's own depth alone.
     A protected path names each of its ancestors as much as its leaf: the
     directory ``ledger`` is where the state file is read from, and an entry
@@ -3114,10 +3164,15 @@ def assert_index_carries_no_protected_alias(
     directory is untouched.
     """
 
-    protected = (
-        spec.release_root_relative.as_posix(),
-        spec.state_relative.as_posix(),
-        spec.prefix_relative.as_posix(),
+    protected = tuple(
+        dict.fromkeys(
+            (
+                spec.release_root_relative.as_posix(),
+                spec.state_relative.as_posix(),
+                spec.prefix_relative.as_posix(),
+                *_surface_alias_paths(surfaces),
+            )
+        )
     )
     folded = {path: _folded_parts(path) for path in protected}
     exact = {path: tuple(path.split("/")) for path in protected}

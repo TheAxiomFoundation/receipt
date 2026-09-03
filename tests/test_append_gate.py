@@ -5146,6 +5146,141 @@ def test_an_ordinary_path_under_a_protected_directory_is_not_an_alias(
         "thesis-facts append check OK: 2 rows, immutable prefix 1"
     )
 
+def an_index_entry(candidate: Candidate, listed: str) -> None:
+    """Add one real file to the candidate index at exactly ``listed``.
+
+    ``index_an_alias`` above writes a second entry for a blob that is already
+    tracked, which is what an alias of an *existing* file looks like. These
+    cases are about a path the proposal adds, so the file is written and
+    staged the ordinary way; the directory it goes in does not exist in the
+    base, so the checkout stores the spelling this asks for.
+    """
+
+    path = candidate.root / listed
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# added by the proposal\n", encoding="utf-8")
+    git(candidate.root, "add", "--", listed)
+
+
+def test_an_index_alias_of_a_gate_pattern_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5-G1-F2. The whole-index alias scan compared every entry against
+    the three paths a ``ChainSpec`` carries — the release root and the two
+    state paths — and against nothing else. The gate and data surfaces are
+    the caller's own configuration and protect paths of their own, and every
+    surface match is by exact spelling, so an index entry spelled
+    ``Scripts/check_append.py`` under a gate pattern of
+    ``scripts/check_append.py`` folded onto the gate surface while classifying
+    as merely unclassified. Beside a ledger change that is what decides the
+    path the run takes: the mixed DATA/GATE refusal never fires, and the
+    proposal goes down the data path with a second committed object standing
+    over the gate script — the file a name-folding checkout materialises where
+    the gate script is, and the code this verifier's own consumer runs.
+
+    Measured at 1275847: ``thesis-facts append check OK: 3 rows, immutable
+    prefix 1, +1 appended vs base``, with the alias in the commit and no check
+    here reading it."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    an_index_entry(candidate, "Scripts/check_append.py")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "index carries an alias of a protected path: Scripts/check_append.py "
+        f"(for {GATE_FILE} at scripts)"
+    )
+
+
+def test_an_index_alias_of_a_surface_prefix_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S5-G1-F2 for the other kind of pattern. A ``dir/**`` pattern puts every
+    file anywhere beneath ``dir`` on a surface, so what it protects is the
+    directory, and an entry that folds onto that directory while spelled
+    another way is a second committed object over the whole surface rather
+    than over one file. The pattern here is a gate surface of ``tools/**``,
+    which is off the release tree entirely, so nothing else in the gate has
+    anything to say about the entry: the release root's scan does not reach
+    it, no state path names it, and the surface match is exact so it
+    classifies as unclassified.
+
+    Measured at 1275847: ``thesis-facts append check OK: 3 rows, immutable
+    prefix 1, +1 appended vs base``."""
+
+    spec = replace(
+        GATE_SPEC,
+        gate_surface=frozenset({GATE_FILE, "releases/anchors/**", "tools/**"}),
+    )
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    an_index_entry(candidate, "Tools/helper.py")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate, spec=spec)
+    assert str(refusal.value) == (
+        "index carries an alias of a protected path: Tools/helper.py "
+        "(for tools at tools)"
+    )
+
+
+def test_a_surface_prefix_alias_under_the_release_root_answers_first(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S5-G1-F2's one pre-emption, pinned rather than left incidental. The
+    fixture's own gate surface names ``releases/anchors/**``, and an entry
+    spelled ``releases/Anchors/alpha-root.pem`` is an alias of that prefix.
+    On a name-folding filesystem that tree was already refused, one placement
+    later, by the release root's component walk — ``path component
+    releases/anchors is not spelled by its directory: releases/anchors``,
+    measured at 1275847 on APFS — because the working tree really does hold
+    the folded directory there.
+
+    The alias scan is one of the three entry-level exceptions and runs first,
+    so it now answers, and that is the better of the two answers for this
+    tree: the walk's refusal is reachable only where names fold, since where
+    they compare exactly ``releases/Anchors`` is simply another directory and
+    the walk finds ``releases/anchors`` absent, while the index carries two
+    spellings of the same surface on every filesystem. Both refusals are this
+    branch's own additions, so nothing the extraction gave is moved."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    an_index_entry(candidate, "releases/Anchors/alpha-root.pem")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "index carries an alias of a protected path: "
+        "releases/Anchors/alpha-root.pem (for releases/anchors at "
+        "releases/anchors)"
+    )
+
+
+def test_an_entry_that_folds_onto_no_surface_is_still_unclassified(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S5-G1-F2's other side: widening the scan must not turn an ordinary path
+    into an alias. ``checks/check_append.py`` shares the gate script's leaf and
+    nothing else — its first component folds onto no protected path at all —
+    so it is a different file rather than a second spelling of one, and it
+    classifies exactly as it did before: an unclassified change the gate-only
+    verdict names and does not refuse.
+
+    The same verdict with and without the fix, which is the binding."""
+
+    candidate = base_repository(tmp_path)
+    add_gate_file(candidate)
+    an_index_entry(candidate, "checks/check_append.py")
+
+    assert run_gate(candidate) == (
+        "thesis-facts append check OK: gate-only proposal; DATA_SURFACE "
+        f"unchanged; GATE_SURFACE changes=['{GATE_FILE}']; unclassified "
+        "changes=['checks/check_append.py']"
+    )
+
 
 def an_outside_release_tree(
     tmp_path: pathlib.Path,

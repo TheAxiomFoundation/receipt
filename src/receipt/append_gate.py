@@ -133,8 +133,10 @@ every release file the base carries is still an entry in the candidate index,
 the release root's index and working tree agree in both directions — no index
 entry the walk cannot see, no entry the walk cannot find, and no entry
 answered for through a symlinked component or under another entry's spelling —
-the index holds no entry spelled as another spelling of a protected path or
-of any prefix of one — the directory a state file is read through is named by
+the index holds no entry spelled as another spelling of any path this run
+protects — the release root, the two state paths, and every path the
+configured gate and data surfaces name — or of any prefix of one — the
+directory a state file is read through is named by
 that path as much as its leaf is — which every one of those reconciliations is
 blind to because each is a comparison by exact spelling, what the index
 records as a path's *content* is
@@ -222,8 +224,22 @@ comparison cannot be made rather than making one. Comparing every prefix depth
 rather than the protected path's own extends that entry-level check without
 moving it: it is the same read of the same index, at entry, answering about
 more of the same paths, and an entry spelled exactly right as far down as it
-goes is untouched. That is asked on both paths, because an alias is a second
-committed object over a protected path whether or not a base is named.
+goes is untouched. So does asking it about every path this run protects
+rather than the three a ``ChainSpec`` carries. The gate and data surfaces are
+this consumer's configuration and they protect paths of their own —
+``scripts/check_append.py``, and the directory a ``dir/**`` pattern names —
+which that scan compared against nothing, while every surface match here is
+by exact spelling: an entry spelled ``Scripts/check_append.py`` folded onto
+the gate surface and classified as merely unclassified, so beside a ledger
+change it did not make the proposal mixed and the run went down the data path
+with a second committed object standing over the gate script the consumer
+runs. The protected set is derived from the spec the way
+``_surface_directories`` derives the directories to enumerate — the exact
+patterns, the ``dir/**`` prefixes, the release root and its ancestors, the
+state paths — and the ``ChainSpec`` paths are compared first, so an entry that
+aliases two of them keeps the sentence it already had. That is asked on both
+paths, because an alias is a second committed object over a protected path
+whether or not a base is named.
 
 ``release_chain.assert_index_hides_no_working_tree_change`` is the other
 refusal that whole-index read used to make, and it is asked on the base-ref
@@ -2671,7 +2687,11 @@ def _verify_selected_tree(
     # paths, because an alias is a second committed object over a protected
     # path whether or not there is a base to compare against.
     try:
-        assert_index_carries_no_protected_alias(candidate.root, spec.chain)
+        assert_index_carries_no_protected_alias(
+            candidate.root,
+            spec.chain,
+            surfaces=spec.gate_surface | spec.data_surface,
+        )
     except ReleaseChainError as exc:
         raise AppendError(str(exc)) from exc
     if base is not None:
