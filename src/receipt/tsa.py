@@ -212,6 +212,7 @@ import re
 import stat
 import subprocess
 import tempfile
+import unicodedata
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -550,6 +551,35 @@ def physical_path(records: Path, value: str) -> Path:
     except ValueError as exc:
         raise TsaError(f"record path escapes records root: {value!r}") from exc
     return path
+
+
+def _path_fold(path: Path) -> tuple[str, ...]:
+    """A key two spellings of one filesystem path share.
+
+    NFC folds the decomposed and precomposed spellings of one character
+    together; ``casefold`` folds case together.  A path is folded component
+    by component, so nothing a fold produces can be read as a separator.
+
+    Two distinct spellings with one key are one directory entry on a case- or
+    normalisation-insensitive filesystem -- APFS and NTFS both, and HFS+
+    normalises besides -- which is why a rule about "the same path" has to be
+    asked over this and not over the spelling.  ``receipt.corpus`` computes
+    the same fold for the same reason, over its declared corpus paths; this
+    module carries its own rather than importing that one, because
+    :mod:`receipt.tsa` depends on nothing in the package but
+    :mod:`receipt.canonical` and a witness verifier has no business needing a
+    corpus.
+
+    Deliberately conservative in the same way: a case-sensitive filesystem can
+    hold two genuinely distinct files whose names fold together, and a witness
+    naming both is refused here even though the two really are two.  A witness
+    whose meaning depends on which filesystem the auditor cloned onto is not
+    one an auditor can act on.
+    """
+
+    return tuple(
+        unicodedata.normalize("NFC", part).casefold() for part in path.parts
+    )
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -2457,7 +2487,19 @@ def _v2_witness_evidence(
     # there is one (peer review, fifth gate round one).  Compared as the
     # module resolves a claim into a file, so the two spellings physical_path
     # maps together -- with and without the leading ``records`` component --
-    # are one path and not two.
+    # are one path and not two.  And compared over _path_fold rather than over
+    # the resolved spelling, because a spelling is not a directory entry
+    # either: on a case- or normalisation-insensitive filesystem Token.tsr and
+    # token.tsr, or a precomposed name and its decomposed spelling, name one
+    # entry while comparing distinct, and a writer replacing that entry
+    # between the two reads then defeats the object rule as well -- two reads,
+    # two inodes, one name (fifth gate round three).  Refusing fold-equal
+    # spellings is deliberately conservative: a case-sensitive filesystem can
+    # hold two genuinely distinct files whose names fold together, and a
+    # witness whose meaning depends on which filesystem an auditor cloned onto
+    # is not one an auditor can act on.  Two outcomes spelling one path
+    # identically keep the plainer message they had; two spelling it two ways
+    # are told why the two are one.
     #
     # What that comparison is about is a name, and a name is not a file.  The
     # containment check inside physical_path resolves, but the value it
@@ -2519,10 +2561,10 @@ def _v2_witness_evidence(
     # message a witness that breaks two rules at once gets.  Two outcomes
     # naming one file with one digest are the plainer reuse and keep the
     # digest rule's message, as they had it; what the path rule reaches is the
-    # case the digest rule cannot see, two different digests over one path;
-    # and what the object rule reaches is the case neither can, two paths over
-    # one file.
-    seen_token_paths: set[str] = set()
+    # case the digest rule cannot see, two different digests over one path,
+    # fold-equal spellings included; and what the object rule reaches is the
+    # case neither can, two paths that are not fold-equal over one file.
+    seen_token_paths: dict[tuple[str, ...], Path] = {}
     seen_token_files: dict[tuple[int, int], Path] = {}
     seen_response_files: set[str] = set()
     seen_timestamps: set[_TimestampIdentity] = set()
@@ -2546,11 +2588,22 @@ def _v2_witness_evidence(
             physical = physical_path(records, declared)
         except TsaError:
             return
-        if str(physical) in seen_token_paths:
+        earlier = seen_token_paths.get(_path_fold(physical))
+        if earlier is not None:
+            if earlier == physical:
+                raise TsaError(
+                    f"duplicate TSA token path across anchor outcomes: {physical}"
+                )
+            # Two spellings, one directory entry wherever this tree is
+            # cloned onto a case- or normalisation-insensitive filesystem.
+            # Both are named, because what a producer has to fix is that two
+            # of its outcomes spell one path two ways.
             raise TsaError(
-                f"duplicate TSA token path across anchor outcomes: {physical}"
+                f"duplicate TSA token path across anchor outcomes: {physical} "
+                f"and {earlier} are one path on a case- or "
+                "normalisation-insensitive filesystem"
             )
-        seen_token_paths.add(str(physical))
+        seen_token_paths[_path_fold(physical)] = physical
 
     def refuse_a_reused_token_file(physical: Path, identity: tuple[int, int]) -> None:
         # Handed to the read inside the token verifier, so it speaks before

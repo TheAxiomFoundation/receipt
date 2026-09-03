@@ -23,6 +23,7 @@ import re
 import signal
 import stat
 import subprocess
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -3912,6 +3913,151 @@ def test_refuses_two_outcomes_whose_paths_reach_one_response_file(
     # to OpenSSL once, because the refusal arrives before that read is used.
     assert reads.count(str(first_physical)) == 1
     assert reads.count(str(second_physical)) == 1
+    assert [arguments[:2] for arguments in invocations].count(["ts", "-reply"]) == 1
+
+
+def replace_the_response_between_the_reads(
+    monkeypatch: pytest.MonkeyPatch, target: pathlib.Path, content: bytes
+) -> list[str]:
+    """Unlink ``target`` and put ``content`` at that name, once.
+
+    The writer the fold rule exists for.
+    ``serve_a_second_response_from_one_path`` truncates and rewrites, which
+    leaves the inode alone, so the object rule still sees one file. This
+    replaces the *directory entry*, so a second read of that same entry opens
+    a different object: the object rule sees two files, the digest rule sees
+    two true digests, and only a rule about the name is left. It arrives at
+    the first ``ts -verify``, which is after the first outcome has taken its
+    one read and snapshotted it, so nothing about that outcome moves. Returns
+    the write, so a test can show the writer ran.
+    """
+
+    original = tsa_module._run_openssl
+    writes: list[str] = []
+
+    def writing(arguments: list[str], **keywords: Any) -> Any:
+        if arguments[:2] == ["ts", "-verify"] and not writes:
+            target.unlink()
+            target.write_bytes(content)
+            writes.append(str(target))
+        return original(arguments, **keywords)
+
+    monkeypatch.setattr(tsa_module, "_run_openssl", writing)
+    return writes
+
+
+def spelled_the_other_way(logical: str, alias: str) -> str:
+    """One declared token path, spelled the way a folding filesystem folds.
+
+    ``case`` upper-cases the final component; ``normalisation`` decomposes the
+    whole string. Both name the same directory entry on APFS or NTFS -- and
+    HFS+ stores only the decomposed form -- while differing from the original
+    by every comparison of the strings themselves.
+    """
+
+    if alias == "case":
+        parts = pathlib.PurePosixPath(logical).parts
+        return str(pathlib.PurePosixPath(*parts[:-1], parts[-1].upper()))
+    return unicodedata.normalize("NFD", logical)
+
+
+@pytest.mark.parametrize("alias", ["case", "normalisation"])
+def test_refuses_two_outcomes_whose_paths_fold_to_one_directory_entry(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+    alias: str,
+) -> None:
+    """S5R3-F4: a spelling is not a directory entry either.
+
+    The path rule keyed the raw spelling ``physical_path`` returns, so
+    ``Token.tsr`` and ``token.tsr`` -- or a precomposed name and its
+    decomposed spelling -- were two paths to the rule and one directory entry
+    to APFS, NTFS or HFS+. The object rule does not close it: a writer that
+    *replaces* the entry between the two reads gives the second read a
+    different inode, so the two outcomes read two objects out of one name.
+    Nor does the declared-digest rule, because each outcome then declares
+    truly what it read. Every identity behind the name is blind, and the name
+    is what the two outcomes share.
+
+    So the rule is keyed on a portable fold of the physical path -- NFC, then
+    ``casefold``, component by component, the fold ``receipt.corpus`` computes
+    over its own declared paths -- and fold-equal spellings are refused before
+    either response is read. Without it the witness below returns two
+    ``TokenEvidence`` entries covering a two-anchor bundle out of one
+    directory entry, on any filesystem that folds; the rule itself is lexical,
+    so it holds on filesystems that do not, which is the point -- a witness
+    whose meaning depends on which filesystem an auditor cloned onto is not
+    one an auditor can act on.
+
+    The control is the untouched tree: two outcomes at two paths that do not
+    fold together are still two tokens.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    tree = build_witness_tree(tmp_path, local_anchors[:2])
+    shared = tree.tokens[alpha.anchor_id]
+    betas_response = tree.tokens[beta.anchor_id].read_bytes()
+
+    # The control: two outcomes, two paths that fold to two, two tokens.
+    control = verify_tree(tree)
+    assert [token.anchor_id for token in control.tokens] == [
+        alpha.anchor_id,
+        beta.anchor_id,
+    ]
+    assert tsa_module._path_fold(shared) != tsa_module._path_fold(
+        tree.tokens[beta.anchor_id]
+    )
+
+    if alias == "normalisation":
+        # A name the two Unicode spellings of which differ at all.
+        renamed = shared.parent / unicodedata.normalize(
+            "NFC", f"réponse-alpha.{alpha.anchor_id}.tsr"
+        )
+        shared.rename(renamed)
+        tree.tokens[alpha.anchor_id] = renamed
+        shared = renamed
+
+    declared = logical_path(tree.records, shared)
+    second_spelling = spelled_the_other_way(declared, alias)
+    first_physical = tsa_module.physical_path(tree.records.resolve(), declared)
+    second_physical = tsa_module.physical_path(tree.records.resolve(), second_spelling)
+    # The premise: two spellings no comparison of the strings joins, one key.
+    assert second_spelling != declared
+    assert str(second_physical) != str(first_physical)
+    assert tsa_module._path_fold(second_physical) == tsa_module._path_fold(
+        first_physical
+    )
+
+    def point_both_outcomes_at_one_entry(payload: dict[str, Any]) -> None:
+        first, second = payload["anchorOutcomes"]
+        assert (first["tsaAnchorId"], second["tsaAnchorId"]) == (
+            alpha.anchor_id,
+            beta.anchor_id,
+        )
+        first["tokenPath"] = declared
+        second["tokenPath"] = second_spelling
+        second["tokenSha256"] = sha256_bytes(betas_response)
+
+    rewrite_witness(tree, point_both_outcomes_at_one_entry)
+    writes = replace_the_response_between_the_reads(
+        monkeypatch, shared, betas_response
+    )
+    reads = record_one_reads(monkeypatch)
+    invocations = record_openssl_arguments(monkeypatch)
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    # The writer really did run, and really did put a second object there.
+    assert writes == [str(shared)]
+    assert shared.read_bytes() == betas_response
+    assert str(caught.value) == (
+        f"duplicate TSA token path across anchor outcomes: {second_physical} "
+        f"and {first_physical} are one path on a case- or "
+        "normalisation-insensitive filesystem"
+    )
+    # Refused before the second read, and before the second verification.
+    assert reads.count(str(first_physical)) == 1
+    assert reads.count(str(second_physical)) == 0
     assert [arguments[:2] for arguments in invocations].count(["ts", "-reply"]) == 1
 
 
