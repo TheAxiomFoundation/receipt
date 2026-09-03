@@ -35,6 +35,53 @@ parameterization: every repo-specific constant moved into ``AppendGateSpec``,
 supplied by the consumer's committed code. Behavior is gated by the
 differential harness in tests/test_append_gate_equivalence.py.
 
+What this verdict speaks for
+
+The subject of every check below is the working tree as this run read it, and
+the working tree is not the commit. Five things follow. They are the shape of
+this gate rather than gaps in it, and they are stated here because a reader
+who takes the checks below for statements about a commit will read every one
+of them wrong.
+
+The bytes are the working tree's. Each state file is read once, through
+directory descriptors, and every consumer — the row checks, the release
+verification, the base comparisons — is fed that one snapshot; each file is
+re-read at the end. What that establishes is that the path held those bytes at
+the reads this run made.
+
+The commit's content is bound per protected path, and only where the index
+differs from the base. ``release_chain.assert_index_content_bound`` requires
+the blob the index records for a path to be the base tree's — meaning the
+commit under review does not change that path, and the working tree's
+difference from it is the proposal — or the git blob id of the bytes this run
+just verified for it. Per path, and by that rule, is what the differential
+harness leaves available: its fixtures commit with ``git add -A`` and then
+mutate the working tree without staging, so the candidate index equals the
+base tree in every case, and a rule holding the index and the tree to agree as
+a whole would refuse the upstream verifier's own model of what a proposal is.
+
+So there is no coherent-tree guarantee across correlated files. A working-tree
+append can leave the ledger at its base blob in the index while the next
+release bundle is staged, or the reverse; each path is answered for on its own
+terms, and nothing here asks whether one commit could carry all of them at
+once.
+
+The push path is bound to no commit at all, because it has none. With no base
+ref there is no commit under review for an index blob to be compared against,
+and the content binding does not run there; what that path verifies is the
+tree in front of it.
+
+Every descriptor this run holds — the candidate root's, the release root's —
+makes a comparison at two instants rather than confining the reads between
+them. Those reads resolve names again, so a directory swapped after the walk
+and swapped back before the closing check is not seen, and the same is true of
+the state files' closing re-reads: a writer's instant between two reads
+remains.
+
+Closing any of that means verifying the committed tree object rather than the
+working tree, which changes what this gate verifies rather than adding a check
+to it. It is tracked as #43, and it is not done here.
+
 Additions since the extraction close confinement gaps the upstream battery
 never presented: a gate-only proposal is confined to the surfaces its verdict
 speaks for, classified from what the candidate index records as well as from
