@@ -82,7 +82,8 @@ for" and tracked as #43 rather than bound by a test here.
 Docstrings labelled S5-F1 onward name a fifth gate's first round, numbering
 from one again: S5-F1 the ignored files the surface classification's untracked
 listing excludes, S5-F2 the caching settings this verifier read and believed
-rather than overriding on the reads they decide.
+rather than overriding on the reads they decide, S5-F3 the configured leaf
+under the release root whose spelling no walk bound.
 
 The fixture is a local git repository built from scratch, and no network is
 used anywhere here. Most of it holds a README and no manifests, so the gate's
@@ -5509,6 +5510,164 @@ def test_a_nested_release_root_component_in_another_normalisation_is_refused(
             "under it"
         )
     assert str(refusal.value) == expected
+
+
+@pytest.mark.parametrize(
+    ("field", "leaf"),
+    [("manifest_relative", "manifests"), ("anchor_relative", "anchors")],
+    ids=["manifests", "anchors"],
+)
+def test_a_configured_leaf_spelled_differently_on_disk_is_refused(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    leaf: str,
+) -> None:
+    """Binds S5-F3, simulated the way the round-9 spelling cases are. The two
+    configured paths under the release root were walked one component short,
+    so the one component nothing bound was the leaf — the manifest directory's
+    own name, and the anchor directory's. A spec naming ``releases/manifests``
+    over a ``releases/Manifests`` on disk has the chain in that directory
+    verified wherever names fold and no chain at all, which is an acceptance,
+    wherever they do not: one commit, two verdicts, neither about the path the
+    spec pins.
+
+    What a name-folding filesystem produces is one pair of facts — the
+    directory's listing does not hold the requested spelling, and an ``lstat``
+    of that spelling succeeds anyway. Here the second is real and the first is
+    simulated, by answering one ``os.listdir`` of the release root with the
+    folded spelling and delegating every other listing, which is the whole of
+    what ``_assert_component_spelled`` reads. The real-checkout case is below.
+
+    Measured at 62a6d03 with the leaf left out of the walk: ``thesis-facts
+    append check OK: 2 rows, immutable prefix 1`` for both leaves — the
+    manifest directory read as a chain the spec does not name, the anchor
+    directory never questioned."""
+
+    candidate = base_repository(tmp_path)
+    for relative in (CHAIN_SPEC.manifest_relative, CHAIN_SPEC.anchor_relative):
+        (candidate.root / relative).mkdir()
+    release_root = candidate.root / CHAIN_SPEC.release_root_relative
+    real_listdir = os.listdir
+
+    def a_listing_that_folds(where: Any) -> list[str]:
+        listed = real_listdir(where)
+        if pathlib.Path(os.fspath(where)) == release_root:
+            return [leaf.capitalize() if name == leaf else name for name in listed]
+        return listed
+
+    monkeypatch.setattr(os, "listdir", a_listing_that_folds)
+    # The other half of the pair is real: the spelling still resolves.
+    assert (release_root / leaf).is_dir()
+
+    configured = getattr(CHAIN_SPEC, field).as_posix()
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate)
+    assert str(refusal.value) == (
+        f"path component {configured} is not spelled by its directory: "
+        f"{configured}"
+    )
+
+
+@pytest.mark.skipif(
+    os.getuid() == 0, reason="root lists a directory it has no rights on"
+)
+def test_a_manifest_directory_spelled_differently_on_disk_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S5-F3 on a real checkout, which only a name-folding filesystem can
+    carry: where names compare exactly, a directory renamed to ``Manifests``
+    leaves no ``manifests`` to resolve, and the tree is the ordinary
+    no-manifest-directory one this gate accepts. So this skips on ext4 and on
+    CI, where the simulated case above binds the refusal, and it binds the
+    whole arrangement here — the manifests really are read out of the folded
+    directory, and the refusal really does stand ahead of that read.
+
+    Measured at 62a6d03 with the leaf left out of the walk, on APFS: the
+    directory spelled ``Manifests`` is opened as ``releases/manifests``, its
+    contents are enumerated as the chain, and the tree is refused for what that
+    file is rather than for where it is — ``unknown file in closed release
+    manifest directory: notes.json``. On a filesystem that compares names
+    exactly, ``releases/manifests`` resolves to nothing, which is the
+    no-manifest-directory tree
+    ``test_a_manifest_path_that_is_absent_is_still_no_chain`` binds as
+    ``thesis-facts append check OK: 2 rows, immutable prefix 1``. Neither
+    verdict is about ``releases/manifests``, and they are not the same
+    verdict."""
+
+    candidate = base_repository(tmp_path)
+    manifests = candidate.root / CHAIN_SPEC.manifest_relative
+    manifests.mkdir()
+    (manifests / "notes.json").write_text("{}\n", encoding="utf-8")
+    release_root = candidate.root / CHAIN_SPEC.release_root_relative
+    manifests.rename(release_root / "Manifests")
+    if not a_folded_spelling(release_root, CHAIN_SPEC.manifest_relative.name):
+        pytest.skip("the rename left no folded spelling to answer for")
+
+    configured = CHAIN_SPEC.manifest_relative.as_posix()
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate)
+    assert str(refusal.value) == (
+        f"path component {configured} is not spelled by its directory: "
+        f"{configured}"
+    )
+
+
+def test_the_manifest_leaf_keeps_its_own_type_refusal(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S5-F3's other side: what the walk binds at a leaf is its spelling, not
+    its type. A manifest directory spelled exactly as the spec names it and
+    standing over a symlink is still refused by
+    ``assert_manifest_directory_regular`` in the enumeration's own words, and a
+    regular file there likewise, because the walk asks the directory's listing
+    about the name and leaves what the name resolves to alone. The two
+    questions are separable because they are asked of different things.
+
+    ``test_a_manifest_directory_that_is_itself_a_link_keeps_its_own_refusal``
+    and ``test_the_push_path_decides_the_manifest_paths_type_before_its_chain``
+    bind the same boundary from the other direction; this one states it for
+    the leaf the walk now visits."""
+
+    candidate = base_repository(tmp_path)
+    release_root = candidate.root / CHAIN_SPEC.release_root_relative
+    manifest_path = candidate.root / CHAIN_SPEC.manifest_relative
+    manifest_path.write_text("not a directory\n", encoding="utf-8")
+    assert CHAIN_SPEC.manifest_relative.name in os.listdir(release_root)
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate)
+    assert str(refusal.value) == (
+        f"release manifest path is not a regular directory: {manifest_path}"
+    )
+
+
+def test_the_anchor_leaf_is_spelled_but_not_typed_by_the_walk(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S5-F3 for the other leaf the walk now visits, which is where the
+    separation of the two questions earns its keep. A regular file standing at
+    the candidate's own ``releases/anchors`` is spelled exactly as the spec
+    names it, so the walk passes it — and nothing here reads that path at all:
+    the anchors this gate reads come from the trusted code root or from a
+    caller's override, never from the candidate. Judging the leaf's type in the
+    walk would refuse this tree over a directory the verdict never opens.
+
+    ``test_an_anchor_path_that_is_not_a_directory_keeps_its_own_refusal`` binds
+    the sentence for the anchor path that *is* read; this binds that the walk
+    does not take it over, and that visiting the leaf for its spelling costs
+    the tree nothing."""
+
+    candidate = base_repository(tmp_path)
+    release_root = candidate.root / CHAIN_SPEC.release_root_relative
+    (candidate.root / CHAIN_SPEC.anchor_relative).write_text(
+        "not a directory\n", encoding="utf-8"
+    )
+    assert CHAIN_SPEC.anchor_relative.name in os.listdir(release_root)
+
+    assert run_push_gate(candidate) == (
+        "thesis-facts append check OK: 2 rows, immutable prefix 1"
+    )
 
 
 def test_a_state_path_component_spelled_differently_on_disk_is_refused(
