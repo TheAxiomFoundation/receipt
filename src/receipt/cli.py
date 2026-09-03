@@ -766,9 +766,116 @@ _ASCII_LITERAL_PROBE = "".join(chr(code) for code in range(0x20, 0x7F)) + "\n\t"
 _ASCII_LITERAL_BYTES = _ASCII_LITERAL_PROBE.encode("ascii")
 _STREAM_ENCODING_UNSET = object()
 
+#: The canonical names of the codecs this module will write ASCII bytes for a
+#: reader of. Each is a single-byte code page: a fixed 256-entry table, with no
+#: shift state, whose 0x00–0x7F half is the ASCII identity. Those three
+#: properties are what make raw ASCII bytes on the wire mean, to that reader,
+#: exactly the characters :func:`_terminal_safe` approved — no byte can join
+#: with a neighbour to become part of another character, and no byte this
+#: module did not write can change what its bytes mean.
+#:
+#: An enumeration rather than a computed rule, which is the whole point. A
+#: runtime classification admits ``raw-unicode-escape``: it is stateless, its
+#: ASCII range is the identity, no byte of it combines with a neighbour, and it
+#: passes :func:`_ascii_is_literal` — and it decodes the six perfectly
+#: printable characters ``\u001b`` into ESC and ``\u000d`` into CR, so a
+#: producer's filename spelled that way is a control sequence on arrival
+#: (peer review, Sol round 7, round 3). No probe over single characters or
+#: single bytes can see that, because the hazard is a multi-character decode.
+#: So membership is by identity: a page is on this list because it is a code
+#: page, and the probe is kept as a belt over the list rather than as the
+#: proof.
+#:
+#: Deliberately absent, and each for its own reason. ``cp864`` is a single-byte
+#: page whose 0x25 is ARABIC PERCENT SIGN rather than ``%``, so it is not the
+#: ASCII identity and the belt refuses it as well. The EBCDIC pages —
+#: ``cp037``, ``cp273``, ``cp424``, ``cp500`` and their family — are not ASCII
+#: at any byte. ``charmap`` has no fixed table at all; its mapping is the
+#: caller's. Every multi-byte codec is absent even where ASCII survives it
+#: (``cp932``, ``gbk``, ``big5``, ``euc_jp``, ``euc_kr``, ``gb2312``), because
+#: a lead byte this command did not write can change what its first byte
+#: means. And every stateful or transforming codec is absent: the
+#: ``iso2022_*`` family, ``utf-7``, ``hz``, ``unicode-escape``,
+#: ``raw-unicode-escape``, ``idna``, ``punycode``, UTF-16 and UTF-32.
+#:
+#: A codec that satisfies the rule and is not listed is refused, not written
+#: to unsafely; adding it is this list plus the table test that proves the
+#: four properties of every member.
+_ASCII_TRANSPARENT_CODECS = frozenset(
+    {
+        "ascii",
+        # ISO 8859, every part Python ships (there is no part 12).
+        "iso8859-1",
+        "iso8859-2",
+        "iso8859-3",
+        "iso8859-4",
+        "iso8859-5",
+        "iso8859-6",
+        "iso8859-7",
+        "iso8859-8",
+        "iso8859-9",
+        "iso8859-10",
+        "iso8859-11",
+        "iso8859-13",
+        "iso8859-14",
+        "iso8859-15",
+        "iso8859-16",
+        # The Windows ANSI code pages.
+        "cp1250",
+        "cp1251",
+        "cp1252",
+        "cp1253",
+        "cp1254",
+        "cp1255",
+        "cp1256",
+        "cp1257",
+        "cp1258",
+        # The OEM/DOS code pages a console still reports.
+        "cp437",
+        "cp720",
+        "cp737",
+        "cp775",
+        "cp850",
+        "cp852",
+        "cp855",
+        "cp856",
+        "cp857",
+        "cp858",
+        "cp860",
+        "cp861",
+        "cp862",
+        "cp863",
+        "cp865",
+        "cp866",
+        "cp869",
+        "cp874",
+        "cp1006",
+        "cp1125",
+        # The KOI8 family and its neighbours.
+        "koi8-r",
+        "koi8-t",
+        "koi8-u",
+        "kz1048",
+        "ptcp154",
+        "tis-620",
+        # The Mac OS Roman family.
+        "mac-croatian",
+        "mac-cyrillic",
+        "mac-greek",
+        "mac-iceland",
+        "mac-latin2",
+        "mac-roman",
+        "mac-romanian",
+        "mac-turkish",
+        # Two more single-byte tables Python ships.
+        "hp-roman8",
+        "palmos",
+    }
+)
+
 
 def _ascii_is_literal(encoding: str) -> bool:
-    """Whether a codec carries terminal-safe ASCII byte for byte.
+    """Whether a codec carries this one probe of ASCII byte for byte.
 
     The probe contains every printable ASCII character plus LF and TAB. Its
     encoding must equal the same text encoded as ASCII, and those exact bytes
@@ -776,8 +883,20 @@ def _ascii_is_literal(encoding: str) -> bool:
     decode an ASCII sequence such as ``+ABs-`` into ESC, while
     ``unicode_escape`` turns a sanitiser-produced ``\\x1b`` back into ESC.
     UTF-16 and UTF-32 fail because their characters occupy wider code units.
-    Latin-1, cp125x and ISO-8859 codecs carry this repertoire literally and
-    pass. An unknown or unusable codec fails closed.
+    An unknown or unusable codec fails closed.
+
+    What this cannot decide is the question it was once asked to answer.
+    Passing proves one fixed string survives one round trip from a fresh
+    codec; it does not prove that *every* ASCII sequence does, nor that the
+    codec was in a fresh state when :func:`_emit` reached it.
+    ``raw-unicode-escape`` passes and decodes ``\\u001b`` — six printable
+    characters a producer's filename may carry — into ESC; ``iso2022_jp``
+    passes and, after a single non-ASCII write has left its stream in JIS X
+    0208 mode, reads the raw ASCII ``PASS`` as ``日仭嗷`` (peer review, Sol
+    round 7, round 3). So this is now a belt over
+    :data:`_ASCII_TRANSPARENT_CODECS` rather than the proof:
+    :func:`_byte_safe_encoding` asks it of a codec that is already on the
+    list, and a member that somehow fails it is refused.
     """
 
     try:
@@ -879,17 +998,29 @@ def _byte_safe_encoding(
     Anything else is eligible only for ASCII with ``backslashreplace``, so no
     character outside ASCII can produce a byte at all.
 
-    Eligibility is proved, not inferred from the codec's family. The bytes
-    are written directly to the stream's buffer, but a reader interprets them
-    through the codec the stream advertises. :func:`_ascii_is_literal` encodes
-    every printable ASCII character plus LF and TAB and requires exact ASCII
-    bytes, then decodes those bytes and requires the original probe. UTF-7
-    fails because printable ASCII sequences can decode to controls;
-    ``unicode_escape`` fails because backslash escapes decode back to the
-    controls the sanitiser removed; UTF-16 and UTF-32 fail because ASCII is
-    not one byte per character. Latin-1, cp125x and ISO-8859 codecs pass. A
-    failing or unknown codec is refused before any bytes are written (peer
-    review, Sol round 7).
+    Eligibility is granted by name, from :data:`_ASCII_TRANSPARENT_CODECS`,
+    and not inferred from a runtime probe. The bytes are written directly to
+    the stream's buffer, but a reader interprets them through the codec the
+    stream advertises, and what has to be true of that codec is stronger than
+    what any probe can ask: every ASCII sequence must arrive as itself, from
+    whatever state a previous write left the stream in. Only a single-byte,
+    stateless code page whose lower half is the ASCII identity is that, and
+    the list is those pages by name.
+
+    A probe cannot substitute for the list, which is why this stopped being
+    one. ``raw-unicode-escape`` passes :func:`_ascii_is_literal` and decodes
+    the six printable characters ``\\u001b`` into ESC, so a producer's
+    filename spelled that way starts a control sequence in a reader.
+    ``iso2022_jp`` passes and is a stateful codec: one non-ASCII character
+    written earlier leaves the stream in JIS X 0208 mode, where the raw ASCII
+    ``PASS`` this module then writes reads as ``日仭嗷`` and a longer verdict
+    raises ``UnicodeDecodeError`` in the consumer (peer review, Sol round 7,
+    round 3). Both are refused now, along with UTF-7 and ``unicode_escape``
+    (which the probe already caught), UTF-16 and UTF-32 (whose ASCII is not
+    one byte per character), ``hz``, ``idna`` and anything unknown.
+
+    The probe is kept as a belt over the list: a listed codec that fails it is
+    refused rather than trusted, so the two have to agree.
 
     A codec-less, bufferless stream is the exception because it is not a byte
     stream at all. :func:`_stream_encoding` returns ``None`` for that Unicode
@@ -926,11 +1057,13 @@ def _byte_safe_encoding(
     every one of them; UTF-16 and UTF-32 hand the terminal bytes no
     character in the text ever was.
 
-    The cost is that a stream whose codec cannot prove literal ASCII is
-    refused. In particular UTF-7, ``unicode_escape``, UTF-16 and UTF-32 no
-    longer receive raw ASCII bytes that their own decoders interpret as
-    something else. A literal-ASCII legacy stream still receives ASCII with
-    backslash escapes for non-ASCII text.
+    The cost is that a stream whose codec is not a code page this module
+    names is refused rather than written to. That is a refusal for a Japanese
+    or Korean multi-byte console, and it is the right side to err on: the
+    alternative is a verdict whose bytes mean something else to the reader it
+    was written for. A single-byte legacy stream — Latin-1, cp1252, an OEM
+    page, KOI8 — still receives ASCII with backslash escapes for non-ASCII
+    text.
 
     Asked once per emission, by :func:`main`, and the answer is handed to
     everything downstream. Asking again inside :func:`_emit` made the
@@ -953,7 +1086,7 @@ def _byte_safe_encoding(
         raise TypeError("stream encoding decision is not a string or None")
     if name in _UTF8_STREAM_ENCODINGS:
         return "utf-8"
-    if _ascii_is_literal(name):
+    if name in _ASCII_TRANSPARENT_CODECS and _ascii_is_literal(name):
         return "ascii"
     raise OSError(
         f"verdict stream codec {name} does not carry ASCII literally; "
