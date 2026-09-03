@@ -923,6 +923,7 @@ def test_two_declared_paths_under_distinct_ancestors_still_verify(
 
 
 def test_maximum_rows_at_maximum_portable_depth_use_a_shared_prefix_trie(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Binds S7-F1: cumulative prefix strings made depth times rows allocations.
 
@@ -934,9 +935,22 @@ def test_maximum_rows_at_maximum_portable_depth_use_a_shared_prefix_trie(
     or budget for the test to assert; paths with distinct prefixes retained
     that same 2.1-million cardinality in its dictionary.
 
-    Without S7-F1 the returned allocation count is absent or is the visit
-    count rather than 4,606, and the derived shared-budget assertions fail.
+    What the folded-character recorder measures is the finding's own number.
+    Every prefix reaches ``_path_fold`` exactly once per visit either way, so
+    the total characters folded is the total prefix text the check
+    materialises. The trie folds one component per visit — 2,101,248
+    characters over these paths, plus the 4,190,208 the whole-path pass folds
+    and always did. The cumulative loop folded a joined prefix per visit
+    instead: 1,069,551,616 characters, one gibibyte of strings for one
+    within-cap journal, which is what the finding measured as about two
+    gibibytes held live.
+
+    Without S7-F1 the call does not accept a budget, the returned allocation
+    count is absent rather than 4,606, and the folded-character bound is
+    exceeded by a factor of about 170.
     """
+
+    import receipt.corpus as corpus_module
 
     from receipt.corpus import _PathPrefixWork, _reject_aliasing_paths
 
@@ -949,6 +963,14 @@ def test_maximum_rows_at_maximum_portable_depth_use_a_shared_prefix_trie(
     assert len(paths[0]) == 1023
     assert len(paths[0].split("/")) == 511
 
+    real_fold = corpus_module._path_fold
+    folded = [0]
+
+    def recording_fold(value: str) -> str:
+        folded[0] += len(value)
+        return real_fold(value)
+
+    monkeypatch.setattr(corpus_module, "_path_fold", recording_fold)
     work = _PathPrefixWork()
     entries = _reject_aliasing_paths(paths, work=work)
 
@@ -959,6 +981,14 @@ def test_maximum_rows_at_maximum_portable_depth_use_a_shared_prefix_trie(
     )
     assert work.work == MAX_JOURNAL_ROWS * 511 == 2093056
     assert entries == 510 + MAX_JOURNAL_ROWS == 4606
+    # The whole-path pass folds each path once and is unchanged; the prefix
+    # pass folds one component per visit rather than one joined prefix.
+    whole_paths = MAX_JOURNAL_ROWS * 1023
+    components = MAX_JOURNAL_ROWS * (510 * 1 + 3)
+    assert folded[0] == whole_paths + components == 6291456
+    # A joined prefix per visit is 1 + 3 + 5 + … + 1023 per path.
+    assert MAX_JOURNAL_ROWS * 511 * 511 == 1069551616
+    assert folded[0] < 8 * 1024 * 1024
 
 
 def test_the_fixture_spends_eighteen_visits_from_one_shared_prefix_budget(
