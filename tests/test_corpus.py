@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import unicodedata
 
 import pytest
 
@@ -4663,3 +4664,144 @@ def test_the_device_basename_is_derived_the_way_win32_derives_it() -> None:
         "notes.yaml",
     ):
         assert _win32_device_basename(name) not in WIN32_RESERVED_DEVICE_NAMES, name
+
+
+def _case_insensitive(directory: pathlib.Path) -> bool:
+    """Whether this volume resolves a name under a spelling it does not store."""
+
+    probe = directory / "ReceiptCaseProbe"
+    probe.write_text("probe\n")
+    try:
+        return (directory / "receiptcaseprobe").exists()
+    finally:
+        probe.unlink()
+
+
+def test_refuses_an_attested_path_the_directory_does_not_spell(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5R2-F1: a bound path was opened by its declared spelling.
+
+    The journal attests ``readme.md`` and the tree holds ``README.md``. On a
+    case-insensitive volume the declared spelling resolves to the stored one,
+    so the file was lstat-ed, opened, hashed and matched, and the verdict
+    passed — while a case-sensitive clone of the *same* corpus has no
+    ``readme.md`` at all and refuses it as missing. Which filesystem the
+    auditor cloned onto decided whether the corpus verified, which is exactly
+    the host-dependence the fold-key rules exist to remove.
+
+    Refused on every filesystem now, by one of two mechanisms, and the test
+    asserts the one that belongs to the host it is running on: where the
+    volume resolves the declared spelling, the component walk refuses because
+    the parent's listing does not emit it; where it does not, nothing
+    resolves and the existing missing-file refusal speaks. Without the fix
+    the first host returns a CorpusVerification over the corpus.
+    """
+
+    attested = {**ATTESTED, "readme.md": "# corpus\n"}
+    write_tree(tmp_path, attested=attested)
+    (tmp_path / "readme.md").unlink()
+    (tmp_path / "README.md").write_text("# corpus\n")
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path,
+            render_journal(journal_rows(attested=attested)),
+            spec=corpus_spec(),
+        )
+    if _case_insensitive(tmp_path):
+        assert str(caught.value) == (
+            "path component 'readme.md' is not spelled by its directory: "
+            "readme.md"
+        )
+    else:
+        assert str(caught.value) == (
+            "bound file is missing or not a regular file: readme.md"
+        )
+
+
+def test_refuses_an_attested_name_stored_under_a_different_normalization(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5R2-F1: normalization aliases a spelling exactly as case does.
+
+    The journal attests the NFC spelling of ``café.md``; the tree stores the
+    NFD one. APFS and HFS+ resolve either spelling to the file they hold, so
+    the declared name opened the stored bytes and the digest matched; ext4
+    holds two distinct names and the declared one is simply absent. The same
+    corpus, the same journal, two verdicts — and the listing is what settles
+    it, because a listing emits the spelling the volume stores.
+
+    Without the fix the resolving host passes.
+    """
+
+    nfc = unicodedata.normalize("NFC", "caf\u00e9.md")
+    nfd = unicodedata.normalize("NFD", nfc)
+    assert nfc != nfd
+    attested = {**ATTESTED, nfc: "# corpus\n"}
+    write_tree(tmp_path, attested=attested)
+    (tmp_path / nfc).unlink()
+    (tmp_path / nfd).write_text("# corpus\n")
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path,
+            render_journal(journal_rows(attested=attested)),
+            spec=corpus_spec(),
+        )
+    message = str(caught.value)
+    assert message in (
+        f"path component {nfc!r} is not spelled by its directory: {nfc}",
+        f"bound file is missing or not a regular file: {nfc}",
+    ), message
+
+
+def test_refuses_a_required_attested_path_the_directory_does_not_spell(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5R2-F1: the requirement is what makes the gap consequential.
+
+    The spec *requires* ``readme.md``, so the consumer has said the corpus is
+    not complete without it. On a case-insensitive clone the requirement was
+    satisfied by a file named ``README.md``; on a case-sensitive clone of the
+    same bytes the requirement can never be satisfied at all. A required
+    path whose satisfaction depends on the auditor's filesystem is not a
+    requirement, which is why the spelling is bound rather than the
+    resolution.
+
+    Without the fix the resolving host reports the requirement met.
+    """
+
+    attested = {**ATTESTED, "readme.md": "# corpus\n"}
+    write_tree(tmp_path, attested=attested)
+    (tmp_path / "readme.md").unlink()
+    (tmp_path / "README.md").write_text("# corpus\n")
+    spec = corpus_spec(
+        required_attested_paths=frozenset({".axiom/toolchain.toml", "readme.md"})
+    )
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows(attested=attested)), spec=spec
+        )
+    assert "readme.md" in str(caught.value)
+
+
+def test_a_content_file_found_by_its_spelled_name_still_verifies(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5R2-F1, the other side: the sweep already spells its own names.
+
+    Every content path in the journal is compared against a set the walk
+    built out of ``os.scandir`` names, so a content file that verifies is one
+    the listing emitted under exactly that spelling — the new component check
+    can only agree with the sweep about them. It is asked of them anyway, so
+    that one rule covers both bound kinds rather than two rules covering one
+    each, and this asserts the rule costs the ordinary corpus nothing.
+
+    This test passes with the fix disabled, which is the point.
+    """
+
+    write_tree(tmp_path)
+    verification = verify_corpus_binding(
+        tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+    )
+    assert [entry.path for entry in verification.content] == sorted(CONTENT)
+    assert [entry.path for entry in verification.attested] == sorted(ATTESTED)
