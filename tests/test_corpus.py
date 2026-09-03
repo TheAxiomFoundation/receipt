@@ -5563,13 +5563,14 @@ def test_refuses_a_row_larger_than_the_parser_budget_before_parsing_it(
     describes — with no budget consulted anywhere on the way.
 
     ``MAX_JOURNAL_ROW_BYTES`` is checked on the row's own bytes first,
-    before ``strip`` and before the parse. The oversized row is placed
-    first, so the recorder on ``_parse_row`` can assert what matters: not
-    that this row was refused before it was parsed, but that *nothing* was
-    parsed at all.
+    before the decode, before ``strip`` and before the parse. The oversized
+    row is placed first, so the recorder on ``_parse_row`` can assert what
+    matters: not that this row was refused before it was parsed, but that
+    *nothing* was parsed at all.
 
     Without it ``_parse_row`` is called and ``json.loads`` runs on a row of
-    whatever size the producer chose.
+    whatever size the producer chose. The test below this one is the same
+    bound one level lower, where S5R4-F4 moved it.
     """
 
     import receipt.corpus as corpus_module
@@ -5610,10 +5611,10 @@ def test_refuses_a_journal_larger_than_the_parser_budget_before_decoding_it(
     The ordering is what this asserts, and it is asserted by handing the
     parser bytes that are *not* valid UTF-8: if the size check runs first the
     refusal names the size, and if it does not the refusal names the
-    encoding. The real budget is eight gibibytes — the product of the row cap
-    and the per-row byte cap — so it is lowered here rather than met, which
-    is the only way to test a bound whose whole point is that reaching it
-    honestly is out of reach.
+    encoding. The real budget is sixty-four mebibytes — a stated ceiling on
+    what a corpus journal may be at all, where it used to be the eight
+    gibibytes the two constants below it multiply to (S5R4-F4) — so it is
+    lowered here rather than met.
 
     Without the check this raises "corpus journal is not UTF-8", after
     decoding whatever it was given.
@@ -5629,17 +5630,105 @@ def test_refuses_a_journal_larger_than_the_parser_budget_before_decoding_it(
     )
 
 
-def test_the_journal_byte_budget_is_the_product_of_the_two_below_it() -> None:
-    """Binds S5R3-F8: the derivation is arithmetic, so it is pinned.
+def test_refuses_an_oversized_row_before_the_journal_is_decoded(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S5R4-F4: the row bound bound the parse, not the allocation.
+
+    S5R3-F8 added a per-row byte cap and checked it on the decoded text: the
+    whole payload was decoded, the whole decoded text was split into rows,
+    and only then was the first row measured. So the allocation the cap
+    exists to stop had already been made twice over by the time the cap
+    spoke, and what it bounded was ``json.loads`` alone.
+
+    The rows are found by splitting the *raw bytes* now, and each row is
+    measured as bytes before it is turned into text. What proves the order
+    is that the oversized row here is not valid UTF-8: if any decode ran
+    first the refusal would name the encoding, and the recorders show that
+    neither ``_parse_row`` nor ``json.loads`` was reached at all.
+
+    Without the fix this raises "corpus journal is not UTF-8", after
+    allocating a string for every byte the producer sent.
+    """
+
+    import receipt.corpus as corpus_module
+
+    parsed: list[int] = []
+    loaded: list[str] = []
+    monkeypatch.setattr(
+        corpus_module,
+        "_parse_row",
+        lambda line, number, spec: parsed.append(number),
+    )
+    real_loads = json.loads
+
+    def recording_loads(*arguments, **options):  # type: ignore[no-untyped-def]
+        loaded.append("called")
+        return real_loads(*arguments, **options)
+
+    monkeypatch.setattr(corpus_module.json, "loads", recording_loads)
+
+    huge = b"\xff" * (MAX_JOURNAL_ROW_BYTES + 1)
+    write_tree(tmp_path)
+    journal = huge + b"\n" + render_journal(journal_rows())
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, journal, spec=corpus_spec())
+    assert parsed == [] and loaded == []
+    assert str(caught.value) == (
+        f"journal row 1 is {len(huge)} bytes, over the parser budget of "
+        f"{MAX_JOURNAL_ROW_BYTES}"
+    )
+
+
+def test_the_total_byte_budget_speaks_before_the_row_budget(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S5R4-F4, the order: the total is the outermost of the three.
+
+    A payload can be over the total *and* carry an oversized row, and which
+    refusal speaks says which check ran first. The total is checked on the
+    raw bytes before the payload is split, let alone decoded, so it is the
+    one that speaks — and it is the only bound that can say anything at all
+    about an input that is not a journal.
+
+    The ceiling is lowered here rather than met: sixty-four mebibytes is a
+    statement about what a corpus journal may be, not a number a test should
+    allocate.
+
+    This ordering held before S5R4-F4 as well, and the test is here because
+    of what changed beneath it: the row bound now runs on bytes too, so the
+    two checks are asked in the same units and which of them speaks is worth
+    pinning.
+    """
+
+    monkeypatch.setattr("receipt.corpus.MAX_JOURNAL_BYTES", 256)
+    write_tree(tmp_path)
+    journal = b"\xff" * 300 + b"\n"
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, journal, spec=corpus_spec())
+    assert str(caught.value) == (
+        "corpus journal is 301 bytes, over the parser budget of 256"
+    )
+
+
+def test_one_journal_budget_is_derived_and_the_other_is_stated() -> None:
+    """Binds S5R3-F8 and S5R4-F4: which of these numbers is arithmetic.
 
     ``MAX_JOURNAL_ROW_BYTES`` is derived from the largest row the schema
     admits — a gate declaration carrying ``MAX_EVIDENCE_ENTRIES`` entries
     whose key and value are each ``MAX_EVIDENCE_TEXT`` characters, with JSON
-    free to spell one character in twelve bytes — and ``MAX_JOURNAL_BYTES``
-    is that times ``MAX_JOURNAL_ROWS``. Both are written out beside the
-    constants; this asserts the numbers rather than leaving the prose to be
-    believed, so raising ``MAX_EVIDENCE_TEXT`` or ``MAX_EVIDENCE_ENTRIES``
-    without re-deriving the row cap fails a test.
+    free to spell one character in twelve bytes — and the derivation is
+    written out beside the constant, so raising ``MAX_EVIDENCE_TEXT`` or
+    ``MAX_EVIDENCE_ENTRIES`` without re-deriving the row cap fails here.
+
+    ``MAX_JOURNAL_BYTES`` is not derived from anything, and nothing derives
+    from it. It used to be the product of the two constants above, which is
+    eight gibibytes — the product of two worst cases no journal reaches at
+    once, and no ceiling at all on the one input this module cannot
+    recognise, which is an input that is not a journal (S5R4-F4). It is a
+    stated ceiling now, asserted here to be far below that product so a
+    later edit cannot quietly restore the derivation, and far above anything
+    a corpus carries: a real journal is kilobytes.
     """
 
     string = 12 * MAX_EVIDENCE_TEXT + 2
@@ -5648,7 +5737,11 @@ def test_the_journal_byte_budget_is_the_product_of_the_two_below_it() -> None:
     assert MAX_EVIDENCE_ENTRIES * entry == 1573376
     assert MAX_JOURNAL_ROW_BYTES == 2097152
     assert MAX_EVIDENCE_ENTRIES * entry <= MAX_JOURNAL_ROW_BYTES
-    assert MAX_JOURNAL_BYTES == MAX_JOURNAL_ROWS * MAX_JOURNAL_ROW_BYTES
+    assert MAX_JOURNAL_BYTES == 64 * 1024 * 1024
+    assert MAX_JOURNAL_BYTES < MAX_JOURNAL_ROWS * MAX_JOURNAL_ROW_BYTES
+    # And what a journal actually costs: the package's own fixture, which
+    # binds four paths and declares three gates.
+    assert len(render_journal(journal_rows())) < 2048
 
 
 def test_refuses_a_journal_with_more_rows_than_the_parser_budget(
