@@ -2646,7 +2646,7 @@ def test_the_index_is_asked_about_a_path_not_a_pattern(
     append_one_row(candidate)
 
     assert release_chain._index_entries(candidate.root, "releases/x[y]z.md") == [
-        ("100644", "0", "releases/x[y]z.md")
+        ("100644", "0", "releases/x[y]z.md", False)
     ]
     release_chain.assert_index_agrees_with_tree(candidate.root, "releases/x[y]z.md")
     release_chain.assert_state_path_tracked(candidate.root, "releases/x[y]z.md")
@@ -2998,7 +2998,7 @@ def test_an_ambient_literal_pathspec_mode_cannot_hide_the_index(
     state_path = CHAIN_SPEC.state_relative.as_posix()
     assert [
         listed
-        for _mode, _stage, listed in release_chain._index_entries(
+        for _mode, _stage, listed, _intent in release_chain._index_entries(
             candidate.root, state_path
         )
     ] == [state_path]
@@ -3035,7 +3035,7 @@ def test_an_ambient_icase_pathspec_mode_cannot_widen_an_index_read(
 
     assert [
         listed
-        for _mode, _stage, listed in release_chain._index_entries(
+        for _mode, _stage, listed, _intent in release_chain._index_entries(
             candidate.root, "releases/README.md"
         )
     ] == ["releases/README.md"]
@@ -3086,3 +3086,180 @@ def test_the_git_environment_drops_every_pathspec_mode(
     assert not set(environment) & set(release_chain.PATHSPEC_ENVIRONMENT)
     assert environment["GIT_NO_REPLACE_OBJECTS"] == "1"
     assert environment["GIT_DIR_FIXTURE_MARKER"] == "carried through"
+
+
+def re_add_as_intent_to_add(candidate: Candidate, relative: str) -> None:
+    """Drop one tracked path from the index and re-add it with ``git add -N``.
+
+    What is left is an *intent-to-add* entry: stage 0, mode 100644, the empty
+    blob's object id and no content. The working tree is untouched throughout,
+    so every comparison that reads it agrees with the entry — and a commit
+    made from this index deletes the path.
+    """
+
+    git(candidate.root, "rm", "--cached", "--quiet", "--", relative)
+    git(candidate.root, "add", "-N", "--", relative)
+
+
+def test_an_intent_to_add_index_entry_is_readable_as_such(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S4-F3 at the parse. ``git ls-files -s`` gives an intent-to-add
+    entry as ``100644 <empty blob> 0``, which is exactly what an ordinary
+    tracked file with the same content looks like — and an empty file really
+    does carry that object id, so the object id is no test either. The flag
+    word ``git ls-files --debug`` prints is: ``CE_INTENT_TO_ADD`` is set for
+    one and clear for the other. Without reading it the two records here are
+    indistinguishable."""
+
+    candidate = base_repository(tmp_path)
+    state_path = CHAIN_SPEC.state_relative.as_posix()
+    empty = candidate.root / "releases" / "empty.md"
+    empty.write_text("", encoding="utf-8")
+    git(candidate.root, "add", "--", "releases/empty.md")
+    re_add_as_intent_to_add(candidate, state_path)
+
+    (intent_mode, intent_stage, _path, intent) = release_chain._index_entries(
+        candidate.root, state_path
+    )[0]
+    (empty_mode, empty_stage, _empty_path, empty_intent) = release_chain._index_entries(
+        candidate.root, "releases/empty.md"
+    )[0]
+    # Same mode, same stage, same object id — and only one of them records
+    # anything.
+    assert (intent_mode, intent_stage) == (empty_mode, empty_stage) == ("100644", "0")
+    assert git(candidate.root, "rev-parse", f":{state_path}") == git(
+        candidate.root, "rev-parse", ":releases/empty.md"
+    )
+    assert intent is True
+    assert empty_intent is False
+
+
+@pytest.mark.parametrize("with_base", [True, False], ids=["base-ref", "push"])
+def test_an_intent_to_add_state_entry_is_refused(
+    tmp_path: pathlib.Path, with_base: bool
+) -> None:
+    """Binds S4-F3 for the two files the whole verdict is about. ``git rm
+    --cached`` of the ledger followed by ``git add -N`` of it leaves a stage-0
+    100644 entry at the path, so the tracked-state check found an entry, the
+    mode was supported, and the working tree carried exactly what the entry
+    claimed — while the entry records no content and the commit under review
+    deletes the ledger. Without the flag read this proposal is accepted on
+    both paths."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    state_path = CHAIN_SPEC.state_relative.as_posix()
+    re_add_as_intent_to_add(candidate, state_path)
+    # git itself calls the entry a modification of a tracked path, which is
+    # the disguise: nothing an index read returns says the content is gone.
+    assert f"M\t{state_path}" in git(
+        candidate.root, "diff-index", "--cached", "--name-status", "HEAD"
+    ).splitlines()
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate) if with_base else run_push_gate(candidate)
+    assert str(refusal.value) == (
+        f"index entry for {state_path} is intent-to-add and records no content"
+    )
+
+
+def test_an_intent_to_add_state_entry_keeps_the_earlier_refusals(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S4-F3's placement inside the tracked-state check: last, after absent,
+    unmerged and non-regular, because a 100644 stage-0 entry has already
+    answered all three and there is nothing else left to say about it. An
+    intent-to-add entry is not always 100644 — ``git add -N`` records the
+    working tree's type, so a state path replaced by a symlink and re-added
+    that way is an intent-to-add 120000 entry — and that is the refusal that
+    fires, in the words it already had."""
+
+    candidate = base_repository(tmp_path)
+    state_path = CHAIN_SPEC.state_relative.as_posix()
+    ledger = candidate.root / CHAIN_SPEC.state_relative
+    ledger.unlink()
+    ledger.symlink_to(tmp_path / "elsewhere.jsonl")
+    re_add_as_intent_to_add(candidate, state_path)
+    assert release_chain._index_entries(candidate.root, state_path) == [
+        ("120000", "0", state_path, True)
+    ]
+
+    with pytest.raises(ReleaseChainError) as refusal:
+        release_chain.assert_state_path_tracked(
+            candidate.root, CHAIN_SPEC.state_relative
+        )
+    assert str(refusal.value) == (
+        f"state path {state_path} has a non-regular index entry: 120000"
+    )
+
+
+def test_an_intent_to_add_base_release_entry_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S4-F3 for a base release file. The still-indexed check refuses a
+    path ``git rm --cached`` removed outright; ``git add -N`` puts an entry
+    back where that check looks, at the mode and stage it requires, so the
+    removal was hidden behind an entry recording nothing. The release file is
+    still on disk and byte-identical, so neither byte nor mode comparison
+    above says anything. Without the flag read this proposal is accepted."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    re_add_as_intent_to_add(candidate, "releases/README.md")
+    assert (candidate.root / "releases" / "README.md").read_text(
+        encoding="utf-8"
+    ) == "Release journal for the fixture ledger.\n"
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "index entry for releases/README.md is intent-to-add and records no "
+        "content"
+    )
+
+
+def test_an_intent_to_add_base_release_entry_keeps_the_byte_refusal(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S4-F3's placement in the release-history pass: the new refusal sits
+    after every comparison for that path, so a proposal that also rewrites
+    the file's bytes gets the byte refusal the upstream verifier gives, not
+    this one."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    readme = candidate.root / CHAIN_SPEC.release_root_relative / "README.md"
+    readme.write_text("Rewritten as well.\n", encoding="utf-8")
+    re_add_as_intent_to_add(candidate, "releases/README.md")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        f"existing release file bytes changed relative to {candidate.base}: "
+        "releases/README.md"
+    )
+
+
+def test_an_intent_to_add_release_path_is_refused_by_the_root_scan(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S4-F3 for a release path the base does not carry, which no
+    per-file comparison reaches: ``git add -N`` under ``releases/`` records a
+    stage-0 100644 entry for a file the reconciliation then finds on disk, so
+    the index and the working tree were called agreed over an entry holding
+    nothing. The root scan reads the flag beside the mode. Without it the
+    push path accepts this tree outright."""
+
+    candidate = base_repository(tmp_path)
+    (candidate.root / "releases" / "NOTES.md").write_text(
+        "release notes\n", encoding="utf-8"
+    )
+    git(candidate.root, "add", "-N", "--", "releases/NOTES.md")
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate)
+    assert str(refusal.value) == (
+        "index entry for releases/NOTES.md is intent-to-add and records no "
+        "content"
+    )

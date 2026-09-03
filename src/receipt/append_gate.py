@@ -58,7 +58,11 @@ index reads asks about the exact path, as a literal pathspec, rather than
 handing git a name to interpret as a pattern — and every git read here, like
 every one in ``release_chain``, runs with git's four pathspec-mode environment
 variables dropped, because a pathspec written here has to mean what it says
-rather than whatever the caller's environment would make of it.
+rather than whatever the caller's environment would make of it. Every one of
+them reads the entry's flag word too: an intent-to-add entry records no
+content while looking in every other respect like a tracked file, so the
+tracked-state check, the still-indexed check, and the release root's scan each
+refuse one rather than comparing against a path this commit deletes.
 
 What the closing re-check cannot do is bound the whole run. Verifying a
 working tree means verifying something the candidate can write to for as long
