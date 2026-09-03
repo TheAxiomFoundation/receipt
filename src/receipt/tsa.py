@@ -39,34 +39,34 @@ can activate it -- the ported supplemental-outcome refusal, reaching a case
 the baseline let through because it took the ID alone for the identity,
 while a pending anchor whose signer any active anchor already allows is that
 active authority under a new name and is skipped for the same reason a
-bundle may not allow one signer under two of its anchors; an
-unavailable witness of either schema whose reason is not a string, or that
-carries token evidence at the witness level (the v2 per-anchor outcome has
-always refused both); an unavailable legacy witness that names a bundle by
-any of its three claim fields, whose claim is then resolved and counted
-where the baseline ignored those fields; and a v2 witness that offers one
-RFC 3161 response under two of its outcomes, counted across the primary and
-supplemental outcomes together so that one response cannot stand for a
-bundle configuring more than one anchor -- counted three ways over: the
-physical file an outcome points at, refused before that outcome's response
-is read at all; the file digest that outcome declares, refused before its
-token is verified and so ahead of the ported refusals inside
-``verify_timestamp_token``; and the pair of the ``TSTInfo`` an authority
-signed and the certificate that signed it, refused where that verification
-returns.  Each reaches what the one before it cannot.  Two outcomes may name
-one path and declare two digests, and each outcome reads the path for
-itself, so a writer serving a different valid response to each read
-satisfies both from a repository that never held both.  And nearly
-everything around a signed ``TSTInfo`` is the producer's to rewrite -- the
-unsigned ``PKIStatusInfo`` wrapper, and the ``certificates``, ``crls`` and
-``unsignedAttrs`` a ``SignedData`` carries outside its signature -- so one
-issuance has many valid encodings and a rule counting files counts
-encodings.  The signer is half of that last identity because a ``TSTInfo``
-need not say whose it is: RFC 3161 makes its serial unique within one TSA
-and no further, and its nonce and its ``tsa`` name optional, so two
-independent pinned authorities can sign byte-identical ``TSTInfo``s with no
-forgery at all.  All three are admissible because no witness in the pinned
-tree names one path twice or offers one authority's timestamp twice.
+bundle may not allow one signer under two of its anchors; an unavailable
+witness of either schema whose reason is not a string, or that carries token
+evidence at the witness level (the v2 per-anchor outcome has always refused
+both); an unavailable legacy witness that names a bundle by any of its three
+claim fields, whose claim is then resolved and counted where the baseline
+ignored those fields; and a v2 witness that offers one RFC 3161 response
+under two of its outcomes, counted across the primary and supplemental
+outcomes together so that one response cannot stand for a bundle configuring
+more than one anchor -- counted three ways over: the physical file an
+outcome points at, refused before that outcome's response is read at all;
+the file digest that outcome declares, refused before its token is verified
+and so ahead of the ported refusals inside ``verify_timestamp_token``; and
+the pair of the ``TSTInfo`` an authority signed and the certificate that
+signed it, refused where that verification returns.  Each reaches what the
+one before it cannot.  Two outcomes may name one path and declare two
+digests, and each outcome reads the path for itself, so a writer serving a
+different valid response to each read satisfies both from a repository that
+never held both.  And nearly everything around a signed ``TSTInfo`` is the
+producer's to rewrite -- the unsigned ``PKIStatusInfo`` wrapper, and the
+``certificates``, ``crls`` and ``unsignedAttrs`` a ``SignedData`` carries
+outside its signature -- so one issuance has many valid encodings and a rule
+counting files counts encodings.  The signer is half of that last identity
+because a ``TSTInfo`` need not say whose it is: RFC 3161 makes its serial
+unique within one TSA and no further, and its nonce and its ``tsa`` name
+optional, so two independent pinned authorities can sign byte-identical
+``TSTInfo``s with no forgery at all.  All three are admissible because no
+witness in the pinned tree names one path twice or offers one authority's
+timestamp twice.
 
 The pinned root behind the two counting refusals is read from the repository
 exactly once, and every check runs on those bytes: the PEM hash over the
@@ -97,14 +97,15 @@ was taken from one open of its pathname and ``openssl ts -reply`` and
 described the file at an earlier instant than the one the verifications read;
 the bytes that were hashed are now the bytes both of them are given.  That
 digest identifies a file and not a timestamp, which is why the private
-``_verify_timestamp_token`` returns the digest of the signed ``TSTInfo``
-beside its evidence.  Beside, and not inside: :class:`TokenEvidence` is the
-public dataclass 0.5.1 shipped, field for field and in order, because the
-digest is a counting aid one caller in this module needs and adding it as a
-required field would break a keyword construction that omitted it, shift a
-positional one, and change what serializing the fields produces -- none of
-them things a maintenance release may do.  A later minor version can expose
-it if a consumer asks for it.
+``_verify_timestamp_token`` returns the identity of the timestamp -- the
+signed ``TSTInfo`` and the certificate that signed it -- beside its
+evidence.  Beside, and not inside: :class:`TokenEvidence` is the public
+dataclass 0.5.1 shipped, field for field and in order, because that
+identity is a counting aid one caller in this module needs and adding it as
+a required field would break a keyword construction that omitted it, shift
+a positional one, and change what serializing the fields produces -- none
+of them things a maintenance release may do.  A later minor version can
+expose it if a consumer asks for it.
 
 All three of those reads open without waiting.  Each has a path-level check
 in front of it, and the check answers about a pathname while the descriptor
