@@ -155,6 +155,27 @@ of its leaf, which already has a refusal of its own — the manifest
 directory's is the enumeration's, the anchor directory's is the walk at the
 top of ``verify_release_chain`` — so no sentence of theirs is replaced.
 
+The manifest directory's own refusal holds only once something has decided to
+enumerate, and on the push path what decides that is the leaf's type:
+``initialized`` is ``manifest_directory.is_dir() and any(iterdir())``, which
+is false for a tracked blob standing where that directory was, for an empty
+untracked link, and for a dangling one. Each of those was this path's word for
+"this tree has no chain" — an acceptance with no manifest, signature or
+receipt read — while the commit under review may carry the chain still. So
+that type is decided before the question is asked, in the enumeration's own
+words (``release_chain.assert_manifest_directory_regular``). It stands ahead
+of the push path's reads because it decides whether there are any, and it
+pre-empts nothing: the enumeration is the only thing that would have spoken
+for such a leaf, it does so for exactly one of the three shapes — a link to a
+populated directory — and this says the same sentence for it. The anchor
+directory's leaf is not the same case and gets no such check: nothing decides
+whether the anchors are read, so the first read through that path meets them,
+and a non-directory there is already refused as ``missing or non-regular
+producer public key`` — and past it, ``missing or non-regular TSA anchor`` —
+refusals the extraction gave, which a check here would only replace. A test
+pins that, so the difference between the two leaves is bound rather than
+asserted.
+
 Standing ahead of the read means standing where a pre-existing refusal about
 that content would have stood, and three cases do:
 
@@ -1768,6 +1789,13 @@ def check_release_chain_without_base(
     the index scan that follows returns when no entry names the root. So the
     walked root is held open across the chain verification and that scan, and
     re-checked before the verdict returns.
+
+    It is also the path on which that question decides whether anything is
+    read at all, so what the manifest path *is* is decided before it is asked:
+    a tracked blob, an empty link or a dangling link there all answer
+    ``initialized`` false, which is this path's word for "no chain", and the
+    enumeration that refuses such a path never runs. See
+    ``release_chain.assert_manifest_directory_regular``.
     """
 
     held = _hold_release_root(candidate)
@@ -1797,6 +1825,24 @@ def _check_release_chain_without_base(
     """One push-path verdict through a release root already walked and held."""
 
     manifest_directory = candidate.root / candidate.spec.chain.manifest_relative
+    # What that path *is* decides whether this run has a chain to verify, so it
+    # is decided before that question is asked. ``is_dir()`` is false for a
+    # tracked blob standing where the manifest directory was, for an empty
+    # untracked link, and for a dangling one, and each of those made
+    # ``initialized`` false — "this tree has no chain" — for a tree whose chain
+    # the commit under review may well still carry. The walk above stops one
+    # component short of this leaf and the root's index scan reconciles the
+    # blob with the regular file the traversal finds, so nothing else here
+    # says it. Refused in ``_enumerate_manifest_files``'s own words, which is
+    # what a tree whose manifest path is a link to a populated directory has
+    # always been refused with; the enumeration is the only thing that would
+    # have spoken for the other two, and only if it ran.
+    try:
+        release_chain.assert_manifest_directory_regular(
+            candidate.root, candidate.spec.chain
+        )
+    except ReleaseChainError as exc:
+        raise AppendError(str(exc)) from exc
     initialized = manifest_directory.is_dir() and any(manifest_directory.iterdir())
     verification = None
     if initialized:

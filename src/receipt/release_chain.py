@@ -47,7 +47,12 @@ the gate the approved directory held open, opened from the candidate root's
 own descriptor with ``O_NOFOLLOW``, so that after every read through that root
 the gate can ask whether the root it read through is still the one the walk
 approved, a walk on its own being a pathname preflight every later read
-resolves again; the state-path guards
+resolves again; the manifest path's own type, decided for a caller that
+decides whether a tree has a chain by asking the filesystem, because
+``is_dir()`` is false for a blob standing where that directory was, for an
+empty link and for a dangling one alike, and the enumeration whose words
+refuse such a path only runs once something has decided to enumerate; the
+state-path guards
 ``append_gate`` calls, whose walk — like the release root's — now also
 requires each component to be spelled by the directory holding it, because
 what a component *is* is learned by resolving its name and a name-folding
@@ -455,6 +460,45 @@ def receipt_paths_for_manifest(
 
 def producer_signature_path_for_manifest(path: pathlib.Path) -> pathlib.Path:
     return path.with_name(f"{path.stem}.producer.sig")
+
+
+def assert_manifest_directory_regular(root: pathlib.Path, spec: ChainSpec) -> None:
+    """Decide what the manifest path *is*, for a caller about to ask if it has one.
+
+    ``_enumerate_manifest_files`` below answers this for itself, but only once
+    something has decided to enumerate. A caller that decides whether a chain
+    exists by asking the filesystem — ``append_gate``'s push path, whose
+    ``initialized`` is ``manifest_directory.is_dir() and any(iterdir())`` —
+    gets ``False`` for every way the path can be something other than a
+    directory: a tracked 100644 blob standing where the manifest directory
+    was, an empty untracked symlink there, a dangling one. Each of those is
+    then "this tree has no chain", which is an acceptance, and the enumeration
+    that would have said otherwise never runs. Nothing else on that path says
+    it either: the release root's walk stops one component short of this leaf,
+    and the root's index scan reconciles a tracked blob here with the walk that
+    finds a regular file, which is exactly what it is.
+
+    So the type is decided first, in the enumeration's own words and for the
+    same three shapes — an ``lstat``, so a symlink is not a directory here
+    however it resolves, which is the enumeration's ``is_symlink() or not
+    is_dir()`` in one question. A path that is not there at all is not this
+    check's business: an absent chain is legal, and "no chain" is the true
+    answer for it.
+
+    A path this verifier cannot ``lstat`` returns too, which is what
+    ``exists()`` does for the enumeration and what ``is_dir()`` does for the
+    caller: the answer for it is unchanged rather than newly favourable.
+    """
+
+    directory = root / spec.manifest_relative
+    try:
+        entry = os.lstat(directory)
+    except OSError:
+        return
+    if not stat.S_ISDIR(entry.st_mode):
+        raise ReleaseChainError(
+            f"release manifest path is not a regular directory: {directory}"
+        )
 
 
 def _enumerate_manifest_files(
