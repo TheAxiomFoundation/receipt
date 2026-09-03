@@ -30,7 +30,10 @@ resolving the whole name does; the state-path guards ``append_gate`` calls;
 the anchor-set digest in the result) run beside the extracted checks without
 altering any of their refusals, and carry their own tests. Every one of those
 index reads names its path as a literal pathspec, so git is asked about the
-exact path rather than handed a name to interpret as a pattern. The state
+exact path rather than handed a name to interpret as a pattern, and every git
+read here runs with git's four pathspec-mode environment variables dropped, so
+that literal pathspec means what it says instead of whatever an ambient
+``GIT_LITERAL_PATHSPECS`` or ``GIT_ICASE_PATHSPECS`` would make of it. The state
 reads themselves changed shape but not their refusals: ``_regular_file_bytes``
 keeps both of its messages and their order, and opens the file it accepts
 through directory descriptors so no component of the path is resolved twice.
@@ -1761,6 +1764,17 @@ def verify_release_chain(
     )
 
 
+# The four variables git reads as a global pathspec mode. Each one rewrites
+# how every pathspec on every command line is interpreted, including the ones
+# this package writes; see _git_environment.
+PATHSPEC_ENVIRONMENT = (
+    "GIT_LITERAL_PATHSPECS",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_NOGLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS",
+)
+
+
 def _git_environment() -> dict[str, str]:
     """The environment every git read in this package runs under.
 
@@ -1769,11 +1783,29 @@ def _git_environment() -> dict[str, str]:
     candidate repository changes the base commit, tree, or blob these checks
     read behind the name the verdict names — a base resolved to one OID and
     read as another. ``GIT_NO_REPLACE_OBJECTS`` turns the mechanism off for
-    the read; the ambient environment is otherwise carried through, so
-    ``GIT_DIR``, credentials, and the caller's own isolation still apply.
+    the read.
+
+    The pathspec semantics these reads rely on are the ones they write, not
+    the caller's. ``GIT_LITERAL_PATHSPECS`` makes git take every pathspec
+    exactly as typed — the ``:(literal)`` prefix ``_index_entries`` writes
+    included, which then becomes part of the path being looked for, matches
+    nothing, and exits zero: every tracked state file reported absent from
+    the index, and every check that reads "absent" as untracked refusing or
+    returning on it. ``GIT_ICASE_PATHSPECS`` is the other direction — an
+    index read about one path answers with records for differently cased
+    siblings, and ``git ls-tree`` refuses the magic outright, so the base
+    tree cannot be enumerated at all — and ``GIT_GLOB_PATHSPECS`` and
+    ``GIT_NOGLOB_PATHSPECS`` likewise decide what a name means before the
+    command line is read. All four are dropped, so a pathspec written here
+    means here what it says. Everything else in the ambient environment is
+    carried through, so ``GIT_DIR``, credentials, and the caller's own
+    isolation still apply.
     """
 
-    return {**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"}
+    environment = {**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"}
+    for name in PATHSPEC_ENVIRONMENT:
+        environment.pop(name, None)
+    return environment
 
 
 def _git_run(

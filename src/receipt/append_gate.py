@@ -55,7 +55,10 @@ entry the walk cannot see, no entry the walk cannot find, and no entry
 answered for through a symlinked component — and the post-cutover binding
 values are validated for shape rather than presence alone. Every one of those
 index reads asks about the exact path, as a literal pathspec, rather than
-handing git a name to interpret as a pattern.
+handing git a name to interpret as a pattern — and every git read here, like
+every one in ``release_chain``, runs with git's four pathspec-mode environment
+variables dropped, because a pathspec written here has to mean what it says
+rather than whatever the caller's environment would make of it.
 
 What the closing re-check cannot do is bound the whole run. Verifying a
 working tree means verifying something the candidate can write to for as long

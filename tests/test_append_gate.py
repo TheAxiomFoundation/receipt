@@ -2973,3 +2973,116 @@ def test_check_state_modes_refuses_a_symlinked_state_file_on_its_own(
         "state path ledger/official_observations.jsonl has a non-regular "
         "index entry: 120000"
     )
+
+
+def test_an_ambient_literal_pathspec_mode_cannot_hide_the_index(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S4-F4: every index read here writes ``:(literal)<path>`` so git
+    is asked about the exact path, and ``GIT_LITERAL_PATHSPECS`` in the
+    ambient environment makes git take that pathspec *as typed* — the magic
+    prefix included. The read then looks for a file literally named
+    ``:(literal)ledger/official_observations.jsonl``, matches nothing, and
+    exits zero, so the state file the whole verdict is about is reported
+    absent from the index and the tracked-state check at entry refuses a
+    perfectly ordinary proposal. The gate ran every git read under the
+    caller's ambient environment, so any CI job or shell that exports the
+    variable turned the checks it was meant to help into a refusal battery.
+    Without dropping the variable this raises ``state path
+    ledger/official_observations.jsonl is absent from the candidate index``."""
+
+    monkeypatch.setenv("GIT_LITERAL_PATHSPECS", "1")
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+
+    state_path = CHAIN_SPEC.state_relative.as_posix()
+    assert [
+        listed
+        for _mode, _stage, listed in release_chain._index_entries(
+            candidate.root, state_path
+        )
+    ] == [state_path]
+    release_chain.assert_state_path_tracked(candidate.root, CHAIN_SPEC.state_relative)
+    assert run_gate(candidate) == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 1, "
+        "+1 appended vs base"
+    )
+
+
+def test_an_ambient_icase_pathspec_mode_cannot_widen_an_index_read(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S4-F4 from the other direction. ``GIT_ICASE_PATHSPECS`` makes every
+    pathspec case-insensitive, so a read about one path answers with records
+    for differently spelled siblings: here the index carries both
+    ``releases/README.md`` and a ``releases/README.MD`` entry, and the read
+    about the first returns both. The checks that ask about exactly one path
+    filter the records afterwards and survive that; the release root's scan,
+    which reads every record under a directory, does not filter and would
+    take in whatever a differently cased sibling directory holds. Without
+    dropping the variable ``_index_entries`` returns two records here."""
+
+    monkeypatch.setenv("GIT_ICASE_PATHSPECS", "1")
+    candidate = base_repository(tmp_path)
+    blob = git(candidate.root, "rev-parse", ":releases/README.md")
+    git(
+        candidate.root,
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        f"100644,{blob},releases/README.MD",
+    )
+
+    assert [
+        listed
+        for _mode, _stage, listed in release_chain._index_entries(
+            candidate.root, "releases/README.md"
+        )
+    ] == ["releases/README.md"]
+
+
+def test_an_ambient_icase_pathspec_mode_leaves_an_ordinary_proposal_alone(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S4-F4 for a proposal with nothing odd in it at all, which is the case
+    that shows how wide the variable's reach is: the base tree enumeration
+    hands git a plain ``releases`` pathspec, and ``git ls-tree`` does not
+    accept icase magic, so with the variable set an ordinary append is
+    refused with ``cannot enumerate releases at base <oid>: fatal: releases:
+    pathspec magic not supported by this command: 'icase'`` before any
+    comparison is made. With the variable dropped the verdict is exactly the
+    one the gate always gave."""
+
+    monkeypatch.setenv("GIT_ICASE_PATHSPECS", "1")
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+
+    assert run_gate(candidate) == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 1, "
+        "+1 appended vs base"
+    )
+
+
+def test_the_git_environment_drops_every_pathspec_mode(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S4-F4 at the source. All four variables decide what a pathspec means
+    before any command line is read, so all four are dropped and nothing else
+    is: the replacement-object setting is still applied and the rest of the
+    ambient environment still reaches git."""
+
+    for name in release_chain.PATHSPEC_ENVIRONMENT:
+        monkeypatch.setenv(name, "1")
+    monkeypatch.setenv("GIT_DIR_FIXTURE_MARKER", "carried through")
+
+    environment = release_chain._git_environment()
+
+    assert set(release_chain.PATHSPEC_ENVIRONMENT) == {
+        "GIT_LITERAL_PATHSPECS",
+        "GIT_GLOB_PATHSPECS",
+        "GIT_NOGLOB_PATHSPECS",
+        "GIT_ICASE_PATHSPECS",
+    }
+    assert not set(environment) & set(release_chain.PATHSPEC_ENVIRONMENT)
+    assert environment["GIT_NO_REPLACE_OBJECTS"] == "1"
+    assert environment["GIT_DIR_FIXTURE_MARKER"] == "carried through"
