@@ -85,7 +85,11 @@ to it. It is tracked as #43, and it is not done here.
 Additions since the extraction close confinement gaps the upstream battery
 never presented: a gate-only proposal is confined to the surfaces its verdict
 speaks for, classified from what the candidate index records as well as from
-what its working tree shows, a state path that traverses a symlinked component
+what its working tree shows — and from the *ignored* files on those surfaces,
+which the untracked half of that listing excludes by construction, so that a
+gate change carrying its own ignore rule cannot add a second ledger under the
+data surface, or any file under the release root, and still be told
+``DATA_SURFACE unchanged``, a state path that traverses a symlinked component
 is refused before it is read and so is a release root that does — its own
 components are walked from the candidate root before anything reads through
 them, because the checks that would have met a link are all downstream of
@@ -333,7 +337,17 @@ changed set alongside the working tree's takes nothing away either: the union
 is held to the rule the working-tree set already met, so a proposal the index
 shows to touch both surfaces is refused as mixed, in the words that refusal
 has always used, and one it shows to be data goes to the data path, where more
-of the pre-existing checks run for it, not fewer.
+of the pre-existing checks run for it, not fewer. Folding in the ignored files
+on a protected surface is the same shape and the same answer: nothing is
+subtracted from the changed set, so every refusal keeps the input that reached
+it, and a tree the fold newly makes mixed is refused in that refusal's own
+pre-existing words. One such tree is measured — an ignored file under the gate
+surface beside a data change, which the release pass used to meet further down
+as a pre-genesis change to ``releases/`` — and it is the only kind the fold can
+move, since both sentences predate this branch. That fold is restricted to the
+protected surfaces, because everywhere else an ignored file is in no commit and
+is proposed by nothing: reporting a checkout's build tree as an unclassified
+change would say it was part of the proposal, in a list with no bound.
 
 Three refusals here are not about a tree at all, and are stated because they
 do pre-empt everything on every input wherever they apply. Where ``os.open``
@@ -689,6 +703,23 @@ def _classify_surfaces(
     return data_changes, gate_changes, changed - data_changes - gate_changes
 
 
+def _is_protected(path: str, candidate: _CandidateTree) -> bool:
+    """Whether one path lies on a surface this verdict speaks for.
+
+    The two surfaces the spec names, plus the release root, which is neither
+    but is read by the release verification all the same and is the one place
+    ``check_gate_only_confinement`` refuses an unclassified change.
+    """
+
+    release_root = candidate.spec.chain.release_root_relative.as_posix()
+    return (
+        _matches_surface(path, candidate.spec.data_surface)
+        or _matches_surface(path, candidate.spec.gate_surface)
+        or path == release_root
+        or path.startswith(f"{release_root}/")
+    )
+
+
 def check_surface_separation(
     base: _BaseCommit, candidate: _CandidateTree
 ) -> tuple[set[str], set[str], set[str]]:
@@ -698,6 +729,39 @@ def check_surface_separation(
     neither surface is unclassified, and it is returned so no caller can
     treat a surface match as a statement about everything else the proposal
     touched.
+
+    An *ignored* file is a change here too, wherever it lies on a surface this
+    verdict speaks for. ``git ls-files --others --exclude-standard`` answers
+    with the untracked files git would offer to add, and a gate change may add
+    an ignore rule along with the file it hides: ``ledger/*.jsonl`` in
+    ``.gitignore`` beside a second ledger under ``ledger/``, or any file under
+    the release root, and the changed set this classification runs over holds
+    neither, so the proposal is gate-only and returns with ``DATA_SURFACE
+    unchanged`` before the ledger, the frozen prefix, the row bindings and the
+    release history are read. The ignored files are enumerated beside the
+    untracked ones and folded in.
+
+    Folded in *there*, and not everywhere, because an ignored file is only a
+    change where this verdict reads the filesystem rather than the commit.
+    Under the data surface it is a second ledger in the directory the state
+    read descends; under the release root it is a file the release
+    verification's own traversal reaches; under the gate surface it is code
+    this proposal ships. Everywhere else — ``__pycache__``, a virtualenv, a
+    build tree — an ignored file is in no commit, is produced by no proposal,
+    and reporting it as an unclassified change would say a checkout's litter
+    was part of what was proposed, in a list with no bound on its length.
+    ``_is_protected`` is that restriction, and it is the only thing separating
+    the two enumerations: everything it admits is classified by exactly the
+    rule the untracked and tracked changes are.
+
+    The differential harness is silent about all of this, measured rather than
+    reasoned. Its fixtures copy ``ledger/`` and ``releases/`` out of the pinned
+    tree into a fresh ``git init``, so the pinned tree's own root
+    ``.gitignore`` is not among what they copy, they write no other exclude
+    file, and they set no git config beyond a user identity. A fixture built
+    that way from either pinned tree answers ``git ls-files --others --ignored
+    --exclude-standard`` with nothing at all: the union here is the set this
+    classification always ran over.
     """
 
     changed = _nul_paths(
@@ -724,6 +788,26 @@ def check_surface_separation(
                 candidate,
             )
         )
+    )
+    # And that listing excludes the ignored files, which a gate change can
+    # create the rule for. Under a protected surface they are changes; see the
+    # docstring for why the restriction is there and not in _classify_surfaces.
+    changed.update(
+        path
+        for path in _nul_paths(
+            _git_output(
+                [
+                    "ls-files",
+                    "--others",
+                    "--ignored",
+                    "--exclude-standard",
+                    "-z",
+                    "--",
+                ],
+                candidate,
+            )
+        )
+        if _is_protected(path, candidate)
     )
     data_changes, gate_changes, unclassified = _classify_surfaces(changed, candidate)
     if data_changes and gate_changes:

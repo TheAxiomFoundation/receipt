@@ -79,6 +79,10 @@ tree as read, per protected path, rather than one commit's tree — which is
 stated in ``append_gate``'s module docstring under "What this verdict speaks
 for" and tracked as #43 rather than bound by a test here.
 
+Docstrings labelled S5-F1 onward name a fifth gate's first round, numbering
+from one again: S5-F1 the ignored files the surface classification's untracked
+listing excludes.
+
 The fixture is a local git repository built from scratch, and no network is
 used anywhere here. Most of it holds a README and no manifests, so the gate's
 chain verification finds nothing to verify and the checks under test are the
@@ -502,6 +506,151 @@ def test_an_unclassified_change_outside_the_release_tree_is_named(
         "thesis-facts append check OK: gate-only proposal; DATA_SURFACE "
         f"unchanged; GATE_SURFACE changes=['{GATE_FILE}']; "
         "unclassified changes=['NOTES.md']"
+    )
+
+
+def ignore_rule(candidate: Candidate, *patterns: str) -> None:
+    """A gate change's own ``.gitignore``, at the root of the candidate tree.
+
+    The rule is part of the proposal, exactly as the file it hides is: both
+    are what the pull request adds. ``.gitignore`` itself is untracked and
+    unclassified, so it is named in the success text wherever the proposal is
+    still accepted.
+    """
+
+    (candidate.root / ".gitignore").write_text(
+        "".join(f"{pattern}\n" for pattern in patterns), encoding="utf-8"
+    )
+
+
+def test_an_ignored_ledger_sibling_makes_a_gate_proposal_mixed(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5-F1 on the data surface. The changed set this classification
+    runs over came from ``git diff`` plus ``git ls-files --others
+    --exclude-standard``, and ``--exclude-standard`` is what drops the ignored
+    files. A gate change carries its own ``.gitignore``, so a proposal can add
+    the rule and the file it hides in one commit: a second ledger under
+    ``ledger/`` — the directory both state reads descend and the whole data
+    surface — is then in neither half of that set.
+
+    Measured at ccc20b4 with the ignored enumeration removed: ``thesis-facts
+    append check OK: gate-only proposal; DATA_SURFACE unchanged; GATE_SURFACE
+    changes=['scripts/check_append.py']; unclassified changes=['.gitignore']``
+    — the verdict says the data surface did not change while a file the gate
+    would refuse sits inside it, and it returns before the ledger, the frozen
+    prefix, the row bindings and the release history are read.
+
+    Ignored or not, it is a change on a protected surface, so the proposal is
+    mixed and is refused in the words a mixed proposal has always been refused
+    in."""
+
+    candidate = base_repository(tmp_path)
+    add_gate_file(candidate)
+    ignore_rule(candidate, "ledger/shadow.jsonl")
+    (candidate.root / "ledger" / "shadow.jsonl").write_text(
+        "{}\n", encoding="utf-8"
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "mixed data/gate proposal is forbidden: DATA_SURFACE changes="
+        "['ledger/shadow.jsonl']; GATE_SURFACE changes="
+        f"['{GATE_FILE}']; split them into separate pull requests"
+    )
+
+
+def test_an_ignored_release_path_reaches_the_gate_only_confinement(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5-F1 under the release root, which is the other surface a
+    gate-only verdict speaks for without reading. ``releases/README.md``
+    rewritten by a gate proposal is refused by
+    ``check_gate_only_confinement``; the same file *ignored* was not in the
+    changed set at all, so the confinement had nothing to confine.
+
+    Measured at ccc20b4 with the ignored enumeration removed: ``thesis-facts
+    append check OK: gate-only proposal; DATA_SURFACE unchanged; GATE_SURFACE
+    changes=['scripts/check_append.py']; unclassified changes=['.gitignore']``.
+    """
+
+    candidate = base_repository(tmp_path)
+    add_gate_file(candidate)
+    ignore_rule(candidate, "releases/scratch.txt")
+    (candidate.root / "releases" / "scratch.txt").write_text(
+        "riding along\n", encoding="utf-8"
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "gate-only proposal changes unclassified release path(s): "
+        "['releases/scratch.txt']"
+    )
+
+
+def test_an_ignored_file_off_every_protected_surface_is_not_a_change(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S5-F1's restriction, which is the other half of the decision. An
+    ignored file is a change where this verdict reads the filesystem — the two
+    surfaces and the release root — and nowhere else. Build output, a cache
+    directory, a virtualenv: none of it is in a commit, none of it is proposed,
+    and naming it as an unclassified change would report a checkout's litter
+    as part of the proposal, in a list nothing bounds.
+
+    So the verdict here is the one an ordinary gate-only proposal has always
+    had, with only the proposal's own ``.gitignore`` named beside the gate
+    file."""
+
+    candidate = base_repository(tmp_path)
+    add_gate_file(candidate)
+    ignore_rule(candidate, "build/")
+    (candidate.root / "build").mkdir()
+    (candidate.root / "build" / "out.o").write_bytes(b"\x00")
+
+    assert run_gate(candidate) == (
+        "thesis-facts append check OK: gate-only proposal; DATA_SURFACE "
+        f"unchanged; GATE_SURFACE changes=['{GATE_FILE}']; "
+        "unclassified changes=['.gitignore']"
+    )
+
+
+def test_an_ignored_gate_path_is_a_gate_change(tmp_path: pathlib.Path) -> None:
+    """S5-F1 on the third protected surface. ``releases/anchors/**`` is the
+    fixture's gate surface, and an ignored file there is code this proposal
+    ships as much as a tracked one is: it classifies GATE, and beside a data
+    change it makes the proposal mixed rather than letting the data path run
+    with an unread anchor sitting in the tree.
+
+    This tree was refused before the fold as well, further down and in other
+    words — measured at ccc20b4 with the ignored enumeration removed:
+    ``legacy pre-genesis proposal must not change releases/; add a complete
+    genesis manifest, producer signature, and both receipts or no release
+    files at all (changed=['releases/anchors/alpha-root.pem'])``, the release
+    pass meeting the file the classification could not see. Both refusals are
+    the extraction's own, so what the fold moves here is which pre-existing
+    sentence a tree already refused gets, in exactly the way the index fold
+    already moves one: the union is held to the rule the working-tree set was
+    already held to, and a proposal that touches both surfaces is refused as
+    mixed in the words that refusal has always used. The harness cannot
+    produce the case — its fixtures add no ignore rule."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    ignore_rule(candidate, "releases/anchors/")
+    anchors = candidate.root / "releases" / "anchors"
+    anchors.mkdir()
+    (anchors / "alpha-root.pem").write_text("not a root\n", encoding="utf-8")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "mixed data/gate proposal is forbidden: DATA_SURFACE changes="
+        "['ledger/official_observations.jsonl']; GATE_SURFACE changes="
+        "['releases/anchors/alpha-root.pem']; split them into separate pull "
+        "requests"
     )
 
 
