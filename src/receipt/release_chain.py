@@ -31,10 +31,12 @@ the whole name does — and because a case- or normalisation-insensitive
 filesystem answers one entry's question with another entry's file; the
 whole-index read that refuses an entry spelled as another spelling of a
 protected path, which every one of those reconciliations is blind to because
-each compares by exact spelling; the whole-index read's other refusal, for an
-entry marked assume-unchanged or skip-worktree, which tells git to stop
-comparing that path against the working tree and so hides a rewrite from the
-``git diff`` a caller's surface classification is built on; the content
+each compares by exact spelling; its sibling read, which refuses an
+entry marked assume-unchanged or skip-worktree, since that tells git to stop
+comparing the path against the working tree and so hides a rewrite from the
+``git diff`` a caller's surface classification is built on — a separate
+function from the alias refusal because it is about that classification and is
+asked only where one happens, which in ``append_gate`` is the base-ref path; the content
 binding, which requires the blob the index records for a path to be either the
 base's — the commit under review
 does not change it — or the git blob id of the bytes the caller just verified,
@@ -2928,29 +2930,15 @@ def _folded_parts(path: str) -> tuple[str, ...]:
 def assert_index_carries_no_protected_alias(
     root: pathlib.Path, spec: ChainSpec
 ) -> None:
-    """The whole-index read, and the two facts only it can establish.
+    """The whole-index read, and the fact only it can establish about a path.
 
-    Both are refusals at entry, for the same reason: each says a comparison
-    cannot be made in this repository rather than making one. The second is
-    about every entry rather than the protected ones, so it could not be a
-    check on a path, and the read that answers it is this one.
-
-    An index entry marked *assume-unchanged* (``CE_VALID``) or
-    *skip-worktree* (``CE_SKIP_WORKTREE``) tells git to stop comparing that
-    path against the working tree. ``git diff`` then reports nothing for a
-    file that has been rewritten on disk, and the surface classification is
-    built on ``git diff``: the ledger could be rewritten under an
-    assume-unchanged entry, a gate file added beside it, and the proposal
-    classified as gate-only — which returns before the ledger, the frozen
-    prefix, the row bindings and the release history are read at all. Neither
-    bit is something a proposal can want here: both exist to let a working
-    copy diverge from the index on purpose, and this verifier's whole subject
-    is whether they agree. Any entry carrying either refuses, because the
-    classification ``git diff`` performs covers every path in the tree and not
-    only the protected ones. It shares the tracked-state exception in
-    ``append_gate``'s stated precedence rather than adding another.
-
-    The rest of this is the alias refusal.
+    A refusal at entry, because it says a comparison cannot be made in this
+    repository rather than making one. It is asked on every path a caller
+    verifies — the alias it refuses is a second committed object standing over
+    a protected path, which is as true of a push as of a proposal against a
+    base. ``assert_index_hides_no_working_tree_change`` below is the other
+    refusal this read used to make, and it is not asked on every path; see its
+    own docstring for why.
 
     Every reconciliation this package makes between the index and the working
     tree is by exact spelling, which is what makes it a comparison at all: the
@@ -3033,10 +3021,48 @@ def assert_index_carries_no_protected_alias(
                     f"index carries an alias of a protected path: {listed} "
                     f"(for {path} at {prefix})"
                 )
-    # A second pass over the same records rather than a second condition in
-    # the loop above, so a tree an alias already refused keeps that refusal
-    # and this adds nothing to a message anyone has seen.
-    for record in records:
+
+
+def assert_index_hides_no_working_tree_change(root: pathlib.Path) -> None:
+    """Refuse an index entry that tells git to stop comparing it to the tree.
+
+    An entry marked *assume-unchanged* (``CE_VALID``) or *skip-worktree*
+    (``CE_SKIP_WORKTREE``) tells git to stop comparing that path against the
+    working tree. ``git diff`` then reports nothing for a file that has been
+    rewritten on disk, and a caller that classifies a proposal from ``git
+    diff`` is taking that silence for evidence: the ledger could be rewritten
+    under an assume-unchanged entry, a gate file added beside it, and the
+    proposal classified as gate-only — which returns before the ledger, the
+    frozen prefix, the row bindings and the release history are read at all.
+    Neither bit is something a proposal can want here: both exist to let a
+    working copy diverge from the index on purpose, and this verifier's whole
+    subject is whether they agree. Any entry carrying either refuses, because
+    the classification ``git diff`` performs covers every path in the tree and
+    not only the protected ones — which is why this is a whole-index read and
+    could not have been a check on a path.
+
+    What it is *about* is that classification, and nothing else here consults
+    ``git diff`` at all. ``append_gate`` runs it on the path that classifies —
+    the base-ref path — and not on the push path, which has no base to diff
+    against, performs no classification, and answers for the two state files
+    and the release tree by reading them. Running it there refused a valid
+    push verification for a mechanism that path never uses. The index flags
+    cannot be turned off per command the way the caching settings can
+    (``WORKING_TREE_SCAN_OPTIONS``), because they are recorded in the index
+    itself, so this stays a refusal rather than becoming an override.
+
+    It is a separate function from the alias refusal above for that reason and
+    that reason alone: the two are asked on different paths, and a docstring
+    that has to say which is which cannot say it about one function. The cost
+    is a second read of the same index on the path that runs both, which is
+    where the caller wants both anyway. Ordering is unchanged: the alias
+    refusal is asked first, so a tree an alias already refused keeps that
+    refusal and this adds nothing to a message anyone has seen.
+    """
+
+    for record in sorted(
+        _all_index_entries(root), key=lambda entry: (entry.path, entry.stage)
+    ):
         if record.hidden:
             raise ReleaseChainError(
                 f"index entry for {record.path} is marked assume-unchanged or "

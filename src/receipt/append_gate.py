@@ -198,14 +198,7 @@ reads either state file, because an untracked state path, or one under a
 gitlink, is not this commit's content and nothing downstream can be a verdict
 about it. ``release_chain.assert_index_carries_no_protected_alias`` runs
 beside it and shares that exception rather than adding a fourth: it is the
-same fact from the other side. That one read of the whole index answers a
-second thing nothing else can, and shares the exception for it too — an entry
-marked assume-unchanged or skip-worktree tells git to stop comparing that path
-against the working tree, so ``git diff`` reports nothing for a file rewritten
-on disk, and the surface classification this run is built on is that diff: the
-ledger could be rewritten under such an entry, a gate file added beside it,
-and the proposal classified gate-only and returned before any of it was read.
-An index entry spelled as another spelling of a
+same fact from the other side. An index entry spelled as another spelling of a
 protected path — or of any prefix of one, since ``Ledger`` standing where the
 state file's own directory is, and ``Ledger/notes.txt`` under it, are second
 objects a name-folding checkout puts in that directory or over it — is a
@@ -216,7 +209,26 @@ comparison cannot be made rather than making one. Comparing every prefix depth
 rather than the protected path's own extends that entry-level check without
 moving it: it is the same read of the same index, at entry, answering about
 more of the same paths, and an entry spelled exactly right as far down as it
-goes is untouched. And
+goes is untouched. That is asked on both paths, because an alias is a second
+committed object over a protected path whether or not a base is named.
+
+``release_chain.assert_index_hides_no_working_tree_change`` is the other
+refusal that whole-index read used to make, and it is asked on the base-ref
+path alone. An entry marked assume-unchanged or skip-worktree tells git to
+stop comparing that path against the working tree, so ``git diff`` reports
+nothing for a file rewritten on disk — and ``git diff`` is read in exactly one
+place here, the surface classification below, which only the base-ref path
+performs: the ledger could be rewritten under such an entry, a gate file added
+beside it, and the proposal classified gate-only and returned before any of it
+was read. The push path names no base, classifies nothing, and answers for the
+two state files and the release tree by reading them, so refusing it there
+refused a valid verification for a mechanism it does not use. It shares the
+tracked-state exception where it runs rather than adding one, and it stays a
+refusal rather than becoming an override the way the caching settings did,
+because a flag recorded in the index cannot be turned off from a command line.
+Splitting it out of the alias check is what lets each say which path it is
+asked on; the cost is a second read of the same index on the path that asks
+both. And
 ``_assert_root_unchanged`` runs ahead of the surface classification, which is
 a pre-existing check and the one that decides which path the whole run takes,
 because a root exchanged since ``_set_root`` recorded it means the tree being
@@ -434,6 +446,7 @@ from receipt.release_chain import (
     assert_file_modes_authoritative,
     assert_index_agrees_with_tree,
     assert_index_carries_no_protected_alias,
+    assert_index_hides_no_working_tree_change,
     assert_index_content_bound,
     ChainSpec,
     MANIFEST_RE,
@@ -2237,12 +2250,28 @@ def _verify_selected_tree(
     # decidable from the index or the tree, so this refuses rather than
     # comparing, and runs here for that reason: it shares the tracked-state
     # exception rather than adding a fourth. It reads the whole index, which
-    # is the only read here that no pathspec can express.
+    # is the only read here that no pathspec can express. It is asked on both
+    # paths, because an alias is a second committed object over a protected
+    # path whether or not there is a base to compare against.
     try:
         assert_index_carries_no_protected_alias(candidate.root, spec.chain)
     except ReleaseChainError as exc:
         raise AppendError(str(exc)) from exc
     if base is not None:
+        # And here, sharing the same exception but only on this path: an entry
+        # marked assume-unchanged or skip-worktree tells git to stop comparing
+        # it against the working tree, which is a statement about ``git diff``
+        # — and ``git diff`` is only ever read below, by the classification
+        # this path performs. The push path has no base to diff against,
+        # classifies nothing, and answers for the two state files and the
+        # release tree by reading them; refusing it there refused a valid push
+        # verification for a mechanism it does not use. Unlike the caching
+        # settings, the flags cannot be overridden per command, because they
+        # are recorded in the index itself, so this stays a refusal.
+        try:
+            assert_index_hides_no_working_tree_change(candidate.root)
+        except ReleaseChainError as exc:
+            raise AppendError(str(exc)) from exc
         # Before the classification that decides which path this run takes,
         # and again before a gate-only verdict is returned: everything above
         # reached the candidate tree by name, and only a state read ever
