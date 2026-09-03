@@ -5481,8 +5481,9 @@ def test_a_pending_bundle_may_not_present_one_historical_class_twice(
     ]
 
     active = {BUNDLE_LOGICAL: tree.reference, str(rename["path"]): rename}
-    class_members = tuple(
-        sorted(
+    class_members = ", ".join(
+        f"{anchor_id}/{root_spki}"
+        for anchor_id, root_spki in sorted(
             (
                 (alpha.anchor_id, alpha.root_pins["spkiSha256"]),
                 (renamed.anchor_id, alpha.root_pins["spkiSha256"]),
@@ -5527,8 +5528,9 @@ def test_a_rotation_may_not_import_another_classs_historical_signer(
             beta.anchor_id: rotated,
         },
     )
-    class_members = tuple(
-        sorted(
+    class_members = ", ".join(
+        f"{anchor_id}/{root_spki}"
+        for anchor_id, root_spki in sorted(
             (
                 (alpha.anchor_id, alpha.root_pins["spkiSha256"]),
                 (beta.anchor_id, beta.root_pins["spkiSha256"]),
@@ -5636,8 +5638,9 @@ def test_pending_anchor_array_order_does_not_change_the_class_verdict(
     forward = verdict([incoming, renamed], "forward")
     reverse = verdict([renamed, incoming], "reverse")
     assert forward == reverse
-    class_members = tuple(
-        sorted(
+    class_members = ", ".join(
+        f"{anchor_id}/{root_spki}"
+        for anchor_id, root_spki in sorted(
             (
                 (incoming.anchor_id, beta.root_pins["spkiSha256"]),
                 (renamed.anchor_id, beta.root_pins["spkiSha256"]),

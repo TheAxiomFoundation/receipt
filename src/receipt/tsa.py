@@ -2796,6 +2796,12 @@ class _AnchorOccurrence:
         return self.path, str(self.anchor["id"])
 
     @property
+    def label(self) -> str:
+        """The anchor slot as a refusal names it: bundle path and anchor ID."""
+
+        return f"{self.path}/{self.anchor['id']}"
+
+    @property
     def order(self) -> tuple[int, str, str, str]:
         return self.version, self.path, *self.authority
 
@@ -2921,13 +2927,22 @@ def _pending_class_collision_message(
     first: _AnchorOccurrence,
     second: _AnchorOccurrence,
 ) -> str:
-    """Name two anchors and the complete historical class they share."""
+    """Name two anchors and the complete historical class they share.
 
+    The class is rendered as its authority identities, sorted, one
+    ``{anchor ID}/{root SPKI}`` per member and comma-separated, rather than as
+    the tuple of pairs the graph holds them in: a verdict is read by a
+    producer deciding which anchor to file the authority under, and a Python
+    repr in the middle of a sentence is not read at all.
+    """
+
+    members = ", ".join(
+        f"{anchor_id}/{root_spki}"
+        for anchor_id, root_spki in history.class_authorities(first.authority)
+    )
     return (
-        f"pending TSA bundle anchors {first.path}/{first.anchor['id']} and "
-        f"{second.path}/{second.anchor['id']} resolve to one historical "
-        "authority class: "
-        f"{history.class_authorities(first.authority)}"
+        f"pending TSA bundle anchors {first.label} and {second.label} resolve "
+        f"to one historical authority class: {members}"
     )
 
 
