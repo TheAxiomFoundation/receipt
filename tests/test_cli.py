@@ -2506,14 +2506,19 @@ def test_every_ascii_transparent_codec_is_a_stateless_single_byte_page() -> None
     Membership grants raw ASCII bytes to a reader of that codec, so every
     member has to be a single-byte code page: a canonical name, ASCII
     literal under the probe, no byte that combines with an adjacent ASCII
-    byte to become part of another character, and no shift state that a
-    previous write could leave it in. All four are checked here for every
-    name, so the list cannot acquire a member on assertion alone.
+    byte to become part of another character, no character it spells in more
+    than one byte, and no shift state that a previous write could leave it
+    in. All five are checked here for every name, so the list cannot acquire
+    a member on assertion alone.
 
-    The fourth check is what excludes the ``iso2022_*`` family by property
-    rather than by omission: an incremental encoder that has just written a
-    non-ASCII character spells ``A`` as ``\x1b(BA`` there, and as ``A``
-    here.
+    The last two are what exclude by property rather than by omission, and
+    they exclude different families. The shift check excludes ``iso2022_*``:
+    an incremental encoder that has just written a non-ASCII character
+    spells ``A`` as ``\x1b(BA`` there, and as ``A`` here. The one-byte
+    check excludes ``raw-unicode-escape``, which is stateless, has no
+    combining byte and passes the probe — and spells U+3042 as the six
+    bytes ``\u3042``, which is the same thing read backwards as the decode
+    hole the next test is about.
 
     Without S7-R3-F3 there is no list to check and this test cannot be
     written; ``_byte_safe_encoding`` grants the fallback to whatever the
@@ -2531,6 +2536,15 @@ def test_every_ascii_transparent_codec_is_a_stateless_single_byte_page() -> None
         for value in range(256):
             decoded = bytes([value, 0x41]).decode(name, errors="replace")
             assert len(decoded) == 2 and decoded[1] == "A", (name, value)
+        # Characters from outside every one of these pages: a code page
+        # either cannot spell them at all or spells them in one byte, and a
+        # codec that answers with more than one byte is not a code page.
+        for outside in ("\u3042", "\u4e2d", "\uff71", "\u20ac", "\u2122"):
+            try:
+                spelled = outside.encode(name)
+            except (UnicodeEncodeError, UnicodeError):
+                continue
+            assert len(spelled) == 1, (name, outside)
         encoder = codecs.lookup(name).incrementalencoder()
         for probe in ("\u00e9", "\u0430", "\u3042", "\u00b5", "\u0416"):
             try:
