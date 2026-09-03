@@ -40,8 +40,8 @@ also reads the entry's own flag word, because mode and object id do not say
 whether an entry records content: an intent-to-add entry (``git add -N``) is
 stage 0 at the working tree's mode with the empty blob's object id, which is
 what every check here took for a tracked file while the commit made from that
-index deletes the path. The state
-reads themselves changed shape but not their refusals: ``_regular_file_bytes``
+index deletes the path. The state reads themselves changed shape but not
+their refusals: ``_regular_file_bytes``
 keeps both of its messages and their order, and opens the file it accepts
 through directory descriptors so no component of the path is resolved twice.
 That descent returns the identity of every directory it opened, so a caller
@@ -51,15 +51,15 @@ refuses outright rather than falling back to a pathname open where ``os.open``
 takes no ``dir_fd`` — a requirement of the package rather than of any one
 caller, since every state read in it comes through here: on Windows
 ``verify_release_chain``, and so ``receipt verify``'s custody pass, refuses
-exactly as the append gate does, and ``README.md`` states it. It opens each directory component with search rights
-alone where the platform offers them (``O_PATH`` on Linux, ``O_SEARCH``
-elsewhere), which is all it uses them for, so a POSIX search-only directory
-above a readable state file is descended as the pathname open used to descend
-it; where the platform offers neither, the read permission the descent then
-needs is stated in the refusal rather than escaping as a bare
-``PermissionError``. ``assert_index_agrees_with_tree`` likewise accepts a
-category the caller has already observed, so a caller holding the file open
-need not resolve its name again.
+exactly as the append gate does, and ``README.md`` states it. It opens each
+directory component with search rights alone where the platform offers them
+(``O_PATH`` on Linux, ``O_SEARCH`` elsewhere), which is all it uses them for,
+so a POSIX search-only directory above a readable state file is descended as
+the pathname open used to descend it; where the platform offers neither, the
+read permission the descent then needs is stated in the refusal rather than
+escaping as a bare ``PermissionError``. ``assert_index_agrees_with_tree``
+likewise accepts a category the caller has already observed, so a caller
+holding the file open need not resolve its name again.
 ``verify_release_chain`` takes an optional ``state_bytes`` mapping that stands
 in for reading a state path, so a caller that has already read those files can
 hold one verdict to one read of each; omitted, both files are read exactly as
