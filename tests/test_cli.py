@@ -2344,9 +2344,6 @@ def test_a_latin1_stream_round_trips_the_proved_ascii_fallback(
     [
         # U+203A is cp1252's 0x9B, which is CSI.
         ("cp1252", "FAILED: binding \u203a rules/x.yaml"),
-        # ISO-2022-JP switches character sets with ESC, so ordinary Japanese
-        # text carries 0x1b whatever the characters are.
-        ("iso2022_jp", "FAILED: binding \u30c6\u30b9\u30c8.yaml"),
     ],
 )
 def test_a_legacy_codec_cannot_turn_the_verdict_into_a_control_sequence(
@@ -2359,16 +2356,19 @@ def test_a_legacy_codec_cannot_turn_the_verdict_into_a_control_sequence(
     stream's own codec. That order leaves the escaping to be undone by the
     encoder: cp1252 spells the perfectly printable U+203A as the single byte
     0x9B, which is CSI, so a filename carrying it began a control sequence
-    through a character the escaper had no reason to touch. ISO-2022-JP is
-    worse in kind — it emits ESC to switch character sets, so ordinary
-    Japanese text carries 0x1B and the verdict is full of escape sequences
-    with no adversary at all.
+    through a character the escaper had no reason to touch.
 
-    The stream's codec is used now only when it is UTF-8; these two
-    literal-ASCII codecs receive ASCII with ``backslashreplace``, so no
+    The stream's codec is used now only when it is UTF-8; a single-byte code
+    page such as this one receives ASCII with ``backslashreplace``, so no
     character outside ASCII can produce a byte and every byte written is one
-    the escaper approved. Without the fix each payload puts 0x9b or 0x1b on
-    the stream.
+    the escaper approved. Without the fix the payload puts 0x9b on the
+    stream.
+
+    ISO-2022-JP was parametrised here too, as the worse-in-kind case that
+    emits ESC to switch character sets. S7-R3-F3 refuses it outright rather
+    than sending it ASCII, because the ASCII it would receive is read in
+    whatever mode an earlier write left the stream in, so its case now lives
+    in ``test_a_stateful_codec_is_refused_rather_than_written_to_shifted``.
     """
 
     from receipt.cli import _byte_safe_encoding, _emit
@@ -2386,6 +2386,156 @@ def test_a_legacy_codec_cannot_turn_the_verdict_into_a_control_sequence(
     assert b"\x1b" not in data and b"\x9b" not in data
     assert data.startswith(b"FAILED: binding ")
     assert data.endswith(b"\n")
+
+
+def test_every_ascii_transparent_codec_is_a_stateless_single_byte_page() -> None:
+    """Binds S7-R3-F3: the allow-list is a claim, and this is its proof.
+
+    Membership grants raw ASCII bytes to a reader of that codec, so every
+    member has to be a single-byte code page: a canonical name, ASCII
+    literal under the probe, no byte that combines with an adjacent ASCII
+    byte to become part of another character, and no shift state that a
+    previous write could leave it in. All four are checked here for every
+    name, so the list cannot acquire a member on assertion alone.
+
+    The fourth check is what excludes the ``iso2022_*`` family by property
+    rather than by omission: an incremental encoder that has just written a
+    non-ASCII character spells ``A`` as ``\x1b(BA`` there, and as ``A``
+    here.
+
+    Without S7-R3-F3 there is no list to check and this test cannot be
+    written; ``_byte_safe_encoding`` grants the fallback to whatever the
+    one-string probe happens to pass.
+    """
+
+    import codecs
+
+    from receipt.cli import _ASCII_TRANSPARENT_CODECS, _ascii_is_literal
+
+    assert len(_ASCII_TRANSPARENT_CODECS) == 61
+    for name in sorted(_ASCII_TRANSPARENT_CODECS):
+        assert codecs.lookup(name).name == name, name
+        assert _ascii_is_literal(name), name
+        for value in range(256):
+            decoded = bytes([value, 0x41]).decode(name, errors="replace")
+            assert len(decoded) == 2 and decoded[1] == "A", (name, value)
+        encoder = codecs.lookup(name).incrementalencoder()
+        for probe in ("\u00e9", "\u0430", "\u3042", "\u00b5", "\u0416"):
+            try:
+                encoder.encode(probe)
+            except UnicodeEncodeError:
+                continue
+            break
+        assert encoder.encode("A") == b"A", name
+
+    # The excluded families, named in the constant, are excluded in fact.
+    for name in (
+        "utf-7",
+        "unicode-escape",
+        "raw-unicode-escape",
+        "iso2022_jp",
+        "cp037",
+        "cp864",
+        "cp932",
+        "utf-16",
+        "utf-32",
+        "idna",
+    ):
+        assert codecs.lookup(name).name not in _ASCII_TRANSPARENT_CODECS
+
+
+def test_a_codec_that_decodes_printable_escapes_into_controls_is_refused(
+    repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Binds S7-R3-F3: the probe passes ``raw-unicode-escape``, which is a hole.
+
+    Every runtime property the fallback was granted on is true of this codec.
+    It is stateless, its ASCII range is the identity, no byte of it combines
+    with a neighbour, and it passes ``_ascii_is_literal`` — and it decodes
+    the six printable ASCII characters ``\\u001b`` into ESC and ``\\u000d``
+    into CR. A producer's filename spelled that way carries no control
+    character for ``_terminal_safe`` to escape and arrives as one, so the
+    verdict line can be redrawn by text the escaper had no reason to touch.
+
+    No probe over one fixed string can see this, because the hazard is a
+    multi-character decode. The allow-list is what refuses it, before a byte
+    is written.
+
+    Without S7-R3-F3 the probe grants the ASCII fallback, the run reports
+    PASS, and the stream holds bytes whose own decoder makes a control
+    sequence of them.
+    """
+
+    from receipt.cli import _ascii_is_literal
+
+    # The hole, and the reason a probe cannot find it.
+    assert _ascii_is_literal("raw-unicode-escape")
+    assert b"\\u001b[2J".decode("raw-unicode-escape") == "\x1b[2J"
+    assert b"\\u000d".decode("raw-unicode-escape") == "\r"
+    assert all(
+        ord(character) not in (0x1B, 0x0D) for character in "\\u001b[2J"
+    )
+
+    stream = _CodecStdout("raw-unicode-escape")
+    monkeypatch.setattr(sys, "stdout", stream)
+    assert run(repo, "--json") == EXIT_FAIL
+    assert stream.written() == b""
+    error = capsys.readouterr().err
+    assert "verdict could not be rendered; treat the run as unverified" in error
+    assert (
+        "OSError: verdict stream codec raw-unicode-escape does not carry "
+        "ASCII literally; the verdict cannot be written safely" in error
+    )
+    assert error.rstrip("\n").endswith("receipt verify: FAIL")
+
+
+def test_a_stateful_codec_is_refused_rather_than_written_to_shifted(
+    repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Binds S7-R3-F3: the probe reads a fresh codec, not the one ``_emit`` has.
+
+    ``iso2022_jp`` passes ``_ascii_is_literal`` because the probe encodes and
+    decodes from a fresh state. The stream ``_emit`` reaches need not be in
+    one: this stream has already written a single Japanese character, and
+    flushing does not emit the ``\x1b(B`` that would return it to ASCII, so
+    the buffer ends inside JIS X 0208. Raw ASCII bytes appended there are
+    read two at a time — the four bytes of ``PASS`` decode as ``日仭嗷`` —
+    and a longer verdict raises ``UnicodeDecodeError`` in the consumer
+    instead. Either way the reader does not receive the verdict this module
+    escaped.
+
+    Without S7-R3-F3 the probe grants the fallback, the run reports PASS, and
+    those bytes go on the stream behind the shift.
+    """
+
+    from receipt.cli import _ascii_is_literal
+
+    stream = _CodecStdout("iso2022_jp")
+    stream.write("\u65e5")
+    stream.flush()
+    shifted = stream.written()
+
+    # The probe passes, and the state the probe never sees is what decides.
+    assert _ascii_is_literal("iso2022_jp")
+    assert shifted == b"\x1b$BF|"
+    assert (shifted + b"PASS").decode("iso2022_jp") == "\u65e5\u4eed\u55f7"
+    with pytest.raises(UnicodeDecodeError):
+        (shifted + b"VERDICT: FAIL").decode("iso2022_jp")
+
+    monkeypatch.setattr(sys, "stdout", stream)
+    assert run(repo, "--json") == EXIT_FAIL
+    # Nothing was appended behind the shift.
+    assert stream.written() == shifted
+    error = capsys.readouterr().err
+    assert "verdict could not be rendered; treat the run as unverified" in error
+    assert (
+        "OSError: verdict stream codec iso2022_jp does not carry ASCII "
+        "literally; the verdict cannot be written safely" in error
+    )
 
 
 @pytest.mark.parametrize("encoding", ["utf-8", "UTF_8", "utf-8-sig"])
