@@ -2131,10 +2131,11 @@ def _index_entries(
     it. The diagnostics keep naming the path itself, not the magic.
 
     ``--debug`` is read alongside ``-s`` because mode, stage and object id do
-    not say whether an entry records any content. ``git add -N`` — and every
-    porcelain that runs it, ``git add -p`` on an untracked file included —
-    writes an *intent-to-add* entry: stage 0, the working tree's mode (100644
-    for an ordinary file), the empty blob's object id, and no content at all.
+    not say whether an entry records any content. ``git add -N`` (``git add
+    --intent-to-add``) writes an *intent-to-add* entry: stage 0, the working
+    tree's mode (100644 for an ordinary file), the empty blob's object id, and
+    no content at all — a tree written from such an index does not carry the
+    path.
     Every check below took that for a tracked file, so a ``git rm --cached``
     of a protected path followed by ``git add -N`` of it passed the
     tracked-state check, passed the index agreement check (the working tree

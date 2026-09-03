@@ -105,7 +105,12 @@ release root's index scan all run after the comparisons they qualify, so a
 comparison that passed while the working tree was not carrying what git
 recorded is caught afterwards and nothing pre-existing is pre-empted; the
 differential harness pins the upstream's mode-change refusal for an unstaged
-chmod, which is both. Each order is pinned by a test. Classifying the index's
+chmod, which is both. Each order is pinned by a test. That ordering is per
+path, as the loops making it are: a refusal about one release path can still
+be reached before a pre-existing refusal about a later one, because the loop
+answers each path in turn. Sorting the loop differently would only move which
+path is named first, and the harness cannot produce the case — its fixtures
+mutate the working tree without touching the index. Classifying the index's
 changed set alongside the working tree's takes nothing away either: the
 union is held to the rule the working-tree set already met, so a proposal the
 index shows to touch both surfaces is refused as mixed, in the words that
