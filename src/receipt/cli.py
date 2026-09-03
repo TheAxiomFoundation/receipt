@@ -44,6 +44,18 @@ release-chain failure text carrying one printed as whatever the producer
 arranged. :func:`_terminal_safe` covers both classes now, and its docstring
 lists all four.
 
+Where the trusted line sits is part of the same defence. A verdict's last
+line is this module's own text and nothing untrusted follows it: the
+failure branch prints the failed pass and its detail and *then*
+``VERDICT: FAIL — <pass name>``, and :func:`_refuse` ends with
+``receipt verify: FAIL``. Printing the sentinel first left bounded but
+entirely printable detail after the one line an auditor keys on, and four
+thousand printable characters soft-wrap through fifty rows of an
+eighty-column terminal — enough to scroll the real verdict off the screen
+and leave a forged ``VERDICT: PASS`` at column one as the last thing on it,
+without a single escape sequence (peer review, Sol round 2). The passing
+branch already ended with fixed text.
+
 The JSON renderer needs nothing of the kind. ``json.dumps`` with
 ``ensure_ascii`` at its default escapes every non-ASCII code point into a
 ``\\uXXXX`` sequence inside the quoted string — lone surrogates and format
@@ -576,8 +588,23 @@ def _format_text(result: VerifyResult) -> str:
         failure = next((item for item in result.passes if not item.ok), None)
         detail = failure.failure if failure is not None else "unknown failure"
         name = _rendered(failure.name) if failure else "verification"
-        lines.append(f"VERDICT: FAIL — {name}")
+        # The attacker-derived detail first and the trusted sentinel last,
+        # with nothing after it. Printing the sentinel first put bounded but
+        # entirely printable text after the one line an auditor keys on, and
+        # four thousand printable characters soft-wrap through fifty rows of
+        # an eighty-column terminal — long enough to scroll the real verdict
+        # off the screen and leave a forged "VERDICT: PASS" at column one as
+        # the last thing on it (peer review, Sol round 2). The verdict's own
+        # last line is now this module's own text.
+        #
+        # The name on it is a literal from ``receipt.verify`` — "history",
+        # "custody", "binding", "declaration", or the "verification" below —
+        # so the sentinel line is short and cannot wrap. It goes through
+        # ``_rendered`` anyway, because the rule here admits no exceptions.
+        lines.append(f"FAILED: {name}")
         lines.append(f"  {_rendered(str(detail))}")
+        lines.append("")
+        lines.append(f"VERDICT: FAIL — {name}")
     return "\n".join(lines)
 
 
@@ -609,9 +636,17 @@ def _refuse(as_json: bool, stage: str, message: str, code: int) -> int:
     unescaped — ``json.dumps`` escapes it there — but bounded by the same
     policy, because an abort message can carry a producer's flood as readily
     as a completed verdict can.
+
+    And it ends with this module's own text, for the reason
+    :func:`_format_text`'s failure branch does: a bounded message is still
+    four thousand printable characters, which soft-wrap through fifty rows
+    of an eighty-column terminal and can leave a forged verdict line at
+    column one as the last thing on the screen. ``receipt verify: FAIL`` is
+    the last line either way.
     """
 
     print(f"receipt verify: {_rendered(message)}", file=sys.stderr)
+    print("receipt verify: FAIL", file=sys.stderr)
     if as_json:
         print(
             json.dumps(
