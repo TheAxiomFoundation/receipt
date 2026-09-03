@@ -3139,9 +3139,9 @@ def race_a_fifo_in_after_the_one_read(
     swapped: list[str] = []
 
     def reading(
-        path: pathlib.Path, missing: str
+        path: pathlib.Path, missing: str, **keywords: Any
     ) -> tuple[bytes, tuple[int, int]]:
-        answer = real_read(path, missing)
+        answer = real_read(path, missing, **keywords)
         if os.fspath(path) == os.fspath(victim) and not swapped:
             victim.unlink()
             os.mkfifo(victim)
@@ -3474,11 +3474,12 @@ def test_one_verification_opens_each_judged_file_exactly_as_often_as_it_judges_i
     repository path twice, and OpenSSL is never given one -- and it is
     observable directly.
 
-    Two recorders, because no one vantage point sees both halves. The first
-    counts opens inside this process, by all three doors; it cannot see a
-    subprocess. The second reads every argument ``_run_openssl`` is given,
-    which is the only way a file under the records tree could reach OpenSSL.
-    Each of the four reverts trips one of them, and nothing else in the
+    Three recorders, because descriptor-relative opens carry only a component
+    name rather than the full path. The first counts all three Python open
+    doors, the second counts successful one-read snapshots by their lexical
+    paths, and the third reads every argument ``_run_openssl`` is given.
+    Together they see both halves without pretending an ``openat`` leaf name
+    is an absolute path. Each of the four reverts trips one of them, and nothing else in the
     suite: the certificate count handed the repository path puts 14 of its
     paths into OpenSSL arguments, the identity extraction 42, the CMS
     ``-CAfile`` alone 2, and the record parse re-reading its path takes the
@@ -3525,6 +3526,7 @@ def test_one_verification_opens_each_judged_file_exactly_as_often_as_it_judges_i
     loaded = record_bundle_loads(monkeypatch)
     invocations = record_openssl_arguments(monkeypatch)
     opens = record_opens(monkeypatch)
+    one_reads = record_one_reads(monkeypatch)
 
     # The recorder watches all three doors, and each of them exactly once.
     assert probe.read_bytes() == b"counted three times"
@@ -3539,9 +3541,10 @@ def test_one_verification_opens_each_judged_file_exactly_as_often_as_it_judges_i
         anchor.anchor_id for anchor in local_anchors[:2]
     ]
 
-    assert opens[str(tree.record)] == 1
-    assert {token: opens[token] for token in tokens} == dict.fromkeys(tokens, 1)
-    assert {root: opens[root] for root in roots} == {
+    read_counts = collections.Counter(one_reads)
+    assert read_counts[str(tree.record)] == 1
+    assert {token: read_counts[token] for token in tokens} == dict.fromkeys(tokens, 1)
+    assert {root: read_counts[root] for root in roots} == {
         root: validated[root] for root in roots
     }
     assert set(validated) == roots
@@ -3551,7 +3554,7 @@ def test_one_verification_opens_each_judged_file_exactly_as_often_as_it_judges_i
     # with a ``stat`` beside them for the size -- opens once per load.
     assert set(loaded) == {bundle}
     assert loaded[bundle] == 5
-    assert opens[bundle] == loaded[bundle]
+    assert read_counts[bundle] == loaded[bundle]
 
     # And no file under the records tree ever reaches OpenSSL by name.
     named = [
@@ -3833,15 +3836,16 @@ def file_identity(path: pathlib.Path) -> tuple[int, int]:
 
 
 def record_one_reads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Every path ``_read_file_once`` is asked for, in the order it is asked."""
+    """Every path ``_read_file_once`` successfully reads, in read order."""
 
     original = tsa_module._read_file_once
 
     def recording(
-        path: pathlib.Path, missing: str
+        path: pathlib.Path, missing: str, **keywords: Any
     ) -> tuple[bytes, tuple[int, int]]:
+        answer = original(path, missing, **keywords)
         reads.append(str(path))
-        return original(path, missing)
+        return answer
 
     reads: list[str] = []
     monkeypatch.setattr(tsa_module, "_read_file_once", recording)
@@ -4261,6 +4265,115 @@ def link_a_directory_over(target: pathlib.Path) -> pathlib.Path:
     return moved
 
 
+def replace_a_parent_after_its_component_check(
+    monkeypatch: pytest.MonkeyPatch,
+    parent: pathlib.Path,
+    *,
+    subject: str,
+    replacement: str,
+) -> list[str]:
+    """Replace ``parent`` after the lexical preflight for ``subject`` returns."""
+
+    original = tsa_module._refuse_a_linked_component
+    swapped: list[str] = []
+
+    def checking(
+        root: pathlib.Path, path: pathlib.Path, *, subject: str
+    ) -> tuple[pathlib.Path, ...]:
+        components = original(root, path, subject=subject)
+        if subject == expected_subject and not swapped:
+            moved = parent.with_name(f"{parent.name}.checked")
+            parent.rename(moved)
+            if replacement == "symlink":
+                parent.symlink_to(moved.name, target_is_directory=True)
+            else:
+                parent.write_bytes(b"the checked directory is a file now\n")
+            swapped.append(str(parent))
+        return components
+
+    expected_subject = subject
+    monkeypatch.setattr(tsa_module, "_refuse_a_linked_component", checking)
+    return swapped
+
+
+def test_descriptor_walk_refuses_a_parent_swapped_to_a_symlink_after_preflight(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S6-R2-F1: the checked parent must be the parent used by the read.
+
+    The pathname walk returned while the token's day directory was real, then
+    this writer replaced it with a symlink before the leaf open.  Without
+    descriptor-anchored descent, the later whole-path open follows the link
+    and the valid aliased response verifies; the old preflight has proved a
+    fact about an object the read never uses.  The fixed read refuses in the
+    established traversal words, and the successful-read recorder proves no
+    byte of the aliased target reached the one-read snapshot.
+    """
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    assert verify_tree(tree).status == "available"
+    parent = tree.records / RECORD_DAY
+    token = tree.tokens[alpha.anchor_id]
+    swapped = replace_a_parent_after_its_component_check(
+        monkeypatch,
+        parent,
+        subject="witness token path",
+        replacement="symlink",
+    )
+    reads = record_one_reads(monkeypatch)
+
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+
+    assert swapped == [str(parent)]
+    assert parent.is_symlink()
+    assert str(caught.value) == (
+        f"witness token path traverses a symlink at {parent}: "
+        f"{token}"
+    )
+    assert str(token) not in reads
+
+
+def test_descriptor_walk_refuses_a_parent_swapped_to_a_regular_file(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S6-R2-F1: an interior component must still be a directory at open.
+
+    The lexical check sees the record's day directory and this writer replaces
+    it with a regular file before the read.  A whole-path open merely reaches
+    ``ENOTDIR`` and collapses that fact into the generic missing-record text;
+    the descriptor walk instead refuses the changed component by name as not
+    a directory, before any leaf can be opened or read.
+    """
+
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    assert verify_tree(tree).status == "available"
+    parent = tree.records / RECORD_DAY
+    swapped = replace_a_parent_after_its_component_check(
+        monkeypatch,
+        parent,
+        subject="witnessed record path",
+        replacement="file",
+    )
+    reads = record_one_reads(monkeypatch)
+
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+
+    assert swapped == [str(parent)]
+    assert parent.is_file() and not parent.is_dir()
+    assert str(caught.value) == (
+        f"witnessed record path component is not a directory at {parent}: "
+        f"{tree.record}"
+    )
+    assert str(tree.record) not in reads
+
+
 def test_a_witness_token_path_may_not_traverse_a_symlink(
     tmp_path: pathlib.Path,
     local_anchors: tuple[LocalAnchor, ...],
@@ -4283,9 +4396,11 @@ def test_a_witness_token_path_may_not_traverse_a_symlink(
 
     Four blind rules is a statement about where the rule belongs, not about
     which of them to strengthen: no component of a path this module reads may
-    be a link. Walked with ``lstat`` from the records root down, behind the
-    path-level check so that a link at the final component keeps the refusal
-    it already had, and before the read so the aliased outcome is never read.
+    be a link. Checked with ``lstat`` from the records root down for the cheap
+    established verdict, then opened through descriptors anchored there so a
+    checked component cannot be exchanged before the leaf read. The preflight
+    remains behind the path-level check so that a link at the final component
+    keeps the refusal it already had.
     Without the walk this tree verifies with two tokens; the premises below
     are asserted rather than assumed, one per rule the walk stands in front
     of, and the control is the untouched tree.
@@ -4390,7 +4505,7 @@ def test_no_read_this_module_makes_traverses_a_symlinked_component(
     assert: the file is still a regular file, still not a link, and still
     holds the same bytes.
 
-    Without the walk both cases verify unchanged, so what binds the fix is
+    Without the guarded descent both cases verify unchanged, so what binds the fix is
     the refusal. Each keeps the wording of the read it guards -- the record's
     is its own, the root's arrives inside the load-time wrapper that carries
     every root material failure -- and the control is the tree before the

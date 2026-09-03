@@ -16,7 +16,12 @@ the baseline let raise out of the hash; a path this module resolves out of
 the repository and then reads -- the record under witness, an anchor's
 pinned root, or a claimed response -- one of whose components below the
 records root is a symlink, which nothing looked at, the path-level check and
-``O_NOFOLLOW`` both answering for the final component alone; a legacy
+``O_NOFOLLOW`` both answering for the final component alone -- the cheap
+pathname walk now keeps its established answer, then the read descends those
+same components through descriptors anchored at the records root, so a
+checked directory exchanged before the leaf open is refused rather than
+followed, and one exchanged for a regular file is named as not a directory
+(peer review, sixth gate round two); a legacy
 witness over a bundle
 configuring more than one anchor; a bundle configuring an anchor the spec
 carries no identity for, or one whose declared root SPKI or allowed signers
@@ -115,7 +120,13 @@ outcome read, and the timestamp rule two genuine issuances (peer review,
 sixth gate round one).  Four blind rules is a statement about where the rule
 belongs rather than about which of them to strengthen, and the answer is
 upstream of all of them: no component of a path this module reads may be a
-link, which is the refusal counted above.  The object rule stays, because it
+link, which is the refusal counted above.  The first implementation checked
+each name and then opened the whole path, recreating the race it meant to
+close.  The read now holds the records root open, opens each checked interior
+component relative to the descriptor above it with ``O_DIRECTORY`` and
+``O_NOFOLLOW``, and opens the leaf relative to the last one; every descriptor
+stays open through the one snapshot and closes in ``finally`` (peer review,
+sixth gate round two).  The object rule stays, because it
 is what stands if the walk is ever lost and because a second hard link needs
 no link anywhere to reach one file by two names.  And nearly everything
 around a signed ``TSTInfo`` is the producer's to rewrite -- the unsigned
@@ -144,9 +155,9 @@ substitutes another file between validation and use -- the plain form of a
 authority appended after the count -- changes what is on disk and not what is
 trusted; and because nothing is re-encoded, a pinned root's auxiliary trust
 settings apply exactly as pinned.  This module's own refusals go on naming
-the repository path, and the path it reads is walked component by component
-first, so the file it reads is the one the repository names all the way
-down rather than one a linked directory redirects to.
+the repository path, and the path it reads is descended component by
+component from the held records-root descriptor, so no later whole-path
+resolution can redirect it.
 
 The record under witness is read exactly once as well, and those same bytes
 answer every question asked about it: the digest its sidecar has to match,
@@ -158,7 +169,8 @@ whether a token covered the record at all: a writer could leave the witnessed
 record in place for the digest and the time checks, substitute another for
 that read with a token genuinely stamped over the substitute, and put the
 first back, and the evidence then named a record OpenSSL had never seen.
-Its path is walked too, for the same reason the response's is.
+Its path is opened through the anchored descent too, for the same reason the
+response's is.
 
 The trust transition the record carries comes from that snapshot too, and it
 is the one thing that used to come from somewhere else.  ``verify_witness``
@@ -191,8 +203,8 @@ and this one's" at once.  ``verify_witness`` keeps the one list, with 0.5.1's
 signature, because the upstream integration this is a port of walks its chain
 that way; what it leaves is said above and said again in its own docstring.
 
-The claimed response is read once for the same reason, and its path walked
-component by component before that read.  Its ``tokenSha256``
+The claimed response is read once for the same reason, and its checked path
+is opened component by component through held descriptors for that read.  Its ``tokenSha256``
 was taken from one open of its pathname and ``openssl ts -reply`` and
 ``openssl ts -verify`` then made two more, so the digest reported as evidence
 described the file at an earlier instant than the one the verifications read;
@@ -257,23 +269,31 @@ whatever a link there leads to is either the pinned bytes or a commitment
 mismatch, which is why the walk stops where it does rather than growing a
 fourth refusal for a file whose every byte is already committed.
 
-All six of those reads open without waiting, and three of them -- the
-record, the response and the pinned root -- have every component of their
-path ``lstat``ed from the records root down first.  Each has a path-level
-check in front of it, and the check answers about a pathname while the
-descriptor is opened from that pathname again, so what is opened need not be
-what was checked: a regular file replaced by a FIFO in between is opened as
-a FIFO, and a read-only open of a FIFO waits for a writer with no timeout.
-The refusal that ``fstat`` would then give is never reached, and a
-verification that should have failed hangs instead.  So the open carries
-``O_NONBLOCK`` where the platform has the flag, ``fstat`` refuses the
-descriptor in the caller's own words, and the flag is cleared before any
-byte is read -- it governs the open and nothing after it.
+All six of those reads open without waiting.  Three of them -- the record,
+the response and the pinned root -- first ``lstat`` every component from the
+records root down for the established cheap refusal, then descend that exact
+list from an open records-root descriptor.  Every interior open is relative
+to the directory descriptor actually reached and requires a non-link
+directory; the leaf open is relative to the last one, non-following and
+non-blocking, and its ``fstat`` decides the regular-file rule.  A writer
+replacing a checked directory before descent therefore changes the
+descriptor open into a refusal, not the object eventually read.  A writer
+replacing the leaf with a FIFO likewise cannot park the verifier:
+``O_NONBLOCK`` makes the open return, ``fstat`` refuses it in the caller's own
+words, and the flag is cleared before any byte is read -- it governs the open
+and nothing after it.
+
+Descriptor-relative ``os.open`` is a POSIX requirement.  CPython does not
+offer it on Windows, and falling back to a whole-path open there would quietly
+restore the race, so an anchored TSA read refuses with the package's POSIX-
+platform sentence when ``os.open`` lacks ``dir_fd`` support.  The lexical
+name in every verdict remains the path :func:`physical_path` returned.
 
 The record, the response and the pinned root open in binary too, and so does
 the private copy of the pinned root.
-``O_BINARY`` is absent on POSIX and contributes nothing there, and on Windows
-a descriptor opened without it is a text descriptor in the C runtime's sense:
+``O_BINARY`` is absent on POSIX and contributes nothing there.  It remains in
+the generic one-read flags for callers and platforms that expose it; on
+Windows a descriptor opened without it is a text descriptor in the C runtime's sense:
 the read turns ``\r\n`` into ``\n`` and stops at the first ``0x1A``.  Each of
 these files is hashed and then trusted, so a byte the read never returns is a
 byte the digest does not cover, and a copy written through a text descriptor
@@ -324,6 +344,7 @@ rules is lost; its tests reach it by blinding
 
 from __future__ import annotations
 
+import errno
 import functools
 import hashlib
 import io
@@ -754,7 +775,9 @@ def _components_below(root: Path, path: Path) -> tuple[Path, ...]:
         probe = parent
 
 
-def _refuse_a_linked_component(root: Path, path: Path, *, subject: str) -> None:
+def _refuse_a_linked_component(
+    root: Path, path: Path, *, subject: str
+) -> tuple[Path, ...]:
     """Refuse a path this module is about to read through a symlinked component.
 
     Every read here is meant to be of the file the repository names, and
@@ -780,14 +803,19 @@ def _refuse_a_linked_component(root: Path, path: Path, *, subject: str) -> None:
     Placed behind each caller's path-level check rather than in front of it,
     so that a symlink at the *final* component keeps the refusal it already
     had and no message moves; what this reaches is the components above it,
-    which nothing looked at.
+    which nothing looked at.  The checked tuple is returned unchanged to the
+    descriptor walk: this is the cheaper, established answer and wording,
+    and opening those same names relative to held parents is what makes the
+    answer remain true at use time (peer review, sixth gate round two).
     """
 
-    for component in _components_below(root, path):
+    components = _components_below(root, path)
+    for component in components:
         if component.is_symlink():
             raise TsaError(
                 f"{subject} traverses a symlink at {component}: {path}"
             )
+    return components
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -1555,6 +1583,23 @@ _ONE_READ_FLAGS = (
     | getattr(os, "O_BINARY", 0)
 )
 
+#: The root and every interior component of an anchored read are opened as
+#: directories, without following the directory entry and without leaking a
+#: descriptor into an OpenSSL child.  ``O_RDONLY`` is deliberate: it is the
+#: exact portable POSIX shape this verifier requires, rather than a Linux-only
+#: ``O_PATH`` shortcut.
+_DIRECTORY_READ_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+)
+
+#: Captured before tests or callers can wrap ``os.open``.  On Windows CPython
+#: does not expose descriptor-relative ``os.open``; falling back there would
+#: silently restore the check-then-whole-path-open race this walk closes.
+_OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
+
 #: Flags for the private copy of a pinned root the OpenSSL calls are given.
 #:
 #: Named beside ``_ONE_READ_FLAGS`` because the two have to agree about
@@ -1598,7 +1643,29 @@ def _clear_nonblocking(descriptor: int) -> None:
     fcntl.fcntl(descriptor, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
 
 
-def _read_file_once(path: Path, missing: str) -> tuple[bytes, tuple[int, int]]:
+def _is_symlink_at(name: str, parent: int) -> bool:
+    """Whether ``name`` is a link, asked relative to the held parent.
+
+    Only used to choose the words for a directory open that has already
+    failed.  Darwin reports ``ENOTDIR`` for both a link and a regular file
+    under ``O_DIRECTORY | O_NOFOLLOW``; this diagnostic look cannot turn the
+    refusal into acceptance if the entry races again.
+    """
+
+    try:
+        return stat.S_ISLNK(os.lstat(name, dir_fd=parent).st_mode)
+    except OSError:
+        return False
+
+
+def _read_file_once(
+    path: Path,
+    missing: str,
+    *,
+    root: Path | None = None,
+    checked_components: tuple[Path, ...] | None = None,
+    subject: str | None = None,
+) -> tuple[bytes, tuple[int, int]]:
     """Read every byte of ``path`` through one descriptor, or refuse.
 
     The three files this module both checks and then acts on -- a pinned root,
@@ -1615,6 +1682,17 @@ def _read_file_once(path: Path, missing: str) -> tuple[bytes, tuple[int, int]]:
     path-level check in front, which means a race can change which of the two
     identical refusals fires but never the message.
 
+    With ``root`` supplied, ``checked_components`` is the exact tuple the
+    pathname preflight just accepted.  The root and every interior component
+    are opened and ``fstat``ed as directories, each relative to the descriptor
+    above it, and the leaf is opened relative to the last.  All stay open until
+    the bytes have been read and all close in the ``finally`` below.  Thus no
+    checked name is resolved again as part of a complete pathname.  A failed
+    interior open is diagnosed relative to its held parent: a link keeps the
+    established traversal text and ``ENOTDIR`` names a component that became a
+    regular file.  The diagnostic can race, but the failed open has already
+    made the security decision (peer review, sixth gate round two).
+
     That race is why the open is non-blocking: the caller's check answers
     about a pathname and this opens the pathname again, so what is opened may
     be a FIFO the check never saw, and opening one to read blocks until a
@@ -1629,12 +1707,62 @@ def _read_file_once(path: Path, missing: str) -> tuple[bytes, tuple[int, int]]:
     caller that does; the record and the pinned root drop it.
     """
 
-    try:
-        descriptor = os.open(path, _ONE_READ_FLAGS)
-    except OSError as exc:
-        raise TsaError(missing) from exc
+    descriptors: list[int] = []
     chunks: list[bytes] = []
     try:
+        if root is None:
+            descriptor = os.open(path, _ONE_READ_FLAGS)
+            descriptors.append(descriptor)
+        else:
+            if not _OPEN_SUPPORTS_DIR_FD:
+                raise TsaError(
+                    "TSA files cannot be read with secure descent on this "
+                    "platform (os.open lacks dir_fd support); receipt requires "
+                    "a POSIX platform"
+                )
+            if checked_components is None or subject is None:
+                raise TypeError(
+                    "anchored file reads require checked_components and subject"
+                )
+            if not checked_components or checked_components[-1] != path:
+                raise TsaError(missing)
+            parent = os.open(root, _DIRECTORY_READ_FLAGS)
+            descriptors.append(parent)
+            root_stat = os.fstat(parent)
+            if not stat.S_ISDIR(root_stat.st_mode):
+                raise TsaError(missing)
+            for component in checked_components[:-1]:
+                try:
+                    child = os.open(
+                        component.name,
+                        _DIRECTORY_READ_FLAGS,
+                        dir_fd=parent,
+                    )
+                except OSError as exc:
+                    if _is_symlink_at(component.name, parent):
+                        raise TsaError(
+                            f"{subject} traverses a symlink at {component}: {path}"
+                        ) from exc
+                    if exc.errno == errno.ENOTDIR:
+                        raise TsaError(
+                            f"{subject} component is not a directory at "
+                            f"{component}: {path}"
+                        ) from exc
+                    raise TsaError(missing) from exc
+                descriptors.append(child)
+                parent = child
+                opened_component = os.fstat(parent)
+                if not stat.S_ISDIR(opened_component.st_mode):
+                    raise TsaError(
+                        f"{subject} component is not a directory at "
+                        f"{component}: {path}"
+                    )
+            descriptor = os.open(
+                checked_components[-1].name,
+                _ONE_READ_FLAGS,
+                dir_fd=parent,
+            )
+            descriptors.append(descriptor)
         judged = os.fstat(descriptor)
         if not stat.S_ISREG(judged.st_mode):
             raise TsaError(missing)
@@ -1647,7 +1775,8 @@ def _read_file_once(path: Path, missing: str) -> tuple[bytes, tuple[int, int]]:
     except OSError as exc:
         raise TsaError(missing) from exc
     finally:
-        os.close(descriptor)
+        for opened in reversed(descriptors):
+            os.close(opened)
     return b"".join(chunks), (judged.st_dev, judged.st_ino)
 
 
@@ -1675,18 +1804,34 @@ def _read_witnessed_record(records: Path, path: Path) -> bytes:
     ``records`` is the root the component walk is bounded at.  The check above
     answers for the final component and ``O_NOFOLLOW`` for the object opened;
     the components between the root and it are what
-    ``_refuse_a_linked_component`` reaches (sixth gate round one).
+    ``_refuse_a_linked_component`` first checks (sixth gate round one), and
+    the same tuple is then opened relative to held directory descriptors so a
+    replacement after that check cannot redirect this read (sixth gate round
+    two).
     """
 
     missing = f"witnessed record is missing or not a regular file: {path}"
     if not path.is_file() or path.is_symlink():
         raise TsaError(missing)
-    _refuse_a_linked_component(records, path, subject="witnessed record path")
-    record, _identity = _read_file_once(path, missing)
+    components = _refuse_a_linked_component(
+        records, path, subject="witnessed record path"
+    )
+    record, _identity = _read_file_once(
+        path,
+        missing,
+        root=records,
+        checked_components=components,
+        subject="witnessed record path",
+    )
     return record
 
 
-def _read_pinned_root(path: Path) -> bytes:
+def _read_pinned_root(
+    path: Path,
+    *,
+    records: Path | None = None,
+    checked_components: tuple[Path, ...] | None = None,
+) -> bytes:
     """Read a pinned root once, and return the only bytes anything may judge.
 
     ``_root_material`` used to open this repository path five separate times
@@ -1704,12 +1849,19 @@ def _read_pinned_root(path: Path) -> bytes:
     here are what gets hashed, counted, described and trusted, and nothing
     re-reads the path.
 
-    The path-level check in ``_root_material`` stays in front of this and
-    keeps its wording, which ``_read_file_once`` repeats for the descriptor.
+    The path-level and component checks in ``_root_material`` stay in front
+    and keep their wording.  When it supplies ``records`` and the checked
+    component tuple, ``_read_file_once`` anchors the use of those names to
+    directory descriptors; direct callers without them retain the generic
+    one-read shape.
     """
 
     pem, _identity = _read_file_once(
-        path, f"pinned TSA root is missing or not a regular file: {path}"
+        path,
+        f"pinned TSA root is missing or not a regular file: {path}",
+        root=records,
+        checked_components=checked_components,
+        subject="pinned TSA root path" if records is not None else None,
     )
     return pem
 
@@ -1840,8 +1992,9 @@ def _root_material(
     OpenSSL counts them, and a file OpenSSL cannot count is refused rather
     than assumed.
 
-    Every check runs on one read of the repository path, and OpenSSL sees
-    only a private copy of those bytes -- never the path itself.  Pass
+    Every check runs on one descriptor-anchored read of the repository path,
+    and OpenSSL sees only a private copy of those bytes -- never the path
+    itself.  Pass
     ``snapshot_dir`` to keep that copy, which is what
     ``verify_timestamp_token`` trusts as its ``-CAfile``; without it the
     directory is this function's own and goes away, and the returned
@@ -1854,8 +2007,12 @@ def _root_material(
     root_path = physical_path(records, str(root.get("path", "")))
     if not root_path.is_file() or root_path.is_symlink():
         raise TsaError(f"pinned TSA root is missing or not a regular file: {root_path}")
-    _refuse_a_linked_component(records, root_path, subject="pinned TSA root path")
-    pem = _read_pinned_root(root_path)
+    components = _refuse_a_linked_component(
+        records, root_path, subject="pinned TSA root path"
+    )
+    pem = _read_pinned_root(
+        root_path, records=records, checked_components=components
+    )
     if snapshot_dir is not None:
         return _judge_pinned_root(root_path, root, pem, snapshot_dir)
     with tempfile.TemporaryDirectory(prefix="thesis-tsa-root-") as owned:
@@ -2122,11 +2279,20 @@ def _verify_timestamp_token(
             raise TsaError(token_missing)
         # And no component above that one may be a link either, or two
         # outcomes reach one entry by two names that every identity rule
-        # downstream of the name reports as two (sixth gate round one).
-        _refuse_a_linked_component(
+        # downstream of the name reports as two (sixth gate round one).  The
+        # same checked tuple drives descriptor-relative descent, so replacing
+        # a component after this answer cannot redirect the leaf open (sixth
+        # gate round two).
+        components = _refuse_a_linked_component(
             records, token_path, subject="witness token path"
         )
-        token_bytes, token_file = _read_file_once(token_path, token_missing)
+        token_bytes, token_file = _read_file_once(
+            token_path,
+            token_missing,
+            root=records,
+            checked_components=components,
+            subject="witness token path",
+        )
         if on_token_read is not None:
             on_token_read(token_path, token_file)
         token_sha256 = hashlib.sha256(token_bytes).hexdigest()
