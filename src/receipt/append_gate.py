@@ -89,7 +89,16 @@ what its working tree shows — and from the *ignored* files on those surfaces,
 which the untracked half of that listing excludes by construction, so that a
 gate change carrying its own ignore rule cannot add a second ledger under the
 data surface, or any file under the release root, and still be told
-``DATA_SURFACE unchanged``, a state path that traverses a symlinked component
+``DATA_SURFACE unchanged`` — and from an enumeration this run performs itself
+over every protected surface, because a listing that exits 0 is not thereby a
+complete one: ``git ls-files --others`` exits 0 while printing ``warning:
+could not open directory 'ledger/sub/': Permission denied`` and omitting that
+subtree from its answer, so the same second ledger inside a mode-0 directory
+was hidden from the same verdict with no ignore rule needed at all, and the
+surfaces are walked here with ``os.scandir`` before any listing is believed,
+a protected directory that cannot be listed refusing the classification
+outright while git's stderr on those reads is answered rather than discarded
+behind it, a state path that traverses a symlinked component
 is refused before it is read and so is a release root that does — its own
 components are walked from the candidate root before anything reads through
 them, because the checks that would have met a link are all downstream of
@@ -186,7 +195,7 @@ extension already in it is left exactly as it was found.
 They run beside the extracted checks without altering any of their refusals,
 and every new refusal runs after every pre-existing file-level refusal — with
 three stated exceptions at entry, all saying that a comparison cannot be made
-here rather than making one, and three further placements stated after them. The
+here rather than making one, and four further placements stated after them. The
 checkout-level ``release_chain.assert_file_modes_authoritative`` runs ahead of
 the release-history file checks (and after the base ref is resolved, so a
 false setting cannot mask a base that names nothing). It is about what the
@@ -236,8 +245,9 @@ classified is not the tree this verdict was asked about; it runs again before
 the gate-only return, which is the one exit reached without a state read and
 therefore without the descent that would otherwise make the comparison.
 
-Two component walks and one type decision are placed by the same rule those
-three follow rather than being further entry-level exceptions.
+Two component walks, one surface enumeration and one type decision are placed
+by the same rule those three follow rather than being further entry-level
+exceptions.
 ``release_chain.assert_no_symlinked_state_component`` runs at the top of each
 state read and ``release_chain.assert_no_symlinked_release_root`` at the top
 of both release-proposal paths, each ahead of every read through the path it
@@ -307,6 +317,49 @@ spelling refusal, for a single-component root and with no link anywhere;
 renaming ``ledger`` to ``Ledger`` beside a tampered frozen prefix moves it
 from ``immutable prefix line 1 ... was rewritten``. Both were checked against
 this branch's head rather than reasoned about.
+
+The surface enumeration is the fourth placement, and it is the same shape
+asked about a listing rather than about a name.
+``assert_protected_surfaces_enumerable`` runs at the top of the surface
+classification, ahead of the three git listings that classification is built
+from, because ``git ls-files --others`` answers exit 0 for a tree it could not
+finish reading: a mode-0 directory under either surface or under the release
+root makes git print ``warning: could not open directory 'ledger/sub/':
+Permission denied`` on stderr and omit that subtree from stdout, and the
+untracked file inside it — a second ledger, a file under the release root —
+is then in neither half of the changed set. So every protected surface is
+walked here with ``os.scandir``, no symlink descended and the work bounded by
+``MAX_SURFACE_WALK_ENTRIES``, and a protected directory this run cannot list
+refuses: not being able to say what is on a surface is not the same as there
+being nothing on it, and it is the classification rather than any one file
+that cannot be made. Absence is the other answer and it passes, as it does in
+both component walks — ``ENOENT`` and ``ENOTDIR`` from a listing mean there is
+no directory there to withhold one, which git's own listing reports
+faithfully. Only the protected surfaces are walked, for the reason
+``_is_protected`` restricts the ignored listing: everywhere else an unreadable
+directory holds files that are in no commit and are proposed by nothing, and a
+verdict that refused a checkout for its own locked-down build tree would be
+the mistake the caching-settings guard already had to have reversed. Beside
+it, and scoped the same way, the stderr of those reads is answered rather than
+discarded — a warning attributed to a path outside every protected surface is
+left alone, one attributed to a protected path or to no path at all refuses.
+That is the belt; the walk is the guarantee, since it asks the question
+directly instead of waiting for git to mention it.
+
+Standing at the top of the classification means standing ahead of the
+pre-existing mixed-proposal refusal and, through the gate-only exit the
+classification decides, ahead of every pre-existing file-level refusal on the
+data path. Two cases are measured. A search-only ``ledger`` beside an
+ordinary append answered ``cannot bind the spelling of
+ledger/official_observations.jsonl: its directory cannot be listed`` — the
+state walk's sentence, which is still what the push path gives, since it
+classifies nothing — and now answers the enumeration's. A search-only
+``releases/vendor`` holding a committed release file answered ``existing
+release file was deleted relative to <commit>: releases/vendor/notes.md``,
+which is the extraction's own sentence and a diagnosis that tree does not
+deserve — the file is there and only the listing is withheld — and now answers
+that the proposal cannot be classified. Both were produced by disabling the
+enumeration in place and reading the verdict.
 
 Its fail-closed half — a directory the verifier cannot list — fires on every
 filesystem and every platform, because being unable to answer is not a
@@ -676,15 +729,25 @@ def _assert_root_unchanged(candidate: _CandidateTree) -> None:
         raise AppendError("candidate root changed during verification")
 
 
-def _git_output(arguments: list[str], candidate: _CandidateTree) -> bytes:
+def _git_output(
+    arguments: list[str],
+    candidate: _CandidateTree,
+    *,
+    complete_listing: bool = False,
+) -> bytes:
     # Every git read here runs under the shared _git_environment, which turns
     # off refs/replace: a replacement object changes what a commit, tree, or
     # blob reads as while the OID this verdict prints stays the same. And with
     # release_chain.WORKING_TREE_SCAN_OPTIONS on the command line, so that the
-    # three reads the surface classification is built from -- ``diff``,
-    # ``ls-files --others`` and ``diff-index --cached`` -- consult no stat
-    # cache, no untracked cache and no file-system monitor, whatever this
-    # checkout's configuration or its index extensions say.
+    # four reads the surface classification is built from -- ``diff``,
+    # ``ls-files --others``, the same listing with ``--ignored``, and
+    # ``diff-index --cached`` -- consult no stat cache, no untracked cache and
+    # no file-system monitor, whatever this checkout's configuration or its
+    # index extensions say.
+    #
+    # ``complete_listing`` is those four reads' extra requirement: exit 0 is
+    # not by itself a complete enumeration, so a warning printed beside it is
+    # answered rather than discarded. See _assert_listing_complete.
     try:
         completed = subprocess.run(
             ["git", *WORKING_TREE_SCAN_OPTIONS, *arguments],
@@ -698,6 +761,8 @@ def _git_output(arguments: list[str], candidate: _CandidateTree) -> bytes:
     if completed.returncode != 0:
         diagnostic = completed.stderr.decode("utf-8", errors="replace").strip()
         raise AppendError(f"git {' '.join(arguments)} failed: {diagnostic}")
+    if complete_listing:
+        _assert_listing_complete(completed.stderr, candidate)
     return completed.stdout
 
 
@@ -761,6 +826,228 @@ def _is_protected(path: str, candidate: _CandidateTree) -> bool:
     )
 
 
+# The classification below enumerates every protected surface itself before it
+# believes git's listings, and this bounds that enumeration. It is a bound on
+# work, not a confinement: the walk descends no symlink, so no cycle is
+# reachable, and a consumer's protected surfaces are a ledger directory and a
+# release tree of a few hundred files. A tree that exceeds it is refused in the
+# walk's own terms rather than answered from a walk that stopped early, because
+# stopping early is the silent omission this whole check exists to refuse.
+MAX_SURFACE_WALK_ENTRIES = 200_000
+
+# git quotes the path it could not read: ``warning: could not open directory
+# 'ledger/sub/': Permission denied``, from the C format ``could not open
+# directory '%s': %s``. The quoting is what a translation keeps, so the
+# attribution below reads the quoted path rather than the wording; a warning
+# line this finds no path in is a warning this run cannot attribute, and it
+# refuses. See _assert_listing_complete.
+GIT_WARNING_PATH_RE = re.compile(r"'([^']*)'")
+
+
+def _surface_directories(candidate: _CandidateTree) -> tuple[list[str], list[str]]:
+    """The directories the classification's completeness depends on.
+
+    Returns ``(subtrees, listings)``: the directories to walk whole, and the
+    ones to list without descending.
+
+    A ``dir/**`` pattern puts every file anywhere beneath ``dir`` on a
+    protected surface, so the whole subtree has to be enumerable; the release
+    root is the same shape, since ``check_gate_only_confinement`` speaks for
+    every path under it. A pattern naming one exact file puts nothing else on
+    the surface, so what has to be enumerable there is the directory that
+    would hold it -- an untracked file appears in git's listing only if the
+    directory holding it can be read. And every directory above either kind is
+    listed too, because git's own scan reaches a subtree by reading its
+    parents: a search-only ``releases`` hides ``releases/manifests`` from the
+    scan as completely as an unreadable ``releases/manifests`` does.
+
+    The candidate root itself is ``''`` here, which is every surface's last
+    ancestor and is listed once.
+    """
+
+    subtrees = {candidate.spec.chain.release_root_relative.as_posix()}
+    listings: set[str] = set()
+    for pattern in (*candidate.spec.data_surface, *candidate.spec.gate_surface):
+        if pattern.endswith("/**"):
+            subtrees.add(pattern[: -len("/**")])
+        else:
+            listings.add(pattern.rpartition("/")[0])
+    for target in (*subtrees, *listings):
+        parts = [part for part in target.split("/") if part]
+        for depth in range(len(parts)):
+            listings.add("/".join(parts[:depth]))
+    return sorted(subtrees), sorted(listings - subtrees)
+
+
+def _unenumerable_surface(relative: str, strerror: str | None) -> AppendError:
+    """The one refusal for a protected directory this run cannot list."""
+
+    return AppendError(
+        "cannot enumerate a protected directory, so the proposal cannot be "
+        f"classified: {relative or '.'} ({strerror})"
+    )
+
+
+def _enumerate_surface_directory(
+    relative: str, candidate: _CandidateTree, budget: int, *, descend: bool
+) -> int:
+    """List one protected directory, and under ``descend`` everything below it.
+
+    ``lstat`` decides what each entry is, so a symlinked directory is not
+    descended -- which is what git's own untracked scan does with one, and the
+    question here is whether git's listing was complete rather than what lies
+    behind a link. An entry that is gone by the time the walk reaches it, or
+    that turns out not to be a directory, is not this check's business; every
+    other ``OSError`` from a listing refuses.
+    """
+
+    pending = [relative]
+    while pending:
+        current = pending.pop()
+        path = candidate.root / current if current else candidate.root
+        try:
+            entry = os.lstat(path)
+        except OSError as exc:
+            if exc.errno in {errno.ENOENT, errno.ENOTDIR}:
+                continue
+            raise _unenumerable_surface(current, exc.strerror) from exc
+        if not stat.S_ISDIR(entry.st_mode):
+            continue
+        try:
+            with os.scandir(path) as listing:
+                names = [item.name for item in listing]
+        except OSError as exc:
+            if exc.errno in {errno.ENOENT, errno.ENOTDIR}:
+                continue
+            raise _unenumerable_surface(current, exc.strerror) from exc
+        budget -= len(names)
+        if budget < 0:
+            raise AppendError(
+                "protected surface enumeration exceeded "
+                f"{MAX_SURFACE_WALK_ENTRIES} entries, so the proposal cannot "
+                f"be classified: {current or '.'}"
+            )
+        if descend:
+            pending.extend(
+                f"{current}/{name}" if current else name for name in names
+            )
+    return budget
+
+
+def assert_protected_surfaces_enumerable(candidate: _CandidateTree) -> None:
+    """Enumerate every protected surface before believing git's listings.
+
+    This is the guarantee the classification below rests on, and the stderr
+    check beside it is the belt. ``git ls-files --others`` exits 0 while
+    printing ``warning: could not open directory 'ledger/sub/': Permission
+    denied`` and omitting that subtree entirely, so a gate change beside a
+    mode-0 directory holding an untracked or ignored second ledger classified
+    gate-only and was told ``DATA_SURFACE unchanged`` with the ledger, the
+    frozen prefix, the row bindings and the release history all unread. Exit 0
+    is git's word for "the command ran", not for "this is everything".
+
+    So the surfaces are enumerated here, directly, and a protected directory
+    this run cannot list is a refusal rather than an omission: not being able
+    to say what is on a surface is not the same as there being nothing on it.
+    Absence is not the same fact either -- an ``ENOENT`` or ``ENOTDIR`` from a
+    listing means there is no directory there to withhold one, which is what
+    git's listing already reports faithfully -- so those pass, in the shape
+    ``release_chain._assert_component_spelled`` already uses for the same
+    distinction.
+
+    Only the protected surfaces, for the reason ``_is_protected`` restricts
+    the ignored listing: everywhere else an unreadable directory holds files
+    that are in no commit and are proposed by nothing, and refusing over one
+    would refuse a checkout for its own litter. An unreadable ``build/`` is
+    left exactly as it was.
+
+    It runs at the top of the classification, so it precedes the pre-existing
+    mixed-proposal refusal and, through the gate-only exit it guards, every
+    pre-existing file-level refusal on the data path. That is deliberate and
+    it is the same shape as the component walks: a verdict about a surface
+    this run could not enumerate would be a verdict drawn from a listing that
+    was silently short, and the more specific of the two true things to say
+    about such a tree is that the proposal cannot be classified at all. The
+    cases are measured in the tests that bind them.
+    """
+
+    subtrees, listings = _surface_directories(candidate)
+    budget = MAX_SURFACE_WALK_ENTRIES
+    for relative in listings:
+        budget = _enumerate_surface_directory(
+            relative, candidate, budget, descend=False
+        )
+    for relative in subtrees:
+        budget = _enumerate_surface_directory(
+            relative, candidate, budget, descend=True
+        )
+
+
+def _assert_listing_complete(stderr: bytes, candidate: _CandidateTree) -> None:
+    """Refuse a classification read that warned about a protected directory.
+
+    The belt, not the guarantee: ``assert_protected_surfaces_enumerable``
+    above has already listed every protected directory itself, and this asks
+    whether git had anything to say while making the same listing at its own
+    instant. A warning on one of these reads means the listing is not
+    complete, and this run gets to see that only on stderr, since the exit
+    status is 0 either way.
+
+    Scoped to the protected surfaces, because the walk is: git warns about
+    every directory in the checkout it could not open, including the ones no
+    surface names, and refusing over an unreadable ``build/`` would refuse a
+    developer's checkout for its own litter -- the direction round 12's F2
+    already had to reverse once. So each warning line is attributed to the
+    path git quoted in it, and a line naming a directory outside every
+    protected surface is left alone.
+
+    Attribution fails closed. A line with no quoted path in it, a quoted path
+    that is absolute, and one containing ``..`` are all warnings this run
+    cannot place, and an unplaceable warning about a listing this verdict is
+    built on is refused rather than assumed to be about ground the verdict
+    does not speak for.
+    """
+
+    diagnostic = stderr.decode("utf-8", errors="replace").strip()
+    if not diagnostic:
+        return
+    subtrees, listings = _surface_directories(candidate)
+    for line in diagnostic.splitlines():
+        if not line.strip():
+            continue
+        if _warning_is_outside_the_surfaces(line, subtrees, listings, candidate):
+            continue
+        raise AppendError(
+            "git reported a warning while enumerating the working tree: "
+            f"{line.strip()}"
+        )
+
+
+def _warning_is_outside_the_surfaces(
+    line: str,
+    subtrees: list[str],
+    listings: list[str],
+    candidate: _CandidateTree,
+) -> bool:
+    """Whether one warning line names only paths no surface here speaks for."""
+
+    quoted = GIT_WARNING_PATH_RE.findall(line)
+    if not quoted:
+        return False
+    for value in quoted:
+        relative = value.rstrip("/")
+        parts = relative.split("/")
+        if relative.startswith("/") or ".." in parts or "" in parts[1:]:
+            return False
+        if relative in listings or relative in subtrees:
+            return False
+        if any(relative.startswith(f"{subtree}/") for subtree in subtrees):
+            return False
+        if _is_protected(relative, candidate):
+            return False
+    return True
+
+
 def check_surface_separation(
     base: _BaseCommit, candidate: _CandidateTree
 ) -> tuple[set[str], set[str], set[str]]:
@@ -805,6 +1092,10 @@ def check_surface_separation(
     classification always ran over.
     """
 
+    # Before any of the listings below is believed: exit 0 is not a complete
+    # enumeration, and a protected surface this run cannot enumerate itself is
+    # a proposal it cannot classify. See assert_protected_surfaces_enumerable.
+    assert_protected_surfaces_enumerable(candidate)
     changed = _nul_paths(
         _git_output(
             [
@@ -818,6 +1109,7 @@ def check_surface_separation(
                 "--",
             ],
             candidate,
+            complete_listing=True,
         )
     )
     # ``git diff`` excludes untracked files. Tests mint release siblings before
@@ -827,6 +1119,7 @@ def check_surface_separation(
             _git_output(
                 ["ls-files", "--others", "--exclude-standard", "-z", "--"],
                 candidate,
+                complete_listing=True,
             )
         )
     )
@@ -846,6 +1139,7 @@ def check_surface_separation(
                     "--",
                 ],
                 candidate,
+                complete_listing=True,
             )
         )
         if _is_protected(path, candidate)
@@ -888,6 +1182,7 @@ def _staged_surface_changes(
                 "--",
             ],
             candidate,
+            complete_listing=True,
         )
     )
     return _classify_surfaces(staged, candidate)
