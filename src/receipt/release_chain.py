@@ -13,79 +13,77 @@ direction. With pins off, verification establishes signatures against
 whatever material the effective anchor directory holds — the caller's own
 trust choice.)
 
-Extracted nearly verbatim from PolicyEngine/ledger scripts/verify_release_chain.py
-at commit 07984278503b8e06c48c539327f6f1d01c035510 (branch
-codex/thesis-ledger-facts); see receipts/ledger-pin-source-hashes.txt. The only
-intended change is parameterization: every repo-specific constant moved into
-ChainSpec, supplied by the consumer's committed code. Behavior is gated by the
-differential harness in tests/test_ledger_equivalence.py. Additions since the
-extraction (the base-ref history pass with its checkout and index guards,
-which include requiring every base release file to still be an entry in the
-candidate index, since both of that pass's comparisons read the working tree
-and ``git rm --cached`` leaves it untouched; the release-root guard, which
-reconciles that root's index entries with the working tree in both
-directions, by the spelling the traversal returns and after walking an
-indexed path's parents, because a filesystem traversal does not descend a
-symlinked directory while resolving the whole name does — and because a
-case- or normalisation-insensitive filesystem answers one entry's question
-with another entry's file; the whole-index read that refuses an entry spelled
-as another spelling of a protected path, which every one of those
-reconciliations is blind to because each compares by exact spelling; the
-release root's own path walk, which the gate runs before anything reads
-through that root, since every check that would meet a link there is
-downstream of following it; the
-state-path guards ``append_gate`` calls, whose walk — like the release
-root's — now also requires each component to be spelled by the directory
-holding it, because what a component *is* is learned by resolving its name
-and a name-folding filesystem resolves a name this package never wrote;
-the anchor-set digest in the result) run beside the extracted checks without
-altering any of their refusals, and carry their own tests. Every one of those
-index reads names its path as a literal pathspec, so git is asked about the
-exact path rather than handed a name to interpret as a pattern — and so does
-the base tree's own enumeration, which is not an addition but was still
-handing git a configured path to interpret: a release root beginning with
-``:`` was read as pathspec magic and the magic stripped, so the whole root
-enumerated as empty, an existing genesis tree was taken for newly added
-files, and its byte and mode immutability was never compared. What that
-enumeration returns is now required to be the path asked for or to lie under
-it. Every git
-read here runs with git's four pathspec-mode environment variables dropped, so
-that literal pathspec means what it says instead of whatever an ambient
+Extracted nearly verbatim from PolicyEngine/ledger
+scripts/verify_release_chain.py at commit
+07984278503b8e06c48c539327f6f1d01c035510 (branch codex/thesis-ledger-facts);
+see receipts/ledger-pin-source-hashes.txt. The only intended change is
+parameterization: every repo-specific constant moved into ChainSpec, supplied
+by the consumer's committed code. Behavior is gated by the differential
+harness in tests/test_ledger_equivalence.py. Additions since the extraction
+(the base-ref history pass with its checkout and index guards, which include
+requiring every base release file to still be an entry in the candidate index,
+since both of that pass's comparisons read the working tree and ``git rm
+--cached`` leaves it untouched; the release-root guard, which reconciles that
+root's index entries with the working tree in both directions, by the spelling
+the traversal returns and after walking an indexed path's parents, because a
+filesystem traversal does not descend a symlinked directory while resolving
+the whole name does — and because a case- or normalisation-insensitive
+filesystem answers one entry's question with another entry's file; the
+whole-index read that refuses an entry spelled as another spelling of a
+protected path, which every one of those reconciliations is blind to because
+each compares by exact spelling; the release root's own path walk, which the
+gate runs before anything reads through that root, since every check that
+would meet a link there is downstream of following it; the state-path guards
+``append_gate`` calls, whose walk — like the release root's — now also
+requires each component to be spelled by the directory holding it, because
+what a component *is* is learned by resolving its name and a name-folding
+filesystem resolves a name this package never wrote; the anchor-set digest in
+the result) run beside the extracted checks without altering any of their
+refusals, and carry their own tests. Every one of those index reads names its
+path as a literal pathspec, so git is asked about the exact path rather than
+handed a name to interpret as a pattern — and so does the base tree's own
+enumeration, which is not an addition but was still handing git a configured
+path to interpret: a release root beginning with ``:`` was read as pathspec
+magic and the magic stripped, so the whole root enumerated as empty, an
+existing genesis tree was taken for newly added files, and its byte and mode
+immutability was never compared. What that enumeration returns is now required
+to be the path asked for or to lie under it. Every git read here runs with
+git's four pathspec-mode environment variables dropped, so that literal
+pathspec means what it says instead of whatever an ambient
 ``GIT_LITERAL_PATHSPECS`` or ``GIT_ICASE_PATHSPECS`` would make of it. Each
 also reads the entry's own flag word, because mode and object id do not say
 whether an entry records content: an intent-to-add entry (``git add -N``) is
 stage 0 at the working tree's mode with the empty blob's object id, which is
 what every check here took for a tracked file while the commit made from that
-index deletes the path. The state reads themselves changed shape but not
-their refusals: ``_regular_file_bytes`` keeps both of its messages and their
-order, and opens the file it accepts through directory descriptors so no
-component of the path is resolved twice.
-That descent returns the identity of every directory it opened, so a caller
-can ask afterwards whether the file is still reached through the same ones,
-optionally pins the root against an identity the caller recorded earlier, and
-refuses outright rather than falling back to a pathname open where ``os.open``
-takes no ``dir_fd`` — a requirement of the package rather than of any one
-caller, since every state read in it comes through here: on Windows
-``verify_release_chain``, and so ``receipt verify``'s custody pass, refuses
-exactly as the append gate does, and ``README.md`` states it. Both of that
-root open's refusals are named here rather than at either caller, because
-``append_gate._set_root`` performs the same open for the same confinement —
-it holds the candidate root open for the whole of a verdict, so the identity
-it records is a directory it still has rather than a number the filesystem
-may hand to the next directory created in that root's place. It opens each
-directory component with search rights alone where the platform offers them
-(``O_PATH`` on Linux, ``O_SEARCH`` on Darwin), which is all it uses them for,
-so a POSIX search-only directory above a readable state file is descended as
-the pathname open used to descend it; where the platform offers neither, the
-read permission the descent then needs is stated in the refusal rather than
-escaping as a bare ``PermissionError``. ``assert_index_agrees_with_tree``
-likewise accepts a category the caller has already observed, so a caller
-holding the file open need not resolve its name again.
-``verify_release_chain`` takes an optional ``state_bytes`` mapping that stands
-in for reading a state path, so a caller that has already read those files can
-hold one verdict to one read of each; omitted, both files are read exactly as
-before. Every git subprocess here runs with ``refs/replace`` disabled
-(``_git_environment``); those additions are its only callers, and a
+index deletes the path. The state reads themselves changed shape but not their
+refusals: ``_regular_file_bytes`` keeps both of its messages and their order,
+and opens the file it accepts through directory descriptors so no component of
+the path is resolved twice. That descent returns the identity of every
+directory it opened, so a caller can ask afterwards whether the file is still
+reached through the same ones, optionally pins the root against an identity
+the caller recorded earlier, and refuses outright rather than falling back to
+a pathname open where ``os.open`` takes no ``dir_fd`` — a requirement of the
+package rather than of any one caller, since every state read in it comes
+through here: on Windows ``verify_release_chain``, and so ``receipt verify``'s
+custody pass, refuses exactly as the append gate does, and ``README.md``
+states it. Both of that root open's refusals are named here rather than at
+either caller, because ``append_gate._set_root`` performs the same open for
+the same confinement — it holds the candidate root open for the whole of a
+verdict, so the identity it records is a directory it still has rather than a
+number the filesystem may hand to the next directory created in that root's
+place. It opens each directory component with search rights alone where the
+platform offers them (``O_PATH`` on Linux, ``O_SEARCH`` on Darwin), which is
+all it uses them for, so a POSIX search-only directory above a readable state
+file is descended as the pathname open used to descend it; where the platform
+offers neither, the read permission the descent then needs is stated in the
+refusal rather than escaping as a bare ``PermissionError``.
+``assert_index_agrees_with_tree`` likewise accepts a category the caller has
+already observed, so a caller holding the file open need not resolve its name
+again. ``verify_release_chain`` takes an optional ``state_bytes`` mapping that
+stands in for reading a state path, so a caller that has already read those
+files can hold one verdict to one read of each; omitted, both files are read
+exactly as before. Every git subprocess here runs with ``refs/replace``
+disabled (``_git_environment``); those additions are its only callers, and a
 replacement object would otherwise change what a base commit, tree, or blob
 reads as behind the OID a verdict names.
 """

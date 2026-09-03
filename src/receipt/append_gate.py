@@ -45,16 +45,15 @@ them, because the checks that would have met a link are all downstream of
 reading through it — with every component of both required to be spelled by
 the directory that holds it, since what a component *is* comes from resolving
 its name and a name-folding filesystem resolves one this package never named,
-the base is resolved to a commit once and
-carried to every consumer, every git read runs with ``refs/replace`` disabled
-so a replacement object cannot change what the printed OID reads as, each
-state file is read once — through directory descriptors, so no component of
-its path is resolved twice, from a candidate root that is opened before the
-run begins and held open until it ends, so that the identity recorded from
-that descriptor still names a directory rather than a number a filesystem may
-hand to the next one created in its place, and is compared against it again
-wherever a verdict is decided without a state read — the surface
-classification and the gate-only exit,
+the base is resolved to a commit once and carried to every consumer, every git
+read runs with ``refs/replace`` disabled so a replacement object cannot change
+what the printed OID reads as, each state file is read once — through
+directory descriptors, so no component of its path is resolved twice, from a
+candidate root that is opened before the run begins and held open until it
+ends, so that the identity recorded from that descriptor still names a
+directory rather than a number a filesystem may hand to the next one created
+in its place, and is compared against it again wherever a verdict is decided
+without a state read — the surface classification and the gate-only exit,
 which perform no descent and so never reached that comparison — and never
 through a weaker descent than that, nor a narrower one — the directories above
 a state file are opened with search rights where the platform offers them, and
@@ -66,26 +65,25 @@ the two state files are tracked regular files that keep the base's file mode,
 every release file the base carries is still an entry in the candidate index,
 the release root's index and working tree agree in both directions — no index
 entry the walk cannot see, no entry the walk cannot find, and no entry
-answered for through a symlinked component or under another entry's
-spelling — the index holds no entry spelled as another spelling of a
-protected path, which every one of those reconciliations is blind to because
-each is a comparison by exact spelling, and the post-cutover binding values
-are validated for shape rather
-than presence alone. Every one of those
-index reads asks about the exact path, as a literal pathspec, rather than
-handing git a name to interpret as a pattern, as does the base tree's
-enumeration — a release root beginning with ``:`` was read as pathspec magic
-and the magic stripped, so the whole root enumerated as empty, an existing
-genesis tree was treated as newly added files, and the byte and mode
-immutability this pass is for was never compared — and what that enumeration
-returns must be the path asked for or lie under it. Every git read here, like
-every one in ``release_chain``, runs with git's four pathspec-mode environment
-variables dropped, because a pathspec written here has to mean what it says
-rather than whatever the caller's environment would make of it. Every one of
-them reads the entry's flag word too: an intent-to-add entry records no
-content while looking in every other respect like a tracked file, so the
-tracked-state check, the still-indexed check, and the release root's scan each
-refuse one rather than comparing against a path this commit deletes.
+answered for through a symlinked component or under another entry's spelling —
+the index holds no entry spelled as another spelling of a protected path,
+which every one of those reconciliations is blind to because each is a
+comparison by exact spelling, and the post-cutover binding values are
+validated for shape rather than presence alone. Every one of those index reads
+asks about the exact path, as a literal pathspec, rather than handing git a
+name to interpret as a pattern, as does the base tree's enumeration — a
+release root beginning with ``:`` was read as pathspec magic and the magic
+stripped, so the whole root enumerated as empty, an existing genesis tree was
+treated as newly added files, and the byte and mode immutability this pass is
+for was never compared — and what that enumeration returns must be the path
+asked for or lie under it. Every git read here, like every one in
+``release_chain``, runs with git's four pathspec-mode environment variables
+dropped, because a pathspec written here has to mean what it says rather than
+whatever the caller's environment would make of it. Every one of them reads
+the entry's flag word too: an intent-to-add entry records no content while
+looking in every other respect like a tracked file, so the tracked-state
+check, the still-indexed check, and the release root's scan each refuse one
+rather than comparing against a path this commit deletes.
 
 What the closing re-check cannot do is bound the whole run. Verifying a
 working tree means verifying something the candidate can write to for as long
@@ -101,28 +99,27 @@ work and is not done here.
 
 They run beside the extracted checks without altering any of their refusals,
 and every new refusal runs after every pre-existing file-level refusal — with
-three stated exceptions, all at entry and all saying that a comparison cannot
-be made here rather than making one. The checkout-level
-``release_chain.assert_file_modes_authoritative`` runs ahead of the
-release-history file checks (and after the base ref is resolved, so a false
-setting cannot mask a base that names nothing). The per-state-path
+three stated exceptions at entry, all saying that a comparison cannot be made
+here rather than making one, and one further placement stated after them. The
+checkout-level ``release_chain.assert_file_modes_authoritative`` runs ahead of
+the release-history file checks (and after the base ref is resolved, so a
+false setting cannot mask a base that names nothing). The per-state-path
 ``release_chain.assert_state_path_tracked`` runs ahead of everything that
 reads either state file, because an untracked state path, or one under a
 gitlink, is not this commit's content and nothing downstream can be a verdict
 about it. ``release_chain.assert_index_carries_no_protected_alias`` runs
 beside it and shares that exception rather than adding a fourth: it is the
-same fact from the other side. An index entry spelled as another spelling of
-a protected path is a second object every reconciliation below is blind to,
+same fact from the other side. An index entry spelled as another spelling of a
+protected path is a second object every reconciliation below is blind to,
 because each compares by exact spelling; which of the two the one file on a
 name-folding filesystem answers for is not decidable from the index or the
-tree, so this too says a comparison cannot be made rather than making one.
-And ``_assert_root_unchanged`` runs ahead of the surface
-classification, which is a pre-existing check and the one that decides which
-path the whole run takes, because a root exchanged since ``_set_root``
-recorded it means the tree being classified is not the tree this verdict was
-asked about; it runs again before the gate-only return, which is the one exit
-reached without a state read and therefore without the descent that would
-otherwise make the comparison.
+tree, so this too says a comparison cannot be made rather than making one. And
+``_assert_root_unchanged`` runs ahead of the surface classification, which is
+a pre-existing check and the one that decides which path the whole run takes,
+because a root exchanged since ``_set_root`` recorded it means the tree being
+classified is not the tree this verdict was asked about; it runs again before
+the gate-only return, which is the one exit reached without a state read and
+therefore without the descent that would otherwise make the comparison.
 
 ``release_chain.assert_no_symlinked_release_root`` is placed by the same rule
 those three follow rather than being a fourth entry-level one: it runs at the
@@ -152,11 +149,11 @@ be reached before a pre-existing refusal about a later one, because the loop
 answers each path in turn. Sorting the loop differently would only move which
 path is named first, and the harness cannot produce the case — its fixtures
 mutate the working tree without touching the index. Classifying the index's
-changed set alongside the working tree's takes nothing away either: the
-union is held to the rule the working-tree set already met, so a proposal the
-index shows to touch both surfaces is refused as mixed, in the words that
-refusal has always used, and one it shows to be data goes to the data path,
-where more of the pre-existing checks run for it, not fewer.
+changed set alongside the working tree's takes nothing away either: the union
+is held to the rule the working-tree set already met, so a proposal the index
+shows to touch both surfaces is refused as mixed, in the words that refusal
+has always used, and one it shows to be data goes to the data path, where more
+of the pre-existing checks run for it, not fewer.
 
 Two refusals here are not about a tree at all, and are stated because they do
 pre-empt everything on every input wherever they apply. Where ``os.open``
@@ -170,13 +167,12 @@ the descent's words for that too: it has not changed, it cannot be read. Both
 are the gate declining to answer, not a verdict about a proposal. Neither is
 the gate's requirement, either, but the package's: the reader and both
 sentences are ``release_chain``'s, so ``verify_release_chain`` and ``receipt
-verify``'s custody pass refuse in the same words on the same platforms and
-for the same directories. receipt requires
-a POSIX platform — its state reads open through directory descriptors
-(``os.open`` with ``dir_fd``, which every POSIX platform CPython supports and
-Windows does not), so on Windows ``receipt verify`` and the append gate refuse
-rather than reading state through a weaker path. The refusal says so, and
-``README.md`` says the same.
+verify``'s custody pass refuse in the same words on the same platforms and for
+the same directories. receipt requires a POSIX platform — its state reads open
+through directory descriptors (``os.open`` with ``dir_fd``, which every POSIX
+platform CPython supports and Windows does not), so on Windows ``receipt
+verify`` and the append gate refuse rather than reading state through a weaker
+path. The refusal says so, and ``README.md`` says the same.
 
 All of it carries its own tests in tests/test_append_gate.py.
 """
