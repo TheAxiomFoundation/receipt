@@ -1193,8 +1193,8 @@ def assert_no_symlinked_release_root(root: pathlib.Path, spec: ChainSpec) -> Non
     walked from the candidate root with ``lstat`` before anything reads
     through it, and a link at any of them refuses. The leaf is refused in
     ``_working_release_files``'s own words, because that is the same fact this
-    package has always refused a symlinked ``releases`` for and the base-ref
-    path reaches it there anyway; a component above the leaf gets the shape
+    package has always refused a symlinked ``releases`` for, and where the link
+    resolves that is the refusal the base-ref path reaches there anyway; a component above the leaf gets the shape
     the state-path walk uses, naming the component that redirects.
 
     Each component's spelling is bound as well, for the reason the state
@@ -1214,6 +1214,18 @@ def assert_no_symlinked_release_root(root: pathlib.Path, spec: ChainSpec) -> Non
     a release file deleted relative to the base commit; that refusal is
     pre-empted here, deliberately, and both the gate's docstring and a test
     say so.
+
+    What this walks is the release root's own path, and the configured paths
+    that descend from it have their own answers: ``_enumerate_manifest_files``
+    refuses a symlinked manifest directory itself, and ``verify_release_chain``
+    walks every component of the spec-pinned anchor path. Between them is one
+    case neither covers — a spec whose manifest directory sits more than one
+    component below the release root, where those intermediate components are
+    walked by nobody, so a link at one of them is followed on the push path
+    and the chain outside it is what gets verified (checked, not assumed). For
+    the pinned consumer, and for every fixture here, the manifest directory is
+    the release root's own child and there are no such components. That is
+    stated rather than closed here.
     """
 
     relative = spec.release_root_relative
