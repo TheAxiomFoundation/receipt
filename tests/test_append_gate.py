@@ -51,6 +51,10 @@ platform restriction documented as the gate's when it is the package's. S4-F6
 is bound in tests/test_release_chain.py, where the public custody path and
 ``receipt verify`` itself are driven.
 
+Docstrings labelled S4R2-F1 onward name that fourth gate's second round,
+numbering from one again: S4R2-F4 the configured path handed to ``git
+ls-tree`` as a pathspec rather than as a name.
+
 The fixture is a local git repository built from scratch — no network, no
 witnesses, no signatures. Its release tree holds a README and no manifests, so
 the gate's chain verification finds nothing to verify and the checks under
@@ -263,15 +267,46 @@ def git(root: pathlib.Path, *arguments: str, stdin: str | None = None) -> str:
     return completed.stdout.strip()
 
 
-def base_repository(tmp_path: pathlib.Path) -> Candidate:
-    """A committed base: two ledger rows, a frozen prefix, a release README."""
+def spec_with_release_root(release_root: str) -> AppendGateSpec:
+    """The fixture spec with its release directory named some other way.
+
+    Every configured path under the root moves with it, so the layout is the
+    fixture's own and the only thing under test is the name — which is what a
+    consumer pins in its committed code and what this package hands to git.
+    """
+
+    chain = replace(
+        CHAIN_SPEC,
+        release_root_relative=pathlib.PurePosixPath(release_root),
+        manifest_relative=pathlib.PurePosixPath(f"{release_root}/manifests"),
+        anchor_relative=pathlib.PurePosixPath(f"{release_root}/anchors"),
+    )
+    return replace(
+        GATE_SPEC,
+        chain=chain,
+        release_manifest_prefix=f"{release_root}/manifests/",
+        genesis_support_files=frozenset({f"{release_root}/README.md"}),
+        gate_surface=frozenset({GATE_FILE, f"{release_root}/anchors/**"}),
+        data_surface=frozenset({"ledger/**", f"{release_root}/manifests/**"}),
+    )
+
+
+def base_repository(
+    tmp_path: pathlib.Path, release_root: str = "releases"
+) -> Candidate:
+    """A committed base: two ledger rows, a frozen prefix, a release README.
+
+    ``release_root`` names the release directory this tree is built with, for
+    the cases that pair it with ``spec_with_release_root``; the default is the
+    one ``CHAIN_SPEC`` carries and every other test below takes it.
+    """
 
     root = tmp_path / "candidate"
     root.mkdir()
     rows = [observation_row(number) for number in range(1, BASE_ROW_COUNT + 1)]
     write_ledger(root, rows)
     write_prefix_manifest(root, rows)
-    releases = root / CHAIN_SPEC.release_root_relative
+    releases = root / release_root
     releases.mkdir(parents=True)
     (releases / "README.md").write_text(
         "Release journal for the fixture ledger.\n", encoding="utf-8"
@@ -312,15 +347,19 @@ def add_gate_file(candidate: Candidate) -> None:
     script.write_text("# gate fixture\n", encoding="utf-8")
 
 
-def run_gate(candidate: Candidate, base_ref: str | None = None) -> str:
+def run_gate(
+    candidate: Candidate,
+    base_ref: str | None = None,
+    spec: AppendGateSpec = GATE_SPEC,
+) -> str:
     return verify_append_gate(
         candidate.root,
-        spec=GATE_SPEC,
+        spec=spec,
         base_ref=candidate.base if base_ref is None else base_ref,
     )
 
 
-def run_push_gate(candidate: Candidate) -> str:
+def run_push_gate(candidate: Candidate, spec: AppendGateSpec = GATE_SPEC) -> str:
     """The push path: no base ref, so only the full-file invariants run.
 
     ``run_gate`` always names a base, so nothing above exercised the branch
@@ -328,7 +367,7 @@ def run_push_gate(candidate: Candidate) -> str:
     anchor, and the release history.
     """
 
-    return verify_append_gate(candidate.root, spec=GATE_SPEC)
+    return verify_append_gate(candidate.root, spec=spec)
 
 
 def test_an_ordinary_append_is_accepted(tmp_path: pathlib.Path) -> None:
@@ -3770,3 +3809,110 @@ def test_the_base_pass_already_refused_the_tree_the_walk_cannot_enumerate(
         )
     finally:
         vendor.chmod(0o755)
+
+
+def test_a_release_root_beginning_with_a_colon_is_enumerated_at_the_base(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S4R2-F4: the base tree was enumerated by handing the configured
+    release root to ``git ls-tree`` as a bare pathspec, and a pathspec
+    beginning with ``:`` is magic. The magic is stripped and what is left is
+    the path git looks for, so a spec whose root is ``:releases`` asks about
+    ``releases``, which this tree does not have: the enumeration comes back
+    empty and exits zero. Every release file the base carries is then outside
+    the comparison — the history pass has nothing to hold immutable, the whole
+    root classifies as newly added files, and a rewritten release file rides
+    through as a legacy pre-genesis proposal instead of being refused for the
+    bytes it changed.
+
+    With the root named literally the base entries are found and the rewrite
+    gets the refusal it has always had. Without the fix this fails with
+    ``legacy pre-genesis proposal must not change releases/`` — a message
+    about a root the spec never named, for a file whose immutability was
+    never checked."""
+
+    spec = spec_with_release_root(":releases")
+    candidate = base_repository(tmp_path, ":releases")
+    append_one_row(candidate)
+    readme = candidate.root / ":releases" / "README.md"
+    readme.write_text("Rewritten by a data proposal.\n", encoding="utf-8")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate, spec=spec)
+    assert str(refusal.value) == (
+        f"existing release file bytes changed relative to {candidate.base}: "
+        ":releases/README.md"
+    )
+
+
+def test_a_release_root_carrying_glob_magic_enumerates_only_itself(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S4R2-F4's other half of what a pathspec means, and the honest state of
+    it: ``git ls-tree`` does not glob a bare pathspec on the git this package
+    is verified with, so a root spelled ``rel[e]ases`` was already enumerated
+    as the directory of that name and this case passes with the literalization
+    reverted. ``git ls-files`` with the same pathspec is the other way — it
+    returns a sibling ``releases/`` too — which is why the index reads were
+    literalized first, and which is the whole point here: whether a configured
+    path is read as a name or as a pattern was a property of one command's
+    default in one version of git, and git's pathspec-mode variables rewrite
+    it for every command. ``_git_environment`` drops those and ``:(literal)``
+    says what is meant, so this run does not depend on either.
+
+    The sibling is committed and left alone, so anything that enumerated it as
+    part of the release root would report it deleted from a root the walk
+    cannot find it under."""
+
+    spec = spec_with_release_root("rel[e]ases")
+    candidate = base_repository(tmp_path, "rel[e]ases")
+    sibling = candidate.root / "releases"
+    sibling.mkdir()
+    (sibling / "unrelated.md").write_text("not a release\n", encoding="utf-8")
+    candidate = commit_all(candidate, "a sibling the glob would reach")
+    append_one_row(candidate)
+
+    assert set(
+        release_chain.git_tree_entries(candidate.root, candidate.base, "rel[e]ases")
+    ) == {"rel[e]ases/README.md"}
+    assert run_gate(candidate, spec=spec) == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 1, "
+        "+1 appended vs base"
+    )
+
+
+def test_the_base_enumeration_refuses_a_path_outside_the_root_it_asked_for(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S4R2-F4's check on the answer rather than on the question. A literal
+    pathspec cannot return a path outside the root asked about, so this is
+    what the enumeration is held to rather than what git is expected to do:
+    every base entry the release history compares must be the requested root
+    or lie under it. Here ``git ls-tree``'s own output is given one more
+    record, for a path in neither place, and the enumeration refuses it
+    instead of carrying it into the per-file loop — where it would be looked
+    for in the release walk, not found, and reported as a release file
+    deleted from a root it was never in.
+
+    Without the filter the run refuses with ``existing release file was
+    deleted relative to <commit>: outside/x``."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    real_git_run = release_chain._git_run
+
+    def with_a_foreign_record(
+        root: pathlib.Path, arguments: list[str], *, text: bool = False
+    ) -> Any:
+        completed = real_git_run(root, arguments, text=text)
+        if arguments[0] == "ls-tree" and arguments[-1].endswith("releases"):
+            completed.stdout += b"100644 blob " + b"0" * 40 + b"\toutside/x\0"
+        return completed
+
+    monkeypatch.setattr(release_chain, "_git_run", with_a_foreign_record)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        "git tree enumeration returned a path outside releases: outside/x"
+    )

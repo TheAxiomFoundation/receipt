@@ -61,7 +61,12 @@ answered for through a symlinked component or under another entry's
 spelling — and the post-cutover binding values are validated for shape rather
 than presence alone. Every one of those
 index reads asks about the exact path, as a literal pathspec, rather than
-handing git a name to interpret as a pattern — and every git read here, like
+handing git a name to interpret as a pattern, as does the base tree's
+enumeration — a release root beginning with ``:`` was read as pathspec magic
+and the magic stripped, so the whole root enumerated as empty, an existing
+genesis tree was treated as newly added files, and the byte and mode
+immutability this pass is for was never compared — and what that enumeration
+returns must be the path asked for or lie under it. Every git read here, like
 every one in ``release_chain``, runs with git's four pathspec-mode environment
 variables dropped, because a pathspec written here has to mean what it says
 rather than whatever the caller's environment would make of it. Every one of

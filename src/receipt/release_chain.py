@@ -32,7 +32,14 @@ with another entry's file; the state-path guards ``append_gate`` calls;
 the anchor-set digest in the result) run beside the extracted checks without
 altering any of their refusals, and carry their own tests. Every one of those
 index reads names its path as a literal pathspec, so git is asked about the
-exact path rather than handed a name to interpret as a pattern, and every git
+exact path rather than handed a name to interpret as a pattern — and so does
+the base tree's own enumeration, which is not an addition but was still
+handing git a configured path to interpret: a release root beginning with
+``:`` was read as pathspec magic and the magic stripped, so the whole root
+enumerated as empty, an existing genesis tree was taken for newly added
+files, and its byte and mode immutability was never compared. What that
+enumeration returns is now required to be the path asked for or to lie under
+it. Every git
 read here runs with git's four pathspec-mode environment variables dropped, so
 that literal pathspec means what it says instead of whatever an ambient
 ``GIT_LITERAL_PATHSPECS`` or ``GIT_ICASE_PATHSPECS`` would make of it. Each
@@ -1935,9 +1942,51 @@ def resolve_base_commit(root: pathlib.Path, base_ref: str) -> str:
 def git_tree_entries(
     root: pathlib.Path, commit: str, pathspec: str
 ) -> dict[str, GitEntry]:
+    """Every base-tree entry at or under one configured path.
+
+    The path is named as a literal pathspec, for the reason ``_index_entries``
+    names one: handed to git bare it is a pathspec, and a configured path is
+    not. A release root beginning with ``:`` is read as pathspec magic, and
+    the magic is stripped: ``git ls-tree -- :releases`` asks about
+    ``releases``, which in a tree holding a ``:releases`` directory and no
+    ``releases`` matches nothing and exits zero. Every file the base carries
+    under that root is then absent from this enumeration, so the release
+    history pass has nothing to compare, an existing genesis tree is
+    classified as newly added files, and the byte and mode immutability that
+    pass exists to enforce is skipped entirely. Where a ``releases`` does
+    exist alongside it, the enumeration answers about that one instead — a
+    base subtree the spec never named.
+
+    Glob magic is the other half of what a pathspec means, and this command
+    is where the two callers differ: ``git ls-tree`` does not glob a bare
+    pathspec (checked on the git this repository is verified with —
+    ``rel[e]ases`` matches only the directory of that name, while ``git
+    ls-files`` with the same pathspec also returns a sibling ``releases/``).
+    That is a property of one command's default in one version of git, not of
+    anything this package controls, and git's pathspec-mode variables rewrite
+    it for every command — ``_git_environment`` drops those, and
+    ``:(literal)`` then says what is meant here whatever the default is: this
+    exact path, matched as written. ``git ls-tree`` accepts the magic, checked
+    the same way. The diagnostics keep naming the path itself, not the magic.
+
+    What comes back is then held to the same claim: every entry must be the
+    requested path or lie under it. Nothing git returns for a literal pathspec
+    can be anything else, so this is a check on the answer rather than on the
+    tree — an enumeration that names a path outside the root the caller asked
+    about is one no comparison below should be built on, whatever produced it.
+    """
+
     completed = _git_run(
         root,
-        ["ls-tree", "-r", "-z", "--full-tree", commit, "--", pathspec],
+        [
+            "ls-tree",
+            "-r",
+            "-z",
+            "--full-tree",
+            commit,
+            "--",
+            f":(literal){pathspec}",
+        ],
     )
     if completed.returncode != 0:
         diagnostic = completed.stderr.decode("utf-8", errors="replace").strip()
@@ -1956,6 +2005,10 @@ def git_tree_entries(
             raise ReleaseChainError(
                 f"cannot parse git tree entry under {pathspec}"
             ) from exc
+        if path != pathspec and not path.startswith(f"{pathspec}/"):
+            raise ReleaseChainError(
+                f"git tree enumeration returned a path outside {pathspec}: {path}"
+            )
         if path in entries:
             raise ReleaseChainError(f"duplicate git tree entry for {path}")
         entries[path] = GitEntry(mode, object_type, object_id, path)
