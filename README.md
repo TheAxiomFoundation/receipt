@@ -36,7 +36,7 @@ receipt verify --spec path/to/your/spec.py
 
 ## Install
 
-Requires Python 3.11+, `git`, and `openssl` on the path. receipt requires a POSIX platform: its state reads open through directory descriptors (`os.open` with `dir_fd`, which every POSIX platform CPython supports and Windows does not), so on Windows `receipt verify` and the append gate refuse rather than reading state through a weaker path.
+Requires Python 3.11+, `git`, and `openssl` on the path. receipt requires a POSIX platform: its state reads open through directory descriptors (`os.open` with `dir_fd`, which every POSIX platform CPython supports and Windows does not), so on Windows `receipt verify` and the append gate refuse rather than reading state through a weaker path. Every directory above a protected path — the state files, the release root, and the paths configured under it — must also be listable by the verifier: a directory's listing is the only thing that binds the spelling of what it holds, so one that cannot be listed is refused rather than descended, even where it can be traversed.
 
 ```bash
 uv pip install receipt
