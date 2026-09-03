@@ -64,7 +64,16 @@ Three row kinds, one journal:
 ``attested``
     An exact path bound by digest without a sweep — the toolchain pin, the
     pinned validation workflow, an apply manifest. The consumer's spec names
-    which paths it *requires*, so a producer cannot quietly drop one.
+    which paths it *requires*, so a producer cannot quietly drop one. The
+    spelling is bound as well as the bytes: every component of every bound
+    path must appear in a listing of its parent under exactly the declared
+    spelling, so a case-insensitive volume resolving an attested
+    ``readme.md`` to the ``README.md`` it stores is refused rather than
+    hashed. Without that, the same corpus verified on the auditor who cloned
+    onto APFS and refused as a missing file on the auditor who cloned onto
+    ext4 (peer review, Sol round 2). Content files were already found by the
+    spelled names the sweep enumerates; the walk asks it of them too, so one
+    rule covers both kinds.
     Retiring one is recorded by a ``removed`` row, and the file has to leave
     the tree with it: a removed path still on disk refuses, whichever kind
     it was. Two questions are asked about a tombstone, in this order — does
@@ -2230,6 +2239,70 @@ def _assert_no_aliasing_root_component(
         walked.append(component)
 
 
+def _assert_spelled_by_its_directory(
+    parent: pathlib.Path, component: str, relative: str
+) -> None:
+    """Refuse a component the filesystem resolves but its directory does not emit.
+
+    A bound path is opened by the spelling the journal declares, and on a
+    case-insensitive volume that spelling need not be the one on disk: a
+    spec and a journal attesting ``readme.md`` verified against a
+    ``README.md`` the auditor's clone actually holds, hashed it, and passed
+    — while a case-sensitive clone of the very same corpus has no
+    ``readme.md`` at all and refuses. Which host the auditor cloned onto
+    decided whether the corpus verified, which is the defect
+    :meth:`CorpusSpec.content_root_of` closed for classification and this
+    closes for binding (peer review, Sol round 2).
+
+    So the on-disk spelling is bound, not merely the resolution: at every
+    level the exact component must appear in a listing of its parent. A
+    filesystem that resolves ``readme.md`` to ``README.md`` is caught by the
+    listing rather than by the resolution, because the listing emits the one
+    spelling the volume actually stores.
+
+    Asked only of a component that resolves. Where nothing answers to the
+    spelling there is no resolution to disagree with, and the caller's own
+    refusal — a missing bound file, an absent content root — says something
+    more useful than this one could. That is also why the same corpus is
+    refused on both kinds of host for different reasons: the case-sensitive
+    clone never resolves ``readme.md``, so it refuses as a missing file.
+
+    Failure to list is a refusal and not an absence, which is this module's
+    standing rule (see :func:`_list_directory`): a parent that resolves the
+    component but cannot be enumerated leaves the question unanswered.
+
+    The cost is one listing per component of each bound path, and it is not
+    shared between paths. A cached listing would answer a later path's
+    question with an earlier look, which is the staleness the second
+    tombstone pass exists to avoid; the walk is already re-run per bound
+    path for the same reason.
+    """
+
+    try:
+        os.lstat(parent / component)
+    except (FileNotFoundError, NotADirectoryError):
+        return
+    except OSError as exc:
+        raise CorpusError(
+            "cannot check the spelling a bound path component resolves "
+            f"under: {relative} ({exc.strerror})"
+        ) from exc
+    try:
+        with os.scandir(parent) as entries:
+            spelled = any(entry.name == component for entry in entries)
+    except OSError as exc:
+        raise CorpusError(
+            "cannot enumerate the directory that would spell a bound path "
+            f"component, so the path cannot be bound: {relative} "
+            f"({exc.strerror})"
+        ) from exc
+    if not spelled:
+        raise CorpusError(
+            f"path component {_quoted(component)} is not spelled by its "
+            f"directory: {relative}"
+        )
+
+
 def _assert_no_symlinked_component(
     root: pathlib.Path, relative: str, *, what: str = "bound path"
 ) -> pathlib.Path:
@@ -2244,10 +2317,17 @@ def _assert_no_symlinked_component(
     The same hole exists one level up for a content root: an empty or
     suffix-empty root behind a symlinked *parent* would enumerate no files and
     silently pass, so this guards content roots too.
+
+    The same walk binds each component's *spelling* to the one its directory
+    emits — see :func:`_assert_spelled_by_its_directory`, which every level
+    passes through after the symlink question has been answered for it. The
+    symlink question comes first because it is the more urgent one and
+    because it is the reason the walk exists.
     """
 
     current = root
     for segment in relative.split("/"):
+        parent = current
         current = current / segment
         # is_symlink() catches POSIX symlinks; on Windows a junction/reparse
         # point is not a symlink but is reported by st_reparse_tag, so refuse
@@ -2258,6 +2338,7 @@ def _assert_no_symlinked_component(
                 f"{what} traverses a symlink or reparse point at "
                 f"{_quoted(current.relative_to(root).as_posix())}: {relative}"
             )
+        _assert_spelled_by_its_directory(parent, segment, relative)
     return current
 
 
