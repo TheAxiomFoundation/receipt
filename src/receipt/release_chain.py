@@ -41,9 +41,9 @@ whether an entry records content: an intent-to-add entry (``git add -N``) is
 stage 0 at the working tree's mode with the empty blob's object id, which is
 what every check here took for a tracked file while the commit made from that
 index deletes the path. The state reads themselves changed shape but not
-their refusals: ``_regular_file_bytes``
-keeps both of its messages and their order, and opens the file it accepts
-through directory descriptors so no component of the path is resolved twice.
+their refusals: ``_regular_file_bytes`` keeps both of its messages and their
+order, and opens the file it accepts through directory descriptors so no
+component of the path is resolved twice.
 That descent returns the identity of every directory it opened, so a caller
 can ask afterwards whether the file is still reached through the same ones,
 optionally pins the root against an identity the caller recorded earlier, and
@@ -1259,10 +1259,7 @@ def confined_state_descriptor(
             except OSError as exc:
                 if _is_symlink_at(segment, parent):
                     raise _symlinked_component_error(relative, walked) from exc
-                if (
-                    DESCENT_REQUIRES_DIRECTORY_READ
-                    and exc.errno == errno.EACCES
-                ):
+                if DESCENT_REQUIRES_DIRECTORY_READ and exc.errno == errno.EACCES:
                     raise ReleaseChainError(
                         f"state path component {'/'.join(walked)} is not "
                         "readable by this verifier; secure descent requires "
@@ -2115,16 +2112,16 @@ def _index_entries(
     ``--debug`` is read alongside ``-s`` because mode, stage and object id do
     not say whether an entry records any content. ``git add -N`` — and every
     porcelain that runs it, ``git add -p`` on an untracked file included —
-    writes an *intent-to-add* entry: stage 0, mode 100644, the empty blob's
-    object id, and no content at all. Every check below took that for a
-    tracked file, so a ``git rm --cached`` of a protected path followed by
-    ``git add -N`` of it passed the tracked-state check, passed the index
-    agreement check (the working tree really does hold a regular 100644
-    file), passed the still-indexed check, and produced a commit that
-    *deletes* the path. The flag is what says so: ``--debug`` prints the
-    cache entry's flag word, and ``CE_INTENT_TO_ADD`` is set in it. The
-    empty blob is not the test — a file whose content really is empty has the
-    same object id and is an ordinary entry.
+    writes an *intent-to-add* entry: stage 0, the working tree's mode (100644
+    for an ordinary file), the empty blob's object id, and no content at all.
+    Every check below took that for a tracked file, so a ``git rm --cached``
+    of a protected path followed by ``git add -N`` of it passed the
+    tracked-state check, passed the index agreement check (the working tree
+    really does hold a regular 100644 file), passed the still-indexed check,
+    and produced a commit that *deletes* the path. The flag is what says so:
+    ``--debug`` prints the cache entry's flag word, and ``CE_INTENT_TO_ADD``
+    is set in it. The empty blob is not the test — a file whose content really
+    is empty has the same object id and is an ordinary entry.
 
     One command answers both, so the mode and the flag word describe the same
     read of the same index rather than two reads a write could fall between.

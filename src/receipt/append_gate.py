@@ -58,8 +58,8 @@ every release file the base carries is still an entry in the candidate index,
 the release root's index and working tree agree in both directions — no index
 entry the walk cannot see, no entry the walk cannot find, and no entry
 answered for through a symlinked component or under another entry's
-spelling — and the post-cutover binding
-values are validated for shape rather than presence alone. Every one of those
+spelling — and the post-cutover binding values are validated for shape rather
+than presence alone. Every one of those
 index reads asks about the exact path, as a literal pathspec, rather than
 handing git a name to interpret as a pattern — and every git read here, like
 every one in ``release_chain``, runs with git's four pathspec-mode environment
