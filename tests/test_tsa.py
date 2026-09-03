@@ -2850,6 +2850,69 @@ def test_a_fifo_raced_in_after_the_path_check_refuses_without_blocking(
     assert str(caught.value) == expected
 
 
+def flag_expression(name: str) -> str:
+    """The source of one of the module's parenthesised ``os.open`` flag sets.
+
+    ``O_BINARY`` is zero on every platform this suite runs on, so no runtime
+    assertion can tell a flag set that includes it from one that does not.
+    What can be told apart is the expression itself, which is why the two sets
+    are named constants: this reads the source of one and the test below
+    requires the term to be there.
+    """
+
+    source = inspect.getsource(tsa_module)
+    _before, separator, after = source.partition(f"\n{name} = (\n")
+    assert separator, f"{name} is not a parenthesised flag expression"
+    return after.split("\n)\n", 1)[0]
+
+
+def test_the_one_read_and_the_snapshot_write_open_in_binary(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S5R2-F3: nothing between the disk and the digest may translate a byte.
+
+    Both of this module's ``os.open`` calls omitted ``O_BINARY``. It is absent
+    on POSIX and contributes nothing there, but on Windows a descriptor opened
+    without it is a *text* descriptor in the C runtime's sense: reading turns
+    ``\r\n`` into ``\n`` and stops at the first ``0x1A``, and writing turns
+    ``\n`` back into ``\r\n``. Every file the one read returns is hashed and
+    then trusted, so a byte the read never returns is a byte the digest does
+    not cover -- a pinned root, a DER response or a record truncated at a
+    ``0x1A`` would be hashed and trusted as the whole file. And the pinned
+    root's private copy is written through the second call, so a text write
+    would hand OpenSSL something other than what was hashed and counted: the
+    substitution the copy exists to prevent, performed by the copy.
+
+    Two halves, and only one of them binds on this platform. The round trip
+    below is byte-exact here whether or not the flag is set, because the flag
+    is zero here; it is the case that would fail on Windows, and it is stated
+    so a port to a platform with the flag runs it. What binds here is the
+    source of the two flag sets, which is the only place the difference is
+    visible on POSIX: remove the term from either and this fails.
+    """
+
+    for name in ("_ONE_READ_FLAGS", "_SNAPSHOT_WRITE_FLAGS"):
+        assert 'getattr(os, "O_BINARY", 0)' in flag_expression(name)
+    # True on Windows, and vacuously true here, which is the whole of what a
+    # runtime assertion can say about a flag the platform defines as zero.
+    binary = getattr(os, "O_BINARY", 0)
+    assert tsa_module._ONE_READ_FLAGS & binary == binary
+    assert tsa_module._SNAPSHOT_WRITE_FLAGS & binary == binary
+
+    # A CRLF line ending and a 0x1A, the two bytes CRT text mode moves.
+    payload = (
+        b"-----BEGIN CERTIFICATE-----\r\n"
+        b"not really base64\x1anor is this\r\n"
+        b"-----END CERTIFICATE-----\r\n"
+    )
+    source = tmp_path / "crlf-and-substitute.pem"
+    source.write_bytes(payload)
+    assert tsa_module._read_pinned_root(source) == payload
+    snapshot = tsa_module._write_root_snapshot(tmp_path, payload)
+    assert snapshot.read_bytes() == payload
+    assert tsa_module._read_pinned_root(snapshot) == payload
+
+
 @pytest.mark.parametrize(
     ("name", "payload"),
     [

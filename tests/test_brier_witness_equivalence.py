@@ -110,6 +110,12 @@ Deliberately outside the mutation contract:
   waited on indefinitely (peer review, fifth gate round one).  The flag
   changes nothing about reading a regular file, and every file the harness
   reads is one, so no case here moves;
+- the port also sets ``O_BINARY`` on those three opens and on the write of the
+  pinned root's private copy, where the platform has the flag (peer review,
+  fifth gate round two).  POSIX does not, so it is zero wherever this harness
+  runs and no case here can move on it; on Windows it is what keeps a ``\r\n``
+  or a ``0x1A`` in a record, a response or a root PEM from being translated
+  between the disk and the digest;
 - the baseline compares a bundle's anchors with the code identities in one
   direction only, so an identity scoped to a bundle whose anchors do not
   include it is ignored; the port requires the two sets to be equal at load.

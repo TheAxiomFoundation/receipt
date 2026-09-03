@@ -118,6 +118,16 @@ where the platform has the flag, ``fstat`` refuses the descriptor in the
 caller's own words, and the flag is cleared before any byte is read -- it
 governs the open and nothing after it.
 
+They open in binary too, and so does the private copy of the pinned root.
+``O_BINARY`` is absent on POSIX and contributes nothing there, and on Windows
+a descriptor opened without it is a text descriptor in the C runtime's sense:
+the read turns ``\r\n`` into ``\n`` and stops at the first ``0x1A``.  Each of
+these files is hashed and then trusted, so a byte the read never returns is a
+byte the digest does not cover, and a copy written through a text descriptor
+would hand OpenSSL something other than what was hashed -- the substitution
+the copy exists to prevent, performed by the copy.  ``receipt.corpus`` sets
+the flag on its own bound-file read for the same reason.
+
 Because OpenSSL is given the copies and never a repository path, the command
 text quoted in a failure names temporary files; every refusal of this
 module's own still names the record, the token and the root as the repository
@@ -1206,8 +1216,19 @@ def _certificate_count(path: Path, *, pinned_path: Path | None = None) -> int:
 
 
 #: Flags for the one read of a file this module goes on to judge and trust: no
-#: descriptor inherited across an exec, no symlink followed at open time, and
-#: no open that waits -- each where the platform has the flag.
+#: descriptor inherited across an exec, no symlink followed at open time, no
+#: open that waits, and no translation of what is read -- each where the
+#: platform has the flag.
+#:
+#: ``O_BINARY`` is the one that only matters off POSIX, where it is absent and
+#: contributes nothing.  On Windows a descriptor opened without it is a *text*
+#: descriptor in the C runtime's sense: the CRT turns ``\r\n`` into ``\n`` and
+#: stops the read at the first ``0x1A``.  Every file read here is judged by its
+#: SHA-256 and then handed to OpenSSL, so a byte the read never returns is a
+#: byte the digest does not cover -- a pinned root, a DER response or a record
+#: silently truncated at a ``0x1A`` would be hashed and trusted as the whole
+#: file (peer review, fifth gate round two).  ``receipt.corpus`` sets the same
+#: flag on its own bound-file read for the same reason.
 #:
 #: ``O_NONBLOCK`` is what decides whether a refusal arrives at all.  The open
 #: has to happen before ``fstat`` can say what was opened, so a regular file
@@ -1223,6 +1244,25 @@ _ONE_READ_FLAGS = (
     | getattr(os, "O_CLOEXEC", 0)
     | getattr(os, "O_NOFOLLOW", 0)
     | getattr(os, "O_NONBLOCK", 0)
+    | getattr(os, "O_BINARY", 0)
+)
+
+#: Flags for the private copy of a pinned root the OpenSSL calls are given.
+#:
+#: Named beside ``_ONE_READ_FLAGS`` because the two have to agree about
+#: ``O_BINARY``: a copy written through a text descriptor is not a copy.  The
+#: read would return the pinned bytes and the write would put ``\r\n`` where
+#: the original had ``\n``, so what OpenSSL was handed would differ from what
+#: was hashed and counted -- the substitution the snapshot exists to prevent,
+#: performed by the snapshot itself.  Everything else here is the private-file
+#: discipline the snapshot has always had: create or truncate, write only,
+#: no descriptor inherited across an exec.
+_SNAPSHOT_WRITE_FLAGS = (
+    os.O_WRONLY
+    | os.O_CREAT
+    | os.O_TRUNC
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_BINARY", 0)
 )
 
 
@@ -1356,17 +1396,15 @@ def _write_root_snapshot(directory: Path, pem: bytes) -> Path:
     and the two ``-CAfile`` verifications all need a file; this is the only
     file any of them is given.  ``directory`` is a private temporary
     directory (``tempfile.mkdtemp`` makes it 0700) owned by the caller, and
-    the copy is written 0600.  It is a byte-for-byte copy: nothing is
-    re-encoded, so a pinned ``TRUSTED CERTIFICATE``'s auxiliary trust
-    settings survive into it exactly as pinned.
+    the copy is written 0600 through ``_SNAPSHOT_WRITE_FLAGS``.  It is a
+    byte-for-byte copy: nothing is re-encoded, and the flags include
+    ``O_BINARY`` where the platform has it, so a pinned ``TRUSTED
+    CERTIFICATE``'s auxiliary trust settings survive into it exactly as
+    pinned and no line ending is rewritten on the way.
     """
 
     snapshot = directory / "pinned-root.pem"
-    descriptor = os.open(
-        snapshot,
-        os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_CLOEXEC", 0),
-        0o600,
-    )
+    descriptor = os.open(snapshot, _SNAPSHOT_WRITE_FLAGS, 0o600)
     try:
         written = 0
         while written < len(pem):
