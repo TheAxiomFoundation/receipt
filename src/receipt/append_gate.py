@@ -1421,8 +1421,9 @@ def check_release_proposal(
     # a spelling the candidate tree does not hold, is not this proposal's
     # release root, and every comparison below would be about whatever it
     # points at. The leaf case is the enumeration's own refusal, in its
-    # words, so the base-ref path answers a symlinked ``releases`` exactly as
-    # it always has.
+    # words, so a symlinked ``releases`` the enumeration would itself have met
+    # is answered here exactly as it always was; the one it would not have met
+    # — a dangling link — is pre-empted, which the module docstring names.
     try:
         assert_no_symlinked_release_root(candidate.root, candidate.spec.chain)
     except ReleaseChainError as exc:
