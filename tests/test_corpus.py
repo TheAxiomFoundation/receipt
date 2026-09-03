@@ -5123,3 +5123,137 @@ def test_refuses_a_journal_with_more_rows_than_the_parser_budget(
         f"corpus journal carries {MAX_JOURNAL_ROWS + 1} rows, over the "
         f"parser budget of {MAX_JOURNAL_ROWS}"
     )
+
+
+def test_a_non_ascii_extension_is_not_refused_where_no_pin_can_carry_it(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5R2-F5: the screen derived before it filtered the pins.
+
+    With only ``.yaml`` pinned, no 8.3 alias can carry a pinned suffix at
+    all: an alias extension is three characters and ``.yaml`` needs four. So
+    the answer for every name in the tree is the same, and it does not
+    depend on any code page. ``notes.é`` was refused as underivable anyway,
+    because the extension was derived before the pins that could not use it
+    were filtered out — a refusal over a question no pin had put, against an
+    ordinary non-content file that a real corpus may well carry.
+
+    The pins are selected first now, and where none is alias-capable the
+    name is never touched. Without the fix this verification raises the OEM
+    refusal instead of returning.
+    """
+
+    write_tree(tmp_path)
+    (tmp_path / "rules/notes.é").write_text("scratch\n")
+    verification = verify_corpus_binding(
+        tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+    )
+    assert len(verification.content) == len(CONTENT)
+
+
+def test_a_non_ascii_character_past_the_third_cannot_reach_the_alias(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5R2-F5: the code page decides nothing past the third character.
+
+    An 8.3 extension is three characters, so the fourth character of the
+    extension source is dropped before any code page could have an opinion
+    about it. ``x.abcé`` is handed the alias extension ``ABC`` on every
+    volume there is; with ``.yml`` pinned that is not a pinned suffix, and
+    the file is an ordinary non-content one. Screening the whole extension
+    source for non-ASCII refused it as underivable.
+
+    The truncation runs first now, so what the code page is asked about is
+    exactly what reaches the alias. Without the fix this verification raises
+    the OEM refusal.
+    """
+
+    write_tree(tmp_path)
+    (tmp_path / "rules/x.abcé").write_text("scratch\n")
+    spec = corpus_spec(content_suffixes=(".yaml", ".yml"))
+    verification = verify_corpus_binding(
+        tmp_path, render_journal(journal_rows()), spec=spec
+    )
+    assert len(verification.content) == len(CONTENT)
+
+
+def test_the_derivation_still_lands_on_the_first_three_characters(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5R2-F5, the other side: truncating first must not skip a file.
+
+    ``x.ymlé`` has the alias extension ``YML``, which is a pinned suffix, so
+    the file is content under a name no listing emits and the sweep must
+    refuse it — for that reason and not as an underivable one. This pins
+    which refusal speaks, because the change that stops refusing the é could
+    as easily have stopped deriving anything.
+
+    ``_short_name_extension`` is asserted directly as well, so the
+    derivation is stated rather than inferred from the refusal. This test
+    fails on the head with the OEM refusal in place of the alias refusal.
+    """
+
+    from receipt.corpus import _short_name_extension
+
+    assert _short_name_extension("x.ymlé") == "YML"
+    write_tree(tmp_path)
+    (tmp_path / "rules/x.ymlé").write_text("scratch\n")
+    spec = corpus_spec(content_suffixes=(".yaml", ".yml"))
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, render_journal(journal_rows()), spec=spec)
+    assert str(caught.value) == (
+        "content root contains a file whose short-name alias would carry a "
+        "pinned suffix: 'rules/x.ymlé'"
+    )
+
+
+def test_a_non_ascii_character_inside_the_alias_is_still_underivable(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5R2-F5, the control: the refusal that must survive the change.
+
+    ``smuggled.émlx`` truncates to ``éml``, so the é *does* reach the alias
+    and the volume's code page decides whether it ends ``.ÉML`` — a pinned
+    suffix — or something else. That is the round-eight finding, and
+    narrowing the screen to the first three characters must not narrow it
+    past this name.
+
+    This test passes with the S5R2-F5 change disabled, which is the point:
+    it is here to catch the change going one character too far.
+    """
+
+    write_tree(tmp_path)
+    (tmp_path / "rules/smuggled.émlx").write_text("name: smuggled\n")
+    spec = corpus_spec(content_suffixes=(".yaml", ".eml"))
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, render_journal(journal_rows()), spec=spec)
+    assert str(caught.value) == (
+        "8.3 alias extension cannot be derived for a name whose extension "
+        "carries non-ASCII characters (the volume's OEM code page decides "
+        "it): 'smuggled.émlx'"
+    )
+
+
+def test_the_spec_accepts_a_non_ascii_suffix_no_alias_could_carry() -> None:
+    """Binds S5R2-F5: the ASCII rule belongs to alias-capable pins only.
+
+    ``.éyaml`` has a five-character extension, so no 8.3 alias can carry it
+    and the screen never derives anything to compare against it. Refusing
+    the pin at construction refused a legal configuration over a question
+    the screen would never put — and it is a configuration a real corpus
+    might hold, since a suffix outside ASCII is legal everywhere else in
+    this module.
+
+    ``.éml`` is still refused, because an alias could carry a three-
+    character extension and the derivation against it cannot be made. Both
+    halves are asserted here; without the fix the first raises.
+    """
+
+    spec = corpus_spec(content_suffixes=(".yaml", ".éyaml"))
+    assert ".éyaml" in spec.content_suffixes
+    with pytest.raises(CorpusError) as caught:
+        corpus_spec(content_suffixes=(".yaml", ".éml"))
+    assert str(caught.value) == (
+        "CorpusSpec content suffix must be ASCII, because an 8.3 alias "
+        "extension cannot be derived against a non-ASCII one: '.éml'"
+    )
