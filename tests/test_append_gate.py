@@ -67,6 +67,18 @@ after its own walk had passed, S4R3-F4 the configured paths below that root
 whose intermediate components nothing walked, S4R3-F5 the spelling check that
 failed open where a directory could not be listed.
 
+Docstrings labelled S4R4-F3 onward name that fourth gate's fourth round,
+whose numbering starts over again: S4R4-F3 the manifest path whose type
+decided there was no chain to verify, S4R4-F5 the checkout settings that make
+git's changed set a cache rather than a comparison, S4R4-F6 the alias scan
+that compared only at a protected path's own depth, S4R4-F7 the spelling
+check that still failed open for a directory it could not be shown to fold,
+S4R4-F8 the release path spelled as the candidate root itself. That round's
+F1, F2 and F4 are one statement about what this gate verifies — the working
+tree as read, per protected path, rather than one commit's tree — which is
+stated in ``append_gate``'s module docstring under "What this verdict speaks
+for" and tracked as #43 rather than bound by a test here.
+
 The fixture is a local git repository built from scratch, and no network is
 used anywhere here. Most of it holds a README and no manifests, so the gate's
 chain verification finds nothing to verify and the checks under test are the
@@ -183,9 +195,11 @@ GATE_FILE = "scripts/check_append.py"
 def a_folded_spelling(parent: pathlib.Path, spelled: str) -> bool:
     """Whether ``spelled`` resolves under ``parent`` without being listed there.
 
-    The exact condition ``release_chain._assert_component_spelled`` refuses on,
-    asked of the fixture that was actually built rather than of the filesystem
-    in the abstract. A probe of the filesystem's *lookup* does not predict it:
+    The condition ``release_chain._assert_component_spelled`` gives its
+    misspelling refusal for, asked of the fixture that was actually built
+    rather than of the filesystem in the abstract. (Its other refusal, for a
+    directory that cannot be listed at all, needs no such probe: it holds on
+    every filesystem.) A probe of the filesystem's *lookup* does not predict it:
     a rename to a folded-equal name need not change the stored spelling, so a
     filesystem that resolves ``Releases`` for ``releases`` can still leave the
     directory spelled exactly as the spec names it, and then there is no case.
