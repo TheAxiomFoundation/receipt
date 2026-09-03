@@ -3010,6 +3010,143 @@ def test_refuses_one_token_supplied_under_two_anchor_outcomes(
     assert [claim["tsaAnchorId"] for claim in verified] == [alpha.anchor_id]
 
 
+def record_one_reads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every path ``_read_file_once`` is asked for, in the order it is asked."""
+
+    original = tsa_module._read_file_once
+
+    def recording(path: pathlib.Path, missing: str) -> bytes:
+        reads.append(str(path))
+        return original(path, missing)
+
+    reads: list[str] = []
+    monkeypatch.setattr(tsa_module, "_read_file_once", recording)
+    return reads
+
+
+def serve_a_second_response_from_one_path(
+    monkeypatch: pytest.MonkeyPatch, target: pathlib.Path, content: bytes
+) -> list[str]:
+    """Rewrite ``target`` once the first outcome has finished reading it.
+
+    The concurrent writer the path regression models. Each outcome reads the
+    response path for itself, so a writer between the two reads decides what
+    the second one finds; this arrives at the first ``openssl ts -verify``,
+    which is after the first outcome has taken its one read and snapshotted
+    it, so nothing about that outcome's verification moves. Returns the write,
+    so a test can show the writer ran.
+    """
+
+    original = tsa_module._run_openssl
+    writes: list[str] = []
+
+    def writing(arguments: list[str], **keywords: Any) -> Any:
+        if arguments[:2] == ["ts", "-verify"] and not writes:
+            target.write_bytes(content)
+            writes.append(str(target))
+        return original(arguments, **keywords)
+
+    monkeypatch.setattr(tsa_module, "_run_openssl", writing)
+    return writes
+
+
+def without_the_records_prefix(logical: str) -> str:
+    """The second spelling ``physical_path`` maps onto the same file.
+
+    A declared token path may or may not carry the leading ``records``
+    component; ``physical_path`` strips it when it is there, so one file has
+    two logical spellings a witness could use for it.
+    """
+
+    parts = pathlib.PurePosixPath(logical).parts
+    assert parts[0] == "records"
+    return str(pathlib.PurePosixPath(*parts[1:]))
+
+
+@pytest.mark.parametrize("spelling", ["as-declared", "without-records-prefix"])
+def test_refuses_two_outcomes_that_name_one_response_path(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+    spelling: str,
+) -> None:
+    """S5-F4: one file cannot be two outcomes' evidence, whatever it holds.
+
+    The digest rule counts what outcomes *say* is in their files, so two
+    outcomes naming one path with two different digests passed it. Each
+    outcome then reads that path for itself, and a writer with access to the
+    records tree serves one valid response to the first read and another to
+    the second: here the first outcome reads the first authority's genuine
+    stamp, the writer arrives while that outcome is being verified, and the
+    second outcome reads the second authority's genuine stamp from the same
+    name. Both declared digests are true of what was read, both tokens verify
+    under their own anchors, and the evidence describes a repository state
+    that never existed -- one file holding two responses at once.
+
+    Without the path rule that witness returns two ``TokenEvidence`` entries
+    covering a two-anchor bundle out of one file. With it the second outcome
+    is refused on the path before its response is read at all: the read
+    recorder below shows one read of the shared name, and the verification
+    recorder shows one outcome verified. The control is the same tree
+    untouched -- two outcomes at two paths are still two tokens.
+
+    The second parameter is the same attack spelling the shared path the
+    other way ``physical_path`` accepts it, which is what says the rule
+    compares the file a claim resolves to and not the string it is written
+    as: comparing the declared strings lets that spelling through.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    tree = build_witness_tree(tmp_path, local_anchors[:2])
+    shared = tree.tokens[alpha.anchor_id]
+    betas_response = tree.tokens[beta.anchor_id].read_bytes()
+
+    # The control: two outcomes, two files, two tokens.
+    control = verify_tree(tree)
+    assert [token.anchor_id for token in control.tokens] == [
+        alpha.anchor_id,
+        beta.anchor_id,
+    ]
+    assert control.tokens[0].token_path != control.tokens[1].token_path
+    # The premise, from OpenSSL directly: what the writer serves at the second
+    # read is a genuine stamp over this record by the second authority.
+    assert openssl_ts_verifies(
+        tree.record, tree.tokens[beta.anchor_id], beta.tsa.root_pem
+    )
+    assert betas_response != shared.read_bytes()
+
+    def point_betas_outcome_at_alphas_file(payload: dict[str, Any]) -> None:
+        first, second = payload["anchorOutcomes"]
+        assert (first["tsaAnchorId"], second["tsaAnchorId"]) == (
+            alpha.anchor_id,
+            beta.anchor_id,
+        )
+        declared = first["tokenPath"]
+        second["tokenPath"] = (
+            declared
+            if spelling == "as-declared"
+            else without_the_records_prefix(declared)
+        )
+        second["tokenSha256"] = sha256_bytes(betas_response)
+
+    rewrite_witness(tree, point_betas_outcome_at_alphas_file)
+    writes = serve_a_second_response_from_one_path(monkeypatch, shared, betas_response)
+    reads = record_one_reads(monkeypatch)
+    verified = record_token_verifications(monkeypatch)
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    # The writer really did run, and really did change the shared file.
+    assert writes == [str(shared)]
+    assert shared.read_bytes() == betas_response
+    physical = tree.records.resolve() / RECORD_DAY / shared.name
+    assert str(caught.value) == (
+        f"duplicate TSA token path across anchor outcomes: {physical}"
+    )
+    # Refused before the second read, and before the second verification.
+    assert reads.count(str(physical)) == 1
+    assert [claim["tsaAnchorId"] for claim in verified] == [alpha.anchor_id]
+
+
 def supplemental_outcome(
     tree: WitnessTree,
     pending: Mapping[str, Any],

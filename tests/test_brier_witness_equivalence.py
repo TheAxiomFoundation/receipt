@@ -133,16 +133,22 @@ Deliberately outside the mutation contract:
   ``digicert-trusted-root-g4``), so no case here reaches the refusal;
 - the baseline de-duplicates a v2 witness's anchor outcomes by anchor id and
   leaves the response free; the port additionally requires every verified
-  timestamp to be distinct across the witness's primary and supplemental
-  outcomes together, by two rules: the file an outcome names, refused ahead of
-  the ported refusals inside the token verifier, and the ``TSTInfo`` the
-  authority signed, refused where that verifier returns.  The second is what
-  the first cannot be: the ``PKIStatusInfo`` wrapper around a token is
-  unsigned and so are a ``SignedData``'s ``certificates``, ``crls`` and
-  ``unsignedAttrs``, so one issuance has many valid encodings with different
-  file digests.  The 53 pinned witnesses declare 91 tokens between them, at
-  most two per witness, with 91 distinct file digests and 91 distinct signed
-  ``TSTInfo``s, so neither refusal fires on any case here;
+  response to be distinct across the witness's primary and supplemental
+  outcomes together, by three rules: the physical path an outcome points at,
+  refused before that outcome's response is read; the file digest it
+  declares, refused ahead of the ported refusals inside the token verifier;
+  and the ``TSTInfo`` the authority signed, refused where that verifier
+  returns.  Each reaches what the one before it cannot.  Two outcomes naming
+  one path may declare two digests, and each outcome reads the path itself,
+  so a writer serving a different response to each read satisfies both from a
+  repository that held neither state twice (peer review, fifth gate round
+  one).  And the ``PKIStatusInfo`` wrapper around a token is unsigned, as are
+  a ``SignedData``'s ``certificates``, ``crls`` and ``unsignedAttrs``, so one
+  issuance has many valid encodings with different file digests.  The 53
+  pinned witnesses declare 91 tokens between them, at most two per witness,
+  at 91 distinct physical paths with 91 distinct file digests and 91 distinct
+  signed ``TSTInfo``s, and no witness names one path twice, so none of the
+  three refusals fires on any case here;
 - the baseline takes an anchor ID alone for the active identity when deciding
   which anchors of a pending bundle need a supplemental outcome, so a pending
   anchor reusing an active ID under a different root is skipped; the port

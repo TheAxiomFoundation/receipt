@@ -9,7 +9,7 @@ through a frozen :class:`TsaSpec` supplied by consumer code.  This module
 ships no repository-specific trust defaults and performs no chain walk or
 producer signature verification.
 
-The port is stricter than the baseline in fourteen places, each refusing an
+The port is stricter than the baseline in fifteen places, each refusing an
 input the pinned tree never presents and so each outside the differential
 contract: a record under witness that is not a readable regular file, which
 the baseline let raise out of the hash; a legacy witness over a bundle
@@ -42,19 +42,23 @@ carries token evidence at the witness level (the v2 per-anchor outcome has
 always refused both); an unavailable legacy witness that names a bundle by
 any of its three claim fields, whose claim is then resolved and counted
 where the baseline ignored those fields; and a v2 witness that offers one
-RFC 3161 timestamp under two of its outcomes, counted across the primary and
+RFC 3161 response under two of its outcomes, counted across the primary and
 supplemental outcomes together so that one response cannot stand for a
-bundle configuring more than one anchor -- counted twice over: the file an
-outcome names, refused before that outcome's token is verified and so ahead
-of the ported refusals inside ``verify_timestamp_token``, and the
-``TSTInfo`` the authority signed, refused where that verification returns.
-The second rule is what the first cannot be: nearly everything around a
-signed ``TSTInfo`` is the producer's to rewrite -- the unsigned
-``PKIStatusInfo`` wrapper, and the ``certificates``, ``crls`` and
-``unsignedAttrs`` a ``SignedData`` carries outside its signature -- so one
-issuance has many valid encodings and a rule counting files counts
-encodings.  Both are admissible because no witness in the pinned tree offers
-one timestamp twice.
+bundle configuring more than one anchor -- counted three ways over: the
+physical file an outcome points at, refused before that outcome's response
+is read at all; the file digest that outcome declares, refused before its
+token is verified and so ahead of the ported refusals inside
+``verify_timestamp_token``; and the ``TSTInfo`` the authority signed,
+refused where that verification returns.  Each reaches what the one before
+it cannot.  Two outcomes may name one path and declare two digests, and each
+outcome reads the path for itself, so a writer serving a different valid
+response to each read satisfies both from a repository that never held both.
+And nearly everything around a signed ``TSTInfo`` is the producer's to
+rewrite -- the unsigned ``PKIStatusInfo`` wrapper, and the ``certificates``,
+``crls`` and ``unsignedAttrs`` a ``SignedData`` carries outside its
+signature -- so one issuance has many valid encodings and a rule counting
+files counts encodings.  All three are admissible because no witness in the
+pinned tree names one path twice or offers one timestamp twice.
 
 The pinned root behind the two counting refusals is read from the repository
 exactly once, and every check runs on those bytes: the PEM hash over the
@@ -2033,9 +2037,23 @@ def _v2_witness_evidence(
     # evidence about the same record from a pending authority and a reused
     # token covers neither (peer review, fourth gate round three).
     #
-    # Two rules, because the response file and the timestamp inside it are
-    # different things.  One is the file an outcome points at, refused before
-    # that outcome's token is verified so that a duplicate is never put to
+    # Three rules, because the file an outcome points at, the bytes it claims
+    # are there and the timestamp inside them are three different things.  The
+    # first is the physical path itself.  Two outcomes may not name one file,
+    # whatever they say is in it: each outcome reads the path for itself, so a
+    # writer with access to the records tree can serve one valid response to
+    # the first read and another to the second, and both outcomes verify over
+    # evidence no single state of the repository ever held -- the two declared
+    # digests describe two files, and there is one (peer review, fifth gate
+    # round one).  Compared as the module resolves a claim into a file, so the
+    # two spellings physical_path maps together -- with and without the
+    # leading ``records`` component -- are one path and not two.  What it does
+    # not compare is inodes: two names reaching one file through a symlinked
+    # directory stay two paths here, and are left to the digest rule below,
+    # which sees the same bytes under both names.
+    #
+    # Then the file an outcome claims, refused before that outcome's token is
+    # verified so that a duplicate is never put to
     # OpenSSL at all.  It is not enough on its own: nearly everything between
     # the file and the signature is the producer's to rewrite -- a
     # TimeStampResp's PKIStatusInfo wrapper is unsigned, and inside the token
@@ -2051,15 +2069,25 @@ def _v2_witness_evidence(
     # bytes, and the timestamp rule when they name different bytes carrying
     # one timestamp.
     #
-    # Both refusals are new, and the file rule precedes the ported refusals
-    # inside verify_timestamp_token for the outcome it stops.  Admissible
-    # because the inputs they refuse are ones the pinned tree cannot present:
-    # its 53 witnesses declare 91 tokens with 91 distinct file digests and 91
-    # distinct signed TSTInfos.  The file rule reads the outcome's declared
-    # tokenSha256 and records TokenEvidence.token_sha256 -- the digest of the
-    # bytes that were actually read and verified -- so a declared digest that
-    # lies is caught by the ported witness-token-hash refusal first and the
-    # rule only ever remembers a true one.
+    # All three refusals are new, and the path and file rules precede the
+    # ported refusals inside verify_timestamp_token for the outcome they stop.
+    # Admissible because the inputs they refuse are ones the pinned tree
+    # cannot present: its 53 witnesses declare 91 tokens at 91 distinct
+    # physical paths, with 91 distinct file digests and 91 distinct signed
+    # TSTInfos, and no witness names one path twice.  The file rule reads the
+    # outcome's declared tokenSha256 and records TokenEvidence.token_sha256 --
+    # the digest of the bytes that were actually read and verified -- so a
+    # declared digest that lies is caught by the ported witness-token-hash
+    # refusal first and the rule only ever remembers a true one.  The path
+    # rule has no such gap to mind: the path an outcome declares is the file
+    # this module goes on to open, so it is remembered where it is checked.
+    #
+    # Order among them is the order they were added, and it decides only which
+    # message a witness that breaks two rules at once gets.  Two outcomes
+    # naming one file with one digest are the plainer reuse and keep the file
+    # rule's message, as they had it; what the path rule reaches is the case
+    # the digest rule cannot see, two different digests over one path.
+    seen_token_paths: set[str] = set()
     seen_response_files: set[str] = set()
     seen_timestamps: set[str] = set()
 
@@ -2070,6 +2098,23 @@ def _v2_witness_evidence(
             raise TsaError(
                 f"duplicate TSA response file across anchor outcomes: {declared}"
             )
+
+    def refuse_a_reused_token_path(declared: Any) -> None:
+        # A claim with no tokenPath, or one physical_path refuses, is left
+        # alone: verify_timestamp_token raises those refusals itself, in the
+        # place it has always raised them, and moving one here would move a
+        # ported message relative to the checks around it.
+        if not isinstance(declared, str):
+            return
+        try:
+            physical = physical_path(records, declared)
+        except TsaError:
+            return
+        if str(physical) in seen_token_paths:
+            raise TsaError(
+                f"duplicate TSA token path across anchor outcomes: {physical}"
+            )
+        seen_token_paths.add(str(physical))
 
     def refuse_a_reused_timestamp(evidence: TokenEvidence) -> None:
         if evidence.signed_timestamp_sha256 in seen_timestamps:
@@ -2090,6 +2135,7 @@ def _v2_witness_evidence(
         if outcome_status == "available":
             claim = {**witness, **outcome}
             refuse_a_reused_response_file(claim.get("tokenSha256"))
+            refuse_a_reused_token_path(claim.get("tokenPath"))
             evidence = verify_timestamp_token(
                 path,
                 claim,
@@ -2161,6 +2207,7 @@ def _v2_witness_evidence(
         outcome_status = outcome.get("status")
         if outcome_status == "available":
             refuse_a_reused_response_file(outcome.get("tokenSha256"))
+            refuse_a_reused_token_path(outcome.get("tokenPath"))
             evidence = verify_timestamp_token(
                 path,
                 outcome,
