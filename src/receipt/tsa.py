@@ -75,9 +75,10 @@ being a rotation settles what it has to prove and not whose keys it may
 hold, and while its signer edges entered the graph either way, with the
 adopted authority's own slot dropped from the same bundle no rule looked at
 the result -- an anchor already active may rotate within its own class and
-may take a key that is nobody's, and adopting a second class's key is now
-refused in a verdict naming both authorities, since both are ones the
-history can already name (peer review, sixth gate round three); a pending
+may take a key that is nobody's, and adopting another class's key is now
+refused in a verdict naming this anchor's own authority and every class whose
+key it took, all of them identities the history can already give (peer
+review, sixth gate round three); a pending
 bundle that presents two anchors from
 one of those historical classes, which would make one authority current twice
 under disjoint signer sets that the bundle-local check cannot connect -- the
@@ -163,9 +164,15 @@ The count above is arithmetic and not a tally of the list's members, several
 of which carry more than one refusal: the sixth gate's round one left twenty
 places, its round two withdrew one and added three, and its round three added
 none -- what it changed was the reach of the split-or-merge place above,
-which the list had always described as refusing a merge and which the
-implementation exempted an already-active anchor from, so the input it now
-refuses is one this list already claimed.  The withdrawal is
+which the implementation exempted an already-active anchor from.  Of the two
+shapes that exemption let through, the list already claimed one: an anchor
+allowing a second class's key beside its own is "the signers of two classes
+together".  It did not claim the other.  An anchor allowing a second class's
+key and not its own carries exactly one active class's signers, which the
+clause before that one calls that authority under a new name and skips; it is
+a merge for the identity it is filed under and not for the signers it
+declares, and what claims it is the sub-clause this round added.  One place
+carries both, which is why the count does not move.  The withdrawal is
 the only one in the port's history, so it is stated rather than absorbed.
 What it withdrew was the refusal of two pending bundles introducing one
 authority under two anchors, sharing a signer.  Pending history was a rolling
@@ -3006,10 +3013,19 @@ def _adopted_class_message(
     what there is to say about an anchor nothing knew before.  Here the
     anchor is one the history already holds, so both sides of the merge have
     names and the verdict gives both: the ``(anchor ID, root SPKI)`` this
-    anchor is filed under, and the complete class the imported key belongs
-    to, rendered as sorted ``{anchor ID}/{root SPKI}`` members the way the
-    collision verdict below renders one (peer review, sixth gate round
-    three).
+    anchor is filed under, and every authority identity of every class whose
+    key it adopted, as ``{anchor ID}/{root SPKI}`` members the way the
+    collision verdict below renders a class.
+
+    One anchor may adopt keys from several classes at once, so that list is
+    not one class's.  It is the rest of the class this anchor would create,
+    which is what a producer has to undo, and naming the parts it was
+    assembled from would name a partition that ceases to exist the moment the
+    input is admitted.  Members are sorted within each class and the classes
+    follow their graph representatives, each of which is the least authority
+    in its class; that is a total order but not a global sort, so with two
+    classes in the list a member of the first may sort after a member of the
+    second (peer review, sixth gate round three).
     """
 
     members = ", ".join(
@@ -3087,10 +3103,14 @@ def _build_authority_history(
     bundle is classified as a batch against the history before that version,
     with its anchors sorted independently of their JSON array order; all of
     its edges are then retained whether an occurrence is new, a rename, or a
-    skipped rotation.  Semantic errors are remembered until every pending
-    occurrence has entered the graph, so the graph consumed by candidate
-    classification and the per-bundle class guard is the complete history for
-    this verification.
+    skipped rotation.  A bundle's semantic errors are remembered until every
+    one of its own occurrences has entered the graph -- so the graph the class
+    guard is asked about is that bundle's history complete -- and are raised
+    at that bundle, immediately after the guard, before any later bundle is
+    walked.  Holding them to the end of the walk instead would let a later
+    bundle honestly carrying two authorities an earlier one merged be
+    convicted of that merge, the guard seeing the one class the earlier
+    bundle made (peer review, sixth gate round three).
 
     Every occurrence is classified, including one whose ``(ID, root SPKI)``
     the history already holds.  Such an anchor is a rotation and is asked for
@@ -3188,9 +3208,18 @@ def _build_authority_history(
         collision = _first_class_collision(history, batch)
         if collision is not None:
             raise TsaError(_pending_class_collision_message(history, *collision))
+        # And this bundle's own verdict is raised here, for the same reason
+        # the guard above is asked here.  A refused occurrence's edges are in
+        # the graph either way, so a later bundle carrying both of the
+        # authorities it merged -- each under its own name, with its own key,
+        # merging nothing -- resolves to the one class this bundle made and
+        # meets that guard.  Held to the end of the walk, the verdict that
+        # named the anchor which merged would be discarded in favour of one
+        # naming two anchors of a bundle that did not (peer review, sixth gate
+        # round three).
+        if errors:
+            raise TsaError(min(errors)[1])
 
-    if errors:
-        raise TsaError(min(errors)[1])
     return history, tuple(active_occurrences), tuple(pending_batches)
 
 
@@ -3310,18 +3339,21 @@ def _supplemental_candidates(
     Neither reading is true of it, so it is refused and the producer is told
     what to do about it: a rotation belongs under the active ID and root, and
     a new authority belongs in an anchor whose signers are its own.  A pending
-    anchor whose (ID, root SPKI) is already active is a rotation and is
-    skipped by the exact-set test above, which is what keeps a bundle that
-    legitimately allows a superseded signer beside its replacement from
-    reaching the refusal.  It is not skipped by the class question.  Being a
-    rotation settles what an anchor has to prove, not whose keys it may hold,
-    and the wider exemption let it hold a second active authority's key --
-    the merge two paragraphs above says is refused -- whenever the bundle
-    dropped that authority's own slot as well, since the per-bundle class
-    guard needs two slots to see anything.  Such an anchor is now refused,
-    and because both of the merged authorities are ones the history can
-    already name, the verdict names both (peer review, sixth gate round
-    three).
+    anchor whose (ID, root SPKI) is already active is a rotation, and its
+    identity alone is what skips it: it never reaches the exact-set test at
+    all.  That is what keeps a bundle legitimately allowing a superseded
+    signer beside its replacement from being refused there, because such a
+    set is one class's signers beside a key that is nobody's -- the third of
+    the three shapes that test refuses -- and the identical set filed under a
+    pair the history does not hold is refused by it.  What the identity does
+    not excuse is the class question.  Being a rotation settles what an
+    anchor has to prove, not whose keys it may hold, and the wider exemption
+    let it hold a second active authority's key -- the merge two paragraphs
+    above says is refused -- whenever the bundle dropped that authority's own
+    slot as well, since the per-bundle class guard needs two slots to see
+    anything.  Such an anchor is now refused, and every authority the merge
+    would join is one the history can already name, so the verdict names them
+    (peer review, sixth gate round three).
 
     Pending history used to be a mutable set of current candidates.  A
     skipped rotation contributed no signer edge, and succession deleted the

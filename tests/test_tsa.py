@@ -5576,7 +5576,10 @@ def test_a_rotation_may_not_adopt_another_active_classs_signer(
     The premise asserted first is that the bundle really does let A's anchor
     answer with B's key and that B's own anchor is gone from it. Run with the
     ``already_known`` branch reduced to the bare ``continue`` it replaced, the
-    call below returns candidates instead of refusing.
+    call below returns an empty mapping instead of refusing -- not a candidate
+    that goes unanswered: ``history.add`` has already joined A's class to B's,
+    a class holding an active occurrence is asked for no supplemental outcome,
+    and so nothing is demanded and nothing is refused.
     """
 
     alpha, beta = local_anchors[:2]
@@ -5625,9 +5628,11 @@ def test_a_rotation_may_not_take_another_active_classs_signer_outright(
     The shape above leaves A's own key in place, so the merged anchor can be
     read as A with an extra key. Here A's anchor allows B's key and not its
     own, which is the same union of two classes reached by substitution
-    rather than addition -- and it is not a rename, because a rename carries
-    a new ID, while this keeps A's own ``(ID, root SPKI)``. Both went through
-    the one door that did not ask.
+    rather than addition. It is not a rename either: the alias test is
+    reached only by an anchor filed under an ``(ID, root SPKI)`` the history
+    does not hold -- the pair is the unit, and a rename may keep the anchor ID
+    and change only the root -- while this anchor keeps A's own pair. Both
+    went through the one door that did not ask.
 
     The premise asserted first is that the bundle's only anchor is A's, that
     it allows B's key alone, and that A's identity is the active one -- so it
@@ -5669,6 +5674,91 @@ def test_a_rotation_may_not_take_another_active_classs_signer_outright(
         "(ID, root SPKI) the history already holds may rotate its own "
         "class's keys, but may not adopt another authority's signer"
     )
+
+
+def test_an_adopting_anchor_names_every_class_whose_key_it_took(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_beta: LocalTsa,
+) -> None:
+    """S6-R3-R1: the verdict is the whole of the class the merge would create.
+
+    The two above adopt from one class each. An anchor may take keys from any
+    number of them, and the verdict is the producer's account of what has to
+    be undone, so it names every one: the members of each adopted class, and
+    with the anchor's own authority that is exactly the class this bundle
+    would create. The order is total but not a global sort -- members are
+    sorted within a class and the classes follow their representatives, each
+    the least authority in its class -- and this is the shape that shows it,
+    B's class carrying a second name that sorts after C's only name.
+
+    The premises asserted first are that B's class really does hold two names
+    by the time this bundle is read, that C is a class of its own and not part
+    of B's, and that the adopting anchor is A's own active slot carrying all
+    three keys.
+    """
+
+    alpha, beta = local_anchors[:2]
+    rotated = certificate_pins(rotated_beta.signer_pem)
+    tree = build_witness_tree(tmp_path, [alpha, beta])
+    zeta = alias_of(beta, anchor_id="zeta-2026")
+    incoming = alias_of(beta, anchor_id="incoming-2026")
+    introduce, spec = add_bundle_version(
+        tree,
+        [zeta, incoming],
+        version=2,
+        signers={incoming.anchor_id: rotated},
+    )
+    # The premise: B renamed to zeta is B, while incoming's key is nobody's,
+    # so incoming is a class of its own and the only candidate here.
+    assert set(
+        tsa_module._supplemental_candidates(
+            tree.records,
+            {BUNDLE_LOGICAL: tree.reference},
+            [introduce],
+            spec=spec,
+        )
+    ) == {(introduce["path"], incoming.anchor_id)}
+
+    pending, spec = add_bundle_version(
+        tree,
+        [alpha],
+        version=3,
+        extra_signers={alpha.anchor_id: [beta.signer_pins, rotated]},
+        base=spec,
+    )
+    # And the premise: one anchor, A's own, allowing all three keys.
+    written = json.loads(
+        (tree.records / "trust" / "tsa-anchors-v3.json").read_text()
+    )["anchors"]
+    assert [entry["id"] for entry in written] == [alpha.anchor_id]
+    assert {
+        signer["spkiSha256"] for signer in written[0]["allowedSigners"]
+    } == {
+        alpha.signer_pins["spkiSha256"],
+        beta.signer_pins["spkiSha256"],
+        rotated["spkiSha256"],
+    }
+
+    root_spki = beta.root_pins["spkiSha256"]
+    with pytest.raises(TsaError) as caught:
+        tsa_module._supplemental_candidates(
+            tree.records,
+            {BUNDLE_LOGICAL: tree.reference},
+            [introduce, pending],
+            spec=spec,
+        )
+    assert str(caught.value) == (
+        f"pending TSA anchor {pending['path']}/{alpha.anchor_id} merges "
+        f"authority {alpha.anchor_id}/{alpha.root_pins['spkiSha256']} with "
+        f"{beta.anchor_id}/{root_spki}, {zeta.anchor_id}/{root_spki}, "
+        f"{incoming.anchor_id}/{root_spki}; an anchor whose "
+        "(ID, root SPKI) the history already holds may rotate its own "
+        "class's keys, but may not adopt another authority's signer"
+    )
+    # B's class is named whole and ahead of C's, and its second name sorts
+    # after C's only one, which is the order the verdict documents.
+    assert zeta.anchor_id > incoming.anchor_id
 
 
 def test_succession_keeps_the_predecessors_signer_in_pending_history(
@@ -6039,6 +6129,82 @@ def test_a_later_bundles_merge_does_not_convict_an_earlier_bundle(
         f"pending TSA anchor {merger.anchor_id} splits or merges active "
         "authorities' signers; a pending anchor must carry one active "
         "anchor's signers exactly, or none of them"
+    )
+
+
+def test_an_earlier_bundles_merge_does_not_convict_a_later_bundle(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+) -> None:
+    """S6-R3-R1: a bundle's verdict is raised at that bundle, both ways round.
+
+    The mirror of the test above, and the half the adoption refusal opened.
+    That refusal is recorded rather than raised, so the merging anchor's edges
+    join the two classes before the walk moves on. A later bundle carrying
+    both of those authorities honestly -- each under its own name, with its
+    own key, merging nothing -- then resolves to the one class the earlier
+    bundle made and meets the collision guard, which raises where this rule
+    only records. The innocent bundle was convicted by its two anchor slots
+    and the computed verdict naming the anchor that merged was discarded.
+
+    A bundle's own verdict is therefore raised at that bundle, after its own
+    collision question and before any later bundle is walked -- which is the
+    principle the guard above already follows, asked now of this rule too.
+
+    The premise asserted first is that the later bundle really is honest: two
+    active authorities under their own names with their own keys, accepted on
+    its own and demanding no supplemental outcome. So what the verdict must
+    name is the earlier bundle, which is the one that merged.
+    """
+
+    alpha, beta = local_anchors[:2]
+    tree = build_witness_tree(tmp_path / "tree", [alpha, beta])
+    merging, spec = add_bundle_version(
+        tree,
+        [alpha],
+        version=2,
+        extra_signers={alpha.anchor_id: [beta.signer_pins]},
+    )
+    honest, spec = add_bundle_version(
+        tree, [alpha, beta], version=3, base=spec
+    )
+
+    def candidates_for(*pending: dict[str, Any]) -> set[tuple[str, str]]:
+        return set(
+            tsa_module._supplemental_candidates(
+                tree.records,
+                {BUNDLE_LOGICAL: tree.reference},
+                list(pending),
+                spec=spec,
+            )
+        )
+
+    # The premise: the later bundle is both authorities under their own names
+    # with their own keys, and on its own it is accepted.
+    written = json.loads(
+        (tree.records / "trust" / "tsa-anchors-v3.json").read_text()
+    )["anchors"]
+    assert [
+        (
+            anchor["id"],
+            {signer["spkiSha256"] for signer in anchor["allowedSigners"]},
+        )
+        for anchor in written
+    ] == [
+        (alpha.anchor_id, {alpha.signer_pins["spkiSha256"]}),
+        (beta.anchor_id, {beta.signer_pins["spkiSha256"]}),
+    ]
+    assert candidates_for(honest) == set()
+
+    # Walked with the merger before it, the refusal still names the merger.
+    with pytest.raises(TsaError) as caught:
+        candidates_for(merging, honest)
+    assert str(caught.value) == (
+        f"pending TSA anchor {merging['path']}/{alpha.anchor_id} merges "
+        f"authority {alpha.anchor_id}/{alpha.root_pins['spkiSha256']} with "
+        f"{beta.anchor_id}/{beta.root_pins['spkiSha256']}; an anchor whose "
+        "(ID, root SPKI) the history already holds may rotate its own "
+        "class's keys, but may not adopt another authority's signer"
     )
 
 
