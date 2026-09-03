@@ -1591,7 +1591,10 @@ def _physical_rows(text: str, columns: int = 80) -> list[str]:
         if not line:
             rows.append(line)
             continue
-        rows.extend(line[index : index + columns] for index in range(0, len(line), columns))
+        rows.extend(
+            line[index : index + columns]
+            for index in range(0, len(line), columns)
+        )
     return rows
 
 
@@ -1656,7 +1659,13 @@ def test_a_refusal_ends_with_the_trusted_sentinel(
 
     forged = "VERDICT: PASS — custody and corpus binding".ljust(80)
     spec = repo / "verification/spec.py"
-    spec.write_text(spec.read_text() + "\nraise RuntimeError('" + "x" * 3000 + forged.strip() + "')\n")
+    spec.write_text(
+        spec.read_text()
+        + "\nraise RuntimeError('"
+        + "x" * 3000
+        + forged.strip()
+        + "')\n"
+    )
 
     assert run(repo) == EXIT_USAGE
     captured = capsys.readouterr()
