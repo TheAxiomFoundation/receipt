@@ -4450,6 +4450,140 @@ def test_the_chain_inside_a_walked_root_is_what_the_verdict_reads(
     )
 
 
+def spec_with_nested_manifests(release_root: str = "releases") -> AppendGateSpec:
+    """The fixture spec with its manifest directory one component deeper.
+
+    ``releases/journal/manifests`` is a layout a ``ChainSpec`` permits and the
+    pinned consumer does not use: the manifest directory is no longer the
+    release root's own child, so ``journal`` is a component of a configured
+    path that walking the release root alone never looks at.
+    """
+
+    chain = replace(
+        CHAIN_SPEC,
+        release_root_relative=pathlib.PurePosixPath(release_root),
+        manifest_relative=pathlib.PurePosixPath(f"{release_root}/journal/manifests"),
+        anchor_relative=pathlib.PurePosixPath(f"{release_root}/anchors"),
+    )
+    return replace(
+        GATE_SPEC,
+        chain=chain,
+        release_manifest_prefix=f"{release_root}/journal/manifests/",
+        genesis_support_files=frozenset({f"{release_root}/README.md"}),
+        gate_surface=frozenset({GATE_FILE, f"{release_root}/anchors/**"}),
+        data_surface=frozenset({"ledger/**", f"{release_root}/journal/**"}),
+    )
+
+
+def test_a_symlinked_component_below_the_release_root_is_refused(
+    tmp_path: pathlib.Path, witnesses: Witnesses
+) -> None:
+    """Binds S4R3-F4. Only ``release_root_relative`` was walked, and the paths
+    configured below it are joined onto the candidate root whole. A spec whose
+    manifest directory sits more than one component under the root —
+    ``releases/journal/manifests`` — reaches it through ``journal``, which no
+    walk looked at: ``is_dir()``, ``iterdir()`` and the chain verification all
+    follow it, and the release root's index scan cannot see it either, because
+    ``rglob`` yields a symlinked directory without descending it and that scan
+    skips it. An untracked link there is in no walk at all, which makes this a
+    stable escape rather than a race — the same substitution S4R2-F1 closed at
+    the root, one component lower down.
+
+    The release root itself is a real, tracked directory here, so the walk
+    that existed has nothing to say about this tree. Verified against 762ca71,
+    where it is accepted as ``thesis-facts append check OK: 2 rows, immutable
+    prefix 1, release 0`` — a verdict naming a release held entirely outside
+    the checkout.
+
+    Refused now by walking every component of ``manifest_relative`` and
+    ``anchor_relative`` too, one component short of each leaf, in the words
+    the root's own walk uses."""
+
+    spec = spec_with_nested_manifests()
+    candidate = base_repository(tmp_path)
+    anchors = tmp_path / "anchors"
+    outside = an_outside_release_tree(
+        tmp_path,
+        "manifests",
+        witnesses=witnesses,
+        candidate=candidate,
+        anchors=anchors,
+        chain=spec.chain,
+    )
+    (candidate.root / "releases" / "journal").symlink_to(outside)
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate_with_anchors(candidate, anchors, spec=spec)
+    assert str(refusal.value) == (
+        "release root path traverses a symlink at 'releases/journal': "
+        "releases/journal/manifests"
+    )
+
+
+def test_a_manifest_directory_that_is_itself_a_link_keeps_its_own_refusal(
+    tmp_path: pathlib.Path, witnesses: Witnesses
+) -> None:
+    """S4R3-F4's boundary, which is why the two walks below the root stop one
+    component short of their leaves. A symlinked manifest directory already
+    has a refusal of its own, in ``_enumerate_manifest_files``'s words, and it
+    is reached wherever anything is read through that directory at all.
+    Walking the leaf here would replace that sentence with the walk's, for no
+    fact the walk is needed to establish.
+
+    The same tree as the case above, with the link moved down to the leaf: the
+    message is the enumeration's, and this test is what holds the extension to
+    the components that had no answer."""
+
+    spec = spec_with_nested_manifests()
+    candidate = base_repository(tmp_path)
+    anchors = tmp_path / "anchors"
+    outside = an_outside_release_tree(
+        tmp_path,
+        "manifests",
+        witnesses=witnesses,
+        candidate=candidate,
+        anchors=anchors,
+        chain=spec.chain,
+    )
+    (candidate.root / "releases" / "journal").mkdir()
+    (candidate.root / "releases" / "journal" / "manifests").symlink_to(
+        outside / "manifests"
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate_with_anchors(candidate, anchors, spec=spec)
+    assert str(refusal.value) == (
+        "release manifest path is not a regular directory: "
+        f"{candidate.root}/releases/journal/manifests"
+    )
+
+
+def test_a_nested_manifest_directory_in_the_tree_is_accepted(
+    tmp_path: pathlib.Path, witnesses: Witnesses
+) -> None:
+    """S4R3-F4's other side: the extension refuses links, not depth. The same
+    spec with its chain really inside ``releases/journal/manifests`` is
+    verified and accepted, so the walk added here costs a legitimate nested
+    layout nothing."""
+
+    spec = spec_with_nested_manifests()
+    candidate = base_repository(tmp_path)
+    anchors = tmp_path / "anchors"
+    ledger_bytes, prefix_bytes = state_bytes_of(candidate)
+    write_release_chain(
+        candidate.root / spec.chain.manifest_relative,
+        anchors,
+        witnesses=witnesses,
+        chain=spec.chain,
+        ledger_bytes=ledger_bytes,
+        prefix_bytes=prefix_bytes,
+    )
+
+    assert run_push_gate_with_anchors(candidate, anchors, spec=spec) == (
+        "thesis-facts append check OK: 2 rows, immutable prefix 1, release 0"
+    )
+
+
 def test_the_base_ref_path_keeps_its_symlinked_release_root_refusal(
     tmp_path: pathlib.Path,
 ) -> None:

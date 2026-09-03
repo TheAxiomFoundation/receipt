@@ -140,9 +140,20 @@ state read and ``release_chain.assert_no_symlinked_release_root`` at the top
 of both release-proposal paths, each ahead of every read through the path it
 walks, because a path reached through a linked component — or under a spelling
 the candidate tree does not hold — is not the path this verdict is about, and
-nothing read through it is evidence about this proposal. Standing there means
-standing where a pre-existing refusal about that content would have stood, and
-three cases do:
+nothing read through it is evidence about this proposal. The second walks
+every configured path under the release tree and not the root alone:
+``manifest_relative`` and ``anchor_relative`` are joined onto the candidate
+root whole, so a spec whose manifest directory sits more than one component
+below the root reaches it through components no walk looked at, and an
+untracked link at one of them is invisible to the index reconciliation as
+well, since ``rglob`` yields a symlinked directory without descending it and
+the release root's scan skips it. Each of those two stops one component short
+of its leaf, which already has a refusal of its own — the manifest
+directory's is the enumeration's, the anchor directory's is the walk at the
+top of ``verify_release_chain`` — so no sentence of theirs is replaced.
+
+Standing ahead of the read means standing where a pre-existing refusal about
+that content would have stood, and three cases do:
 
 For the release root's own leaf, a link the enumeration would itself have met
 is answered in the enumeration's own words, so that refusal is unchanged. A

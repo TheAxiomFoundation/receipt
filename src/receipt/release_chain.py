@@ -1220,12 +1220,15 @@ def assert_no_symlinked_release_root(root: pathlib.Path, spec: ChainSpec) -> Non
     root the spec spells one way is answered for by a directory spelled
     another. See ``_assert_component_spelled``.
 
-    The gate calls this at the top of both of its release-proposal paths,
-    ahead of the reads, rather than after the comparisons the way the index
-    checks run: a root that is not in the candidate tree is not a release root
-    this verdict can be about, so there is nothing for a later refusal to be
-    more specific about. For a single-component root — every consumer's, and
-    every fixture's but the two the gate's tests build for a nested root — a
+    The gate reaches this through ``hold_release_root`` at the top of both of
+    its release-proposal paths, ahead of the reads, rather than after the
+    comparisons the way the index checks run: a root that is not in the
+    candidate tree is not a release root this verdict can be about, so there
+    is nothing for a later refusal to be more specific about. It runs a second
+    time at the end of each path, from ``assert_release_root_unchanged``,
+    because a walk on its own is a preflight every later read resolves again.
+    For a single-component root — every consumer's, and every fixture's but
+    the two the gate's tests build for a nested root — a
     link the enumeration would itself have met is answered word for word as
     the enumeration answers it. The one link it would not have met is a
     dangling one, which ``_working_release_files`` answers by returning
@@ -1237,28 +1240,67 @@ def assert_no_symlinked_release_root(root: pathlib.Path, spec: ChainSpec) -> Non
     the folded name would have answered. ``append_gate``'s module docstring
     enumerates all of it with the cases measured, and tests pin them.
 
-    What this walks is the release root's own path, and the configured paths
-    that descend from it have their own answers: ``_enumerate_manifest_files``
-    refuses a symlinked manifest directory itself, and ``verify_release_chain``
-    walks every component of the spec-pinned anchor path. Between them is one
-    case neither covers — a spec whose manifest directory sits more than one
-    component below the release root, where those intermediate components are
-    walked by nobody, so a link at one of them is followed on the push path
-    and the chain outside it is what gets verified (checked, not assumed). For
-    the pinned consumer, and for every fixture here, the manifest directory is
-    the release root's own child and there are no such components. That is
-    stated rather than closed here.
+    The release root is not the only path that has to be walked, because it is
+    not the only one joined onto the candidate root. ``manifest_relative`` and
+    ``anchor_relative`` are configured whole, and a spec whose manifest
+    directory sits more than one component below the release root —
+    ``releases/journal/manifests`` — reaches it through components that
+    walking the root alone never looks at. A link at one of those is followed
+    by ``is_dir()``, by ``iterdir()`` and by the chain verification, and the
+    index reconciliation cannot see it either: ``rglob`` yields a symlinked
+    directory without descending it and the release root's scan skips it, so
+    an untracked link there is in no walk at all. That is the same escape as a
+    linked root, one component lower down, and it is stable rather than a
+    race. So every component of both paths is walked here too, with the same
+    ``lstat`` and the same spelling check, in the same words.
+
+    Their *leaves* are left to the refusals that already exist for them, which
+    is why the walk of each stops one component short. A symlinked manifest
+    directory is ``_enumerate_manifest_files``'s own refusal (``release
+    manifest path is not a regular directory``), and against a base it is the
+    enumeration's (``release path is a symlink``); a symlinked spec-pinned
+    anchor directory is the walk at the top of ``verify_release_chain``. Both
+    are reached wherever anything is read through those directories at all,
+    and refusing here instead would replace their sentences with this one's
+    and, for an anchor directory a caller has overridden, refuse a tree over a
+    directory this verdict never reads. Nothing above a leaf has an answer
+    like that, which is exactly the gap.
     """
 
-    relative = spec.release_root_relative
-    parts = relative.parts
+    _walk_release_path(
+        root,
+        spec.release_root_relative,
+        spec.release_root_relative.parts,
+        leaf_is_the_release_root=True,
+    )
+    for relative in (spec.manifest_relative, spec.anchor_relative):
+        _walk_release_path(
+            root, relative, relative.parts[:-1], leaf_is_the_release_root=False
+        )
+
+
+def _walk_release_path(
+    root: pathlib.Path,
+    relative: pathlib.PurePosixPath,
+    parts: tuple[str, ...],
+    *,
+    leaf_is_the_release_root: bool,
+) -> None:
+    """One configured path under the release tree, component by component.
+
+    ``parts`` is what to walk rather than ``relative.parts`` because the two
+    paths below the root are walked one component short; ``relative`` still
+    names the whole configured path in the refusal, since that is the path
+    the verdict would have been about.
+    """
+
     current = root
     walked: tuple[str, ...] = ()
     for depth, segment in enumerate(parts, start=1):
         child = current / segment
         walked = (*walked, segment)
         if _is_reparse_point(child):
-            if depth == len(parts):
+            if leaf_is_the_release_root and depth == len(parts):
                 raise ReleaseChainError(
                     "releases must be a real directory, not a symlink"
                 )
