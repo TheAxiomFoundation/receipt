@@ -287,8 +287,8 @@ shows to touch both surfaces is refused as mixed, in the words that refusal
 has always used, and one it shows to be data goes to the data path, where more
 of the pre-existing checks run for it, not fewer.
 
-Two refusals here are not about a tree at all, and are stated because they do
-pre-empt everything on every input wherever they apply. Where ``os.open``
+Three refusals here are not about a tree at all, and are stated because they
+do pre-empt everything on every input wherever they apply. Where ``os.open``
 cannot take a ``dir_fd``, the state reads refuse before anything is compared,
 because the confinement they claim is unavailable on that platform — and so
 does ``_set_root``, which opens the candidate root with the descent's flags
@@ -305,6 +305,22 @@ through directory descriptors (``os.open`` with ``dir_fd``, which every POSIX
 platform CPython supports and Windows does not), so on Windows ``receipt
 verify`` and the append gate refuse rather than reading state through a weaker
 path. The refusal says so, and ``README.md`` says the same.
+
+The third is about the spec rather than the platform: a configured release
+path with no components at all — ``.``, or the empty path — names the
+candidate root itself, and this gate's own reads disagree about what is inside
+such a root. ``git ls-tree`` lists the entries under ``.`` with no prefix, so
+``git_tree_entries`` refuses the first of them as a path outside the root it
+asked about and the base enumeration never returns; the gate-only confinement
+asks whether a changed path is ``.`` or begins with ``./`` and so finds
+nothing inside the release root, which makes that confinement silently a
+no-op; and there is no component for the release root's walk to walk or its
+hold to hold. ``_set_root`` refuses it — ``release root must be a subdirectory
+of the candidate root``, and the same sentence for the manifest and anchor
+paths — after the platform check and before the tree is touched. It is the
+gate's rather than ``ChainSpec``'s deliberately: a spec is the consumer's
+committed code and validating one is #41's subject, while this is the one
+consumer that cannot answer for it.
 
 All of it carries its own tests in tests/test_append_gate.py.
 """
@@ -415,6 +431,41 @@ class AppendError(ValueError):
     """The proposed ledger change violates an append invariant."""
 
 
+def _assert_release_paths_are_subdirectories(spec: AppendGateSpec) -> None:
+    """Refuse a spec whose release paths name the candidate root itself.
+
+    ``PurePosixPath('.')`` and the empty path both report no components at
+    all, and a release root spelled either way is the candidate root. Nothing
+    here can speak for such a spec, because this gate's own reads disagree
+    about what is inside it. ``git ls-tree`` names the entries under ``.``
+    without any prefix — ``a/f.txt``, not ``./a/f.txt``, checked on the git
+    this repository is verified with — so ``git_tree_entries`` refuses the
+    first of them as a path outside the root it asked about, and the base
+    enumeration the release-history pass is built on never returns. From the
+    other side, ``check_gate_only_confinement`` asks whether a changed path is
+    ``.`` or begins with ``./`` and finds nothing inside the release root at
+    all, so the confinement a gate-only verdict rests on is silently a no-op;
+    and ``hold_release_root`` has no component to walk or hold.
+
+    So it is refused here, at the gate's entry, rather than left to whichever
+    of those the run reaches first. It belongs to the gate rather than to
+    ``ChainSpec`` — a spec is the consumer's committed code, and validating it
+    is #41's subject — and it is a statement about the configuration rather
+    than about a tree, like the platform refusals below it: the gate declining
+    to answer.
+    """
+
+    for label, relative in (
+        ("release root", spec.chain.release_root_relative),
+        ("release manifest path", spec.chain.manifest_relative),
+        ("release anchor path", spec.chain.anchor_relative),
+    ):
+        if not relative.parts:
+            raise AppendError(
+                f"{label} must be a subdirectory of the candidate root"
+            )
+
+
 def _set_root(root: pathlib.Path, spec: AppendGateSpec) -> _CandidateTree:
     """Select the candidate worktree without changing the trusted code root.
 
@@ -454,6 +505,10 @@ def _set_root(root: pathlib.Path, spec: AppendGateSpec) -> _CandidateTree:
         assert_secure_descent_supported()
     except ReleaseChainError as exc:
         raise AppendError(str(exc)) from exc
+    # And after it, before the tree is touched at all: a configured release
+    # path that names the candidate root itself is one no read below can be
+    # about. See _assert_release_paths_are_subdirectories.
+    _assert_release_paths_are_subdirectories(spec)
     try:
         descriptor = os.open(candidate_root, release_chain.DIRECTORY_OPEN_FLAGS)
     except OSError as exc:

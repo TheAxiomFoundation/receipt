@@ -4749,39 +4749,94 @@ def test_a_release_root_swapped_after_its_walk_is_refused(
     assert str(refusal.value) == refusal_text
 
 
-def test_a_release_root_spelled_as_the_candidate_root_holds_that_directory(
-    tmp_path: pathlib.Path,
+@pytest.mark.parametrize("spelling", [".", ""], ids=["dot", "empty"])
+@pytest.mark.parametrize(
+    "field",
+    ["release_root_relative", "manifest_relative", "anchor_relative"],
+    ids=["release-root", "manifest", "anchor"],
+)
+def test_a_release_path_spelled_as_the_candidate_root_is_refused(
+    tmp_path: pathlib.Path, field: str, spelling: str
 ) -> None:
-    """S4R3-F3's degenerate spec, found by re-reading the round's own diff. A
-    ``ChainSpec`` whose release root is the candidate root — ``.``, or the
-    empty path, both of which ``PurePosixPath`` reports as no components at
-    all — gives the hold nothing to walk, and the first draft fell off the end
-    of that loop holding nothing and asserted its way out of the gate. No spec
-    in this repository is that one and no consumer's is either, but an
-    ``AssertionError`` escaping a verifier is not an answer, and under ``-O``
-    it would have been a ``TypeError`` instead.
+    """Binds S4R4-F8. A configured release path with no components at all —
+    ``.`` and the empty path both give that — names the candidate root itself,
+    and the gate's own reads disagree about what is inside such a root.
+    ``git ls-tree`` lists the entries under ``.`` with no prefix (``a/f.txt``,
+    not ``./a/f.txt``, checked on the git this repository is verified with),
+    so ``git_tree_entries`` refuses the first of them as a path outside the
+    root it asked about and the base enumeration never returns; the gate-only
+    confinement asks whether a changed path is ``.`` or begins with ``./`` and
+    finds nothing inside the release root, so that confinement is silently a
+    no-op; and the release root's hold has no component to walk.
 
-    The loop is seeded with the candidate root's own directory now, so such a
-    spec holds the directory it actually names and the closing re-check
-    compares that root against itself, which is the true answer for it."""
+    Only the descriptor holder ever supported such a spec, by seeding its walk
+    with the candidate root — which answered the ``AssertionError`` an earlier
+    draft raised, and left every read above still disagreeing. The seeding is
+    gone and the spec is refused at the gate's entry instead, before the tree
+    is touched.
+
+    Measured at de1dbe4 with the refusal removed, for both spellings. A
+    release root of ``.``: the push path accepts it outright, as
+    ``thesis-facts append check OK: 2 rows, immutable prefix 1``, having
+    walked, held and scanned nothing; against a base it is refused as ``git
+    tree enumeration returned a path outside .:
+    ledger/immutable_prefix.json`` — the enumeration meeting the tree's own
+    first file. A manifest path of ``.``: the push path refuses as ``release
+    manifest directory contains a non-regular entry: <root>/releases``, the
+    enumeration having taken the whole checkout for a manifest directory,
+    while against a base the tree is accepted, since no ``*.json`` sits at the
+    root and the run decides there is no chain. An anchor path of ``.`` is
+    accepted on both paths, because the gate reads the anchors it is handed
+    rather than the candidate's. Three configurations, five different
+    answers, none of them about this proposal.
+
+    No consumer pins such a spec and no fixture here builds one; the point is
+    that a verifier answers rather than asserting or half-reading."""
 
     candidate = base_repository(tmp_path)
-    chain = replace(CHAIN_SPEC, release_root_relative=pathlib.PurePosixPath("."))
-    with selected_tree(candidate) as tree:
-        held = release_chain.hold_release_root(
-            tree.root, chain, root_descriptor=tree.root_descriptor
-        )
-        assert held is not None
-        try:
-            recorded = os.fstat(held)
-            observed = os.stat(tree.root)
-            assert (recorded.st_dev, recorded.st_ino) == (
-                observed.st_dev,
-                observed.st_ino,
-            )
-            release_chain.assert_release_root_unchanged(tree.root, chain, held)
-        finally:
-            os.close(held)
+    chain = replace(
+        CHAIN_SPEC, **{field: pathlib.PurePosixPath(spelling)}
+    )
+    spec = replace(GATE_SPEC, chain=chain)
+    label = {
+        "release_root_relative": "release root",
+        "manifest_relative": "release manifest path",
+        "anchor_relative": "release anchor path",
+    }[field]
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate, spec=spec)
+    assert str(refusal.value) == (
+        f"{label} must be a subdirectory of the candidate root"
+    )
+
+    with pytest.raises(AppendError) as with_base:
+        run_gate(candidate, spec=spec)
+    assert str(with_base.value) == str(refusal.value)
+
+
+def test_an_ordinary_spec_names_a_subdirectory_for_every_release_path(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S4R4-F8's other side: the check is about a path with no components, and
+    every spec in this repository — and every consumer's — names a
+    subdirectory for all three. The fixture's own is accepted exactly as
+    before."""
+
+    for relative in (
+        CHAIN_SPEC.release_root_relative,
+        CHAIN_SPEC.manifest_relative,
+        CHAIN_SPEC.anchor_relative,
+    ):
+        assert relative.parts
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    assert run_gate(candidate) == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 1, "
+        "+1 appended vs base"
+    )
+
 
 
 def test_the_chain_inside_a_walked_root_is_what_the_verdict_reads(
