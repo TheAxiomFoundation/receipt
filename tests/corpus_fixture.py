@@ -164,7 +164,7 @@ SIGNER_EXTENSIONS = (
 )
 
 
-def _tsa_config(root_name: str, policy_oid: str) -> str:
+def _tsa_config(root_name: str, policy_oid: str, *, tsa_name: bool = True) -> str:
     return (
         "[ tsa_config ]\n"
         "serial = ./tsa_serial\n"
@@ -177,9 +177,56 @@ def _tsa_config(root_name: str, policy_oid: str) -> str:
         "digests = sha256, sha512\n"
         "accuracy = secs:1\n"
         "ordering = yes\n"
-        "tsa_name = yes\n"
+        f"tsa_name = {'yes' if tsa_name else 'no'}\n"
         "ess_cert_id_chain = no\n"
         "ess_cert_id_alg = sha256\n"
+    )
+
+
+def stamp_anonymously(
+    tsa: LocalTsa,
+    digest: str,
+    out: pathlib.Path,
+    *,
+    policy_oid: str,
+    serial: str,
+) -> None:
+    """Stamp ``digest`` with everything optional about the authority left out.
+
+    A ``TSTInfo`` names the authority that signed it in two ways RFC 3161
+    leaves optional: the ``tsa`` general name, and a serial number the
+    standard requires to be unique only within one TSA. Turn the name off,
+    fix the policy and the serial, and ask for no nonce, and two independent
+    authorities stamping one digest in one second sign byte-identical
+    ``TSTInfo``s -- two legitimate responses that a rule counting the signed
+    timestamp alone reads as one.
+
+    Nothing here is forged. Each response is ``openssl ts -reply``'s own work
+    under its own signing key, from the authority's own configuration with
+    two settings changed; what a caller has to arrange is the second, which
+    is why callers retry.
+
+    ``serial`` is written into the authority's counter, which the reply then
+    advances, so pass one above anything the fixture's ordinary stamping
+    reaches and no two tokens in a session share a serial by accident.
+    """
+
+    query = tsa.directory / f"{out.stem}.tsq"
+    _openssl(
+        [
+            "ts", "-query", "-digest", digest, "-sha256", "-cert", "-no_nonce",
+            "-out", str(query),
+        ]
+    )
+    config = tsa.directory / "anonymous.cnf"
+    config.write_text(_tsa_config(tsa.root_pem.name, policy_oid, tsa_name=False))
+    (tsa.directory / "tsa_serial").write_text(f"{serial}\n")
+    _openssl(
+        [
+            "ts", "-reply", "-config", str(config), "-section", "tsa_config",
+            "-queryfile", str(query), "-out", str(out),
+        ],
+        cwd=tsa.directory,
     )
 
 

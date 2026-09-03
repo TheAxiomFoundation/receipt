@@ -51,17 +51,22 @@ bundle configuring more than one anchor -- counted three ways over: the
 physical file an outcome points at, refused before that outcome's response
 is read at all; the file digest that outcome declares, refused before its
 token is verified and so ahead of the ported refusals inside
-``verify_timestamp_token``; and the ``TSTInfo`` the authority signed,
-refused where that verification returns.  Each reaches what the one before
-it cannot.  Two outcomes may name one path and declare two digests, and each
-outcome reads the path for itself, so a writer serving a different valid
-response to each read satisfies both from a repository that never held both.
-And nearly everything around a signed ``TSTInfo`` is the producer's to
-rewrite -- the unsigned ``PKIStatusInfo`` wrapper, and the ``certificates``,
-``crls`` and ``unsignedAttrs`` a ``SignedData`` carries outside its
-signature -- so one issuance has many valid encodings and a rule counting
-files counts encodings.  All three are admissible because no witness in the
-pinned tree names one path twice or offers one timestamp twice.
+``verify_timestamp_token``; and the pair of the ``TSTInfo`` an authority
+signed and the certificate that signed it, refused where that verification
+returns.  Each reaches what the one before it cannot.  Two outcomes may name
+one path and declare two digests, and each outcome reads the path for
+itself, so a writer serving a different valid response to each read
+satisfies both from a repository that never held both.  And nearly
+everything around a signed ``TSTInfo`` is the producer's to rewrite -- the
+unsigned ``PKIStatusInfo`` wrapper, and the ``certificates``, ``crls`` and
+``unsignedAttrs`` a ``SignedData`` carries outside its signature -- so one
+issuance has many valid encodings and a rule counting files counts
+encodings.  The signer is half of that last identity because a ``TSTInfo``
+need not say whose it is: RFC 3161 makes its serial unique within one TSA
+and no further, and its nonce and its ``tsa`` name optional, so two
+independent pinned authorities can sign byte-identical ``TSTInfo``s with no
+forgery at all.  All three are admissible because no witness in the pinned
+tree names one path twice or offers one authority's timestamp twice.
 
 The pinned root behind the two counting refusals is read from the repository
 exactly once, and every check runs on those bytes: the PEM hash over the
@@ -427,8 +432,22 @@ class _TimestampIdentity:
     outside the signature, so one issuance has many valid encodings with
     different digests.  Its ``TSTInfo`` has one, and two issuances by one
     authority differ in it by serial number and genTime.
+
+    ``signer_certificate_sha256`` is what says *whose* timestamp it is: the
+    certificate ``openssl cms -verify`` authenticated the signature with, as
+    ``_certificate_identity`` reports it.  Without it the pair is not an
+    identity at all.  A ``TSTInfo`` carries nothing that must name its
+    authority -- RFC 3161 requires the serial number to be unique within one
+    TSA and no further, and the nonce and the ``tsa`` name are both optional
+    -- so two independent pinned authorities can sign byte-identical
+    ``TSTInfo``s, legitimately and with no forgery, and a rule counting the
+    signed content alone refuses the second of two valid outcomes (peer
+    review, fifth gate round one).  Qualified by the signer, one authority
+    cannot present its own timestamp twice and two authorities are never
+    confused for one.
     """
 
+    signer_certificate_sha256: str
     tst_info_sha256: str
 
 
@@ -1847,7 +1866,10 @@ def _verify_timestamp_token(
         tsa_certificate_sha256=signer_identity["certificateSha256"],
         tsa_spki_sha256=signer_identity["spkiSha256"],
     )
-    return evidence, _TimestampIdentity(tst_info_sha256=tst_info_sha256)
+    return evidence, _TimestampIdentity(
+        signer_certificate_sha256=signer_identity["certificateSha256"],
+        tst_info_sha256=tst_info_sha256,
+    )
 
 
 _TOKEN_EVIDENCE_FIELDS = {
@@ -2187,22 +2209,29 @@ def _v2_witness_evidence(
     # a SignedData's certificates, crls and unsignedAttrs are outside the
     # signature -- so one issuance has many valid encodings with different
     # file digests, and any of them satisfies a rule that counts files.  The
-    # other rule counts what the authority signed: the digest of the TSTInfo
-    # that _verify_timestamp_token returns beside its evidence, which no
-    # re-encoding can move without breaking the signature the -CAfile
-    # verification checks.
-    # It is knowable only once that verification has run, so it is checked
-    # where verify_timestamp_token returns (peer review, fourth gate round
-    # four).  The file rule therefore fires when two outcomes name the same
-    # bytes, and the timestamp rule when they name different bytes carrying
-    # one timestamp.
+    # other rule counts what an authority signed: the _TimestampIdentity
+    # _verify_timestamp_token returns beside its evidence, which pairs the
+    # digest of the TSTInfo -- unmovable by any re-encoding, because moving it
+    # breaks the signature the -CAfile verification checks -- with the digest
+    # of the certificate that verification authenticated the signature with.
+    # Both halves, because a TSTInfo does not have to say whose it is: RFC
+    # 3161 makes its serial unique within one TSA and no further, and its
+    # nonce and its tsa name optional, so two independent pinned authorities
+    # can sign byte-identical TSTInfos with no forgery at all, and counting
+    # the signed content alone refuses the second of two valid outcomes (peer
+    # review, fifth gate round one).  The pair is knowable only once the
+    # verification has run, so it is checked where _verify_timestamp_token
+    # returns (fourth gate round four).  The file rule therefore fires when
+    # two outcomes name the same bytes, and the timestamp rule when they name
+    # different bytes carrying one authority's one timestamp.
     #
     # All three refusals are new, and the path and file rules precede the
     # ported refusals inside verify_timestamp_token for the outcome they stop.
     # Admissible because the inputs they refuse are ones the pinned tree
     # cannot present: its 53 witnesses declare 91 tokens at 91 distinct
     # physical paths, with 91 distinct file digests and 91 distinct signed
-    # TSTInfos, and no witness names one path twice.  The file rule reads the
+    # TSTInfos -- distinct before the signer qualifies them, so distinct
+    # after -- and no witness names one path twice.  The file rule reads the
     # outcome's declared tokenSha256 and records TokenEvidence.token_sha256 --
     # the digest of the bytes that were actually read and verified -- so a
     # declared digest that lies is caught by the ported witness-token-hash
@@ -2217,7 +2246,7 @@ def _v2_witness_evidence(
     # the digest rule cannot see, two different digests over one path.
     seen_token_paths: set[str] = set()
     seen_response_files: set[str] = set()
-    seen_timestamps: set[str] = set()
+    seen_timestamps: set[_TimestampIdentity] = set()
 
     def refuse_a_reused_response_file(declared: Any) -> None:
         # Only a string can have been recorded, and a claim carrying anything
@@ -2245,9 +2274,10 @@ def _v2_witness_evidence(
         seen_token_paths.add(str(physical))
 
     def refuse_a_reused_timestamp(identity: _TimestampIdentity) -> None:
-        if identity.tst_info_sha256 in seen_timestamps:
+        if identity in seen_timestamps:
             raise TsaError(
-                "duplicate TSA timestamp across anchor outcomes: "
+                "duplicate TSA timestamp across anchor outcomes: signer "
+                f"{identity.signer_certificate_sha256}, timestamp "
                 f"{identity.tst_info_sha256}"
             )
 
@@ -2275,7 +2305,7 @@ def _v2_witness_evidence(
             )
             refuse_a_reused_timestamp(identity)
             seen_response_files.add(evidence.token_sha256)
-            seen_timestamps.add(identity.tst_info_sha256)
+            seen_timestamps.add(identity)
             tokens.append(evidence)
         elif outcome_status == "unavailable":
             _unavailable_outcome(outcome, label=f"TSA anchor {anchor_id}")
@@ -2347,7 +2377,7 @@ def _v2_witness_evidence(
             )
             refuse_a_reused_timestamp(identity)
             seen_response_files.add(evidence.token_sha256)
-            seen_timestamps.add(identity.tst_info_sha256)
+            seen_timestamps.add(identity)
             supplemental_tokens.append(evidence)
         elif outcome_status == "unavailable":
             _unavailable_outcome(outcome, label=f"supplemental TSA anchor {anchor_id}")

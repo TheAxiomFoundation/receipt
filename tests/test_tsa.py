@@ -56,6 +56,7 @@ from corpus_fixture import (
     certificate_pins,
     rotate_tsa_signer,
     sha256_bytes,
+    stamp_anonymously,
 )
 
 UTC = timezone.utc
@@ -337,7 +338,7 @@ def test_token_evidence_is_the_released_dataclass_unchanged() -> None:
     # The identity exists, privately, and carries what the rule counts.
     assert tuple(
         field.name for field in dataclasses.fields(tsa_module._TimestampIdentity)
-    ) == ("tst_info_sha256",)
+    ) == ("signer_certificate_sha256", "tst_info_sha256")
 
 
 # --- end-to-end verification against a locally generated RFC 3161 authority --
@@ -3859,7 +3860,8 @@ def test_refuses_a_re_wrapped_response_offered_as_a_second_token(
             transition_bundle_updates=[pending_first, pending_second],
         )
     assert str(caught.value) == (
-        f"duplicate TSA timestamp across anchor outcomes: {sha256_bytes(signed)}"
+        "duplicate TSA timestamp across anchor outcomes: signer "
+        f"{beta.signer_pins['certificateSha256']}, timestamp {sha256_bytes(signed)}"
     )
     # Neither earlier rule can see this one: two paths, two file digests.
     assert [claim["tsaAnchorId"] for claim in verified] == [
@@ -3867,6 +3869,98 @@ def test_refuses_a_re_wrapped_response_offered_as_a_second_token(
         first.anchor_id,
         second.anchor_id,
     ]
+
+
+def test_two_authorities_may_sign_one_timestamp_and_both_count(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+) -> None:
+    """S5-F1: a timestamp is identified by its signer as well as its bytes.
+
+    A ``TSTInfo`` need not say whose it is. RFC 3161 requires its serial
+    number to be unique within one TSA and no further, and its nonce and its
+    ``tsa`` general name are both optional -- so two independent authorities
+    answering for one digest, in one second, with the same policy and the
+    same serial and neither naming itself, sign the same bytes. Nothing here
+    is forged: both responses below are ``openssl ts -reply``'s own work
+    under its own signing key, and each verifies against its own pinned root
+    and against no other, asserted from OpenSSL directly.
+
+    Counting the signed ``TSTInfo`` alone made that pair one timestamp, and
+    the second anchor's perfectly valid outcome was refused as a duplicate --
+    a chain rejected for having two authorities that agreed too exactly.
+    Qualified by the certificate ``openssl cms -verify`` authenticated the
+    signature with, the two are two, and the witness verifies with a token
+    for each anchor. The control the qualification must not weaken is the
+    re-bagged token below: one signer, one ``TSTInfo``, two encodings, still
+    refused.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    shared_policy = alpha.tsa.policy_oid
+    tree = build_witness_tree(
+        tmp_path,
+        local_anchors[:2],
+        policy_oids={beta.anchor_id: [beta.tsa.policy_oid, shared_policy]},
+    )
+    assert verify_tree(tree).status == "available"
+
+    digest = sha256_bytes(tree.record.read_bytes())
+    responses = {
+        anchor.anchor_id: tree.records / RECORD_DAY / f"record-0001.{anchor.anchor_id}.same.tsr"
+        for anchor in local_anchors[:2]
+    }
+    # Both authorities answer for one digest, each under its own key. The
+    # retry is for the one thing a test has to arrange rather than declare:
+    # that the two stamps land in the same second.
+    for attempt in range(20):
+        for anchor in local_anchors[:2]:
+            stamp_anonymously(
+                anchor.tsa,
+                digest,
+                responses[anchor.anchor_id],
+                policy_oid=shared_policy,
+                serial="7f",
+            )
+        signed = {
+            anchor_id: signed_timestamp_of(tmp_path, response)
+            for anchor_id, response in responses.items()
+        }
+        if signed[alpha.anchor_id] == signed[beta.anchor_id]:
+            break
+    else:  # pragma: no cover - twenty crossings of a second boundary
+        pytest.fail("the two authorities never stamped within one second")
+
+    # The premise, from OpenSSL directly: two files, one signed timestamp,
+    # and each file verifying against its own authority's root alone.
+    alphas, betas = responses[alpha.anchor_id], responses[beta.anchor_id]
+    assert sha256_bytes(alphas.read_bytes()) != sha256_bytes(betas.read_bytes())
+    assert openssl_ts_verifies(tree.record, alphas, alpha.tsa.root_pem)
+    assert openssl_ts_verifies(tree.record, betas, beta.tsa.root_pem)
+    assert not openssl_ts_verifies(tree.record, alphas, beta.tsa.root_pem)
+    assert not openssl_ts_verifies(tree.record, betas, alpha.tsa.root_pem)
+
+    def point_each_outcome_at_its_own_new_response(payload: dict[str, Any]) -> None:
+        for outcome in payload["anchorOutcomes"]:
+            response = responses[outcome["tsaAnchorId"]]
+            outcome["tokenPath"] = logical_path(tree.records, response)
+            outcome["tokenSha256"] = sha256_bytes(response.read_bytes())
+            outcome["tsaPolicyOid"] = shared_policy
+
+    rewrite_witness(tree, point_each_outcome_at_its_own_new_response)
+    evidence = verify_tree(tree)
+    assert evidence.status == "available"
+    assert [token.anchor_id for token in evidence.tokens] == [
+        alpha.anchor_id,
+        beta.anchor_id,
+    ]
+    # Two authorities, one timestamp between them, and two outcomes covered.
+    assert (
+        evidence.tokens[0].tsa_certificate_sha256
+        != evidence.tokens[1].tsa_certificate_sha256
+    )
+    assert evidence.tokens[0].token_sha256 != evidence.tokens[1].token_sha256
+    assert signed_timestamp_of(tmp_path, alphas) == signed_timestamp_of(tmp_path, betas)
 
 
 def test_refuses_a_re_bagged_token_offered_as_a_second_timestamp(
@@ -3937,7 +4031,8 @@ def test_refuses_a_re_bagged_token_offered_as_a_second_timestamp(
             transition_bundle_updates=[pending_first, pending_second],
         )
     assert str(caught.value) == (
-        f"duplicate TSA timestamp across anchor outcomes: {sha256_bytes(signed)}"
+        "duplicate TSA timestamp across anchor outcomes: signer "
+        f"{beta.signer_pins['certificateSha256']}, timestamp {sha256_bytes(signed)}"
     )
     assert [claim["tsaAnchorId"] for claim in verified] == [
         alpha.anchor_id,
