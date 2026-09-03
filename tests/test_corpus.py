@@ -940,8 +940,8 @@ def _mutate_after_hashing(
     real = corpus_mod._regular_file_digest
     state = {"armed": True}
 
-    def hash_then_mutate(root: pathlib.Path, relative: str):
-        result = real(root, relative)
+    def hash_then_mutate(root: pathlib.Path, relative: str, **options: object):
+        result = real(root, relative, **options)
         if state["armed"] and relative == victim_relative:
             state["armed"] = False
             mutate()
@@ -4937,10 +4937,14 @@ def test_a_content_file_found_by_its_spelled_name_still_verifies(
 
     Every content path in the journal is compared against a set the walk
     built out of ``os.scandir`` names, so a content file that verifies is one
-    the listing emitted under exactly that spelling — the new component check
-    can only agree with the sweep about them. It is asked of them anyway, so
-    that one rule covers both bound kinds rather than two rules covering one
-    each, and this asserts the rule costs the ordinary corpus nothing.
+    the listing emitted under exactly that spelling. That is why the spelling
+    check is asked of attested paths only: asking it of content too would
+    answer a question already answered, at one listing per component per
+    file, which for a wide content directory is quadratic and unbudgeted.
+
+    Both halves are asserted — an ordinary corpus verifies, and a content
+    file whose on-disk spelling differs from the bound one is refused by the
+    sweep itself, on any host, with the spelling walk never consulted.
 
     This test passes with the fix disabled, which is the point.
     """
@@ -4951,6 +4955,13 @@ def test_a_content_file_found_by_its_spelled_name_still_verifies(
     )
     assert [entry.path for entry in verification.content] == sorted(CONTENT)
     assert [entry.path for entry in verification.attested] == sorted(ATTESTED)
+
+    (tmp_path / "rules/tax/rate.yaml").rename(tmp_path / "rules/tax/RATE.yaml")
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    assert "not bound by the witnessed journal" in str(caught.value)
 
 
 @pytest.mark.parametrize("survivor", ["gone.", "gone "])
@@ -5656,3 +5667,36 @@ def test_a_real_aliasing_root_spelling_keeps_the_root_component_refusal(
         "'rules' on a case- or normalization-insensitive filesystem",
         "pinned content root is absent from the tree: rules",
     ), message
+
+
+def test_a_degenerate_content_suffix_asks_the_8_3_screen_nothing(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5R2-F5, adversarially: capability is bounded at both ends.
+
+    The schema accepts any suffix beginning with a dot, ``"."`` included. A
+    derived 8.3 alias extension is never empty — ``_short_name_extension``
+    returns ``None`` when there is nothing after the last period, and the
+    comparison prepends a dot to what it does return — so no alias can end
+    in a bare ``"."`` and a corpus pinning it is asking the 8.3 screen
+    nothing at all. Counting it alias-capable made every non-ASCII extension
+    under a content root raise the OEM refusal for a configuration whose
+    answer is False on every code page, which is the exact over-refusal
+    S5R2-F5 removed at the other end of the same test.
+
+    Without the lower bound this verification raises.
+    """
+
+    from receipt.corpus import _alias_capable_suffix
+
+    assert not _alias_capable_suffix(".")
+    assert _alias_capable_suffix(".y")
+    assert _alias_capable_suffix(".yml")
+    assert not _alias_capable_suffix(".yaml")
+    write_tree(tmp_path)
+    (tmp_path / "rules/notes.é").write_text("scratch\n")
+    spec = corpus_spec(content_suffixes=(".yaml", "."))
+    verification = verify_corpus_binding(
+        tmp_path, render_journal(journal_rows()), spec=spec
+    )
+    assert len(verification.content) == len(CONTENT)
