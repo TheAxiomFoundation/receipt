@@ -25,6 +25,7 @@ from typing import Any
 
 import pytest
 
+from receipt import tsa as tsa_module
 from receipt.canonical import canonical_bytes, canonical_sha256
 from receipt.tsa import (
     _certificate_count,
@@ -2174,3 +2175,206 @@ def test_a_pinned_roots_auxiliary_trust_settings_apply_as_pinned(
             transition_bundle_updates=[],
         )
         assert evidence.status == "available"
+
+
+def _plain_certificate(source: pathlib.Path, destination: pathlib.Path) -> bytes:
+    """``source``'s certificate re-encoded plain: any X509_AUX settings dropped."""
+
+    subprocess.run(
+        ["openssl", "x509", "-in", str(source), "-out", str(destination)],
+        check=True,
+        capture_output=True,
+    )
+    return destination.read_bytes()
+
+
+def swap_at_the_first_cafile(
+    monkeypatch: pytest.MonkeyPatch, target: pathlib.Path, content: bytes
+) -> list[str]:
+    """Overwrite ``target`` the instant OpenSSL is about to be given a -CAfile.
+
+    The concurrent writer the two regressions below model, arriving at the one
+    moment that separates the fix from the head that lacked it: after every
+    check on the pinned root has passed, and before the file is trusted.
+
+    Interposed on ``_run_openssl`` rather than on a validation read, for two
+    reasons. After the fix no validation read touches the repository path at
+    all -- ``_certificate_count`` and ``_certificate_identity`` are handed the
+    private snapshot -- so there is no longer a read there to interpose on.
+    And the pinned root is validated afresh by every ``_root_material`` call,
+    of which one verification makes several, so a swap installed at any
+    earlier read is caught by the next call's PEM-hash refusal: a different
+    refusal, and a weaker test than the one the finding asks for. The
+    ``-CAfile`` command is the point of use, and the gap between validation
+    and use is the whole of the finding.
+    """
+
+    original = tsa_module._run_openssl
+    commands: list[str] = []
+
+    def swapping(arguments: list[str], **keywords: Any) -> Any:
+        if "-CAfile" in arguments:
+            target.write_bytes(content)
+            commands.append(arguments[0])
+        return original(arguments, **keywords)
+
+    monkeypatch.setattr(tsa_module, "_run_openssl", swapping)
+    return commands
+
+
+def openssl_failure_detail(message: str) -> str:
+    """The OpenSSL diagnostic out of a ported ``OpenSSL command failed`` text."""
+
+    return message.split("): ", 1)[1]
+
+
+def test_a_root_swapped_after_validation_is_not_what_gets_trusted(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S3-F1: the -CAfile is the validated bytes, not the path they came from.
+
+    ``_root_material`` counted, hashed and described the pinned root through
+    separate opens of a repository path, and ``verify_timestamp_token`` then
+    handed that same path to ``openssl ts -verify -CAfile`` and ``openssl cms
+    -verify -CAfile``. A writer with access to the repository could replace a
+    validated ``TRUSTED CERTIFICATE`` that rejects the timestamping purpose
+    with the plain form of the very same certificate: the PEM hash is the only
+    pin that moves, and by then it has already been checked, so the
+    certificate hash, the SPKI and the code identity all still describe the
+    file -- and the rejection is gone. Asserted below from OpenSSL directly:
+    the plain form accepts the token the pinned form refuses.
+
+    Without the one-read snapshot the swapped file is the ``-CAfile``, the
+    token verifies, and ``verify_timestamp_token`` returns evidence for a
+    token the pinned root explicitly refuses to vouch for. With it the
+    verification is given a private copy of the bytes it validated, and the
+    swap changes what is on disk and nothing else: the refusal is the same
+    one the file produces with no writer at all.
+    """
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    rejecting = _trusted_root(
+        alpha.tsa.root_pem, tmp_path / "rejecting.pem", "-addreject"
+    )
+    plain = _plain_certificate(tmp_path / "rejecting.pem", tmp_path / "plain.pem")
+    root_path, reference, spec = bundle_over_root_file(
+        tree, alpha, name="alpha-rejects-timestamping.pem", content=rejecting
+    )
+    token = tree.tokens[alpha.anchor_id]
+    # The premise, from OpenSSL directly: the purpose rejection is the whole
+    # difference between the two files, and it decides the token.
+    assert b"BEGIN TRUSTED CERTIFICATE" in rejecting
+    assert b"BEGIN TRUSTED CERTIFICATE" not in plain
+    assert certificate_pins(tmp_path / "plain.pem") == certificate_pins(
+        tmp_path / "rejecting.pem"
+    )
+    assert not openssl_ts_verifies(tree.record, token, tmp_path / "rejecting.pem")
+    assert openssl_ts_verifies(tree.record, token, tmp_path / "plain.pem")
+
+    claim = claim_against(tree, reference, alpha, token)
+    with pytest.raises(TsaError) as unswapped:
+        verify_timestamp_token(
+            tree.record, claim, reference, spec=spec, records=tree.records
+        )
+
+    swapped_commands = swap_at_the_first_cafile(monkeypatch, root_path, plain)
+    with pytest.raises(TsaError) as swapped:
+        verify_timestamp_token(
+            tree.record, claim, reference, spec=spec, records=tree.records
+        )
+    # The writer really did run, and really did change the pinned file.
+    assert swapped_commands == ["ts"]
+    assert root_path.read_bytes() == plain
+    prefix = (
+        "OpenSSL command failed (openssl ts -verify -config /dev/null -data "
+        f"{tree.record} -in {token} -CAfile "
+    )
+    assert str(unswapped.value).startswith(prefix)
+    assert str(swapped.value).startswith(prefix)
+    assert openssl_failure_detail(str(swapped.value)) == openssl_failure_detail(
+        str(unswapped.value)
+    )
+
+
+def test_a_second_authority_appended_after_the_count_is_not_trusted(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S3-F1: the count and the trust decision are about the same bytes.
+
+    The other half of the same gap. ``openssl storeutl`` counted one
+    certificate in the pinned file, and the two ``-CAfile`` verifications
+    then re-read that path; a writer who appends a second authority in
+    between gets a file that trusts two authorities and was counted as
+    trusting one. The bundle here pins the first authority's root and allows
+    the *second* authority's signer and policy, which is the shape that turns
+    the swap into an acceptance rather than a later refusal -- every check but
+    the chain passes, and the chain is exactly what the appended certificate
+    supplies.
+
+    Without the snapshot ``verify_timestamp_token`` returns evidence for a
+    token issued by an authority the pinned root never vouched for. With it
+    the ported chain refusal fires, because the file OpenSSL is given holds
+    the one certificate that was counted.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    beta_signer = certificate_pins(beta.tsa.signer_pem)
+    root_path, reference, spec = bundle_over_root_file(
+        tree,
+        alpha,
+        name="alpha-root-alone.pem",
+        content=alpha.tsa.root_pem.read_bytes(),
+        signers={alpha.anchor_id: beta_signer},
+        mutate_anchor=lambda entry: entry.__setitem__(
+            "allowedPolicyOids", [beta.tsa.policy_oid]
+        ),
+    )
+    combined = tmp_path / "alpha-root-and-a-second-authority.pem"
+    combined.write_bytes(
+        alpha.tsa.root_pem.read_bytes() + beta.tsa.root_pem.read_bytes()
+    )
+    beta_token = tree.records / RECORD_DAY / "record-0001.beta.tsr"
+    beta.tsa.stamp(sha256_bytes(tree.record.read_bytes()), beta_token)
+    # The premise, from OpenSSL and from the count directly.
+    assert _certificate_count(root_path) == 1
+    assert _certificate_count(combined) == 2
+    assert not openssl_ts_verifies(tree.record, beta_token, root_path)
+    assert openssl_ts_verifies(tree.record, beta_token, combined)
+
+    claim = claim_against(
+        tree,
+        reference,
+        alpha,
+        beta_token,
+        signer=beta_signer,
+        policy_oid=beta.tsa.policy_oid,
+    )
+    with pytest.raises(TsaError) as unswapped:
+        verify_timestamp_token(
+            tree.record, claim, reference, spec=spec, records=tree.records
+        )
+
+    swapped_commands = swap_at_the_first_cafile(
+        monkeypatch, root_path, combined.read_bytes()
+    )
+    with pytest.raises(TsaError) as swapped:
+        verify_timestamp_token(
+            tree.record, claim, reference, spec=spec, records=tree.records
+        )
+    assert swapped_commands == ["ts"]
+    assert _certificate_count(root_path) == 2
+    prefix = (
+        "OpenSSL command failed (openssl ts -verify -config /dev/null -data "
+        f"{tree.record} -in {beta_token} -CAfile "
+    )
+    assert str(unswapped.value).startswith(prefix)
+    assert str(swapped.value).startswith(prefix)
+    assert openssl_failure_detail(str(swapped.value)) == openssl_failure_detail(
+        str(unswapped.value)
+    )

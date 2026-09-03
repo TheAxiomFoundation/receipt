@@ -20,9 +20,17 @@ witness selects); a pinned root PEM that OpenSSL's own parser (``openssl
 storeutl -noout -certs``) does not count exactly one certificate in, or whose
 certificates it cannot count at all -- the declared certificate hash and SPKI
 describe only the first certificate, while a ``-CAfile`` trusts every
-certificate it is given, so with exactly one counted the pinned file itself
-is what the two verifications trust, auxiliary trust settings included, and
-what the identity pins is the whole of what they trust; a bundle whose configured anchors are
+certificate it is given, so with exactly one counted what the identity pins
+is the whole of what the two verifications trust.  That root is read from the
+repository exactly once and every check runs on those bytes; the count and
+the identity are taken by running OpenSSL on a private byte-for-byte copy of
+them, and the two ``-CAfile`` verifications are handed that same copy rather
+than the path.  So a writer who substitutes another file between validation
+and use -- the plain form of a ``TRUSTED CERTIFICATE`` that rejects the
+timestamping purpose, or a second authority appended after the count --
+changes what is on disk and not what is trusted, and because nothing is
+re-encoded a pinned root's auxiliary trust settings apply as pinned.  Next: a
+bundle whose configured anchors are
 not exactly the anchors the spec's identities for that bundle name, so an
 identity the consumer scoped to it cannot be quietly absent from it; a
 pending bundle anchor reusing an active anchor ID under a different
@@ -49,6 +57,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import tempfile
 from collections.abc import Iterable, Mapping
@@ -678,8 +687,30 @@ def _load_trust_bundle(
     # whose root and signer are checked against the bundle alone.  Checked
     # last, so an altered bundle still binds the commitment mismatch above.
     bundle_id = str(payload["bundleId"])
+    # One private directory for the whole loop: _root_material writes each
+    # anchor's root snapshot into it, reads the identity out, and this call
+    # never needs the copy again.
+    with tempfile.TemporaryDirectory(prefix="thesis-tsa-bundle-") as snapshots:
+        _check_bundle_anchors(
+            records, anchors, bundle_id, Path(snapshots), spec=spec
+        )
+    return path, payload
+
+
+def _check_bundle_anchors(
+    records: Path,
+    anchors: list[Any],
+    bundle_id: str,
+    snapshot_dir: Path,
+    *,
+    spec: TsaSpec,
+) -> None:
+    """Bind every anchor of one bundle to the verifier code's own pins."""
+
+    anchor_ids: set[str] = set()
     for anchor in anchors:
         anchor_id = str(anchor["id"])
+        anchor_ids.add(anchor_id)
         identity = spec.identity(bundle_id, anchor_id)
         if identity is None:
             raise TsaError(
@@ -719,13 +750,13 @@ def _load_trust_bundle(
         # anchor; the ported refusal text is carried inside a new load-time
         # message so the ported message itself neither moves nor changes.
         try:
-            material = _root_material(records, anchor)
+            material = _root_material(records, anchor, snapshot_dir=snapshot_dir)
         except TsaError as exc:
             raise TsaError(
                 f"TSA anchor {anchor_id} in bundle {bundle_id} references root "
                 f"material that fails validation: {exc}"
             ) from exc
-        if material["spkiSha256"] != identity.root_spki_sha256:
+        if material.identity["spkiSha256"] != identity.root_spki_sha256:
             raise TsaError(
                 f"TSA anchor {anchor_id} in bundle {bundle_id} references a root "
                 "whose SPKI differs from its verifier code identity"
@@ -742,7 +773,6 @@ def _load_trust_bundle(
             f"TSA bundle {bundle_id} configures anchors {sorted(anchor_ids)} "
             f"but verifier code pins identities for {sorted(identity_ids)}"
         )
-    return path, payload
 
 
 def bootstrap_trust_bundles(
@@ -838,7 +868,7 @@ def preferred_active_trust_bundle(
 _STOREUTL_TOTAL_RE = re.compile(r"Total found: ([0-9]+)\Z")
 
 
-def _certificate_count(path: Path) -> int:
+def _certificate_count(path: Path, *, pinned_path: Path | None = None) -> int:
     """Return how many certificates OpenSSL itself reads out of ``path``.
 
     The question a pinned root has to answer is how many certificates
@@ -857,26 +887,131 @@ def _certificate_count(path: Path) -> int:
     and no total at all from OpenSSL 3.6 (so this refuses as uncountable);
     a file holding an object the store loader cannot decode fails
     outright on both.  None of these is a file a pinned root may be.
+
+    ``path`` is the private snapshot ``_root_material`` took of the pinned
+    root, so ``pinned_path`` says which repository file the refusals should
+    name; the OpenSSL command quoted inside a wrapped failure still names the
+    snapshot, because that is the file OpenSSL was given.
     """
 
+    blamed = path if pinned_path is None else pinned_path
     try:
         listing = _run_openssl(["storeutl", "-noout", "-certs", str(path)])
     except TsaError as exc:
         raise TsaError(
-            f"pinned TSA root PEM certificates could not be counted: {path}: {exc}"
+            f"pinned TSA root PEM certificates could not be counted: {blamed}: {exc}"
         ) from exc
     assert isinstance(listing, str)
     match = _STOREUTL_TOTAL_RE.search(listing.strip())
     if match is None:
         raise TsaError(
-            f"pinned TSA root PEM certificates could not be counted: {path}: "
+            f"pinned TSA root PEM certificates could not be counted: {blamed}: "
             "openssl storeutl reported no total"
         )
     return int(match.group(1))
 
 
-def _root_material(records: Path, anchor: dict[str, Any]) -> dict[str, str]:
-    """Validate an anchor's referenced root and return its certificate identity.
+#: Flags for the one read of a pinned root: no descriptor inherited across an
+#: exec, and no symlink followed at open time where the platform has the flag.
+_ROOT_OPEN_FLAGS = (
+    os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+)
+
+
+def _read_pinned_root(path: Path) -> bytes:
+    """Read a pinned root once, and return the only bytes anything may judge.
+
+    ``_root_material`` used to open this repository path four separate times
+    -- to count its certificates, to hash it, and twice to describe its first
+    certificate -- and ``verify_timestamp_token`` then opened it twice more
+    as a ``-CAfile``.  Between any two of those a writer with access to the
+    repository could substitute another file, so what was validated need not
+    be what was trusted: a ``TRUSTED CERTIFICATE`` that rejects the
+    timestamping purpose could become the plain form of the same certificate
+    with the rejection gone (every declared hash still matching), or a
+    counted one-certificate file could become a two-certificate one, and the
+    verifications trusted whatever was on disk at that instant (peer review,
+    fourth gate round three).  One read closes the gap: the bytes returned
+    here are what gets hashed, counted, described and trusted, and nothing
+    re-reads the path.
+
+    The descriptor is opened with ``O_NOFOLLOW`` where the platform defines
+    it and ``fstat``ed rather than ``stat``ed, so the regular-file rule is
+    decided about the same object the bytes come from.  The path-level check
+    in ``_root_material`` stays in front of this and keeps its wording; this
+    repeats it for the descriptor, so a race can change which check refuses
+    but never the message.
+    """
+
+    missing = f"pinned TSA root is missing or not a regular file: {path}"
+    try:
+        descriptor = os.open(path, _ROOT_OPEN_FLAGS)
+    except OSError as exc:
+        raise TsaError(missing) from exc
+    chunks: list[bytes] = []
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise TsaError(missing)
+        while True:
+            chunk = os.read(descriptor, 1 << 20)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except OSError as exc:
+        raise TsaError(missing) from exc
+    finally:
+        os.close(descriptor)
+    return b"".join(chunks)
+
+
+def _write_root_snapshot(directory: Path, pem: bytes) -> Path:
+    """Copy the bytes read from a pinned root into a private file.
+
+    OpenSSL takes a path, not bytes, so the count, the certificate identity
+    and the two ``-CAfile`` verifications all need a file; this is the only
+    file any of them is given.  ``directory`` is a private temporary
+    directory (``tempfile.mkdtemp`` makes it 0700) owned by the caller, and
+    the copy is written 0600.  It is a byte-for-byte copy: nothing is
+    re-encoded, so a pinned ``TRUSTED CERTIFICATE``'s auxiliary trust
+    settings survive into it exactly as pinned.
+    """
+
+    snapshot = directory / "pinned-root.pem"
+    descriptor = os.open(
+        snapshot,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+    )
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(pem)
+    return snapshot
+
+
+@dataclass(frozen=True)
+class PinnedRootSnapshot:
+    """One pinned root as read once, and what those bytes were found to be.
+
+    ``pem`` is the exact byte string every check in ``_root_material`` ran
+    on, ``identity`` is ``_certificate_identity`` over it, and ``path`` names
+    the private copy of it the OpenSSL calls saw -- the file
+    ``verify_timestamp_token`` goes on to hand both its ``-CAfile``
+    arguments.  ``path`` is ``None`` when ``_root_material`` owned the
+    temporary directory and has already removed it, which is every caller
+    that wanted only the identity.
+    """
+
+    pem: bytes
+    identity: dict[str, str]
+    path: Path | None
+
+
+def _root_material(
+    records: Path,
+    anchor: dict[str, Any],
+    *,
+    snapshot_dir: Path | None = None,
+) -> PinnedRootSnapshot:
+    """Validate an anchor's referenced root and return it as it was read.
 
     The ported checks, verbatim: the root path is a regular file, its PEM
     hash, certificate hash, and SPKI hash match what the bundle declares.
@@ -886,9 +1021,16 @@ def _root_material(records: Path, anchor: dict[str, Any]) -> dict[str, str]:
     no selection ever validated the new bundle's root before a transition
     activated it (peer review).
 
-    One check is not ported: the file must hold exactly one certificate, as
+    Two checks are not ported: the file must hold exactly one certificate, as
     OpenSSL counts them, and a file OpenSSL cannot count is refused rather
     than assumed.
+
+    Every check runs on one read of the repository path, and OpenSSL sees
+    only a private copy of those bytes -- never the path itself.  Pass
+    ``snapshot_dir`` to keep that copy, which is what
+    ``verify_timestamp_token`` trusts as its ``-CAfile``; without it the
+    directory is this function's own and goes away, and the returned
+    ``path`` is ``None``.
     """
 
     root = anchor.get("rootCertificate")
@@ -897,6 +1039,20 @@ def _root_material(records: Path, anchor: dict[str, Any]) -> dict[str, str]:
     root_path = physical_path(records, str(root.get("path", "")))
     if not root_path.is_file() or root_path.is_symlink():
         raise TsaError(f"pinned TSA root is missing or not a regular file: {root_path}")
+    pem = _read_pinned_root(root_path)
+    if snapshot_dir is not None:
+        return _judge_pinned_root(root_path, root, pem, snapshot_dir)
+    with tempfile.TemporaryDirectory(prefix="thesis-tsa-root-") as owned:
+        material = _judge_pinned_root(root_path, root, pem, Path(owned))
+    return PinnedRootSnapshot(pem=material.pem, identity=material.identity, path=None)
+
+
+def _judge_pinned_root(
+    root_path: Path, root: dict[str, Any], pem: bytes, snapshot_dir: Path
+) -> PinnedRootSnapshot:
+    """Run every root check over ``pem``, with OpenSSL reading a private copy."""
+
+    snapshot = _write_root_snapshot(snapshot_dir, pem)
     # The certificate hash and SPKI below describe the file's *first*
     # certificate, which is all _certificate_identity reads, while
     # verify_timestamp_token gives `openssl ts -verify` and `openssl cms
@@ -917,21 +1073,26 @@ def _root_material(records: Path, anchor: dict[str, Any]) -> dict[str, str]:
     # review, third gate round two).  The label no longer matters: whatever
     # label the one object wears, `openssl x509` reads it as the certificate
     # _certificate_identity hashes below, and verify_timestamp_token trusts
-    # the pinned file itself, exactly one object by this count, so any
-    # auxiliary trust settings it carries apply as pinned rather than being
-    # dropped by a re-encoding (peer review, third gate round three).
-    if _certificate_count(root_path) != 1:
+    # the snapshot of these very bytes, exactly one object by this count, so
+    # any auxiliary trust settings they carry apply as pinned rather than
+    # being dropped by a re-encoding (peer review, third gate round three).
+    #
+    # And every one of these checks judges `pem`, read from the repository
+    # once, rather than re-opening the path: counting, hashing and describing
+    # the same mutable file three times told an auditor only what it held at
+    # three separate instants (peer review, fourth gate round three).
+    if _certificate_count(snapshot, pinned_path=root_path) != 1:
         raise TsaError(
             f"pinned TSA root PEM must hold exactly one certificate: {root_path}"
         )
-    if sha256_file(root_path) != root.get("pemSha256"):
+    if hashlib.sha256(pem).hexdigest() != root.get("pemSha256"):
         raise TsaError(f"pinned TSA root PEM hash mismatch: {root_path}")
-    identity = _certificate_identity(root_path)
+    identity = _certificate_identity(snapshot)
     if identity["certificateSha256"] != root.get("certificateSha256"):
         raise TsaError(f"pinned TSA root certificate hash mismatch: {root_path}")
     if identity["spkiSha256"] != root.get("spkiSha256"):
         raise TsaError(f"pinned TSA root SPKI hash mismatch: {root_path}")
-    return identity
+    return PinnedRootSnapshot(pem=pem, identity=identity, path=snapshot)
 
 
 def _select_anchor(
@@ -940,7 +1101,16 @@ def _select_anchor(
     trust: dict[str, Any],
     *,
     spec: TsaSpec,
-) -> dict[str, Any]:
+    snapshot_dir: Path | None = None,
+) -> tuple[dict[str, Any], PinnedRootSnapshot]:
+    """Pick the one anchor a claim selects, and return it with its root as read.
+
+    ``snapshot_dir`` is passed straight to ``_root_material``: a caller that
+    goes on to trust the root -- ``verify_timestamp_token`` -- supplies the
+    private directory the validated copy stays in, and a caller that only
+    needs the anchor supplies nothing.
+    """
+
     anchor_id = witness.get("tsaAnchorId")
     endpoint = witness.get("tsa")
     candidates = [
@@ -960,7 +1130,8 @@ def _select_anchor(
     anchor = candidates[0]
     if anchor_id and endpoint != anchor.get("endpoint"):
         raise TsaError("witness TSA endpoint does not match its pinned anchor")
-    identity = _root_material(records, anchor)
+    material = _root_material(records, anchor, snapshot_dir=snapshot_dir)
+    identity = material.identity
     bundle_id = str(trust.get("bundleId"))
     code_identity = spec.identity_claim(bundle_id, str(anchor.get("id")))
     if not isinstance(code_identity, dict):
@@ -982,7 +1153,7 @@ def _select_anchor(
     )
     if configured_spkis != code_identity.get("signerSpkiSha256"):
         raise TsaError("TSA signer SPKIs differ from the verifier code pins")
-    return anchor
+    return anchor, material
 
 
 def _bundle_for_claim(
@@ -1036,20 +1207,28 @@ def verify_timestamp_token(
         if token_claim.get(key) != expected:
             raise TsaError(f"timestamp token {key} does not match its bundle pin")
     _trust_path, trust = _load_trust_bundle(records, bundle_reference, spec=spec)
-    anchor = _select_anchor(records, token_claim, trust, spec=spec)
-    token_logical = token_claim.get("tokenPath")
-    if not isinstance(token_logical, str):
-        raise TsaError("witness token lacks tokenPath")
-    token_path = physical_path(records, token_logical)
-    if not token_path.is_file() or token_path.is_symlink():
-        raise TsaError(f"witness token is missing for {path}: {token_path}")
-    token_sha256 = sha256_file(token_path)
-    if token_sha256 != token_claim.get("tokenSha256"):
-        raise TsaError(f"witness token hash mismatch for {path}")
-    root_path = physical_path(records, str(anchor["rootCertificate"]["path"]))
 
+    # The temporary directory opens before the anchor is selected, so that
+    # _root_material can keep its snapshot of the pinned root here: the same
+    # bytes it validated are the bytes the two -CAfile verifications below
+    # are given.  Nothing else moves -- the checks between still run in the
+    # order they did, and every refusal keeps its place.
     with tempfile.TemporaryDirectory(prefix="thesis-tsa-") as temporary:
         temp = Path(temporary)
+        anchor, pinned_root = _select_anchor(
+            records, token_claim, trust, spec=spec, snapshot_dir=temp
+        )
+        token_logical = token_claim.get("tokenPath")
+        if not isinstance(token_logical, str):
+            raise TsaError("witness token lacks tokenPath")
+        token_path = physical_path(records, token_logical)
+        if not token_path.is_file() or token_path.is_symlink():
+            raise TsaError(f"witness token is missing for {path}: {token_path}")
+        token_sha256 = sha256_file(token_path)
+        if token_sha256 != token_claim.get("tokenSha256"):
+            raise TsaError(f"witness token hash mismatch for {path}")
+        root_snapshot = pinned_root.path
+        assert root_snapshot is not None
         token_der = temp / "token.der"
         tst_info = temp / "tst-info.der"
         signer = temp / "signer.pem"
@@ -1119,15 +1298,22 @@ def verify_timestamp_token(
             "SSL_CERT_FILE": "/dev/null",
         }
         verification_time = str(int(gen_time.timestamp()))
-        # The -CAfile below is the pinned file itself. _root_material has
-        # already had OpenSSL's own parser count exactly one certificate in
-        # it, so the trust anchor these verifications are given is the one
-        # object the anchor's certificateSha256 and spkiSha256 describe --
-        # and it is given as pinned, auxiliary trust settings included. A
-        # re-encoding through `openssl x509` was tried and withdrawn: it
-        # emits a plain certificate, so a pinned TRUSTED CERTIFICATE that
-        # rejects the timestamping purpose was laundered into a root that
-        # permits it (peer review, third gate round three).
+        # The -CAfile below is _root_material's private snapshot of the
+        # pinned root: a byte-for-byte copy, in a directory only this process
+        # can reach, of the one read whose bytes it hashed, had OpenSSL count
+        # exactly one certificate in, and read the anchor's certificate and
+        # SPKI out of.  So the trust anchor these verifications are given is
+        # the one object the anchor's certificateSha256 and spkiSha256
+        # describe, given as pinned: nothing is re-encoded, and a pinned
+        # TRUSTED CERTIFICATE's auxiliary trust settings apply.  A
+        # re-encoding through `openssl x509` was tried and withdrawn -- it
+        # emits a plain certificate, laundering a root that rejects the
+        # timestamping purpose into one that permits it (peer review, third
+        # gate round three) -- and handing over the repository path itself
+        # was withdrawn after it too: the path is mutable, so a writer could
+        # substitute that plain form, or a second authority appended after
+        # the count, between validation and use (fourth gate round three).
+        # Diagnostics still name the pinned path; only OpenSSL sees the copy.
         _run_openssl(
             [
                 "ts",
@@ -1139,7 +1325,7 @@ def verify_timestamp_token(
                 "-in",
                 str(token_path),
                 "-CAfile",
-                str(root_path),
+                str(root_snapshot),
                 "-CApath",
                 str(empty_ca_dir),
                 "-attime",
@@ -1156,7 +1342,7 @@ def verify_timestamp_token(
                 "-in",
                 str(token_der),
                 "-CAfile",
-                str(root_path),
+                str(root_snapshot),
                 "-no-CApath",
                 "-no-CAstore",
                 "-purpose",
@@ -1452,7 +1638,7 @@ def _v2_witness_evidence(
     for outcome in outcomes:
         if not isinstance(outcome, dict):
             raise TsaError("multi-token witness outcome is not an object")
-        anchor = _select_anchor(records, outcome, trust, spec=spec)
+        anchor, _outcome_root = _select_anchor(records, outcome, trust, spec=spec)
         anchor_id = str(anchor["id"])
         if anchor_id in seen_anchor_ids:
             raise TsaError(f"duplicate TSA anchor outcome: {anchor_id}")
@@ -1520,7 +1706,9 @@ def _v2_witness_evidence(
             spec=spec,
             active_required=False,
         )
-        selected = _select_anchor(records, outcome, pending_trust, spec=spec)
+        selected, _pending_root = _select_anchor(
+            records, outcome, pending_trust, spec=spec
+        )
         if selected != trust_anchor:
             raise TsaError(f"supplemental TSA anchor mismatch: {key}")
         outcome_status = outcome.get("status")

@@ -61,19 +61,26 @@ Deliberately outside the mutation contract:
   SPKI -- the last two describing the file's first certificate only -- and
   then hands the whole file to ``openssl ts -verify -CAfile``, which trusts
   every certificate in it; the port refuses a pinned root PEM unless
-  ``openssl storeutl -noout -certs`` counts exactly one certificate in it,
-  and gives the two ``-CAfile`` verifications the pinned file itself, which
-  that count guarantees holds exactly that one object, auxiliary trust
-  settings included (a re-encoding through ``openssl x509`` was tried and
-  withdrawn: it dropped X509_AUX settings).  ``storeutl``
-  counts one in each pinned root (``records/trust/freetsa-root-2016.pem``
-  and ``records/trust/digicert-trusted-root-g4.pem``), so the refusal --
-  which precedes the ported PEM-hash refusal, and the further refusal for a
-  root whose certificates ``storeutl`` cannot count at all -- fires on no
-  case here; and each root's one certificate is the certificate its own
+  ``openssl storeutl -noout -certs`` counts exactly one certificate in it.
+  ``storeutl`` counts one in each pinned root
+  (``records/trust/freetsa-root-2016.pem`` and
+  ``records/trust/digicert-trusted-root-g4.pem``), so the refusal -- which
+  precedes the ported PEM-hash refusal, and the further refusal for a root
+  whose certificates ``storeutl`` cannot count at all -- fires on no case
+  here;
+- the baseline opens a pinned root once per check and once more per
+  ``-CAfile``; the port reads it once and judges and trusts a private
+  byte-for-byte copy of those bytes, so the count, the hashes, the
+  certificate identity and the two ``-CAfile`` verifications are all about
+  one instant of one file.  Nothing is re-encoded (a re-encoding through
+  ``openssl x509`` was tried and withdrawn: it dropped X509_AUX settings),
+  and each pinned root's one certificate is the certificate its own
   ``certificateSha256`` already pins (``a6379e7c...`` and ``552f7bdc...``),
-  so the substituted ``-CAfile`` carries the same trust anchor the baseline
-  passed and no case's outcome moves;
+  so the copy carries the same trust anchor the baseline passed, byte for
+  byte, and no case's outcome moves.  Only the ``-CAfile`` argument's spelling
+  changes, and no compared message quotes it: every mutation here that reaches
+  OpenSSL either succeeds or is caught by the deterministic token-hash refusal
+  first, and none mutates a root PEM;
 - the baseline compares a bundle's anchors with the code identities in one
   direction only, so an identity scoped to a bundle whose anchors do not
   include it is ignored; the port requires the two sets to be equal at load.
