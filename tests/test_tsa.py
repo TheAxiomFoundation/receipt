@@ -1173,6 +1173,7 @@ def add_bundle_version(
     *,
     version: int,
     signers: Mapping[str, dict[str, str]] | None = None,
+    extra_signers: Mapping[str, Sequence[dict[str, str]]] | None = None,
     mutate_anchor: Callable[[dict[str, Any]], None] | None = None,
     base: TsaSpec | None = None,
 ) -> tuple[dict[str, Any], TsaSpec]:
@@ -1183,25 +1184,36 @@ def add_bundle_version(
     it carries a trust transition. ``signers`` replaces an anchor's allowed
     signer with the given certificate pins, in the bundle and in the new
     identity together, which is how a rotated signing key enters: as a new
-    version, never as an edit. ``base`` is the spec to extend, for a test that
-    writes two versions and needs one spec pinning both; without it each call
-    extends the tree's own spec and the second would drop the first.
+    version, never as an edit. ``extra_signers`` adds further pins beside it,
+    again in the bundle and the identity together, which is the only way an
+    anchor can allow two signing keys at once -- the load requires the two
+    sets to be equal, so adding to one alone stops there. ``base`` is the spec
+    to extend, for a test that writes two versions and needs one spec pinning
+    both; without it each call extends the tree's own spec and the second
+    would drop the first.
     """
 
     from receipt.canonical import canonical_sha256
 
     base = base or tree.spec
     signers = signers or {}
+    extra_signers = extra_signers or {}
     bundle_id = f"tsa-anchors-v{version}"
     logical = f"records/trust/{bundle_id}.json"
     payload: dict[str, Any] = {
         "schemaVersion": "thesis_tsa_trust_bundle_v1",
         "bundleId": bundle_id,
-        "anchors": [anchor.entry() for anchor in anchors],
+        "anchors": [
+            anchor.entry(extra_signers=extra_signers.get(anchor.anchor_id, ()))
+            for anchor in anchors
+        ],
     }
     for entry in payload["anchors"]:
         if entry["id"] in signers:
-            entry["allowedSigners"] = [dict(signers[entry["id"]])]
+            entry["allowedSigners"] = [
+                dict(signers[entry["id"]]),
+                *(dict(extra) for extra in extra_signers.get(entry["id"], ())),
+            ]
         if mutate_anchor is not None:
             mutate_anchor(entry)
     path = tree.records / "trust" / f"{bundle_id}.json"
@@ -1219,7 +1231,13 @@ def add_bundle_version(
             anchor_id=anchor.anchor_id,
             root_spki_sha256=anchor.root_pins["spkiSha256"],
             signer_spki_sha256=frozenset(
-                {signers.get(anchor.anchor_id, anchor.signer_pins)["spkiSha256"]}
+                {
+                    signers.get(anchor.anchor_id, anchor.signer_pins)["spkiSha256"],
+                    *(
+                        extra["spkiSha256"]
+                        for extra in extra_signers.get(anchor.anchor_id, ())
+                    ),
+                }
             ),
             max_future_seconds=0,
             max_token_lead_seconds=300,
@@ -3589,6 +3607,7 @@ def pending_authority(
     *,
     version: int,
     base: TsaSpec | None = None,
+    extra_signers: Mapping[str, Sequence[dict[str, str]]] | None = None,
 ) -> tuple[dict[str, Any], TsaSpec]:
     """A further bundle version introducing ``anchor`` as a pending authority.
 
@@ -3603,7 +3622,13 @@ def pending_authority(
     (tree.records / "trust" / anchor.tsa.root_pem.name).write_bytes(
         anchor.tsa.root_pem.read_bytes()
     )
-    return add_bundle_version(tree, [anchor], version=version, base=base)
+    return add_bundle_version(
+        tree,
+        [anchor],
+        version=version,
+        base=base,
+        extra_signers=extra_signers,
+    )
 
 
 def supplemental_outcome(
@@ -3875,6 +3900,91 @@ def test_a_genuinely_new_authority_is_still_a_supplemental_candidate(
         "supplemental TSA outcome mismatch: "
         f"missing=[('{unrelated['path']}', '{stranger.anchor_id}')], extra=[]"
     )
+
+
+def test_a_pending_anchor_may_not_mix_an_active_signer_with_a_new_one(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+) -> None:
+    """S5R2-F4: partly-active is not active, and it is not new either.
+
+    The signer half of the skip asked whether *any* of a pending anchor's
+    allowed signers was already active, which reads a set as though it had one
+    member. An anchor declaring an active signer beside a new one -- a
+    genuinely new authority with an old key listed next to its own -- was
+    therefore skipped wholesale: the transition demanded nothing of it and
+    activated it with no supplemental evidence at all, which is the whole of
+    what the supplemental outcome exists to require.
+
+    Nor can it simply be called new. The supplemental outcome is supposed to
+    show that whoever holds the new key answered, and an anchor that also
+    allows the old key satisfies it with a stamp by the authority the chain
+    already trusts -- the same one-authority-two-stamps the rename rule
+    refuses. Neither reading is true of such an anchor, so it is refused and
+    the producer is told what to do about it: split the rotation from the new
+    authority. The three shapes are asserted here together, because what the
+    rule has to do is tell them apart -- a signer set already active entire is
+    a rename and is skipped, a disjoint one is a candidate, and one that is
+    partly both is refused before any outcome is looked at.
+
+    Reverted to "any overlap is a rename", the mixed anchor below is skipped
+    and the witness verifies with no supplemental evidence for it.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    renamed = alias_of(alpha, anchor_id="alpha-renamed-2026")
+    rename, spec = add_bundle_version(tree, [renamed], version=2)
+    stranger = alias_of(beta, anchor_id="beta-arriving-2026")
+    arrival, spec = pending_authority(tree, stranger, version=3, base=spec)
+    mixed = alias_of(beta, anchor_id="beta-mixed-2026")
+    mixture, spec = pending_authority(
+        tree,
+        mixed,
+        version=4,
+        base=spec,
+        extra_signers={mixed.anchor_id: [alpha.signer_pins]},
+    )
+    # The premise: one pending anchor allowing the active signing key and a
+    # key no active anchor allows, both.
+    declared = json.loads(
+        (tree.records / "trust" / "tsa-anchors-v4.json").read_text()
+    )["anchors"][0]["allowedSigners"]
+    assert {signer["spkiSha256"] for signer in declared} == {
+        alpha.signer_pins["spkiSha256"],
+        beta.signer_pins["spkiSha256"],
+    }
+
+    def candidates_for(pending: dict[str, Any]) -> set[tuple[str, str]]:
+        return set(
+            tsa_module._supplemental_candidates(
+                tree.records,
+                {BUNDLE_LOGICAL: tree.reference},
+                [pending],
+                spec=spec,
+            )
+        )
+
+    assert candidates_for(rename) == set()
+    assert candidates_for(arrival) == {(arrival["path"], stranger.anchor_id)}
+    mixes = (
+        f"pending TSA anchor {mixed.anchor_id} mixes an active signer with a "
+        "new one; a rotation and a new authority cannot share an anchor"
+    )
+    with pytest.raises(TsaError) as caught:
+        candidates_for(mixture)
+    assert str(caught.value) == mixes
+    # And the whole witness is refused, rather than verifying with nothing
+    # supplemental required of the anchor that is about to activate.
+    with pytest.raises(TsaError) as whole:
+        verify_witness(
+            tree.record,
+            spec=spec,
+            records=tree.records,
+            trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+            transition_bundle_updates=[mixture],
+        )
+    assert str(whole.value) == mixes
 
 
 def swap_the_token_at_the_first_read(

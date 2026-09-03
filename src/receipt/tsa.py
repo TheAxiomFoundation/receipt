@@ -9,7 +9,7 @@ through a frozen :class:`TsaSpec` supplied by consumer code.  This module
 ships no repository-specific trust defaults and performs no chain walk or
 producer signature verification.
 
-The port is stricter than the baseline in fifteen places, each refusing an
+The port is stricter than the baseline in sixteen places, each refusing an
 input the pinned tree never presents and so each outside the differential
 contract: a record under witness that is not a readable regular file, which
 the baseline let raise out of the hash; a legacy witness over a bundle
@@ -37,9 +37,14 @@ reusing an active anchor ID under a different code-pinned root, which is a
 new authority and so must carry a supplemental outcome before the transition
 can activate it -- the ported supplemental-outcome refusal, reaching a case
 the baseline let through because it took the ID alone for the identity,
-while a pending anchor whose signer any active anchor already allows is that
-active authority under a new name and is skipped for the same reason a
-bundle may not allow one signer under two of its anchors; an unavailable
+while a pending anchor all of whose signers an active anchor already allows
+is that active authority under a new name and is skipped for the same reason
+a bundle may not allow one signer under two of its anchors; a pending anchor
+that allows an active signer beside a new one, which is neither of those and
+so is refused rather than skipped or admitted -- skipping it activates a new
+authority with no supplemental evidence, and admitting it lets the active
+authority produce the very token the new key is supposed to prove; an
+unavailable
 witness of either schema whose reason is not a string, or that carries token
 evidence at the witness level (the v2 per-anchor outcome has always refused
 both); an unavailable legacy witness that names a bundle by any of its three
@@ -2193,6 +2198,23 @@ def _supplemental_candidates(
     under an active ID and root, and the ported refusal would then demand a
     supplemental outcome for every one of them.  ``(id, root SPKI)`` alone
     lets a renamed anchor pose as new.
+
+    Which is why the signer half asks whether the anchor's *whole* signer set
+    is already active, and refuses the anchor that is partly one thing and
+    partly another.  Skipping on any overlap took an anchor declaring an
+    active signer beside a new one -- a genuinely new authority with an old
+    key listed beside its own -- for a rename, and it activated with no
+    supplemental evidence at all (peer review, fifth gate round two).  Nor may
+    it simply be treated as new: the supplemental outcome is supposed to show
+    that whoever holds the new key answered, and an anchor that also allows
+    the old key can satisfy it with a stamp by the authority the chain already
+    trusts.  Neither reading is true of such an anchor, so it is refused and
+    the producer is told to split it: a rotation belongs under the active ID
+    and root, and a new authority belongs in an anchor whose signers are its
+    own.  A pending anchor whose (ID, root SPKI) is already active is a
+    rotation and is skipped before any of this, which is what keeps a bundle
+    that legitimately allows a superseded signer beside its replacement from
+    reaching the refusal.
     """
 
     active_authorities, active_signers = _active_anchor_identities(
@@ -2208,8 +2230,15 @@ def _supplemental_candidates(
             anchor_id = str(anchor["id"])
             if _anchor_authority(anchor) in active_authorities:
                 continue
-            if _anchor_signer_fingerprints(anchor) & active_signers:
+            signers = _anchor_signer_fingerprints(anchor)
+            if signers and signers <= active_signers:
                 continue
+            if signers & active_signers:
+                raise TsaError(
+                    f"pending TSA anchor {anchor_id} mixes an active signer "
+                    "with a new one; a rotation and a new authority cannot "
+                    "share an anchor"
+                )
             candidates[(bundle_path, anchor_id)] = (reference, anchor)
     return candidates
 
