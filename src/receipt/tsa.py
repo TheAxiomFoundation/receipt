@@ -9,7 +9,7 @@ through a frozen :class:`TsaSpec` supplied by consumer code.  This module
 ships no repository-specific trust defaults and performs no chain walk or
 producer signature verification.
 
-The port is stricter than the baseline in twenty-one places, each refusing an
+The port is stricter than the baseline in twenty-two places, each refusing an
 input the pinned tree never presents and so each outside the differential
 contract: a record under witness that is not a readable regular file, which
 the baseline let raise out of the hash; a path this module resolves out of
@@ -1360,8 +1360,30 @@ def _check_bundle_anchors(
                 "SPKI that differs from its verifier code identity"
             )
         signers = anchor.get("allowedSigners")
+        # Every entry is validated before any set is built.  A fingerprint of
+        # an unhashable type -- ``{"spkiSha256": []}`` -- used to raise
+        # ``TypeError`` out of the set comprehension below rather than
+        # ``TsaError``, so a pinned but malformed bundle crashed the
+        # verification instead of being refused by it, and a caller that
+        # catches this module's own error saw an exception it does not handle
+        # (peer review, sixth gate round two).  Type, length and alphabet are
+        # asked of each entry in the bundle's own order, and the refusal names
+        # the entry's index because that is what a producer has to edit.
+        if isinstance(signers, list):
+            for position, signer in enumerate(signers):
+                fingerprint = (
+                    signer.get("spkiSha256") if isinstance(signer, dict) else None
+                )
+                if (
+                    type(fingerprint) is not str
+                    or SHA256_RE.fullmatch(fingerprint) is None
+                ):
+                    raise TsaError(
+                        f"TSA anchor {anchor_id} in bundle {bundle_id} declares "
+                        f"a malformed allowedSigners entry at index {position}"
+                    )
         declared_signers = (
-            {signer.get("spkiSha256") for signer in signers if isinstance(signer, dict)}
+            {signer["spkiSha256"] for signer in signers}
             if isinstance(signers, list)
             else set()
         )
@@ -1370,9 +1392,7 @@ def _check_bundle_anchors(
                 f"TSA anchor {anchor_id} in bundle {bundle_id} declares allowed "
                 "signers that differ from its verifier code identity"
             )
-        declared_signers_by_anchor[anchor_id] = {
-            str(fingerprint) for fingerprint in declared_signers
-        }
+        declared_signers_by_anchor[anchor_id] = set(declared_signers)
         # Declared values agreeing with the identity is not the root material
         # agreeing with either. The material checks lived only in
         # _select_anchor, which a pending rotation's reused anchor id never

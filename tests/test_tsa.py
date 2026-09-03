@@ -1598,6 +1598,93 @@ def test_refuses_at_load_a_bundle_anchor_that_contradicts_its_identity(
 
 
 @pytest.mark.parametrize(
+    ("fingerprint", "reason"),
+    [
+        ([], "unhashable"),
+        ({}, "unhashable-mapping"),
+        (5, "non-string"),
+        (None, "absent"),
+        ("not sixty-four lowercase hexadecimal characters at all", "not-hex"),
+        ("A" * 64, "upper-case"),
+    ],
+    ids=["list", "mapping", "int", "null", "not-hex", "upper-case"],
+)
+def test_a_malformed_allowed_signer_entry_is_refused_by_index(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    fingerprint: Any,
+    reason: str,
+) -> None:
+    """S6-R2-F5: a malformed fingerprint is refused, not raised through.
+
+    The load put every entry's ``spkiSha256`` into a set and compared that set
+    with the identity the verifier code pins, so the values were hashed before
+    anything asked what they were. A pinned bundle carrying an unhashable one
+    -- ``{"spkiSha256": []}`` or ``{"spkiSha256": {}}`` -- therefore raised
+    ``TypeError`` out of the set comprehension rather than ``TsaError``: a
+    verifier that catches this module's own error saw an exception it does not
+    handle, and a malformed bundle crashed the verification instead of being
+    refused by it. The other shapes reached a refusal, but the wrong one --
+    "declares allowed signers that differ from its verifier code identity",
+    which says the producer picked the wrong key when what it did was write a
+    value that is not a key at all.
+
+    Each entry's type, length and alphabet are now asked before any set is
+    built, in the bundle's own order, and the refusal names the index because
+    an index is what a producer edits. The malformed entry below is the second
+    of two, so the index is part of what is asserted rather than a constant;
+    the first entry is the honest one and is not what the message names.
+
+    Without the fix the two unhashable cases raise ``TypeError`` here (which
+    ``pytest.raises(TsaError)`` does not catch) and the other four reach the
+    identity-disagreement message instead.
+    """
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+
+    def add_a_malformed_signer(entry: dict[str, Any]) -> None:
+        entry["allowedSigners"] = [
+            dict(alpha.signer_pins),
+            {"spkiSha256": fingerprint},
+        ]
+
+    reference, spec = add_bundle_version(
+        tree,
+        local_anchors[:1],
+        version=2,
+        mutate_anchor=add_a_malformed_signer,
+    )
+    # The premise: the bundle really is pinned by the spec it is loaded
+    # against, and really does carry the malformed value at index 1 -- so the
+    # refusal below is about the entry and not about the commitment.
+    written = json.loads(
+        (tree.records / "trust" / "tsa-anchors-v2.json").read_text()
+    )["anchors"][0]["allowedSigners"]
+    assert written[0]["spkiSha256"] == alpha.signer_pins["spkiSha256"]
+    assert written[1] == {"spkiSha256": fingerprint}
+    assert spec.bundle_reference(str(reference["path"])) == reference
+
+    with pytest.raises(TsaError) as caught:
+        _load_trust_bundle(tree.records, reference, spec=spec)
+    assert str(caught.value) == (
+        f"TSA anchor {alpha.anchor_id} in bundle tsa-anchors-v2 declares a "
+        "malformed allowedSigners entry at index 1"
+    )
+    # And through the pending-transition path, which is how a bundle like this
+    # would arrive: refused before anything activates it.
+    with pytest.raises(TsaError) as pending:
+        verify_step(
+            tree.record,
+            spec=spec,
+            records=tree.records,
+            trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+            prior_pending_updates=[reference],
+        )
+    assert str(pending.value) == str(caught.value)
+
+
+@pytest.mark.parametrize(
     ("kept", "message"),
     [
         ("trustBundleId", "witness lacks a TSA trust-bundle path"),
