@@ -128,10 +128,13 @@ root, because a root reached through a linked component — or under a spelling
 the candidate tree does not hold — is not this proposal's release root, and
 nothing read through it is evidence about this proposal. For a
 single-component root, which is what every consumer here and every fixture
-has, the only input it refuses that the enumeration below would also have
-refused is a symlinked root itself, and it gives that refusal in the
-enumeration's own words, so nothing observable is pre-empted; everything else
-it refuses, nothing refused before. A root of more than one component can also
+has, a link the enumeration would itself have met is answered in the
+enumeration's own words, so that refusal is unchanged. One link it would not
+have met is pre-empted, and it is named here rather than glossed: a *dangling*
+link at the root, which ``_working_release_files`` answers by returning
+nothing, so the base-ref path used to refuse it one file later as ``existing
+release file was deleted relative to <commit>``. It is refused as the link it
+is now, and a test pins that. A root of more than one component can also
 pre-empt the enumeration's byte and mode refusals about the files it would
 have reached through the link — comparisons whose subject is a file outside
 the tree.

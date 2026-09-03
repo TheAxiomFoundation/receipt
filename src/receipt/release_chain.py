@@ -1207,9 +1207,13 @@ def assert_no_symlinked_release_root(root: pathlib.Path, spec: ChainSpec) -> Non
     checks run: a root that is not in the candidate tree is not a release root
     this verdict can be about, so there is nothing for a later refusal to be
     more specific about. For a single-component root — every consumer's, and
-    the fixtures' — the only refusal that reaches an input the enumeration
-    would also have refused is the leaf link, and that one is word for word
-    what the enumeration says.
+    the fixtures' — a link the enumeration would itself have met is answered
+    word for word as the enumeration answers it. The one link it would not
+    have met is a dangling one, which ``_working_release_files`` answers by
+    returning nothing at all, so against a base it was refused a file later as
+    a release file deleted relative to the base commit; that refusal is
+    pre-empted here, deliberately, and both the gate's docstring and a test
+    say so.
     """
 
     relative = spec.release_root_relative
