@@ -14,6 +14,7 @@ whose whole purpose is to be handed to a skeptic, is the more important half.
 
 from __future__ import annotations
 
+import codecs
 import hashlib
 import io
 import json
@@ -2160,13 +2161,22 @@ def test_a_utf8_stream_still_carries_the_characters_themselves(
     bytes of 0x80 through 0xBF, disjoint from C0 and from ASCII, so a
     byte-oriented reader never sees a control the text did not carry.
 
-    So a UTF-8 stream keeps its own codec and a verdict printed to a modern
+    So a UTF-8 stream is written in UTF-8 and a verdict printed to a modern
     terminal is unchanged. The spellings are canonicalised through
     ``codecs.lookup``, which is why ``UTF_8`` is here beside ``utf-8``.
 
+    Asserted over the raw bytes, and against one expected value for all
+    three, because the three spellings are one codec and S6-F4 is the
+    difference between saying that and assuming it: ``utf-8-sig`` prepends a
+    byte-order mark, and decoding the result with ``utf-8-sig`` would have
+    stripped the mark again and hidden it. What is checked is that the bytes
+    a ``utf-8-sig`` stream receives are the bytes a ``utf-8`` stream
+    receives.
+
     This test passes with the S5R3-F6 and S5R4-F3 changes disabled, which is
     the point: it is the control that keeps either fix from flattening every
-    verdict to ASCII.
+    verdict to ASCII. It fails with S6-F4 disabled, on the ``utf-8-sig``
+    case alone.
     """
 
     from receipt.cli import _byte_safe_encoding, _emit
@@ -2174,7 +2184,9 @@ def test_a_utf8_stream_still_carries_the_characters_themselves(
     payload = "FAILED: binding \u203a \u30c6\u30b9\u30c8.yaml"
     stream = _CodecStdout(encoding)
     _emit(payload, stream, encoding=_byte_safe_encoding(stream))
-    assert stream.written().decode(encoding) == payload + "\n"
+    data = stream.written()
+    assert data == (payload + "\n").encode("utf-8")
+    assert not data.startswith(codecs.BOM_UTF8)
 
 
 @pytest.mark.parametrize("encoding", ["utf-16", "utf-16-le", "utf-32-le"])
@@ -2365,6 +2377,49 @@ def test_a_bufferless_utf8_stream_still_gets_the_verdict(
     monkeypatch.setattr(sys, "stdout", stream)
     assert run(repo) == EXIT_OK
     assert "VERDICT: PASS" in "".join(stream.text)
+
+
+@pytest.mark.parametrize("as_json", [True, False])
+def test_a_utf8_sig_stream_receives_no_byte_order_mark(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch, as_json: bool
+) -> None:
+    """Binds S6-F4: a trusted codec was handed back to the encoder by name.
+
+    ``_byte_safe_encoding`` returned the stream's own spelling wherever it
+    trusted it, and ``utf-8-sig`` was in the trusted set on the argument
+    that it is UTF-8. It is UTF-8 with a byte-order mark: Python's codec
+    writes U+FEFF ahead of the first character. So a ``--json`` verdict
+    written to a stream reporting that codec — a Windows console under a
+    UTF-8 code page, a stream a host opened with the signature codec — began
+    ``ef bb bf``, and a JSON document does not begin with a byte-order mark.
+    RFC 8259 says an implementation may ignore one; ``json.loads`` does not,
+    and neither do many parsers a machine consumer would use. The command's
+    JSON contract is that every exit path prints exactly one object bearing
+    a ``verdict`` key, and this path printed something no parser would read.
+
+    The trusted set holds ``utf-8`` alone now, and a stream reporting
+    ``utf-8-sig`` is recognised as a UTF-8 stream and written as ``utf-8``:
+    the same bytes, minus a mark this command was never asked to send. The
+    text verdict is here too, because the mark is not content there either.
+
+    Asserted over the raw bytes, because a decode with ``utf-8-sig`` would
+    strip the very thing under test. Without the fix the JSON verdict starts
+    ``ef bb bf`` and ``json.loads`` raises on it.
+    """
+
+    stream = _CodecStdout("utf-8-sig")
+    monkeypatch.setattr(sys, "stdout", stream)
+    assert run(repo, *(["--json"] if as_json else [])) == EXIT_OK
+    data = stream.written()
+
+    assert not data.startswith(codecs.BOM_UTF8)
+    assert codecs.BOM_UTF8 not in data
+    if as_json:
+        assert data.startswith(b"{")
+        assert json.loads(data.decode("utf-8"))["verdict"] == "PASS"
+    else:
+        assert data.startswith(b"receipt ")
+        assert b"VERDICT: PASS" in data
 
 
 def test_a_strict_ascii_stdout_still_gets_the_text_verdict(

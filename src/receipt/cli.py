@@ -114,6 +114,17 @@ Sol round 5). That fallback runs only where the stream's own codec is the
 trusted UTF-8 now, and refuses otherwise, which the render boundary turns
 into the refusal it already has for a verdict it cannot render.
 
+What is written is canonical UTF-8, with no byte-order mark. The stream's
+own spelling used to be handed back to the encoder, and ``utf-8-sig`` is a
+UTF-8 codec that prepends U+FEFF: a ``--json`` verdict written to a stream
+under that codec began ``ef bb bf``, and a JSON document does not begin with
+a byte-order mark — ``json.loads`` refuses it, and so does every parser that
+follows RFC 8259 (peer review, Sol round 5). The mark is not content the
+command means to send in the text verdict either. So ``utf-8-sig`` is
+recognised as a UTF-8 stream and written as ``utf-8``, which is the same
+bytes minus the mark, and the trusted set — the codecs this module will
+*write* in — holds ``utf-8`` alone.
+
 The JSON renderer needs nothing of the kind. ``json.dumps`` with
 ``ensure_ascii`` at its default escapes every non-ASCII code point into a
 ``\\uXXXX`` sequence inside the quoted string — lone surrogates and format
@@ -698,7 +709,8 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
     return "\n".join(lines)
 
 
-#: The canonical names of the codecs whose bytes a reader decodes back to
+#: The canonical name of the one codec this module writes in when it is not
+#: falling back to ASCII: the codec whose bytes a reader decodes back to
 #: exactly the characters this module escaped, and which cannot spell a
 #: character it kept as a byte a terminal reads as a control. Everything else
 #: — a legacy code page, a stateful ISO-2022 encoding, UTF-7, and UTF-16 and
@@ -706,18 +718,33 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
 #: :func:`_terminal_safe` performs is over *characters*, so a codec that maps
 #: a printable character onto a terminal-controlling byte defeats it after
 #: the fact. See :func:`_byte_safe_encoding`.
-_TRUSTED_ENCODINGS = frozenset({"utf-8", "utf-8-sig"})
+#:
+#: ``utf-8-sig`` was in here, and it is not a codec this module may write in:
+#: it prepends U+FEFF, so a ``--json`` verdict began ``ef bb bf`` and was not
+#: JSON (peer review, Sol round 5). It is recognised as a UTF-8 *stream* by
+#: :data:`_UTF8_STREAM_ENCODINGS` below and written as ``utf-8``.
+_TRUSTED_ENCODINGS = frozenset({"utf-8"})
+
+#: The canonical names of the stream codecs whose text this module writes as
+#: canonical UTF-8. The two differ by a byte-order mark and nothing else, so
+#: a stream reporting either is a stream whose reader decodes UTF-8; what
+#: makes them one entry here and two elsewhere is that the mark is bytes this
+#: command would be adding, not bytes it was asked to write.
+_UTF8_STREAM_ENCODINGS = frozenset({"utf-8", "utf-8-sig"})
 
 
 def _escapes_non_ascii(encoding: str) -> bool:
     """Whether :func:`_emit` will spell a non-ASCII character in backslashes.
 
-    True for every encoding but the trusted ones, because :func:`_emit`
+    True for every encoding but the trusted one, because :func:`_emit`
     encodes with ``backslashreplace`` and :func:`_byte_safe_encoding` hands
     it ASCII wherever the stream's own codec is not UTF-8. :func:`_rendered`
     asks this so that what it measures is what the stream receives; an
     unknown spelling answers True, which is the same fail-closed direction
     :func:`_byte_safe_encoding` takes.
+
+    What it is asked about is a decision :func:`_byte_safe_encoding` made,
+    so in this command it is only ever ``utf-8`` or ``ascii``.
     """
 
     try:
@@ -762,12 +789,20 @@ def _byte_safe_encoding(stream: TextIO) -> str:
     is worse in kind rather than in degree: it emits ESC to switch
     character sets, so ordinary Japanese text carries 0x1B.
 
-    So the stream's own encoding is used only when it is UTF-8 —
-    ``utf-8`` or ``utf-8-sig``, compared after ``codecs.lookup`` has
-    canonicalised the spelling, which is what turns ``UTF_8`` and ``utf8``
-    into ``utf-8``. Anything else, and anything unknown, is encoded as ASCII
-    with ``backslashreplace``, so no character outside ASCII can produce a
-    byte at all and every byte written is one the escaper approved.
+    So the stream's codec is honoured only when it is UTF-8 — ``utf-8`` or
+    ``utf-8-sig``, compared after ``codecs.lookup`` has canonicalised the
+    spelling, which is what turns ``UTF_8`` and ``utf8`` into ``utf-8``.
+    Anything else, and anything unknown, is encoded as ASCII with
+    ``backslashreplace``, so no character outside ASCII can produce a byte
+    at all and every byte written is one the escaper approved.
+
+    Honoured, and not handed back: what this returns is always ``utf-8`` or
+    ``ascii``, never the stream's own spelling. ``utf-8-sig`` is a UTF-8
+    codec that prepends a byte-order mark, and returning it put ``ef bb bf``
+    in front of a ``--json`` verdict, which is not a JSON document (peer
+    review, Sol round 5). A stream under that codec is a UTF-8 stream and is
+    written as ``utf-8``: the same bytes, minus a mark this command was
+    never asked to send.
 
     UTF-8 needs the argument stated rather than assumed, because it is the
     only case that survives it: a multi-byte sequence is a lead byte of 0xC2
@@ -806,9 +841,8 @@ def _byte_safe_encoding(stream: TextIO) -> str:
     trusted answer be compared and refused by one set of names.
     """
 
-    canonical = _stream_encoding(stream)
-    if canonical in _TRUSTED_ENCODINGS:
-        return canonical
+    if _stream_encoding(stream) in _UTF8_STREAM_ENCODINGS:
+        return "utf-8"
     return "ascii"
 
 
@@ -902,6 +936,13 @@ def _emit(text: str, stream: TextIO, *, encoding: str) -> None:
     with such a stream, so the write refuses and the render boundary in
     :func:`main` turns that into the refusal it already has for a verdict it
     cannot render.
+
+    ``utf-8-sig`` is refused here although it is honoured as a stream codec
+    everywhere else, and for the reason the trusted set gives: what a buffer
+    receives is bytes this module encoded, and what the text API receives is
+    re-encoded by the stream — which for that codec means a byte-order mark
+    this command did not write and, in ``--json`` mode, a document that is
+    not JSON.
 
     A write is repeated until the whole payload is gone, through
     :func:`_write_all`, because a single call is not obliged to take all of
