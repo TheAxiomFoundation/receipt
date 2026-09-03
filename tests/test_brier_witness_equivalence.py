@@ -68,8 +68,8 @@ Deliberately outside the mutation contract:
   precedes the ported PEM-hash refusal, and the further refusal for a root
   whose certificates ``storeutl`` cannot count at all -- fires on no case
   here;
-- the baseline opens a pinned root once per check and once more per
-  ``-CAfile``; the port reads it once and judges and trusts a private
+- the baseline opens a pinned root five times to validate it and twice more
+  as a ``-CAfile``; the port reads it once and judges and trusts a private
   byte-for-byte copy of those bytes, so the count, the hashes, the
   certificate identity and the two ``-CAfile`` verifications are all about
   one instant of one file.  Nothing is re-encoded (a re-encoding through

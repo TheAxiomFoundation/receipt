@@ -1045,10 +1045,10 @@ _ROOT_OPEN_FLAGS = (
 def _read_pinned_root(path: Path) -> bytes:
     """Read a pinned root once, and return the only bytes anything may judge.
 
-    ``_root_material`` used to open this repository path four separate times
-    -- to count its certificates, to hash it, and twice to describe its first
-    certificate -- and ``verify_timestamp_token`` then opened it twice more
-    as a ``-CAfile``.  Between any two of those a writer with access to the
+    ``_root_material`` used to open this repository path five separate times
+    -- once to count its certificates, once to hash it, and three times to
+    describe its first certificate -- and ``verify_timestamp_token`` then
+    opened it twice more as a ``-CAfile``.  Between any two of those a writer with access to the
     repository could substitute another file, so what was validated need not
     be what was trusted: a ``TRUSTED CERTIFICATE`` that rejects the
     timestamping purpose could become the plain form of the same certificate
@@ -1207,8 +1207,9 @@ def _judge_pinned_root(
     #
     # And every one of these checks judges `pem`, read from the repository
     # once, rather than re-opening the path: counting, hashing and describing
-    # the same mutable file three times told an auditor only what it held at
-    # three separate instants (peer review, fourth gate round three).
+    # the same mutable file across five opens told an auditor what it held at
+    # five separate instants and no more (peer review, fourth gate round
+    # three).
     if _certificate_count(snapshot, pinned_path=root_path) != 1:
         raise TsaError(
             f"pinned TSA root PEM must hold exactly one certificate: {root_path}"
