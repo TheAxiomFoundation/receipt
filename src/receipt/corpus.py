@@ -131,6 +131,25 @@ nothing afterwards reads, and a change on a filesystem whose directory
 timestamps are too coarse to distinguish it from the stamp taken an instant
 earlier.
 
+All of that rests on one platform property, so the platform is a
+precondition rather than an assumption: ``st_ctime`` must be the inode
+change time, which nothing in userspace can set. On Windows every supported
+CPython reports the *creation* time there — 3.12 deprecated the field and
+3.14 still fills it that way — so an entry could be added, removed or
+renamed and the directory's mtime put back with ``os.utime``, leaving the
+whole recorded tuple identical; the file ctime above is settable in the same
+sense. :func:`verify_corpus_binding` therefore refuses at entry when
+``os.name`` is not ``"posix"`` rather than reporting a verdict it cannot
+support. Nothing platform-specific is attempted in its place: NTFS keeps a
+real ChangeTime, but it is reachable only through ``ctypes`` and cannot be
+exercised here, so reading it is a follow-up and not part of what ships.
+
+The Windows *naming* rules this module implements are a separate matter and
+they stay on. A trailing dot or space, and an 8.3 short-name alias, describe
+spellings a corpus may carry and a consumer may one day resolve; they are
+facts about the names in the tree, not about the host the verifier is
+running on, and screening for them on POSIX is exactly the point.
+
 Every trust anchor arrives from the consumer's committed :class:`CorpusSpec`.
 The module ships no defaults: not a content root, not a required gate, not an
 accepted tier.
@@ -1124,6 +1143,12 @@ def _directory_generation(
     device and inode — which say it is still the same directory and not a new
     one swapped in under the name — that is what "this directory has not
     changed since I read it" means here.
+
+    Only ``st_ctime_ns`` makes that a claim rather than a courtesy: mtime is
+    a value ``os.utime`` restores. Windows fills the same field with the
+    creation time, which restores itself, so
+    :func:`verify_corpus_binding` refuses to run there at all rather than
+    compare a tuple a writer can reproduce.
     """
 
     try:
@@ -1949,7 +1974,26 @@ def verify_corpus_binding(
     ``journal_bytes`` must be the same bytes the release chain verified — pass
     them through rather than re-reading the file, so nothing can change between
     the custody proof and the binding proof.
+
+    Refuses at entry on any platform that is not POSIX. Everything this
+    module claims about a tree being written to while it is read rests on
+    ``st_ctime`` meaning the inode change time, which no userspace call can
+    set; on Windows every supported CPython reports the file's *creation*
+    time there instead, so a writer can add, remove or rename an entry, put
+    the directory's mtime back with ``os.utime``, and leave the whole
+    recorded tuple identical. The same holds for the ctime term in the
+    bound-file identity. Refusing is the fail-closed answer; trusting a
+    stamp a writer can restore would let the module's central claim be false
+    while every check reported it true (peer review, round seven).
     """
+
+    if os.name != "posix":
+        raise CorpusError(
+            "corpus verification requires POSIX change-time semantics "
+            "(st_ctime as the inode change time) to detect a tree changing "
+            "under it; on this platform the verifier refuses rather than "
+            "trusting a stamp a writer can restore"
+        )
 
     root = root.resolve()
     content, attested, gates, removed = parse_journal(journal_bytes, spec=spec)
