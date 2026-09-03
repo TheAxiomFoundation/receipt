@@ -43,9 +43,12 @@ is refused before it is read, the base is resolved to a commit once and
 carried to every consumer, every git read runs with ``refs/replace`` disabled
 so a replacement object cannot change what the printed OID reads as, each
 state file is read once — through directory descriptors, so no component of
-its path is resolved twice, from a candidate root whose identity was recorded
-before the run began and is compared again wherever a verdict is decided
-without a state read — the surface classification and the gate-only exit,
+its path is resolved twice, from a candidate root that is opened before the
+run begins and held open until it ends, so that the identity recorded from
+that descriptor still names a directory rather than a number a filesystem may
+hand to the next one created in its place, and is compared against it again
+wherever a verdict is decided without a state read — the surface
+classification and the gate-only exit,
 which perform no descent and so never reached that comparison — and never
 through a weaker descent than that, nor a narrower one — the directories above
 a state file are opened with search rights where the platform offers them, and
@@ -122,14 +125,20 @@ index shows to touch both surfaces is refused as mixed, in the words that
 refusal has always used, and one it shows to be data goes to the data path,
 where more of the pre-existing checks run for it, not fewer.
 
-One refusal here is not about a tree at all, and is stated because it does
-pre-empt everything on every input wherever it applies: where ``os.open``
+Two refusals here are not about a tree at all, and are stated because they do
+pre-empt everything on every input wherever they apply. Where ``os.open``
 cannot take a ``dir_fd``, the state reads refuse before anything is compared,
-because the confinement they claim is unavailable on that platform. That is
-the gate declining to answer, not a verdict about a proposal. It is not the
-gate's requirement either, but the package's: the reader is
-``release_chain``'s, so ``verify_release_chain`` and ``receipt verify``'s
-custody pass refuse in the same words on the same platforms. receipt requires
+because the confinement they claim is unavailable on that platform — and so
+does ``_set_root``, which opens the candidate root with the descent's flags
+before the run begins and therefore meets the same fact first. Where the
+platform offers no search-only flag, that open has to ask for read permission
+on the root, and a root this verifier may traverse but not read is refused in
+the descent's words for that too: it has not changed, it cannot be read. Both
+are the gate declining to answer, not a verdict about a proposal. Neither is
+the gate's requirement, either, but the package's: the reader and both
+sentences are ``release_chain``'s, so ``verify_release_chain`` and ``receipt
+verify``'s custody pass refuse in the same words on the same platforms and
+for the same directories. receipt requires
 a POSIX platform — its state reads open through directory descriptors
 (``os.open`` with ``dir_fd``, which every POSIX platform CPython supports and
 Windows does not), so on Windows ``receipt verify`` and the append gate refuse
@@ -141,6 +150,7 @@ All of it carries its own tests in tests/test_append_gate.py.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import locale
@@ -154,6 +164,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from receipt import release_chain
 from receipt.canonical import canonical_sha256
 from receipt.release_chain import (
     _git_environment,
@@ -164,11 +175,13 @@ from receipt.release_chain import (
     ReleaseChainError,
     assert_no_symlinked_state_component,
     assert_release_root_index_regular,
+    assert_secure_descent_supported,
     assert_state_path_tracked,
     confined_state_descriptor,
     git_blob_bytes,
     git_file_entry,
     read_state_descriptor,
+    unreadable_directory_error,
     verify_base_release_chain,
     verify_release_chain,
     verify_release_history_immutable,
@@ -195,11 +208,15 @@ class AppendGateSpec:
 class _CandidateTree:
     """Candidate-controlled paths, kept separate from the trusted code root.
 
-    ``root_identity`` is the ``(st_dev, st_ino)`` of the resolved root when
-    this verdict began. Every state read descends from that directory, and
-    the descent opened it by name each time, so a root swapped mid-run — the
-    one component no walk below it can speak for — was simply followed. The
-    descriptor walk compares against this.
+    ``root_descriptor`` is the resolved root, held open for the whole verdict,
+    and ``root_identity`` is the ``(st_dev, st_ino)`` ``fstat`` of that
+    descriptor. Every state read descends from that directory, and the descent
+    opened it by name each time, so a root swapped mid-run — the one component
+    no walk below it can speak for — was simply followed. The descriptor walk
+    compares against the recorded identity; the descriptor is what makes the
+    comparison mean something, because an identity is only an identity while
+    the inode it names cannot be handed to another directory. See
+    ``_set_root``. The gate closes it once, in ``verify_append_gate``.
     """
 
     root: pathlib.Path
@@ -207,6 +224,7 @@ class _CandidateTree:
     prefix_path: pathlib.Path
     spec: AppendGateSpec
     root_identity: tuple[int, int]
+    root_descriptor: int
 
 
 @dataclass(frozen=True)
@@ -240,17 +258,57 @@ def _set_root(root: pathlib.Path, spec: AppendGateSpec) -> _CandidateTree:
     """
 
     candidate_root = root.resolve()
-    # Recorded once, here, because this is the only moment in the run at
-    # which the root has not yet been used for anything: every later read
-    # descends from it, and a root exchanged after this is a different tree
-    # answering questions asked about this one.
-    recorded = os.lstat(candidate_root)
+    # Opened once, here, because this is the only moment in the run at which
+    # the root has not yet been used for anything: every later read descends
+    # from it, and a root exchanged after this is a different tree answering
+    # questions asked about this one.
+    #
+    # The descriptor is held for the whole verdict, and that is what makes
+    # the recorded identity evidence. ``(st_dev, st_ino)`` from an ``lstat``
+    # is not a name for a directory over time: POSIX filesystems recycle the
+    # inode of a deleted directory, so a root removed outright and replaced
+    # by another directory — or by a symlink — created in its place can be
+    # handed the number this run wrote down, and every comparison against it
+    # then passes for a tree this run never selected. (The tests that rename
+    # the root aside cannot show this: renaming keeps the original inode
+    # live, so the replacement necessarily gets a different one.) An open
+    # descriptor holds the inode, so while this one is open no other
+    # directory can be given that number, and an ``lstat`` of the path that
+    # reports the recorded identity really is the directory recorded here.
+    #
+    # It is opened the way the state descent opens it — search rights where
+    # the platform has them, ``O_DIRECTORY`` and ``O_NOFOLLOW`` — and gives
+    # the descent's own two refusals for the two things that can stop it,
+    # because they are the same facts about the same open: a platform with no
+    # ``dir_fd`` cannot be confined at all, and a root this verifier may
+    # traverse but not read has not changed, it cannot be read. Anything else
+    # is raised as it stands, as the ``lstat`` this replaced raised it.
+    try:
+        assert_secure_descent_supported()
+    except ReleaseChainError as exc:
+        raise AppendError(str(exc)) from exc
+    try:
+        descriptor = os.open(candidate_root, release_chain.DIRECTORY_OPEN_FLAGS)
+    except OSError as exc:
+        if release_chain.DESCENT_REQUIRES_DIRECTORY_READ and (
+            exc.errno == errno.EACCES
+        ):
+            raise AppendError(
+                str(
+                    unreadable_directory_error(
+                        candidate_root, spec.chain.state_relative
+                    )
+                )
+            ) from exc
+        raise
+    recorded = os.fstat(descriptor)
     return _CandidateTree(
         root=candidate_root,
         ledger_path=candidate_root / spec.chain.state_relative,
         prefix_path=candidate_root / spec.chain.prefix_relative,
         spec=spec,
         root_identity=(recorded.st_dev, recorded.st_ino),
+        root_descriptor=descriptor,
     )
 
 
@@ -268,10 +326,13 @@ def _assert_root_unchanged(candidate: _CandidateTree) -> None:
     both surface probes answered by a replacement, and the verdict returned
     was about a tree this run never selected.
 
-    The comparison is the one ``_set_root`` made — ``os.lstat`` of the
-    resolved root — against the identity it recorded, and a root that cannot
-    be ``lstat``-ed at all is the same answer, because it was there when the
-    run began. The refusal is the wording
+    The comparison is ``os.lstat`` of the resolved root against ``os.fstat``
+    of the descriptor ``_set_root`` opened and this run still holds, and a
+    root that cannot be ``lstat``-ed at all is the same answer, because it was
+    there when the run began. Asking the descriptor rather than a recorded
+    pair of numbers is what makes the answer one about a directory: the
+    descriptor holds the original inode, so no directory created at that path
+    since can have been given its number. The refusal is the wording
     ``release_chain.confined_state_descriptor`` already gives for this fact,
     so one sentence names it wherever it is found.
 
@@ -288,9 +349,10 @@ def _assert_root_unchanged(candidate: _CandidateTree) -> None:
 
     try:
         current = os.lstat(candidate.root)
+        held = os.fstat(candidate.root_descriptor)
     except OSError as exc:
         raise AppendError("candidate root changed during verification") from exc
-    if (current.st_dev, current.st_ino) != candidate.root_identity:
+    if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
         raise AppendError("candidate root changed during verification")
 
 
@@ -1497,9 +1559,44 @@ def verify_append_gate(
     ``thesis-facts append check failed: `` prefix when rendering a refusal.
     ``trusted_code_root`` preserves the upstream split between code-owned trust
     anchors and candidate-controlled ledger/release data.
+
+    The candidate root is selected and opened here and held open until the
+    verdict is finished, which is what every comparison against its recorded
+    identity relies on; see ``_set_root``.
     """
 
     candidate = _set_root(root, spec)
+    try:
+        return _verify_selected_tree(
+            candidate,
+            base_ref=base_ref,
+            trusted_code_root=trusted_code_root,
+            release_anchor_dir=release_anchor_dir,
+        )
+    finally:
+        # The root descriptor ``_set_root`` opened, and every comparison
+        # inside answered from. It is held for exactly the run it speaks for
+        # and closed once, however that run ends; the dataclass is frozen, so
+        # it is closed by field.
+        os.close(candidate.root_descriptor)
+
+
+def _verify_selected_tree(
+    candidate: _CandidateTree,
+    *,
+    base_ref: str | None,
+    trusted_code_root: pathlib.Path,
+    release_anchor_dir: pathlib.Path | None,
+) -> str:
+    """One verdict about one already-selected candidate tree.
+
+    Split out of ``verify_append_gate`` for one reason: the candidate root is
+    held open for the whole of a verdict, and this is the whole of a verdict,
+    so the descriptor has exactly one place to be closed and no exit from here
+    can skip it.
+    """
+
+    spec = candidate.spec
     # One resolution for the whole verdict: the base was resolved by name at
     # the surface check, again at the append-only diff and the frozen prefix,
     # and again at the release history, so a branch that moved during the run
