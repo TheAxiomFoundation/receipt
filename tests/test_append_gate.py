@@ -3396,3 +3396,110 @@ def test_a_second_spelling_is_refused_against_a_base_as_well(
         "release file recorded in the index is absent or not a regular file: "
         "releases/README.MD"
     )
+
+
+def a_replacement_repository(
+    candidate: Candidate, tmp_path: pathlib.Path
+) -> pathlib.Path:
+    """A second checkout of the candidate, ready to be moved into its place.
+
+    Copied from it, so every OID this run has already resolved still exists
+    in the replacement and git answers about it exactly as it would about the
+    original — which an unrelated repository would not, and which is what
+    makes a swapped root produce a *verdict* rather than an error.
+    """
+
+    replacement = tmp_path / "replacement"
+    shutil.copytree(candidate.root, replacement, symlinks=True)
+    return replacement
+
+
+def move_a_repository_into_the_root(
+    candidate: Candidate, replacement: pathlib.Path
+) -> None:
+    """Rename the candidate root aside and put ``replacement`` at its path."""
+
+    candidate.root.rename(candidate.root.parent / "moved-aside")
+    replacement.rename(candidate.root)
+
+
+def test_a_gate_only_verdict_is_bound_to_the_recorded_root(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S4-F1: ``_set_root`` records the resolved root's identity, and
+    the only thing that ever compared it against what the name resolves to
+    now is the descriptor walk a state read performs. A gate-only proposal
+    performs none — it classifies the changed sets and returns — so the whole
+    branch ran without the recorded root being consulted once. Here the root
+    is renamed aside and another repository is moved into its place after the
+    classification, exactly where nothing looked; without the check the run
+    returns the ordinary gate-only acceptance for a tree it never selected,
+    and the tree it is standing in is one the same gate would refuse."""
+
+    candidate = base_repository(tmp_path)
+    add_gate_file(candidate)
+    replacement = a_replacement_repository(candidate, tmp_path)
+    # Its first row is not the frozen one, so a run that really did read this
+    # tree would refuse it — the acceptance is not merely about the wrong
+    # tree, it is about a tree this gate rejects.
+    rows = [observation_row(number) for number in range(1, BASE_ROW_COUNT + 1)]
+    rows[0] = observation_row(99)
+    write_ledger(replacement, rows)
+    staged = append_gate._staged_surface_changes
+
+    def swap_after_classifying(
+        base: append_gate._BaseCommit, tree: append_gate._CandidateTree
+    ) -> tuple[set[str], set[str], set[str]]:
+        classified = staged(base, tree)
+        move_a_repository_into_the_root(candidate, replacement)
+        return classified
+
+    monkeypatch.setattr(append_gate, "_staged_surface_changes", swap_after_classifying)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == "candidate root changed during verification"
+
+
+def test_the_classification_is_bound_to_the_recorded_root_too(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S4-F1's other call. The checkout guard and the tracked-state check run
+    before any classification and reach the tree by name, so a root exchanged
+    between ``_set_root`` and the surface probes has those two answered by
+    the tree that was selected and everything after them answered by a
+    replacement — one verdict assembled from two repositories. The
+    classification decides which path the whole run takes, so it is bound to
+    the recorded root as well. Here the replacement carries the candidate's
+    data change *and* a gate script, so without the check the surface probes
+    classify it and the run refuses it as a mixed proposal — a refusal about
+    a tree that was never under review, naming files the selected one does
+    not contain."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    replacement = a_replacement_repository(candidate, tmp_path)
+    script = replacement / GATE_FILE
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("# gate fixture\n", encoding="utf-8")
+    assert not (candidate.root / GATE_FILE).exists()
+    tracked = append_gate.assert_state_path_tracked
+    swapped = False
+
+    def swap_after_the_last_state_path(
+        root: pathlib.Path, relative: pathlib.PurePosixPath
+    ) -> None:
+        nonlocal swapped
+        tracked(root, relative)
+        if relative == CHAIN_SPEC.prefix_relative and not swapped:
+            swapped = True
+            move_a_repository_into_the_root(candidate, replacement)
+
+    monkeypatch.setattr(
+        append_gate, "assert_state_path_tracked", swap_after_the_last_state_path
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert swapped
+    assert str(refusal.value) == "candidate root changed during verification"

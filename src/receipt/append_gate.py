@@ -44,7 +44,10 @@ carried to every consumer, every git read runs with ``refs/replace`` disabled
 so a replacement object cannot change what the printed OID reads as, each
 state file is read once — through directory descriptors, so no component of
 its path is resolved twice, from a candidate root whose identity was recorded
-before the run began, and never through a weaker descent than that — every
+before the run began and is compared again wherever a verdict is decided
+without a state read — the surface classification and the gate-only exit,
+which perform no descent and so never reached that comparison — and never
+through a weaker descent than that — every
 consumer here, the release verification included, is fed those bytes, and the
 file's mode and parent directories as that one read observed them, rather than
 the path, with each file re-checked at the end, forwards and then backwards,
@@ -227,6 +230,36 @@ def _set_root(root: pathlib.Path, spec: AppendGateSpec) -> _CandidateTree:
         spec=spec,
         root_identity=(recorded.st_dev, recorded.st_ino),
     )
+
+
+def _assert_root_unchanged(candidate: _CandidateTree) -> None:
+    """Require the root to still be the directory ``_set_root`` selected.
+
+    Every check in this module reaches the candidate tree by name — the
+    checkout settings, the tracked-state entries, ``git`` itself with the
+    root as its working directory — and the only thing that ever compared
+    the recorded identity against what the name resolves to now was the
+    descriptor walk each state read performs. A gate-only proposal performs
+    no state read: it classifies the changed sets and returns. So a root
+    renamed aside, with another repository moved into its place after
+    ``_set_root`` recorded it, had the checkout guard, the tracking check and
+    both surface probes answered by a replacement, and the verdict returned
+    was about a tree this run never selected.
+
+    The comparison is the one ``_set_root`` made — ``os.lstat`` of the
+    resolved root — against the identity it recorded, and a root that cannot
+    be ``lstat``-ed at all is the same answer, because it was there when the
+    run began. The refusal is the wording
+    ``release_chain.confined_state_descriptor`` already gives for this fact,
+    so one sentence names it wherever it is found.
+    """
+
+    try:
+        current = os.lstat(candidate.root)
+    except OSError as exc:
+        raise AppendError("candidate root changed during verification") from exc
+    if (current.st_dev, current.st_ino) != candidate.root_identity:
+        raise AppendError("candidate root changed during verification")
 
 
 def _git_output(arguments: list[str], candidate: _CandidateTree) -> bytes:
@@ -1475,6 +1508,12 @@ def verify_append_gate(
         except ReleaseChainError as exc:
             raise AppendError(str(exc)) from exc
     if base is not None:
+        # Before the classification that decides which path this run takes,
+        # and again before a gate-only verdict is returned: everything above
+        # reached the candidate tree by name, and only a state read ever
+        # compares the root against what _set_root recorded — which a
+        # gate-only proposal never performs.
+        _assert_root_unchanged(candidate)
         tree_data, tree_gate, tree_unclassified = check_surface_separation(
             base,
             candidate,
@@ -1524,6 +1563,11 @@ def verify_append_gate(
                 if base.ref != base.commit
                 else ""
             )
+            # The verdict is about the tree this run selected, so say so
+            # last: nothing below the classification reads the filesystem
+            # again, and without this the gate-only branch is the one exit
+            # that never asks whether the root is still the recorded one.
+            _assert_root_unchanged(candidate)
             return (
                 "thesis-facts append check OK: gate-only proposal; "
                 "DATA_SURFACE unchanged; GATE_SURFACE changes="
