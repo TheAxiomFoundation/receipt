@@ -86,6 +86,10 @@ rather than overriding on the reads they decide, S5-F3 the configured leaf
 under the release root whose spelling no walk bound, S5-F4 the
 classification-only refusal a push verification was held to.
 
+Docstrings labelled S5-R2-F1 onward name that fifth gate's second round,
+numbering from one again: S5-R2-F1 the untracked and ignored listings that
+took git's exit status for a complete enumeration.
+
 The fixture is a local git repository built from scratch, and no network is
 used anywhere here. Most of it holds a README and no manifests, so the gate's
 chain verification finds nothing to verify and the checks under test are the
@@ -654,6 +658,233 @@ def test_an_ignored_gate_path_is_a_gate_change(tmp_path: pathlib.Path) -> None:
         "['ledger/official_observations.jsonl']; GATE_SURFACE changes="
         "['releases/anchors/alpha-root.pem']; split them into separate pull "
         "requests"
+    )
+
+
+@pytest.mark.skipif(
+    os.getuid() == 0, reason="root lists a directory it has no rights on"
+)
+def test_an_unreadable_data_directory_cannot_be_classified(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S5-R2-F1 on the data surface, which is where the finding bites
+    hardest. The classification's untracked and ignored listings took ``git
+    ls-files``'s exit status for a complete enumeration, and it is not one:
+    with ``ledger/sub`` at mode 0 git exits 0, prints ``warning: could not open
+    directory 'ledger/sub/': Permission denied`` on stderr, and omits that
+    subtree from stdout entirely — measured directly against git 2.53.0 on
+    this checkout before anything here was written. The gate discarded stderr,
+    so the second ledger inside that directory was in neither half of the
+    changed set.
+
+    Measured at 54b589e, this exact tree: ``thesis-facts append check OK:
+    gate-only proposal; DATA_SURFACE unchanged; GATE_SURFACE
+    changes=['scripts/check_append.py']`` — the verdict names the data surface
+    as unchanged, and returns before the ledger, the frozen prefix, the row
+    bindings and the release history are read, with a file the gate would
+    refuse sitting under the surface it just spoke for.
+
+    The fix does not try to read what git could not. It enumerates every
+    protected surface itself and refuses the whole classification when one of
+    those directories cannot be listed: not being able to say what is on a
+    surface is not the same as there being nothing on it."""
+
+    candidate = base_repository(tmp_path)
+    add_gate_file(candidate)
+    hidden = candidate.root / "ledger" / "sub"
+    hidden.mkdir()
+    (hidden / "shadow.jsonl").write_text("{}\n", encoding="utf-8")
+    hidden.chmod(0o000)
+    try:
+        with pytest.raises(AppendError) as refusal:
+            run_gate(candidate)
+        assert str(refusal.value) == (
+            "cannot enumerate a protected directory, so the proposal cannot "
+            "be classified: ledger/sub (Permission denied)"
+        )
+    finally:
+        hidden.chmod(0o755)
+
+
+@pytest.mark.skipif(
+    os.getuid() == 0, reason="root lists a directory it has no rights on"
+)
+def test_an_unreadable_release_directory_cannot_be_classified(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S5-R2-F1 on the release root, the other surface a gate-only verdict
+    speaks for without reading. ``check_gate_only_confinement`` refuses an
+    unclassified change anywhere under that root, and it can only refuse what
+    the classification found: an untracked file inside a mode-0 directory
+    there is in no listing at all.
+
+    Measured at 54b589e, this exact tree: ``thesis-facts append check OK:
+    gate-only proposal; DATA_SURFACE unchanged; GATE_SURFACE
+    changes=['scripts/check_append.py']`` — the confinement had nothing to
+    confine, and said so as an acceptance.
+
+    The release root is walked whole for that reason, and its own leaf as much
+    as anything below it."""
+
+    candidate = base_repository(tmp_path)
+    add_gate_file(candidate)
+    vault = candidate.root / CHAIN_SPEC.release_root_relative / "vault"
+    vault.mkdir()
+    (vault / "riding-along.txt").write_text("hidden\n", encoding="utf-8")
+    vault.chmod(0o000)
+    try:
+        with pytest.raises(AppendError) as refusal:
+            run_gate(candidate)
+        assert str(refusal.value) == (
+            "cannot enumerate a protected directory, so the proposal cannot "
+            "be classified: releases/vault (Permission denied)"
+        )
+    finally:
+        vault.chmod(0o755)
+
+
+@pytest.mark.skipif(
+    os.getuid() == 0, reason="root lists a directory it has no rights on"
+)
+def test_an_unreadable_directory_off_every_surface_is_not_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S5-R2-F1's restriction, which is S5-F1's restriction applied to the
+    same question one layer down. An unreadable directory that lies on no
+    protected surface holds files that are in no commit and are proposed by
+    nothing: a build tree, a cache, a virtualenv whose site-packages a
+    developer has locked down. Refusing over one would refuse a checkout for
+    its own litter, which is the direction round 12's F2 had to reverse once
+    already.
+
+    So the walk is restricted to the surfaces, exactly as the ignored listing
+    is, and this is also what makes the stderr check beside it a scoped one:
+    git warns about *every* directory in the checkout it could not open, and
+    this tree really does produce ``warning: could not open directory
+    'build/sub/': Permission denied`` on the same reads the verdict is built
+    from. The verdict is the ordinary gate-only one all the same."""
+
+    candidate = base_repository(tmp_path)
+    add_gate_file(candidate)
+    litter = candidate.root / "build" / "sub"
+    litter.mkdir(parents=True)
+    (litter / "out.o").write_bytes(b"\x00")
+    litter.chmod(0o000)
+    try:
+        assert run_gate(candidate) == (
+            "thesis-facts append check OK: gate-only proposal; DATA_SURFACE "
+            f"unchanged; GATE_SURFACE changes=['{GATE_FILE}']"
+        )
+    finally:
+        litter.chmod(0o755)
+
+
+@pytest.mark.skipif(
+    os.getuid() == 0, reason="root lists a directory it has no rights on"
+)
+def test_the_stderr_check_refuses_what_the_walk_would_have_caught(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S5-R2-F1's belt, shown to hold on its own. The walk is the guarantee —
+    it asks the question directly, of every protected directory, before any
+    listing is believed — and the stderr check is the second answer for the
+    case the walk cannot have: git making the same listing at its own instant
+    and finding something the walk did not, a permission changed between the
+    two reads among them.
+
+    Disabling the walk in place is how that is measured rather than argued.
+    With ``assert_protected_surfaces_enumerable`` replaced by a no-op the tree
+    below is still refused, and by the stderr check, in its own words. With
+    both gone — the head at 54b589e — it is accepted as ``thesis-facts append
+    check OK: gate-only proposal; DATA_SURFACE unchanged; GATE_SURFACE
+    changes=['scripts/check_append.py']``."""
+
+    monkeypatch.setattr(
+        append_gate, "assert_protected_surfaces_enumerable", lambda candidate: None
+    )
+    candidate = base_repository(tmp_path)
+    add_gate_file(candidate)
+    hidden = candidate.root / "ledger" / "sub"
+    hidden.mkdir()
+    (hidden / "shadow.jsonl").write_text("{}\n", encoding="utf-8")
+    hidden.chmod(0o000)
+    try:
+        with pytest.raises(AppendError) as refusal:
+            run_gate(candidate)
+        assert str(refusal.value) == (
+            "git reported a warning while enumerating the working tree: "
+            "warning: could not open directory 'ledger/sub/': Permission denied"
+        )
+    finally:
+        hidden.chmod(0o755)
+
+
+def test_a_warning_this_run_cannot_place_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S5-R2-F1's belt where it fails closed. Attribution reads the path git
+    quoted, because the quoting is what a translated message keeps while the
+    wording is not. A line this run finds no path in is a line it cannot
+    place, and an unplaceable warning about a listing the verdict is built on
+    is refused rather than assumed to be about ground the verdict does not
+    speak for. The same goes for a quoted path that is absolute or climbs out
+    of the tree: neither is a repository-relative path any surface here can be
+    compared against.
+
+    Driven directly, because a git that emits an unattributable warning on
+    these reads is not something a fixture can arrange; the protected and
+    unprotected lines beside it are the same call answering the cases the
+    tree-level tests above produce for real."""
+
+    candidate = base_repository(tmp_path)
+    add_gate_file(candidate)
+    with selected_tree(candidate) as tree:
+        for line in (
+            b"warning: something went wrong\n",
+            b"warning: could not open directory '/etc/shadow/': Denied\n",
+            b"warning: could not open directory '../outside/': Denied\n",
+            b"warning: could not open directory 'ledger/sub/': Denied\n",
+            b"warning: could not open directory 'releases/vault/': Denied\n",
+            b"warning: could not open directory 'scripts/': Denied\n",
+        ):
+            with pytest.raises(AppendError) as refusal:
+                append_gate._assert_listing_complete(line, tree)
+            assert str(refusal.value) == (
+                "git reported a warning while enumerating the working tree: "
+                f"{line.decode().strip()}"
+            )
+        # And the ones this run can place outside every protected surface.
+        for quiet in (
+            b"",
+            b"   \n",
+            b"warning: could not open directory 'build/sub/': Denied\n",
+            b"warning: could not open directory 'node_modules/': Denied\n",
+        ):
+            append_gate._assert_listing_complete(quiet, tree)
+
+
+def test_the_surface_walk_is_bounded(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S5-R2-F1's budget, which is a bound on work rather than a confinement.
+    The walk descends no symlink, so no cycle is reachable and the only thing
+    that can make it long is a genuinely enormous protected surface. A walk
+    that stopped early would be exactly the silent omission the finding is
+    about, so exceeding the budget is a refusal in the walk's own terms.
+
+    ``MAX_SURFACE_WALK_ENTRIES`` is 200,000 entries, which no consumer's
+    ledger directory and release tree come near, so the bound is lowered here
+    rather than the fixture grown to meet it."""
+
+    candidate = base_repository(tmp_path)
+    add_gate_file(candidate)
+    monkeypatch.setattr(append_gate, "MAX_SURFACE_WALK_ENTRIES", 1)
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value).startswith(
+        "protected surface enumeration exceeded 1 entries, so the proposal "
+        "cannot be classified: "
     )
 
 
@@ -4129,7 +4360,19 @@ def test_a_search_only_state_directory_is_refused_by_the_walk(
     (fixture.series.observation_1) was rewritten``: that is the refusal this
     one now pre-empts, and the module docstring says so. The release-root case
     below is one no probe could have answered on any filesystem, and it was
-    accepted here."""
+    accepted here.
+
+    S5-R2-F1 moved which of the two walks answers first for this tree, and
+    both halves are asserted here. ``ledger`` is a data-surface subtree, so
+    against a base the surface enumeration reaches it before the
+    classification it guards, and the answer is that enumeration's. Measured
+    at this round's head with ``assert_protected_surfaces_enumerable`` removed
+    from ``check_surface_separation``: ``cannot bind the spelling of
+    ledger/official_observations.jsonl: its directory cannot be listed:
+    ledger/official_observations.jsonl`` — the state walk's sentence, which is
+    still what the push path gives, since it classifies nothing and so runs no
+    surface enumeration. Neither walk lets the bytes through; which one says
+    so depends on which read comes first."""
 
     candidate = base_repository(tmp_path)
     append_one_row(candidate)
@@ -4143,6 +4386,14 @@ def test_a_search_only_state_directory_is_refused_by_the_walk(
         with pytest.raises(AppendError) as refusal:
             run_gate(candidate)
         assert str(refusal.value) == (
+            "cannot enumerate a protected directory, so the proposal cannot "
+            "be classified: ledger (Permission denied)"
+        )
+
+        # And the state path's own walk, where nothing classifies ahead of it.
+        with pytest.raises(AppendError) as push_refusal:
+            run_push_gate(candidate)
+        assert str(push_refusal.value) == (
             "cannot bind the spelling of "
             f"{CHAIN_SPEC.state_relative.as_posix()}: its directory cannot be "
             f"listed: {CHAIN_SPEC.state_relative.as_posix()}"
@@ -4422,7 +4673,22 @@ def test_the_base_pass_already_refused_the_tree_the_walk_cannot_enumerate(
     and have always keyed the base comparison by the traversal's own
     enumeration. This test passes with S4-F2 reverted — that is its point.
     What S4-F2 changed is that the candidate index and the push path are now
-    held to what the base-ref path already required."""
+    held to what the base-ref path already required.
+
+    S5-R2-F1 puts a more specific answer in front of that one, deliberately,
+    and this test records both. ``releases/vendor`` is inside the release
+    root, which is a protected surface, so the surface enumeration meets it
+    before the classification runs and refuses that the proposal cannot be
+    classified at all. Measured at this round's head with
+    ``assert_protected_surfaces_enumerable`` removed from
+    ``check_surface_separation``: ``existing release file was deleted relative
+    to <base>: releases/vendor/notes.md`` — the pre-existing sentence, and a
+    diagnosis this tree does not deserve, since the file is there and only its
+    listing is withheld. That is the pre-emption the module docstring states:
+    a protected directory the verifier cannot list is answered as one, and the
+    base comparison keyed to a traversal that could not see it is not reached.
+    The pre-existing refusal is untouched wherever the directory is listable,
+    which every other base-comparison test here exercises."""
 
     candidate = base_repository(tmp_path)
     vendor = candidate.root / CHAIN_SPEC.release_root_relative / "vendor"
@@ -4435,8 +4701,8 @@ def test_the_base_pass_already_refused_the_tree_the_walk_cannot_enumerate(
         with pytest.raises(AppendError) as refusal:
             run_gate(candidate)
         assert str(refusal.value) == (
-            f"existing release file was deleted relative to {candidate.base}: "
-            "releases/vendor/notes.md"
+            "cannot enumerate a protected directory, so the proposal cannot "
+            "be classified: releases/vendor (Permission denied)"
         )
     finally:
         vendor.chmod(0o755)
