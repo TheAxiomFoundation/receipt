@@ -2876,6 +2876,101 @@ def test_refuses_a_tree_file_whose_short_name_alias_would_be_content(
     )
 
 
+def _refuses_short_name_alias(tmp_path: pathlib.Path, name: str) -> None:
+    """Write ``rules/<name>`` and assert the short-name screen refuses it."""
+
+    write_tree(tmp_path)
+    (tmp_path / "rules" / name).write_text("name: smuggled\n")
+    spec = corpus_spec(content_suffixes=(".yaml", ".yml"))
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, render_journal(journal_rows()), spec=spec)
+    assert str(caught.value) == (
+        "content root contains a file whose short-name alias would carry a "
+        f"pinned suffix: {'rules/' + name!r}"
+    )
+
+
+def test_refuses_a_short_name_alias_hidden_behind_an_embedded_space(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S4-F1: the extension was truncated before the 8.3 rules ran.
+
+    Win32 removes every space from a name *before* it truncates the
+    extension to three characters, so with ``.yml`` pinned the file emitted
+    as ``smuggled.y mlx`` is handed the alias ``SMUGGL~1.YML`` and that
+    alias opens the same bytes. The screen read the written extension
+    instead — ``y mlx``, first three characters ``Y M`` — decided the alias
+    could not carry a pinned suffix, and let the long name be skipped as
+    non-content. The closed world the verdict then called closed held a file
+    reachable under a content name.
+
+    Without the fix this verification returns a CorpusVerification with the
+    file sitting in the tree, unbound.
+    """
+
+    _refuses_short_name_alias(tmp_path, "smuggled.y mlx")
+
+
+def test_refuses_a_short_name_alias_hidden_behind_several_spaces(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S4-F1: one space was not the bound; every space is removed.
+
+    ``smuggled.y m l x`` carries three of them, and the alias Win32 derives
+    is the same ``SMUGGL~1.YML``. Pinned separately from its sibling because
+    a fix that dropped only the first space, or only a leading one, would
+    satisfy that test and leave this hole open. Without the fix the written
+    extension truncates to ``Y M`` again and the file is skipped.
+    """
+
+    _refuses_short_name_alias(tmp_path, "smuggled.y m l x")
+
+
+def test_refuses_a_short_name_alias_whose_space_precedes_the_dot(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S4-F1: the removal happens before the period is located, too.
+
+    ``smuggled . yml`` is not content by suffix — its last four characters
+    are ``" yml"``, not ``".yml"`` — and it does not end in a dot or a
+    space, so the stripping screen does not reach it either. Win32 removes
+    both spaces first and then finds the period, so the alias is
+    ``SMUGGL~1.YML``. Without the fix the written extension is ``" yml"``,
+    truncating to ``" YM"``, and the file is skipped as non-content.
+    """
+
+    _refuses_short_name_alias(tmp_path, "smuggled . yml")
+
+
+def test_a_short_name_extension_mapping_a_non_ascii_character_still_verifies(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S4-F1, the other side: the character mapping is pinned, not guessed.
+
+    8.3 generation cannot hold a character outside its own small set, and
+    substitutes an underscore for one. So ``smuggled.ÿml`` is handed the
+    extension ``_ML`` — or ``Y_M`` where the host stores the name
+    decomposed, since the combining mark maps to the underscore instead —
+    and neither is ``.YML``. The file is not content under either name and
+    the verification stands.
+
+    Pinned as an acceptance rather than left to chance: a screen that mapped
+    every unrepresentable character to *nothing* rather than to an
+    underscore would read this name as ``.YML`` and refuse a corpus that is
+    exactly what it claims to be, and every refusal test above would still
+    pass. This test passes on the head as well, which is the point — the
+    mapping must not over-refuse either.
+    """
+
+    write_tree(tmp_path)
+    (tmp_path / "rules" / "smuggled.ÿml").write_text("name: smuggled\n")
+    spec = corpus_spec(content_suffixes=(".yaml", ".yml"))
+    verification = verify_corpus_binding(
+        tmp_path, render_journal(journal_rows()), spec=spec
+    )
+    assert len(verification.content) == len(CONTENT)
+
+
 def test_refuses_a_tree_entry_whose_name_windows_would_strip(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -31,6 +31,21 @@ Three row kinds, one journal:
     refused rather than followed — a junction is not a symlink on Windows,
     and descending one would sweep a directory outside the clone.
 
+    Two spellings decide membership that no listing emits, so the sweep
+    screens the names it is handed for both. A trailing dot or space is
+    stripped by Win32 before a lookup, so the entry carrying it *is* the
+    entry beside it. And an NTFS volume generating 8.3 short names gives a
+    long name a second, addressable spelling whose extension may be a pinned
+    suffix although the written one is not. That extension is modelled the
+    way 8.3 generation derives it — spaces removed, leading periods removed,
+    the text after the last remaining period mapped into the 8.3 character
+    set and truncated to three — because deriving it from the written name
+    instead read an embedded space as a character and let ``smuggled.y mlx``
+    through while its alias ``SMUGGL~1.YML`` opened the same bytes (peer
+    review, round seven). The stem is not modelled, nor is whether the
+    volume generates short names at all; the extension is what decides
+    membership, and it is compared conservatively.
+
 ``attested``
     An exact path bound by digest without a sweep — the toolchain pin, the
     pinned validation workflow, an apply manifest. The consumer's spec names
@@ -127,6 +142,11 @@ GATE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._/-]{0,127}\Z")
 #: a long name, and it opens the long name's file.
 SHORT_NAME_SHAPE_RE = re.compile(r"[^.]{1,8}(\.[^.]{1,3})?\Z")
 SHORT_NAME_TILDE_RE = re.compile(r"~[0-9]")
+#: The punctuation an 8.3 short name may carry unchanged. Everything outside
+#: this set, the ASCII letters and the ASCII digits is replaced by an
+#: underscore when Win32 derives a short name, which is what
+#: :func:`_short_name_extension` models.
+SHORT_NAME_PUNCTUATION = frozenset("$%'-_@~`!(){}^#&")
 
 CONTENT_KIND = "content"
 ATTESTED_KIND = "attested"
@@ -614,6 +634,54 @@ def _strips_to_another_name(segment: str) -> bool:
     return segment != segment.rstrip(". ")
 
 
+def _short_name_extension(name: str) -> str | None:
+    """The extension 8.3 generation gives this name, or None if it gives none.
+
+    Derived the way Win32 derives it, in the order Win32 applies the rules,
+    because the order is what decides the answer:
+
+    - every space is removed first. Win32 strips spaces out of a name before
+      it truncates, so ``"smuggled.y mlx"`` yields ``YML`` and not ``Y M``
+      (peer review, round seven: truncating the raw extension read the space
+      as a character and the helper answered false for a name whose alias
+      really would carry the pinned suffix);
+    - leading periods are then removed, so ``".yml"`` has no extension here
+      at all, exactly as it has none in the short name Win32 hands out;
+    - what follows the last remaining period is the extension. If no period
+      remains there is none;
+    - each of its characters is mapped: an ASCII letter is uppercased, an
+      ASCII digit and the punctuation in :data:`SHORT_NAME_PUNCTUATION` are
+      kept, and everything else — every non-ASCII character included, and any
+      period that somehow survived — becomes an underscore, which is what
+      Win32 substitutes for a character the 8.3 namespace cannot hold;
+    - the result is truncated to three characters.
+
+    What is modelled is the extension and nothing else. The *stem* is not:
+    it depends on collisions with names this verifier cannot see, so the
+    tilde-digit part of a short name is unmodellable from here. Whether 8.3
+    generation is even on for the volume is not modelled either — it is a
+    per-volume setting an auditor's clone cannot report. Both of those are
+    why the caller refuses on the extension alone rather than reconstructing
+    a short name and looking for it.
+    """
+
+    stripped = name.replace(" ", "").lstrip(".")
+    _, dot, extension = stripped.rpartition(".")
+    if not dot:
+        return None
+    mapped = "".join(
+        character.upper()
+        if "a" <= character <= "z" or "A" <= character <= "Z"
+        else (
+            character
+            if "0" <= character <= "9" or character in SHORT_NAME_PUNCTUATION
+            else "_"
+        )
+        for character in extension
+    )
+    return mapped[:3] or None
+
+
 def _short_name_carries_pinned_suffix(name: str, suffixes: tuple[str, ...]) -> bool:
     """Whether 8.3 generation would give this name a pinned content suffix.
 
@@ -625,27 +693,28 @@ def _short_name_carries_pinned_suffix(name: str, suffixes: tuple[str, ...]) -> b
     ``SMUGGL~1.YML`` that opens the same bytes is content, and sits outside
     the closed world the sweep just called closed (peer review, round six).
 
-    Modelling 8.3 *generation* is not attempted: the stem depends on
-    collisions with names this verifier cannot see, and the whole scheme can
-    be off on the volume. What is modelled is the only part that decides
-    membership — the extension — and it is compared conservatively. The
-    truncation means a pin longer than three characters can never be carried
-    exactly, so the first three characters of the pin's own extension are
-    what the alias is matched against: with ``.yaml`` pinned, a file named
-    ``x.yamlx`` refuses too, though its alias would read ``.YAM``. Refusing a
-    name no real corpus carries is the cheap side of this trade.
+    The alias's extension comes from :func:`_short_name_extension`, which
+    applies the 8.3 rules in Win32's own order rather than truncating the
+    written name. What that models, and what it does not, is stated there.
+
+    The comparison is conservative in the other direction. The truncation
+    means a pin longer than three characters can never be carried exactly,
+    so the first three characters of the pin's own extension are what the
+    alias is matched against: with ``.yaml`` pinned, a file named
+    ``x.yamlx`` refuses too, though its alias would read ``.YAM``. Refusing
+    a name no real corpus carries is the cheap side of this trade.
 
     Compared through :func:`_path_fold`, the key by which membership is
     decided everywhere else in this module, so ``.YML`` and ``.yml`` are one
     suffix here exactly as they are there.
     """
 
-    _, dot, extension = name.rpartition(".")
-    if not dot or not extension:
+    extension = _short_name_extension(name)
+    if extension is None:
         # No extension, so 8.3 generation produces a short name with none
         # either, and a pinned suffix always begins with a dot.
         return False
-    alias = "." + extension[:3].upper()
+    alias = "." + extension
     return any(
         _path_fold(alias) == _path_fold("." + suffix[1:][:3]) for suffix in suffixes
     )
