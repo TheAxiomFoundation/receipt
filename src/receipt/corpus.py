@@ -44,7 +44,22 @@ Three row kinds, one journal:
     through while its alias ``SMUGGL~1.YML`` opened the same bytes (peer
     review, round seven). The stem is not modelled, nor is whether the
     volume generates short names at all; the extension is what decides
-    membership, and it is compared conservatively.
+    membership.
+
+    That model is bounded at both ends, because it was unsound at both.
+    A character the 8.3 namespace cannot hold becomes an underscore — but
+    the namespace is an OEM code page rather than ASCII, so which non-ASCII
+    characters it *can* hold is the volume's decision and not this
+    verifier's: with ``.éml`` pinned, ``smuggled.émlx`` is aliased ``.ÉML``
+    on a code page 850 volume while the underscore model read ``._ML`` and
+    skipped the file. So an extension carrying a non-ASCII character is
+    refused as underivable rather than guessed at, and a pinned content
+    suffix must be ASCII. At the other end, an alias extension is at most
+    three characters, so a pin longer than that cannot be carried by any
+    alias; comparing the first three characters of a longer pin refused an
+    ordinary ``notes.yam`` under a ``.yaml`` configuration although no
+    alias can end ``.yaml``. Only a pin an alias could carry is compared,
+    and it is compared exactly (peer review, round eight).
 
 ``attested``
     An exact path bound by digest without a sweep — the toolchain pin, the
@@ -469,6 +484,18 @@ class CorpusSpec:
             # verifier's interpreter — the same defect _assert_foldable closes
             # everywhere else this module folds (peer review, round four).
             _assert_foldable(suffix, "CorpusSpec content suffix")
+            # And ASCII, because the 8.3 screen below cannot derive an alias
+            # extension for a non-ASCII one: which characters survive into a
+            # short name is the volume's OEM code page's decision, and an
+            # auditor's clone does not report it. A pin the screen cannot
+            # judge against would leave the sweep unable to answer the
+            # question the pin exists to ask (peer review, round eight).
+            if any(ord(character) > 0x7F for character in suffix):
+                raise CorpusError(
+                    "CorpusSpec content suffix must be ASCII, because an 8.3 "
+                    "alias extension cannot be derived against a non-ASCII "
+                    f"one: {_quoted(suffix)}"
+                )
         if type(self.required_attested_paths) is not frozenset:
             raise CorpusError("CorpusSpec required_attested_paths must be a frozenset")
         for path in sorted(self.required_attested_paths):
@@ -878,10 +905,25 @@ def _short_name_extension(name: str) -> str | None:
       remains there is none;
     - each of its characters is mapped: an ASCII letter is uppercased, an
       ASCII digit and the punctuation in :data:`SHORT_NAME_PUNCTUATION` are
-      kept, and everything else — every non-ASCII character included, and any
-      period that somehow survived — becomes an underscore, which is what
-      Win32 substitutes for a character the 8.3 namespace cannot hold;
+      kept, and any other ASCII character — a surviving period included —
+      becomes an underscore, which is what Win32 substitutes for a character
+      the 8.3 namespace cannot hold;
     - the result is truncated to three characters.
+
+    A *non-ASCII* character in the extension is not mapped at all: the name
+    is refused. Mapping it to an underscore was wrong in the direction that
+    matters. The 8.3 namespace is an OEM code page, not ASCII, so a
+    character the volume's code page can represent survives into the short
+    name and is uppercased there — with ``.éml`` pinned, ``smuggled.émlx``
+    is handed an alias ending ``.ÉML`` on a code page 850 volume, and the
+    underscore model answered ``._ML`` and let the file be skipped as
+    non-content (peer review, round eight). Which code page a volume uses is
+    not something an auditor's clone reports, and guessing wrong in either
+    direction is a wrong answer about closed-world membership, so the
+    verifier says it cannot derive the alias rather than deriving one it
+    cannot stand behind. That refusal is why a pinned content suffix must be
+    ASCII: :class:`CorpusSpec` refuses a non-ASCII one at construction, so a
+    corpus cannot be configured into a state where no name can be judged.
 
     What is modelled is the extension and nothing else. The *stem* is not:
     it depends on collisions with names this verifier cannot see, so the
@@ -896,6 +938,12 @@ def _short_name_extension(name: str) -> str | None:
     _, dot, extension = stripped.rpartition(".")
     if not dot:
         return None
+    if any(ord(character) > 0x7F for character in extension):
+        raise CorpusError(
+            "8.3 alias extension cannot be derived for a name whose extension "
+            "carries non-ASCII characters (the volume's OEM code page decides "
+            f"it): {_quoted(name)}"
+        )
     mapped = "".join(
         character.upper()
         if "a" <= character <= "z" or "A" <= character <= "Z"
@@ -924,16 +972,24 @@ def _short_name_carries_pinned_suffix(name: str, suffixes: tuple[str, ...]) -> b
     applies the 8.3 rules in Win32's own order rather than truncating the
     written name. What that models, and what it does not, is stated there.
 
-    The comparison is conservative in the other direction. The truncation
-    means a pin longer than three characters can never be carried exactly,
-    so the first three characters of the pin's own extension are what the
-    alias is matched against: with ``.yaml`` pinned, a file named
-    ``x.yamlx`` refuses too, though its alias would read ``.YAM``. Refusing
-    a name no real corpus carries is the cheap side of this trade.
+    Only a pin an alias can carry is compared, and it is compared exactly.
+    An 8.3 extension is at most three characters, so a pin whose own
+    extension is longer than three cannot be the extension of any alias, and
+    such a pin is ignored here entirely. Truncating the pin instead and
+    comparing the first three characters was unsound the other way: with
+    ``.yaml`` pinned, an ordinary ``notes.yam`` was refused as though its
+    alias carried the pin, although no alias of anything can end ``.yaml``
+    and the file is simply not content (peer review, round eight). What is
+    left is an exact comparison between the derived alias extension and a
+    pin short enough to be one.
 
     Compared through :func:`_path_fold`, the key by which membership is
     decided everywhere else in this module, so ``.YML`` and ``.yml`` are one
     suffix here exactly as they are there.
+
+    A name whose alias extension cannot be derived does not reach the
+    comparison: :func:`_short_name_extension` refuses it, and that refusal
+    surfaces where the sweep meets the entry.
     """
 
     extension = _short_name_extension(name)
@@ -943,7 +999,9 @@ def _short_name_carries_pinned_suffix(name: str, suffixes: tuple[str, ...]) -> b
         return False
     alias = "." + extension
     return any(
-        _path_fold(alias) == _path_fold("." + suffix[1:][:3]) for suffix in suffixes
+        _path_fold(alias) == _path_fold(suffix)
+        for suffix in suffixes
+        if len(suffix) <= 4
     )
 
 
