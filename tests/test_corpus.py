@@ -4867,6 +4867,55 @@ def test_refuses_a_directory_holding_two_spellings_of_a_bound_component(
     )
 
 
+@pytest.mark.parametrize(
+    "sibling, why",
+    [
+        ("toolchain.toml.", "Win32 strips a trailing period before the lookup"),
+        ("toolchain.toml ", "and it strips a trailing space the same way"),
+    ],
+)
+def test_refuses_an_unscreened_sibling_of_a_bound_component(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sibling: str,
+    why: str,
+) -> None:
+    """Binds S5R4-F1: the sibling scan compared names it never screened.
+
+    S5R3-F3 made this check consume the whole listing and refuse a sibling
+    that folds onto the bound component. What it did not do is screen the
+    entries it was handed, and the fold key answers exactly one class of
+    equivalence — two spellings that differ in case. A spelling a *lookup*
+    collapses onto the bound name without collapsing under the fold walked
+    straight through: a POSIX tree holding both ``.axiom/toolchain.toml``
+    and ``.axiom/toolchain.toml.`` passes, because the exact spelling is
+    present and the sibling's fold key differs, while Win32 strips the
+    trailing period before it resolves the name and hands back whichever of
+    the two it stores — so the witnessed digest covers a file the auditor
+    cannot identify. A trailing space is the same story with the other
+    character Win32 strips.
+
+    The portable-name screen is what answers both, and it is the screen
+    every other listing in this module already runs. Without it this
+    verification returns a CorpusVerification over the corpus, on the host
+    where the two names coexist and on the host where they do not.
+
+    The sibling is injected into the listing rather than written, so the
+    test says the same thing wherever it runs — including on a host whose
+    filesystem refuses to store the name at all.
+    """
+
+    write_tree(tmp_path)
+    monkeypatch.setattr(os, "scandir", _scandir(".axiom", extra=[sibling]))
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        f"tree entry beside '.axiom/toolchain.toml' {NOT_PORTABLE}: {sibling!r}"
+    ), why
+
+
 def _scandir_reshaped_after(directory_name: str, calls: int, **reshape):
     """An ``os.scandir`` that reshapes one directory only after ``calls``.
 

@@ -2494,6 +2494,27 @@ def _assert_spelled_by_its_directory(
     fold key is asking here is whether some other spelling differs from the
     bound one only in case (S5R3-F3).
 
+    Every entry the listing yields is screened before it is compared, which
+    is the standing rule everywhere else this module reads a directory and
+    was missing only here. The fold key pairs two spellings that differ in
+    case; it cannot pair a spelling a *lookup* collapses onto the bound name
+    without collapsing under the fold. A POSIX tree holding both
+    ``.axiom/toolchain.toml`` and ``.axiom/toolchain.toml.`` passed this
+    check — the exact spelling is present, and the trailing-period sibling
+    folds to a different key — while Win32 strips the trailing period before
+    the lookup and resolves the sibling to the bound name, so the digest
+    covers whichever of the two that host hands back (peer review, Sol
+    round 4). :func:`_assert_portable_name` is what answers that class, here
+    as it does beside a pinned content root, and it answers a trailing space
+    the same way.
+
+    The screen refuses ahead of both questions below, including the
+    missing-spelling one. That is deliberate: those two ask which of the
+    spellings in a directory the bound path names, and a directory holding a
+    name this module cannot say the meaning of cannot answer either — the
+    tree is unbindable rather than mis-spelled, and the refusal says so in
+    the policy's own words.
+
     Asked only of a component that resolves. Where nothing answers to the
     spelling there is no resolution to disagree with, and the caller's own
     refusal — a missing bound file, an absent content root — says something
@@ -2536,6 +2557,9 @@ def _assert_spelled_by_its_directory(
     try:
         with os.scandir(parent) as entries:
             for entry in entries:
+                _assert_portable_name(
+                    entry.name, f"tree entry beside {_quoted(relative)}"
+                )
                 if entry.name == component:
                     spelled = True
                 elif other is None and _path_fold(entry.name) == folded:
