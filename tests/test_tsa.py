@@ -4112,14 +4112,20 @@ def supplemental_outcome(
     pending: Mapping[str, Any],
     anchor: LocalAnchor,
     token: pathlib.Path,
+    *,
+    signer: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """One ``supplementalOutcomes`` member offering ``token`` for ``anchor``.
 
     Everything a witness says about a response, for the anchor a pending
     bundle introduces: the bundle it belongs to, the anchor it answers for,
-    the file, and what that anchor's own authority stamped it with.
+    the file, and what stamped it. ``signer`` names the certificate that did,
+    for a pending anchor whose allowed signer is not the one its
+    ``LocalAnchor`` was built around -- a rotated key filed under a new name;
+    without it the anchor's own pins are declared, which is every other case.
     """
 
+    pins = dict(signer or anchor.signer_pins)
     return {
         "role": "pending_trust_bundle",
         "status": "available",
@@ -4132,8 +4138,8 @@ def supplemental_outcome(
         "tokenSha256": sha256_bytes(token.read_bytes()),
         "tsaPolicyOid": anchor.tsa.policy_oid,
         "tsaImprintAlgorithmOid": SHA256_IMPRINT_OID,
-        "tsaSignerCertificateSha256": anchor.signer_pins["certificateSha256"],
-        "tsaSignerSpkiSha256": anchor.signer_pins["spkiSha256"],
+        "tsaSignerCertificateSha256": pins["certificateSha256"],
+        "tsaSignerSpkiSha256": pins["spkiSha256"],
     }
 
 
@@ -4961,6 +4967,102 @@ def give_the_record_its_own_updates(
     return digest
 
 
+def add_record(
+    tree: WitnessTree,
+    anchors: Sequence[LocalAnchor],
+    *,
+    name: str,
+    observation: str,
+    updates: Sequence[Mapping[str, Any]] = (),
+    available: bool = True,
+    supplemental: Sequence[tuple[Mapping[str, Any], LocalAnchor, LocalTsa]] = (),
+) -> pathlib.Path:
+    """A further record in the tree's day directory, with its own v2 witness.
+
+    The tree builder writes one record, and a chain is several. What only a
+    chain has is a record whose transition was still pending when the next
+    record was written -- an unavailable witness does not activate what it
+    carries -- so the walk that carries pending updates forward cannot be
+    shown on one record at all.
+
+    ``updates`` goes into the record's own ``trustBundleUpdates``, ``anchors``
+    are the active bundle's anchors the witness answers for (stamped by their
+    own authorities, or declared unavailable), and ``supplemental`` is one
+    entry per pending anchor the transition introduces: the pending bundle's
+    reference, the anchor, and the authority whose key stamps for it.
+    """
+
+    day = tree.records / RECORD_DAY
+    record = day / name
+    payload: dict[str, Any] = {
+        "schemaVersion": "receipt_test_record_v1",
+        "recordedAt": (datetime.now(UTC) - timedelta(seconds=60)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
+        "observation": observation,
+    }
+    if updates:
+        payload["trustBundleUpdates"] = [dict(update) for update in updates]
+    record.write_bytes(canonical_bytes(payload) + b"\n")
+    digest = sha256_bytes(record.read_bytes())
+
+    status = "available" if available else "unavailable"
+    outcomes: list[dict[str, Any]] = []
+    for anchor in anchors:
+        outcome: dict[str, Any] = {
+            "tsaAnchorId": anchor.anchor_id,
+            "tsa": anchor.endpoint,
+            "status": status,
+        }
+        if available:
+            token = day / f"{record.stem}.{anchor.anchor_id}.tsr"
+            anchor.tsa.stamp(digest, token)
+            outcome.update(
+                {
+                    "tokenPath": logical_path(tree.records, token),
+                    "tokenSha256": sha256_bytes(token.read_bytes()),
+                    "tsaPolicyOid": anchor.tsa.policy_oid,
+                    "tsaImprintAlgorithmOid": SHA256_IMPRINT_OID,
+                    "tsaSignerCertificateSha256": anchor.signer_pins[
+                        "certificateSha256"
+                    ],
+                    "tsaSignerSpkiSha256": anchor.signer_pins["spkiSha256"],
+                }
+            )
+        else:
+            outcome["reason"] = "authority unreachable from this fixture"
+        outcomes.append(outcome)
+
+    witness: dict[str, Any] = {
+        "schemaVersion": "thesis_rfc3161_witness_v2",
+        "digestSha256": digest,
+        "status": status,
+        "trustBundleId": BUNDLE_ID,
+        "trustBundlePath": BUNDLE_LOGICAL,
+        "trustBundleSha256": tree.reference["sha256"],
+        "anchorOutcomes": outcomes,
+    }
+    if not available:
+        witness["reason"] = "no configured authority answered"
+    if supplemental:
+        offered: list[dict[str, Any]] = []
+        for pending, anchor, authority in supplemental:
+            token = day / f"{record.stem}.supplemental.{anchor.anchor_id}.tsr"
+            authority.stamp(digest, token)
+            offered.append(
+                supplemental_outcome(
+                    tree,
+                    pending,
+                    anchor,
+                    token,
+                    signer=certificate_pins(authority.signer_pem),
+                )
+            )
+        witness["supplementalOutcomes"] = offered
+    record.with_suffix(".witness.json").write_bytes(canonical_bytes(witness) + b"\n")
+    return record
+
+
 def a_record_carrying_its_own_transition(
     root: pathlib.Path,
     local_anchors: Sequence[LocalAnchor],
@@ -5069,7 +5171,12 @@ def test_a_chain_walkers_accumulated_transition_is_still_accepted(
     records' -- both are extra entries. ``_verify_witness_with_updates`` hands
     back the snapshot-derived list so such a caller never has to read the
     record itself, and what it hands back is the snapshot's own and not the
-    superset it was given, which is what makes it usable for that.
+    superset it was given, which is what makes it usable for that. Taking the
+    earlier records' updates as ``prior_pending_updates`` is the other half,
+    and it is walked in
+    ``test_a_chain_walk_takes_each_records_updates_from_its_own_verification``
+    (S5R3-F1); here the point is that the returned list is the record's own
+    whichever shape the call used.
     """
 
     tree, rotation, arrival, incoming, spec = a_record_carrying_its_own_transition(
@@ -5132,6 +5239,227 @@ def test_a_chain_walkers_accumulated_transition_is_still_accepted(
         trusted_bundles={BUNDLE_LOGICAL: tree.reference},
     )
     assert derived_updates == updates
+
+
+def test_a_stale_extra_update_is_evaluated_by_one_shape_and_not_the_other(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """S5R3-F1: the comparison is one-way, so a stale extra still counts.
+
+    Deriving the record's own updates and requiring the supplied list to
+    contain them closed the direction where an update disappears. The other
+    direction is still open, and by design: a chain walker supplies the
+    pending updates of earlier records beside this record's own, so extra
+    entries are the normal case and cannot be refused. Which means a caller
+    that supplies this record's updates *from an earlier read of this record*
+    -- while the record on disk now carries none, a writer having removed them
+    -- is supplying an extra entry the witness cannot tell from an earlier
+    record's, and the transition is evaluated with it.
+
+    That residual is asserted here rather than assumed: the record below
+    carries no updates at all, and the legacy shape supplied a stale one is
+    refused for a supplemental outcome the record no longer asks for. It is a
+    property of the supplied-list shape and not of the machinery, which is why
+    ``_verify_witness_with_updates`` takes the earlier records' updates
+    separately: with ``prior_pending_updates=[]`` -- and with nothing supplied
+    at all -- the same tree verifies, because the only entries in the
+    transition are ones this call derived from the snapshot.
+
+    Reverted to one list, the two shapes are the same shape and the second
+    half of this fails: the stale entry has nowhere else to be supplied.
+    """
+
+    beta = local_anchors[1]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    stranger = alias_of(beta, anchor_id="beta-arriving-2026")
+    stale, spec = pending_authority(tree, stranger, version=2)
+    # The premise: this record carries no transition of its own.
+    assert "trustBundleUpdates" not in json.loads(tree.record.read_text())
+
+    with pytest.raises(TsaError) as caught:
+        verify_witness(
+            tree.record,
+            spec=spec,
+            records=tree.records,
+            trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+            transition_bundle_updates=[stale],
+        )
+    assert str(caught.value) == (
+        "supplemental TSA outcome mismatch: "
+        f"missing=[('{stale['path']}', '{stranger.anchor_id}')], extra=[]"
+    )
+
+    # The shape with the two kinds apart: nothing this call did not derive.
+    evidence, updates = tsa_module._verify_witness_with_updates(
+        tree.record,
+        spec=spec,
+        records=tree.records,
+        trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+        prior_pending_updates=[],
+    )
+    assert evidence.status == "available"
+    assert evidence.supplemental_tokens == ()
+    assert updates == []
+    assert evidence == verify_tree(tree, trusted_bundles={BUNDLE_LOGICAL: tree.reference})
+
+    # And the two shapes are not to be mixed, because no call means both.
+    with pytest.raises(TypeError):
+        tsa_module._verify_witness_with_updates(
+            tree.record,
+            spec=spec,
+            records=tree.records,
+            trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+            transition_bundle_updates=[stale],
+            prior_pending_updates=[],
+        )
+
+
+def test_a_chain_walk_takes_each_records_updates_from_its_own_verification(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_alpha: LocalTsa,
+) -> None:
+    """S5R3-F1: three records, and no read of a record but the witness's.
+
+    The shape that has no residual, walked. Each record is verified with the
+    pending updates of the records *before* it and nothing else; its own come
+    back from the verification, from the bytes that call hashed, and go into
+    the accumulator. Nothing in the walk ever reads a record, so there is no
+    second read of one to be stale, and no entry in any transition the witness
+    did not either derive or attribute to an earlier record.
+
+    The middle record's witness is unavailable, which is the only way one
+    record's transition is still pending when the next is written: an
+    available witness activates what has accumulated. So the third record is
+    measured against the second's pending update as well as its own, and
+    answers for both authorities -- which is what says the walk really carried
+    it. Verified with ``prior_pending_updates=[]`` instead, the third record's
+    supplemental outcome for the second record's authority is refused as one
+    no transition introduces.
+
+    The upstream's own shape is walked beside it over the same three records
+    -- the accumulated list plus this record's own, from the caller's read --
+    and the two agree, evidence for evidence and bundle for bundle. That is
+    what says the new entry point is the same verification and not a second
+    one.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    rotated = certificate_pins(rotated_alpha.signer_pem)
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    stranger = alias_of(beta, anchor_id="beta-arriving-2026")
+    arrival, spec = pending_authority(tree, stranger, version=2)
+    renamed = dataclasses.replace(
+        alpha,
+        anchor_id="alpha-renamed-2026",
+        endpoint="https://alpha-renamed-2026.timestamp.invalid/tsr",
+        tsa=rotated_alpha,
+        signer_pins=rotated,
+    )
+    later, spec = add_bundle_version(tree, [renamed], version=3, base=spec)
+
+    second = add_record(
+        tree,
+        local_anchors[:1],
+        name="record-0002.json",
+        observation="the record whose authority is still pending after it",
+        updates=[arrival],
+        available=False,
+        supplemental=[(arrival, stranger, beta.tsa)],
+    )
+    third = add_record(
+        tree,
+        local_anchors[:1],
+        name="record-0003.json",
+        observation="the record measured against the one before it too",
+        updates=[later],
+        supplemental=[
+            (arrival, stranger, beta.tsa),
+            (later, renamed, rotated_alpha),
+        ],
+    )
+    chain = [tree.record, second, third]
+    carried_by_the_records = [
+        json.loads(record.read_text()).get("trustBundleUpdates", [])
+        for record in chain
+    ]
+    assert carried_by_the_records == [[], [arrival], [later]]
+
+    def walk(
+        shape: str,
+    ) -> tuple[list[WitnessEvidence], dict[str, Any], list[list[dict[str, Any]]]]:
+        active: dict[str, Any] = {BUNDLE_LOGICAL: dict(tree.reference)}
+        pending: list[dict[str, Any]] = []
+        seen: list[WitnessEvidence] = []
+        carried: list[list[dict[str, Any]]] = []
+        for record in chain:
+            if shape == "prior":
+                evidence, own = tsa_module._verify_witness_with_updates(
+                    record,
+                    spec=spec,
+                    records=tree.records,
+                    trusted_bundles=active,
+                    prior_pending_updates=list(pending),
+                )
+            else:
+                own = tsa_module.trust_bundle_updates(
+                    tree.records,
+                    json.loads(record.read_text()),
+                    spec=spec,
+                )
+                evidence = verify_witness(
+                    record,
+                    spec=spec,
+                    records=tree.records,
+                    trusted_bundles=active,
+                    transition_bundle_updates=[*pending, *own],
+                )
+            seen.append(evidence)
+            carried.append(own)
+            pending.extend(own)
+            if evidence.status == "available":
+                activate_trust_bundles(active, pending)
+                pending.clear()
+        assert not pending
+        return seen, active, carried
+
+    evidence, active, carried = walk("prior")
+    assert [entry.status for entry in evidence] == [
+        "available",
+        "unavailable",
+        "available",
+    ]
+    # Each record's own updates came back from its own verification, and they
+    # are the updates that record carries.
+    assert carried == carried_by_the_records
+    # And exactly those bundles activated, none of them twice or at a path
+    # the chain never introduced.
+    assert set(active) == {BUNDLE_LOGICAL, arrival["path"], later["path"]}
+    assert active[arrival["path"]] == arrival
+    assert active[later["path"]] == later
+    # The third record answered for both authorities, the earlier record's
+    # included, which is what the accumulator carried forward.
+    assert [token.anchor_id for token in evidence[2].supplemental_tokens] == [
+        stranger.anchor_id,
+        renamed.anchor_id,
+    ]
+
+    # Without the earlier record's update, that outcome answers for nothing.
+    with pytest.raises(TsaError) as dropped:
+        tsa_module._verify_witness_with_updates(
+            third,
+            spec=spec,
+            records=tree.records,
+            trusted_bundles={BUNDLE_LOGICAL: dict(tree.reference)},
+            prior_pending_updates=[],
+        )
+    assert str(dropped.value) == (
+        "supplemental TSA outcome is not introduced by a pending trust "
+        f"transition: ('{arrival['path']}', '{stranger.anchor_id}')"
+    )
+
+    # The upstream's shape, over the same chain, reaching the same place.
+    assert walk("legacy") == (evidence, active, carried)
 
 
 def swap_the_token_at_the_first_read(

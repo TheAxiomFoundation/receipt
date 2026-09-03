@@ -2905,17 +2905,29 @@ def verify_witness(
     supplied list -- by equality of the update mapping, which is the whole of
     what a bundle reference is -- or this refuses.
 
-    Say plainly what that does and does not close.  A supplied list is a
-    superset by design, so a caller that supplies this record's updates *from
-    an earlier read of this record*, beside the snapshot's own, cannot be told
-    apart from one supplying earlier records' pending updates: both are extra
-    entries the witness has no way to attribute.  What the comparison
-    guarantees is that nothing the snapshot carries is missing, and that is
-    all it guarantees.  The rest is the caller's to arrange, so this module
-    offers ``_verify_witness_with_updates``, which returns the snapshot-derived
-    updates the verification actually used: a chain walker that accumulates
-    pending updates should take this record's from there rather than from a
-    read of its own, and then supply only the earlier records' pending ones.
+    Say plainly what that does and does not close.  The comparison is one-way
+    -- every derived update must be in the supplied list, and the supplied
+    list may hold more -- because a supplied list is a superset by design.  So
+    a caller that supplies this record's updates *from an earlier read of this
+    record*, beside the snapshot's own, cannot be told apart from one
+    supplying earlier records' pending updates: both are extra entries, and
+    nothing in this shape says which record an extra entry came from.  A
+    stale extra is therefore evaluated -- the transition the verification
+    weighs is the supplied list -- and what the comparison guarantees is only
+    that nothing the snapshot carries is missing.
+
+    That residual belongs to this shape and not to the machinery, and it is
+    why the module-level ``_verify_witness_with_updates`` takes
+    ``prior_pending_updates`` instead: the pending updates of *earlier*
+    records only, which it combines with the snapshot's own rather than
+    trusting a list that mixes the two.  It returns the snapshot-derived
+    updates beside the evidence, so a chain walker accumulates this record's
+    from the verification rather than from a read of its own and never has
+    both kinds to hand at once -- and there is then no extra entry to
+    attribute, because the caller supplies no entry that could be this
+    record's.  This shape stays because the upstream integration this module
+    is a port of walks its chain exactly this way, and its signature is
+    0.5.1's.
     """
 
     evidence, _updates = _verify_witness_with_updates(
@@ -2937,19 +2949,41 @@ def _verify_witness_with_updates(
     now: datetime | None = None,
     trusted_bundles: Mapping[str, dict[str, Any]] | None = None,
     transition_bundle_updates: list[dict[str, Any]] | None = None,
+    prior_pending_updates: list[dict[str, Any]] | None = None,
 ) -> tuple[WitnessEvidence, list[dict[str, Any]]]:
     """``verify_witness``, and the record's own trust-bundle updates.
 
     Every refusal and every check's place belongs to the public function; this
     is where its body lives.  The second return value is the list derived from
     the bytes this call read -- validated, in the record's own order -- so a
-    caller that has to carry this record's pending updates forward can take
-    them from the verification instead of reading the record again.  That is
-    the only way for such a caller to supply earlier records' updates without
-    also supplying its own from a second read, which is the one substitution
-    the comparison in here cannot see.
+    caller that has to carry this record's pending updates forward takes them
+    from the verification instead of reading the record again.
+
+    The two kinds of update are separate here, which is what the public
+    function's one list cannot do.  ``prior_pending_updates`` is the pending
+    updates of *earlier* records and nothing else; this record's own are
+    derived from the snapshot, and the transition the verification weighs is
+    the two combined -- prior first, then the snapshot's, each mapping
+    admitted once, since a reference repeated across the two describes one
+    bundle and walking it twice would refuse it as its own alias.  So there is
+    no entry in the transition this call did not either derive or attribute to
+    a record before this one, and the stale extra the supplied-list shape
+    cannot see has nowhere to enter (peer review, fifth gate round three).
+
+    ``transition_bundle_updates`` is the other shape, the public function's:
+    prior and current together from the caller's own read, checked to contain
+    every derived update and then used entire.  The two are mutually
+    exclusive, and supplying both is a ``TypeError`` rather than a refusal --
+    there is no reading of a call that says "these are the earlier records'
+    updates" and "these are the earlier records' updates and this one's" at
+    once, and quietly preferring one of them is how a caller ends up believing
+    the other was honoured.
     """
 
+    if transition_bundle_updates is not None and prior_pending_updates is not None:
+        raise TypeError(
+            "supply transition_bundle_updates or prior_pending_updates, not both"
+        )
     records = (records or path.parents[1]).resolve()
     # One read of the record, and every question about it is asked of these
     # bytes: the digest the sidecar has to match, the trust-bundle updates it
@@ -2988,7 +3022,16 @@ def _verify_witness_with_updates(
     supplied = transition_bundle_updates
     updates = trust_bundle_updates(records, _record_payload(record, path), spec=spec)
     if supplied is None:
-        transition_bundle_updates = updates
+        # The shape with nothing left over: the earlier records' pending
+        # updates, and this record's own from the snapshot.  Combined here so
+        # that no caller ever has to hold both kinds and hand them over as
+        # one.  Deduplicated by mapping equality, which is the whole of what a
+        # bundle reference is: one reference named twice is one bundle, and
+        # walking it twice would refuse it as an alias of itself.
+        transition_bundle_updates = []
+        for update in (*(prior_pending_updates or ()), *updates):
+            if update not in transition_bundle_updates:
+                transition_bundle_updates.append(update)
     else:
         if any(update not in supplied for update in updates):
             raise TsaError(
@@ -2996,7 +3039,9 @@ def _verify_witness_with_updates(
                 "witnessed record's own"
             )
         # Used as given: it carries the pending updates of earlier records,
-        # which this call has no way to derive and no business dropping.
+        # which this call has no way to derive and no business dropping --
+        # and, indistinguishably, whatever else the caller put in it, which
+        # is the residual verify_witness's docstring states.
         transition_bundle_updates = supplied
     schema = witness.get("schemaVersion")
     if schema == "thesis_rfc3161_witness_v1":
