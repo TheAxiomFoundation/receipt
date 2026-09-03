@@ -72,9 +72,13 @@ under disjoint signer sets that the bundle-local check cannot connect -- the
 class, not an ``(ID, root SPKI)`` pair, is the unit, and the refusal names both
 anchors and every authority identity in the class they share (peer review,
 sixth gate round two); a caller-supplied trust transition that omits an update
-the
-witnessed record itself carries, which is a transition read from one instant
-of the record and evidence taken from another; a chain genesis file or a
+the witnessed record itself carries, which is a transition read from one
+instant of the record and evidence taken from another; a caller-supplied
+transition that contains an update the witnessed snapshot does not, which
+used to evaluate record A's stale update through replacement record B's valid
+sidecar -- compatibility calls now name and refuse the extra, evaluate exactly
+the derived set, and leave accumulated earlier-record updates to the public
+step API (peer review, sixth gate round two); a chain genesis file or a
 witness sidecar that is not a readable regular file -- genesis had no
 path-level check at all, so the baseline let a directory there raise into a
 message about a parse that never happened, and a sidecar that was a symlink
@@ -668,6 +672,20 @@ class WitnessEvidence:
     tsa_subject: str | None = None
     tsa_certificate_sha256: str | None = None
     tsa_spki_sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class WitnessStep:
+    """One verified witness and the trust updates derived from its one read.
+
+    ``trust_bundle_updates`` contains only this record's own validated updates,
+    in record order.  A chain walker passes the still-pending updates returned
+    by earlier steps to :func:`verify_witness_step` and never has to parse the
+    record beside the verification that authenticates it.
+    """
+
+    evidence: WitnessEvidence
+    trust_bundle_updates: tuple[dict[str, Any], ...]
 
 
 def sha256_file(path: Path) -> str:
@@ -3538,6 +3556,37 @@ def verify_witness(
     return evidence
 
 
+def verify_witness_step(
+    path: Path,
+    *,
+    spec: TsaSpec,
+    records: Path | None = None,
+    now: datetime | None = None,
+    trusted_bundles: Mapping[str, dict[str, Any]] | None = None,
+    prior_pending_updates: list[dict[str, Any]] | None = None,
+) -> WitnessStep:
+    """Verify one chain step without accepting this record's updates on trust.
+
+    ``prior_pending_updates`` contains only updates returned by earlier calls.
+    This call derives the current record's updates from the same bytes its
+    witness authenticates, evaluates prior and current together, and returns
+    the current ones beside the evidence for the next step to carry forward.
+    """
+
+    evidence, updates = _verify_witness_with_updates(
+        path,
+        spec=spec,
+        records=records,
+        now=now,
+        trusted_bundles=trusted_bundles,
+        prior_pending_updates=prior_pending_updates,
+    )
+    return WitnessStep(
+        evidence=evidence,
+        trust_bundle_updates=tuple(dict(update) for update in updates),
+    )
+
+
 def _verify_witness_with_updates(
     path: Path,
     *,
@@ -3618,28 +3667,38 @@ def _verify_witness_with_updates(
     # supplied list is compared with it rather than believed.
     supplied = transition_bundle_updates
     updates = trust_bundle_updates(records, _record_payload(record, path), spec=spec)
-    if supplied is None:
-        # The shape with nothing left over: the earlier records' pending
-        # updates, and this record's own from the snapshot.  Combined here so
-        # that no caller ever has to hold both kinds and hand them over as
-        # one.  Deduplicated by mapping equality, which is the whole of what a
-        # bundle reference is: one reference named twice is one bundle, and
-        # walking it twice would refuse it as an alias of itself.
-        transition_bundle_updates = []
-        for update in (*(prior_pending_updates or ()), *updates):
-            if update not in transition_bundle_updates:
-                transition_bundle_updates.append(update)
-    else:
+    if supplied is not None:
         if any(update not in supplied for update in updates):
             raise TsaError(
                 "transition bundle updates supplied by the caller omit the "
                 "witnessed record's own"
             )
-        # Used as given: it carries the pending updates of earlier records,
-        # which this call has no way to derive and no business dropping --
-        # and, indistinguishably, whatever else the caller put in it, which
-        # is the residual verify_witness's docstring states.
-        transition_bundle_updates = supplied
+        for update in supplied:
+            if update not in updates:
+                label: Any = update
+                if isinstance(update, Mapping) and isinstance(
+                    update.get("path"), str
+                ):
+                    label = update["path"]
+                raise TsaError(
+                    f"stale transition bundle update supplied for {path}: "
+                    f"{label!r}"
+                )
+        # The compatibility argument has now established equality with the
+        # snapshot-derived set.  It contributes no transition entry itself;
+        # evaluating only ``updates`` is what makes the evidence and the
+        # transition answers from one read (peer review, sixth gate round two).
+        prior_pending_updates = []
+
+    # The safe shape: earlier records' pending updates, and this record's own
+    # from the snapshot.  Combined here so that no caller ever has to hold both
+    # kinds and hand them over as one.  Deduplicated by mapping equality, which
+    # is the whole of what a bundle reference is: one reference named twice is
+    # one bundle, and walking it twice would refuse it as its own alias.
+    transition_bundle_updates = []
+    for update in (*(prior_pending_updates or ()), *updates):
+        if update not in transition_bundle_updates:
+            transition_bundle_updates.append(update)
     schema = witness.get("schemaVersion")
     if schema == "thesis_rfc3161_witness_v1":
         preferred = (
