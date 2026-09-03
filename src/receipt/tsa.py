@@ -67,16 +67,8 @@ that is nobody's --
 which is neither a rename nor a new authority and so is refused rather than
 skipped or admitted, since skipping it activates something with no
 supplemental evidence and admitting it lets an authority the chain already
-trusts produce the very token the new key is supposed to prove; pending
-history that used to be a rolling set of current candidates, so a skipped
-rename or rotation contributed no edge, succession deleted the predecessor's
-signer ownership, and reversing an anchor array could change the verdict --
-one persistent component graph is now built from every active and pending
-anchor ever seen, joining equal ``(ID, root SPKI)`` authorities and shared
-signing keys whether or not an occurrence is skipped, never deleting a
-historical edge, and choosing at most the newest candidate from a pending-only
-class, which makes classification independent of anchor-array order (peer
-review, sixth gate round two); a pending bundle that presents two anchors from
+trusts produce the very token the new key is supposed to prove; a pending
+bundle that presents two anchors from
 one of those historical classes, which would make one authority current twice
 under disjoint signer sets that the bundle-local check cannot connect -- the
 class, not an ``(ID, root SPKI)`` pair, is the unit, and the refusal names both
@@ -156,6 +148,32 @@ by two paths, or offers one authority's timestamp twice; and the walk in
 front of them because nothing in that tree is reached through a link at all
 -- its 91 token paths, 53 record paths and 2 pinned root paths pass through
 161 distinct components below the records root, not one of them a symlink.
+
+The count above is arithmetic and not a tally of the list's members, several
+of which carry more than one refusal: the sixth gate's round one left twenty
+places, and its round two withdrew one and added three.  The withdrawal is
+the only one in the port's history, so it is stated rather than absorbed.
+What it withdrew was the refusal of two pending bundles introducing one
+authority under two anchors, sharing a signer.  Pending history was a rolling
+set of current candidates, so a skipped rename or rotation contributed no
+edge, succession deleted the predecessor's signer ownership, and reversing an
+anchor array could change the verdict.  One persistent component graph is
+built instead, from every active and pending anchor this verification sees,
+joining equal ``(ID, root SPKI)`` authorities and shared signing keys whether
+or not an occurrence is skipped, never deleting a historical edge, and
+contributing at most one candidate from each pending-only class -- its newest
+occurrence, because that is the anchor a witness will answer for once the
+transition activates.  That is a stronger statement about the shape the
+refusal existed for: what stopped one new authority being counted twice was
+never the refusal itself but the count, and one class now demands exactly one
+supplemental outcome however many names it has been filed under.  It also
+makes the classification independent of anchor-array order, which the rolling
+set was not (peer review, sixth gate round two).  What it costs is the
+diagnosis, and that cost is real: a producer that files one authority under
+two names by mistake is no longer told so, and sees instead the ported
+refusal for a supplemental outcome no pending transition introduces, which
+names the anchor slot that lost the election rather than the collision that
+decided it.
 
 The pinned root behind the two counting refusals is read from the repository
 exactly once, and every check runs on those bytes: the PEM hash over the
