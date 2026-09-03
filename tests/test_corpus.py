@@ -4662,6 +4662,46 @@ def test_refuses_an_attested_name_stored_under_a_different_normalization(
     )
 
 
+def test_refuses_a_directory_holding_two_spellings_of_a_bound_component(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S5R3-F3: the spelling walk stopped at the component it wanted.
+
+    S5R2-F1 bound the spelling a directory emits, and it asked the question
+    with ``any(entry.name == component)`` — which stops at the first match.
+    The exact spelling being present does not mean it is the only one. A
+    case-sensitive tree can hold ``.axiom/toolchain.toml`` and
+    ``.axiom/TOOLCHAIN.TOML`` side by side, and the walk saw the first, said
+    the component was spelled, and never looked at the second — while a
+    case-insensitive consumer collapses the two into one file and cannot say
+    which of them the witnessed digest covers. That is the same
+    host-dependence S5R2-F1 closed, arriving from the other side: the
+    corpus is well defined on the auditor's clone and ambiguous on the
+    consumer's.
+
+    The whole listing is consumed now, and a sibling that folds onto the
+    component without being it refuses by name. Under the portable-name
+    policy that is the only fold class left, so what this asks is whether
+    another spelling differs from the bound one only in case.
+
+    The sibling is injected into the listing rather than written, so the
+    test says the same thing on a case-insensitive host, where the tree
+    cannot hold both. Without the fix this verification returns a
+    CorpusVerification over the corpus.
+    """
+
+    write_tree(tmp_path)
+    monkeypatch.setattr(os, "scandir", _scandir(".axiom", extra=["TOOLCHAIN.TOML"]))
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        "directory holds another spelling of a bound path component: "
+        "'TOOLCHAIN.TOML' beside 'toolchain.toml'"
+    )
+
+
 def test_refuses_a_required_attested_path_the_directory_does_not_spell(
     tmp_path: pathlib.Path,
 ) -> None:

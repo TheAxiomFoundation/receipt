@@ -65,14 +65,19 @@ Three row kinds, one journal:
     which paths it *requires*, so a producer cannot quietly drop one. The
     spelling is bound as well as the bytes: every component of every bound
     path must appear in a listing of its parent under exactly the declared
-    spelling, so a case-insensitive volume resolving an attested
-    ``readme.md`` to the ``README.md`` it stores is refused rather than
-    hashed. Without that, the same corpus verified on the auditor who cloned
-    onto APFS and refused as a missing file on the auditor who cloned onto
-    ext4 (peer review, Sol round 2). Asked of attested paths, because nothing
-    else enumerates them: a content path is already known to be spelled the
-    way a listing emits it, since the sweep builds its set out of listing
-    names and the membership comparison proves the two sets equal.
+    spelling, and no *other* spelling of it may appear beside it, so a
+    case-insensitive volume resolving an attested ``readme.md`` to the
+    ``README.md`` it stores is refused rather than hashed, and a
+    case-sensitive tree holding both is refused rather than verified for a
+    consumer who can hold only one. Without the first, the same corpus
+    verified on the auditor who cloned onto APFS and refused as a missing
+    file on the auditor who cloned onto ext4 (peer review, Sol round 2);
+    without the second, the listing was consumed only as far as the exact
+    spelling and the coexisting one was never seen (peer review, Sol round
+    3). Asked of attested paths, because nothing else enumerates them: a
+    content path is already known to be spelled the way a listing emits it,
+    since the sweep builds its set out of listing names and the membership
+    comparison proves the two sets equal.
     Retiring one is recorded by a ``removed`` row, and the file has to leave
     the tree with it: a removed path still on disk refuses, whichever kind
     it was. Two questions are asked about a tombstone, in this order — does
@@ -2277,6 +2282,18 @@ def _assert_spelled_by_its_directory(
     listing rather than by the resolution, because the listing emits the one
     spelling the volume actually stores.
 
+    The whole listing is consumed, not the first matching entry, because
+    the exact spelling being present does not mean it is the only one. A
+    case-sensitive tree can hold ``.axiom/toolchain.toml`` and
+    ``.axiom/TOOLCHAIN.TOML`` side by side; this check saw the first, said
+    the component was spelled, and stopped — while a case-insensitive
+    consumer collapses the two into one file and cannot say which of them
+    the digest covers. So a sibling that folds onto the component without
+    being it refuses, by name. Under the portable-name policy that is the
+    only fold class left, and the component itself is ASCII, so what the
+    fold key is asking here is whether some other spelling differs from the
+    bound one only in case (S5R3-F3).
+
     Asked only of a component that resolves. Where nothing answers to the
     spelling there is no resolution to disagree with, and the caller's own
     refusal — a missing bound file, an absent content root — says something
@@ -2310,9 +2327,19 @@ def _assert_spelled_by_its_directory(
             "cannot check the spelling a bound path component resolves "
             f"under: {relative} ({exc.strerror})"
         ) from exc
+    folded = _path_fold(component)
+    spelled = False
+    # Only the first fold-equal sibling is kept: it is what the refusal
+    # names, and a directory an adversary has filled with case variants of
+    # one component must not make this loop hold all of them.
+    other: str | None = None
     try:
         with os.scandir(parent) as entries:
-            spelled = any(entry.name == component for entry in entries)
+            for entry in entries:
+                if entry.name == component:
+                    spelled = True
+                elif other is None and _path_fold(entry.name) == folded:
+                    other = entry.name
     except OSError as exc:
         raise CorpusError(
             "cannot enumerate the directory that would spell a bound path "
@@ -2320,9 +2347,18 @@ def _assert_spelled_by_its_directory(
             f"({exc.strerror})"
         ) from exc
     if not spelled:
+        # First, so that a volume which resolved the declared spelling to the
+        # one it stores keeps the refusal that says exactly that. The check
+        # below is about two spellings coexisting, which is a different tree
+        # and a different thing to tell an auditor.
         raise CorpusError(
             f"path component {_quoted(component)} is not spelled by its "
             f"directory: {relative}"
+        )
+    if other is not None:
+        raise CorpusError(
+            "directory holds another spelling of a bound path component: "
+            f"{_quoted(other)} beside {_quoted(component)}"
         )
 
 
