@@ -3470,6 +3470,133 @@ def _mutating_scandir(directory_name: str, mutate):
     return scandir
 
 
+def test_a_directory_that_became_a_file_verifies_and_keeps_verifying(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S7-R3-F5: the search recursed through a regular-file component.
+
+    An ordinary lifecycle: a corpus once carried ``rules/README.md/legacy.yaml``,
+    the journal retired it, and ``rules/README.md`` is now the ordinary
+    read-me file that name usually is. Nothing here is adversarial and
+    nothing is in motion — the tombstone is honoured, the file is gone, and
+    ``README.md`` is not content because ``.md`` is not a pinned suffix.
+
+    The search matched ``README.md`` by fold key, found components still to
+    go, and recursed into it. ``_TombstoneIndex.folded`` stamps a directory
+    before it lists it, so the recorder was handed a regular file;
+    ``_directory_generation`` has no generation for one and recorded
+    ``None``; ``os.scandir`` then raised ``NotADirectoryError``, which the
+    index reads as an ordinary absence, so the tombstone passed. The ``None``
+    was still in the recorder at the end of the run, where ``assert_unchanged``
+    read it as a directory that had moved — so this corpus refused as "the
+    tree changed during verification" on every run, for ever, with the tree
+    perfectly still. Verifying twice is the point: the failure was not a
+    race, and a second identical run reproduced it exactly.
+
+    Both halves of the fix are bound here, because either one alone hides
+    the other. The search no longer descends into a non-directory, so the
+    recorder is never offered ``rules/README.md`` at all — asserted over
+    every name ``record`` is handed — and a stamp the recorder never took is
+    no longer read as movement.
+
+    Without the first half ``rules/README.md`` is stamped and the recorded
+    names assertion fails; without the second the first call raises the
+    refusal.
+    """
+
+    import receipt.corpus as corpus_module
+
+    recorded: list[str] = []
+    real_record = corpus_module._DirectoryGenerations.record
+
+    def recording_record(
+        self: object, directory: pathlib.Path, relative: str
+    ) -> bool:
+        recorded.append(relative)
+        return real_record(self, directory, relative)
+
+    monkeypatch.setattr(
+        corpus_module._DirectoryGenerations, "record", recording_record
+    )
+
+    write_tree(tmp_path)
+    legacy = "rules/README.md/legacy.yaml"
+    body = "name: legacy\n"
+    rows = journal_rows()
+    for state in ("present", "removed"):
+        rows.append(
+            {
+                "schemaVersion": JOURNAL_SCHEMA,
+                "kind": "content",
+                "path": legacy,
+                "sha256": sha256_text(body),
+                "state": state,
+            }
+        )
+    reindex(rows)
+    readme = tmp_path / "rules" / "README.md"
+    readme.write_text("# rules\n")
+    assert readme.is_file()
+
+    for _ in range(2):
+        verification = verify_corpus_binding(
+            tmp_path, render_journal(rows), spec=corpus_spec()
+        )
+        assert verification.removed_paths == (legacy,)
+        assert legacy not in {entry.path for entry in verification.content}
+        # The directories around it are stamped; the file is not a directory
+        # and is never offered as one.
+        assert "rules" in recorded
+        assert "rules/README.md" not in recorded
+
+
+def test_a_stamp_the_recorder_never_took_is_not_a_mutation(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S7-R3-F5: a ``None`` stamp was read as a directory that moved.
+
+    ``record`` keeps a ``None`` for anything it could not stamp — a regular
+    file, an absent path, a directory it could not ``lstat`` — and
+    ``assert_unchanged`` treated every one of them as movement. A ``None``
+    says this recorder never had a stamp to compare, which is not a claim
+    about the tree, and the recorders that produce one either refuse at the
+    listing that follows or hand their subject to a re-hash that asks a
+    stronger question.
+
+    The direction that matters is asserted immediately after, because
+    passing over an untaken stamp must not pass over a taken one: a
+    directory stamped with a real generation and then written into still
+    refuses, in the sentence it always did.
+
+    Without S7-R3-F5 the first ``assert_unchanged`` raises.
+    """
+
+    from receipt.corpus import (
+        _DirectoryGenerations,
+        _PathPrefixWork,
+        _directory_generation,
+    )
+
+    (tmp_path / "notes.txt").write_text("x\n")
+    generations = _DirectoryGenerations(_PathPrefixWork())
+    assert generations.record(tmp_path / "notes.txt", "notes.txt") is False
+    assert generations.record(tmp_path / "absent", "absent") is False
+    generations.assert_unchanged()
+
+    watched = tmp_path / "watched"
+    watched.mkdir()
+    assert generations.record(watched, "watched") is True
+    stamped = _directory_generation(watched)
+    (watched / "planted.txt").write_text("y\n")
+    assert _directory_generation(watched) != stamped
+    with pytest.raises(CorpusError) as caught:
+        generations.assert_unchanged()
+    assert str(caught.value) == (
+        "the tree changed during verification; the closed-world verdict is "
+        "refused"
+    )
+
+
 def test_a_tombstone_entry_that_vanishes_after_the_listing_is_not_a_survivor(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

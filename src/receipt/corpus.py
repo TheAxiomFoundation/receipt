@@ -269,6 +269,18 @@ nothing below it can exist, so descending through every remaining component
 only multiplied strings and ``lstat`` calls before the missing bound file
 refused later (peer review, Sol round 7).
 
+The tombstone search stops there for the same reason and it took a round to
+say so. It descended through an intermediate component that was a regular
+file, which asked the index for a listing that entry cannot have; the entry
+was stamped before the listing was attempted, a file has no generation to
+stamp, and the run then refused the whole verdict as "tree changed". So an
+ordinary directory-to-file lifecycle — a tombstone for a file under
+``README.md/``, with ``README.md`` since recreated as an ordinary file —
+could not verify on any run, however still the tree was (peer review, Sol
+round 7, round 3). A non-directory now ends that branch of the search
+without being recorded, and a stamp the recorder never took is passed over
+by the re-check rather than read as movement.
+
 *When* each stamp is taken is what decides what the re-check can promise, and
 the answer is: at the run's first read of that directory, by whichever pass
 makes it. One recorder is built before anything looks at the tree and is
@@ -2245,10 +2257,25 @@ class _DirectoryGenerations:
     window the check closes is the widest one available rather than the
     narrowest.
 
-    A directory that could not be stat-ed is kept as ``None`` and refuses at
-    the re-check. That is the module's standing rule — a failure to look is
-    not an absence — and in practice the listing that follows the stamp
-    refuses first, with a message that says what could not be read.
+    A directory that could not be stat-ed is kept as ``None``, and the
+    re-check passes over it rather than reading it as a mutation. What a
+    ``None`` records is that this recorder never had a stamp to compare, not
+    that the tree moved, and treating it as movement refused runs where
+    nothing had: a tombstone search that reached a regular file where a
+    directory component was named recorded the file, and a legitimate
+    directory-to-file lifecycle — a tombstone for ``README.md/child`` with
+    ``README.md`` now an ordinary file — failed as "tree changed" on every
+    run, for ever (peer review, Sol round 7, round 3).
+
+    Nothing is lost by passing over it, because a ``None`` stamp is never the
+    only thing looking. Each recorder either lists the directory immediately
+    — :func:`_list_directory` refuses what it cannot enumerate and
+    :class:`_TombstoneIndex` refuses every failure that is not a plain
+    absence — or is an ancestor walk whose bound file is opened and re-hashed
+    afterwards, which is a stronger question than the stamp asked. And the
+    direction that matters is untouched: a directory stamped with a real
+    generation that *becomes* unreadable answers ``None`` at the re-check,
+    which does not equal the tuple it was stamped with, and refuses.
 
     What the re-check can and cannot see is stated on
     :meth:`assert_unchanged`, which re-reads the stamps in both directions
@@ -2375,7 +2402,11 @@ class _DirectoryGenerations:
         """Re-state one stamped directory, refusing if it moved."""
 
         directory, generation = self._seen[relative]
-        if generation is None or _directory_generation(directory) != generation:
+        if generation is None:
+            # Never stamped, so there is nothing to compare and no movement
+            # to claim; the class docstring says what looks instead.
+            return
+        if _directory_generation(directory) != generation:
             raise CorpusError(
                 "the tree changed during verification; the closed-world "
                 "verdict is refused"
@@ -2646,6 +2677,16 @@ def _fold_survivor(index: _TombstoneIndex, relative: str) -> str | None:
                     "removed path traverses a symlink or reparse point at "
                     f"{_quoted('/'.join([*spelled, entry.name]))}: {relative}"
                 )
+            if not stat.S_ISDIR(info.st_mode):
+                # A regular file, a device, a socket: this branch of the
+                # search ends here. Descending anyway asked the index for a
+                # listing the entry cannot have, which cost a stamp the
+                # recorder could not take and then refused the whole verdict
+                # as "tree changed" — for a tombstone that had been honoured
+                # and a tree that had not moved (peer review, Sol round 7,
+                # round 3). A file has no listing to stamp and nothing can be
+                # under it, so it is neither recorded nor recursed into.
+                continue
             found = search(entry, rest, [*spelled, entry.name])
             if found is not None:
                 return found
