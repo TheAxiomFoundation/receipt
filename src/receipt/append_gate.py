@@ -114,7 +114,14 @@ reads either state file, because an untracked state path, or one under a
 gitlink, is not this commit's content and nothing downstream can be a verdict
 about it. ``release_chain.assert_index_carries_no_protected_alias`` runs
 beside it and shares that exception rather than adding a fourth: it is the
-same fact from the other side. An index entry spelled as another spelling of a
+same fact from the other side. That one read of the whole index answers a
+second thing nothing else can, and shares the exception for it too — an entry
+marked assume-unchanged or skip-worktree tells git to stop comparing that path
+against the working tree, so ``git diff`` reports nothing for a file rewritten
+on disk, and the surface classification this run is built on is that diff: the
+ledger could be rewritten under such an entry, a gate file added beside it,
+and the proposal classified gate-only and returned before any of it was read.
+An index entry spelled as another spelling of a
 protected path is a second object every reconciliation below is blind to,
 because each compares by exact spelling; which of the two the one file on a
 name-folding filesystem answers for is not decidable from the index or the

@@ -4841,3 +4841,66 @@ def test_a_new_release_file_staged_with_other_content_is_refused(
         f"{CHAIN_SPEC.manifest_relative.as_posix()}/{stem}{suffix} than the "
         "working tree this verdict read"
     )
+
+
+@pytest.mark.parametrize(
+    "flag", ["--assume-unchanged", "--skip-worktree"], ids=["assume", "skip"]
+)
+def test_an_index_entry_that_hides_the_working_tree_is_refused(
+    tmp_path: pathlib.Path, flag: str
+) -> None:
+    """Binds S4R3-F2. ``git update-index --assume-unchanged`` and
+    ``--skip-worktree`` both tell git to stop comparing an entry against the
+    working tree, and the whole surface classification is built on ``git
+    diff``: with the bit set the ledger can be rewritten on disk and the diff
+    reports nothing. Add a gate file beside it and the proposal classifies as
+    gate-only, which returns before the frozen prefix, the append-only diff,
+    the row bindings and the release history are read at all — so a data
+    rewrite ships under a verdict that says DATA_SURFACE unchanged.
+
+    Verified against 7f7597a, where this tree is accepted as ``thesis-facts
+    append check OK: gate-only proposal; DATA_SURFACE unchanged; GATE_SURFACE
+    changes=['scripts/check_append.py']``.
+
+    Refusing the flag itself is the answer, at entry, for any entry rather
+    than only the protected ones: the classification the bit corrupts covers
+    every path in the tree. Without the second pass in
+    ``assert_index_carries_no_protected_alias`` this run returns that
+    acceptance."""
+
+    candidate = base_repository(tmp_path)
+    state_path = CHAIN_SPEC.state_relative.as_posix()
+    git(candidate.root, "update-index", flag, "--", state_path)
+    append_one_row(candidate)
+    add_gate_file(candidate)
+    # The bit does what the finding says it does: the rewrite is invisible.
+    assert git(candidate.root, "diff", "--name-only") == ""
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == (
+        f"index entry for {state_path} is marked assume-unchanged or "
+        "skip-worktree, which hides working-tree changes from git"
+    )
+
+
+def test_an_ordinary_proposal_carries_no_hidden_index_entry(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S4R3-F2's other side: the refusal is about a bit a proposal has to set
+    on purpose, so an ordinary one is untouched. Every record in an ordinary
+    candidate index reads as visible, and the proposal is accepted exactly as
+    it was before the check existed."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    stage(candidate)
+
+    assert [
+        record.hidden
+        for record in release_chain._all_index_entries(candidate.root)
+    ] == [False, False, False]
+    assert run_gate(candidate) == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 1, "
+        "+1 appended vs base"
+    )
