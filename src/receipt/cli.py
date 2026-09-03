@@ -86,8 +86,14 @@ so a filename carrying it could begin a control sequence through a
 character :func:`_terminal_safe` had no reason to touch; ISO-2022-JP emits
 ESC to switch character sets, so ordinary Japanese text carries 0x1B (peer
 review, Sol round 3). :func:`_byte_safe_encoding` uses the stream's own
-codec only when it is a UTF and ASCII with ``backslashreplace`` otherwise,
-so every byte written is one the escaper approved.
+codec only when it is UTF-8 and ASCII with ``backslashreplace`` otherwise,
+so every byte written is one the escaper approved. UTF-16 and UTF-32 were
+trusted alongside it on the argument that a UTF is a UTF, and they do not
+survive it: under UTF-16LE the printable U+5B1B and U+6D38 encode to
+``1b 5b 38 6d``, which is ``ESC [ 8 m`` and hides the rest of the line from
+anything reading the stream as bytes (peer review, Sol round 4). UTF-8 is
+trusted because its code units are bytes and the escaper judged every one of
+them; a wider unit is a unit the escaper never saw.
 
 The JSON renderer needs nothing of the kind. ``json.dumps`` with
 ``ensure_ascii`` at its default escapes every non-ASCII code point into a
@@ -575,13 +581,14 @@ def _format_text(result: VerifyResult) -> str:
 
 
 #: The canonical names of the codecs whose bytes a reader decodes back to
-#: exactly the characters this module escaped. Everything else — a legacy
-#: code page, a stateful ISO-2022 encoding, UTF-7 — is a mapping this module
-#: does not model, and the escaping :func:`_terminal_safe` performs is over
-#: *characters*, so a codec that maps a printable character onto a
-#: terminal-controlling byte defeats it after the fact. See
-#: :func:`_byte_safe_encoding`.
-_UTF_ENCODINGS = frozenset({"utf-8", "utf-8-sig"})
+#: exactly the characters this module escaped, and which cannot spell a
+#: character it kept as a byte a terminal reads as a control. Everything else
+#: — a legacy code page, a stateful ISO-2022 encoding, UTF-7, and UTF-16 and
+#: UTF-32 as well — is a mapping this module does not model, and the escaping
+#: :func:`_terminal_safe` performs is over *characters*, so a codec that maps
+#: a printable character onto a terminal-controlling byte defeats it after
+#: the fact. See :func:`_byte_safe_encoding`.
+_TRUSTED_ENCODINGS = frozenset({"utf-8", "utf-8-sig"})
 
 
 def _byte_safe_encoding(stream: TextIO) -> str:
@@ -600,28 +607,39 @@ def _byte_safe_encoding(stream: TextIO) -> str:
     is worse in kind rather than in degree: it emits ESC to switch
     character sets, so ordinary Japanese text carries 0x1B.
 
-    So the stream's own encoding is used only when it is a UTF —
-    ``utf-8``, ``utf-8-sig``, or any ``utf-16``/``utf-32`` variant, compared
-    after ``codecs.lookup`` has canonicalised the spelling, which is what
-    turns ``UTF_8`` and ``utf8`` into ``utf-8``. Anything else, and anything
-    unknown, is encoded as ASCII with ``backslashreplace``, so no character
-    outside ASCII can produce a byte at all and every byte written is one
-    the escaper approved.
+    So the stream's own encoding is used only when it is UTF-8 —
+    ``utf-8`` or ``utf-8-sig``, compared after ``codecs.lookup`` has
+    canonicalised the spelling, which is what turns ``UTF_8`` and ``utf8``
+    into ``utf-8``. Anything else, and anything unknown, is encoded as ASCII
+    with ``backslashreplace``, so no character outside ASCII can produce a
+    byte at all and every byte written is one the escaper approved.
 
     UTF-8 needs the argument stated rather than assumed, because it is the
-    case that matters: a multi-byte sequence is a lead byte of 0xC2 or
-    above followed by continuation bytes of 0x80 through 0xBF, and those
+    only case that survives it: a multi-byte sequence is a lead byte of 0xC2
+    or above followed by continuation bytes of 0x80 through 0xBF, and those
     ranges are disjoint from C0 and from ASCII. A UTF-8 reader decodes them
     back to the code point they came from and never to a C1 control; a byte
     in 0x80..0x9F reaching a UTF-8 terminal as a *control* would have to
     have been the code point U+0080..U+009F in the text, which
-    :func:`_terminal_safe` has already escaped. UTF-16 and UTF-32 are the
-    same argument with wider units.
+    :func:`_terminal_safe` has already escaped.
+
+    UTF-16 and UTF-32 were admitted on that argument being "the same with
+    wider units", and it is not. A wider unit is a unit a byte-oriented
+    reader does not see: under UTF-16LE the two perfectly printable code
+    points U+5B1B and U+6D38 encode to the four bytes ``1b 5b 38 6d``, which
+    is ``ESC [ 8 m`` — the SGR sequence that renders the rest of the line
+    invisible, and enough to hide a ``VERDICT: FAIL`` from anything reading
+    the stream as bytes (peer review, Sol round 4). What makes the UTF-8
+    argument work is that its code units *are* bytes and the escaper judged
+    every one of them; UTF-16 and UTF-32 hand the terminal bytes no
+    character in the text ever was.
 
     The cost is that a UTF-8 verdict read through a terminal set to a
-    legacy code page shows mojibake, which is what it already showed. The
-    gain is that no encoding this command does not model can turn printable
-    text into a control sequence.
+    legacy code page shows mojibake, which is what it already showed, and
+    that a UTF-16 or UTF-32 stream now receives ASCII with backslash escapes
+    where it used to receive the characters. The gain is that no encoding
+    this command does not model can turn printable text into a control
+    sequence.
     """
 
     encoding = getattr(stream, "encoding", None)
@@ -630,11 +648,7 @@ def _byte_safe_encoding(stream: TextIO) -> str:
             canonical = codecs.lookup(encoding).name
         except (LookupError, ValueError):
             canonical = ""
-        if (
-            canonical in _UTF_ENCODINGS
-            or canonical.startswith("utf-16")
-            or canonical.startswith("utf-32")
-        ):
+        if canonical in _TRUSTED_ENCODINGS:
             return encoding
     return "ascii"
 
@@ -696,11 +710,13 @@ def _emit(text: str, stream: TextIO) -> None:
     reader sees what was meant, spelled in what the terminal can show.
 
     Which encoding that is, is :func:`_byte_safe_encoding`'s decision and
-    not the stream's: the stream's own codec is used only when it is a UTF,
+    not the stream's: the stream's own codec is used only when it is UTF-8,
     and every other one is replaced by ASCII, because escaping code points
     and then handing them to an arbitrary codec left the escaping to be
     undone by the encoder — cp1252 spells the printable U+203A as the
-    single byte 0x9B, which is CSI (peer review, Sol round 3).
+    single byte 0x9B, which is CSI (peer review, Sol round 3), and UTF-16LE
+    spells the printable U+5B1B and U+6D38 as ``ESC [ 8 m`` (peer review,
+    Sol round 4).
 
     The text stream is flushed before the buffer is written so the two
     layers cannot reorder, and a stream with no usable ``buffer`` — a

@@ -1944,24 +1944,26 @@ def test_a_legacy_codec_cannot_turn_the_verdict_into_a_control_sequence(
     assert data.endswith(b"\n")
 
 
-@pytest.mark.parametrize("encoding", ["utf-8", "UTF_8", "utf-16", "utf-32-le"])
-def test_a_utf_stream_still_carries_the_characters_themselves(encoding: str) -> None:
-    """Binds S5R3-F6, the control: a UTF is what the escaping was built on.
+@pytest.mark.parametrize("encoding", ["utf-8", "UTF_8", "utf-8-sig"])
+def test_a_utf8_stream_still_carries_the_characters_themselves(
+    encoding: str,
+) -> None:
+    """Binds S5R3-F6, the control: UTF-8 is what the escaping was built on.
 
-    A UTF maps the characters ``_terminal_safe`` kept onto bytes a reader
+    UTF-8 maps the characters ``_terminal_safe`` kept onto bytes a reader
     decodes back to those characters, which is the property the escaping
-    needs and the property a code page does not have. A UTF-8 multi-byte
-    sequence is a lead byte of 0xC2 or above followed by continuation bytes
-    of 0x80 through 0xBF, disjoint from C0 and from ASCII, so a UTF-8
-    terminal never decodes one as a C1 control.
+    needs and the property a code page does not have. Its multi-byte
+    sequences are a lead byte of 0xC2 or above followed by continuation
+    bytes of 0x80 through 0xBF, disjoint from C0 and from ASCII, so a
+    byte-oriented reader never sees a control the text did not carry.
 
-    So a UTF stream keeps its own codec and a verdict printed to a modern
+    So a UTF-8 stream keeps its own codec and a verdict printed to a modern
     terminal is unchanged. The spellings are canonicalised through
     ``codecs.lookup``, which is why ``UTF_8`` is here beside ``utf-8``.
 
-    This test passes with the S5R3-F6 change disabled, which is the point:
-    it is the control that keeps the fix from flattening every verdict to
-    ASCII.
+    This test passes with the S5R3-F6 and S5R4-F3 changes disabled, which is
+    the point: it is the control that keeps either fix from flattening every
+    verdict to ASCII.
     """
 
     from receipt.cli import _emit
@@ -1970,6 +1972,45 @@ def test_a_utf_stream_still_carries_the_characters_themselves(encoding: str) -> 
     stream = _CodecStdout(encoding)
     _emit(payload, stream)
     assert stream.written().decode(encoding) == payload + "\n"
+
+
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-le", "utf-32-le"])
+def test_a_wider_code_unit_cannot_carry_an_escape_sequence_either(
+    encoding: str,
+) -> None:
+    """Binds S5R4-F3: a UTF is not a UTF as far as a terminal is concerned.
+
+    S5R3-F6 admitted UTF-16 and UTF-32 alongside UTF-8 on the argument that
+    they are "the same with wider units". They are not, and the difference
+    is the whole of the argument: what makes UTF-8 safe is that its code
+    units *are* bytes, so the escaper judged every byte the stream will
+    carry. A wider unit is a unit no reader of bytes sees. Under UTF-16LE
+    the two perfectly printable code points U+5B1B and U+6D38 encode to
+    ``1b 5b 38 6d`` — ``ESC [ 8 m``, the SGR sequence that renders the rest
+    of the line invisible — out of text carrying no control character at
+    all, which is exactly the shape of the cp1252 finding one round earlier.
+
+    Hiding a line is enough: the verdict's trusted last line is where an
+    auditor reads PASS or FAIL.
+
+    The trusted codec path is UTF-8 alone now, so these streams receive
+    ASCII with backslash escapes. The assertion is over the raw bytes,
+    because bytes are what the finding is about. Without the fix each of
+    these payloads puts 0x1b on the stream.
+    """
+
+    from receipt.cli import _emit
+
+    payload = "FAILED: binding \u5b1b\u6d38.yaml"
+    assert all(ord(character) not in (0x1B, 0x9B) for character in payload)
+    assert 0x1B in payload.encode(encoding)
+
+    stream = _CodecStdout(encoding)
+    _emit(payload, stream)
+    data = stream.written()
+    assert data.isascii()
+    assert b"\x1b" not in data and b"\x9b" not in data
+    assert data == b"FAILED: binding \\u5b1b\\u6d38.yaml\n"
 
 
 def test_a_strict_ascii_stdout_still_gets_the_text_verdict(
