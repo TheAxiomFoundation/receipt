@@ -3002,14 +3002,16 @@ def replace_with_a_fifo_after_the_path_check(
     return swapped
 
 
-@pytest.mark.parametrize("victim", ["record", "token", "root"])
+@pytest.mark.parametrize(
+    "victim", ["record", "token", "root", "bundle", "sidecar", "genesis"]
+)
 def test_a_fifo_raced_in_after_the_path_check_refuses_without_blocking(
     tmp_path: pathlib.Path,
     local_anchors: tuple[LocalAnchor, ...],
     monkeypatch: pytest.MonkeyPatch,
     victim: str,
 ) -> None:
-    """S5-F3: the one read opens without waiting, so a refusal arrives at all.
+    """S5-F3, S5R3-F6: every read opens without waiting, so a refusal arrives.
 
     ``_read_file_once`` opens before ``fstat`` can say what it opened, and the
     path-level check in front of it answers about a name rather than about the
@@ -3021,11 +3023,22 @@ def test_a_fifo_raced_in_after_the_path_check_refuses_without_blocking(
     failure instead of a hung suite. With it the open returns a descriptor at
     once, ``fstat`` sees a FIFO, and the caller's own words come back.
 
-    All three files this module reads once, because all three have the same
-    window: the record, the claimed response, and the pinned root. The root's
-    refusal arrives inside the load-time wrapper, which is where every root
-    material failure has been carried since the anchors were validated at
-    load; the wording it carries is the caller's, unchanged.
+    Six files, because every file this verification depends on has that same
+    window. Three were read once from the start: the record, the claimed
+    response, and the pinned root. The root's refusal arrives inside the
+    load-time wrapper, which is where every root material failure has been
+    carried since the anchors were validated at load; the wording it carries
+    is the caller's, unchanged.
+
+    The other three are the JSON inputs, and they were still read
+    check-then-blocking-open through ``load_json`` -- ``is_file`` about a
+    pathname, ``Path.read_text`` opening it again -- although each of them
+    decides what is trusted: the trust bundle is the anchor set, the sidecar
+    is the claim, and the genesis file is the root of the whole transition
+    (S5R3-F6). Each now goes through ``_load_json_once``, so each hangs
+    without the flag and refuses with it. The bundle's and the sidecar's
+    words are the ones their path-level checks already had; genesis had no
+    check at all and gets one in the same form.
     """
 
     if not hasattr(os, "mkfifo"):
@@ -3036,6 +3049,8 @@ def test_a_fifo_raced_in_after_the_path_check_refuses_without_blocking(
     records = tree.records.resolve()
     root_path = records / "trust" / alpha.tsa.root_pem.name
     token_path = records / RECORD_DAY / tree.tokens[alpha.anchor_id].name
+    bundle_path = records / "trust" / tree.bundle.name
+    genesis_path = records / "CHAIN_GENESIS.json"
     targets = {
         "record": (
             tree.record,
@@ -3050,6 +3065,18 @@ def test_a_fifo_raced_in_after_the_path_check_refuses_without_blocking(
             f"TSA anchor {alpha.anchor_id} in bundle {BUNDLE_ID} references root "
             "material that fails validation: pinned TSA root is missing or not "
             f"a regular file: {root_path}",
+        ),
+        "bundle": (
+            tree.bundle,
+            f"TSA trust bundle is missing or not regular: {bundle_path}",
+        ),
+        "sidecar": (
+            tree.witness,
+            f"missing explicit witness marker for {tree.record}",
+        ),
+        "genesis": (
+            tree.records / "CHAIN_GENESIS.json",
+            f"chain genesis is missing or not a regular file: {genesis_path}",
         ),
     }
     victim_path, expected = targets[victim]
@@ -3070,6 +3097,38 @@ def test_a_fifo_raced_in_after_the_path_check_refuses_without_blocking(
     assert swapped == [str(victim_path)]
     assert stat.S_ISFIFO(os.lstat(victim_path).st_mode)
     assert str(caught.value) == expected
+
+
+def test_a_genesis_path_that_is_not_a_regular_file_is_refused_by_name(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """S5R3-F6: the chain genesis is judged like everything else read here.
+
+    The bundle and the sidecar each had a path-level check saying what they
+    have to be; the genesis file had none. It went straight to ``load_json``,
+    so a genesis path that was a directory came back as ``cannot read JSON``
+    quoting an ``errno`` -- a message about a parse that never happened, about
+    a file that is not a file. It is read through ``_load_json_once`` now,
+    which judges it a regular file first and says so in the same form the
+    other five reads use.
+
+    Without the change this is still a ``TsaError``, so what binds the fix is
+    the message: run at the head with the genesis read back through
+    ``load_json`` and the refusal is ``cannot read JSON ...: [Errno 21] Is a
+    directory``.
+    """
+
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    assert verify_tree(tree).status == "available"
+    genesis = tree.records / "CHAIN_GENESIS.json"
+    genesis.unlink()
+    genesis.mkdir()
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == (
+        "chain genesis is missing or not a regular file: "
+        f"{tree.records.resolve() / 'CHAIN_GENESIS.json'}"
+    )
 
 
 def flag_expression(name: str) -> str:
@@ -3168,6 +3227,15 @@ def test_the_one_reads_parse_refuses_exactly_as_the_ported_reader_does(
     with pytest.raises(TsaError) as one_read:
         tsa_module._record_payload(payload, path)
     assert str(one_read.value) == str(ported.value)
+    # S5R3-F6: and through the helper the trust bundle, the witness sidecar
+    # and the genesis file now go through, which is that same parse over one
+    # non-blocking read rather than over a second open of the path.  What its
+    # ``label`` answers for is a path that is not a readable regular file;
+    # these are all readable regular files, so what comes back is the ported
+    # reader's own words.
+    with pytest.raises(TsaError) as once:
+        tsa_module._load_json_once(path, label="never reached for this file")
+    assert str(once.value) == str(ported.value)
 
 
 def record_opens(monkeypatch: pytest.MonkeyPatch) -> collections.Counter[str]:

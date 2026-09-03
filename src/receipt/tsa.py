@@ -553,6 +553,17 @@ def physical_path(records: Path, value: str) -> Path:
 
 
 def load_json(path: Path) -> dict[str, Any]:
+    """Read and parse one JSON object, as the baseline reads one.
+
+    Public, ported, and no longer called from inside this module: every JSON
+    input the verification depends on goes through ``_load_json_once``
+    instead, which takes one non-blocking ``fstat``-judged read and then
+    raises these same two refusals over those bytes through
+    ``_record_payload``.  This stays for consumer code and for the
+    differential harness's own chain walk, which reads the genesis file the
+    way the baseline does.
+    """
+
     try:
         value = json.loads(path.read_text())
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -964,9 +975,9 @@ def _load_trust_bundle(
             f"TSA trust bundle is not independently pinned by verifier code: {logical}"
         )
     path = physical_path(records, logical)
-    if not path.is_file() or path.is_symlink():
-        raise TsaError(f"TSA trust bundle is missing or not regular: {path}")
-    payload = load_json(path)
+    payload = _load_json_once(
+        path, label=f"TSA trust bundle is missing or not regular: {path}"
+    )
     if payload.get("schemaVersion") != "thesis_tsa_trust_bundle_v1":
         raise TsaError(f"unsupported TSA trust schema: {payload.get('schemaVersion')!r}")
     if not isinstance(payload.get("bundleId"), str) or not payload["bundleId"]:
@@ -1444,6 +1455,45 @@ def _read_pinned_root(path: Path) -> bytes:
         path, f"pinned TSA root is missing or not a regular file: {path}"
     )
     return pem
+
+
+def _load_json_once(path: Path, *, label: str) -> dict[str, Any]:
+    """``load_json`` over one non-blocking, ``fstat``-judged read of ``path``.
+
+    The three JSON inputs this module both checks and then acts on -- a trust
+    bundle, a witness sidecar, and the chain genesis -- were read the way the
+    record, the response and the pinned root used to be: a path-level check
+    answering about a pathname, then ``Path.read_text`` opening that pathname
+    again and waiting on the open.  So a regular file replaced by a FIFO in
+    between was opened as a FIFO and the read blocked with no timeout, and a
+    verification that should have failed hung instead (peer review, fifth gate
+    round three).  Each of these decides what is trusted -- a bundle is the
+    anchor set, a sidecar is the claim, genesis is the root of the whole
+    transition -- so each gets the discipline the other three have: one
+    descriptor, opened without waiting, judged a regular file by the ``fstat``
+    of that descriptor, and parsed from the bytes it returned.
+
+    ``label`` is the caller's own refusal for a path that is not a readable
+    regular file, used both for the path-level check in front and for the
+    descriptor behind it, so a race can change which of the two identical
+    refusals fires but never the message.  Everything else is ``load_json``'s:
+    ``_record_payload`` raises its two refusals, ``cannot read JSON {path}``
+    and ``record must be a JSON object: {path}``, word for word and naming the
+    same file, over the bytes of the one read.
+
+    What is not ``load_json``'s is what it did with ``OSError``.  ``load_json``
+    reports one as ``cannot read JSON``; here an unreadable path is the
+    caller's own refusal, which is the same trade ``_read_witnessed_record``
+    and ``_read_pinned_root`` already made, and what makes it possible for the
+    check and the read to say one thing.  ``O_NOFOLLOW`` comes with the
+    discipline too, so a symlink at the final component is refused where
+    ``read_text`` would have followed it.
+    """
+
+    if not path.is_file() or path.is_symlink():
+        raise TsaError(label)
+    data, _identity = _read_file_once(path, label)
+    return _record_payload(data, path)
 
 
 def _write_root_snapshot(directory: Path, pem: bytes) -> Path:
@@ -2748,16 +2798,24 @@ def _verify_witness_with_updates(
     record = _read_witnessed_record(path)
     digest_sha = hashlib.sha256(record).hexdigest()
     witness_path = path.with_suffix(".witness.json")
-    if not witness_path.is_file():
-        raise TsaError(f"missing explicit witness marker for {path}")
-    witness = load_json(witness_path)
+    # The ported refusal, in its ported words and its ported place; what is
+    # new is that it now also answers for a sidecar the read cannot have --
+    # a FIFO raced in behind the check, or a symlink -- rather than the
+    # check passing and the read waiting or following.
+    witness = _load_json_once(
+        witness_path, label=f"missing explicit witness marker for {path}"
+    )
     if witness.get("digestSha256") != digest_sha:
         raise TsaError(
             f"witness digest mismatch for {path}: expected {digest_sha}, "
             f"got {witness.get('digestSha256')}"
         )
     if trusted_bundles is None:
-        genesis = load_json(records / "CHAIN_GENESIS.json")
+        genesis_path = records / "CHAIN_GENESIS.json"
+        genesis = _load_json_once(
+            genesis_path,
+            label=f"chain genesis is missing or not a regular file: {genesis_path}",
+        )
         trusted_bundles = bootstrap_trust_bundles(
             records, genesis, spec=spec, required=True
         )
