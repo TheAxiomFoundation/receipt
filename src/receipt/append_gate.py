@@ -69,9 +69,10 @@ every release file the base carries is still an entry in the candidate index,
 the release root's index and working tree agree in both directions — no index
 entry the walk cannot see, no entry the walk cannot find, and no entry
 answered for through a symlinked component or under another entry's spelling —
-the index holds no entry spelled as another spelling of a protected path,
-which every one of those reconciliations is blind to because each is a
-comparison by exact spelling, what the index records as a path's *content* is
+the index holds no entry spelled as another spelling of a protected path or
+of any prefix of one — the directory a state file is read through is named by
+that path as much as its leaf is — which every one of those reconciliations is
+blind to because each is a comparison by exact spelling, what the index records as a path's *content* is
 the content this verdict read wherever the commit under review changes that
 path — every reconciliation above compares stage, mode and type and none of
 them bytes, so a file rewritten, staged, and restored on disk went down the
@@ -138,10 +139,17 @@ on disk, and the surface classification this run is built on is that diff: the
 ledger could be rewritten under such an entry, a gate file added beside it,
 and the proposal classified gate-only and returned before any of it was read.
 An index entry spelled as another spelling of a
-protected path is a second object every reconciliation below is blind to,
-because each compares by exact spelling; which of the two the one file on a
-name-folding filesystem answers for is not decidable from the index or the
-tree, so this too says a comparison cannot be made rather than making one. And
+protected path — or of any prefix of one, since ``Ledger`` standing where the
+state file's own directory is, and ``Ledger/notes.txt`` under it, are second
+objects a name-folding checkout puts in that directory or over it — is a
+second object every reconciliation below is blind to, because each compares by
+exact spelling; which of the two the one file on a name-folding filesystem
+answers for is not decidable from the index or the tree, so this too says a
+comparison cannot be made rather than making one. Comparing every prefix depth
+rather than the protected path's own extends that entry-level check without
+moving it: it is the same read of the same index, at entry, answering about
+more of the same paths, and an entry spelled exactly right as far down as it
+goes is untouched. And
 ``_assert_root_unchanged`` runs ahead of the surface classification, which is
 a pre-existing check and the one that decides which path the whole run takes,
 because a root exchanged since ``_set_root`` recorded it means the tree being

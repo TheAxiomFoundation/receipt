@@ -4416,7 +4416,7 @@ def test_an_index_alias_of_the_release_root_is_refused(
         run_push_gate(candidate)
     assert str(refusal.value) == (
         "index carries an alias of a protected path: Releases/README.md "
-        "(for releases)"
+        "(for releases at releases)"
     )
 
 
@@ -4444,7 +4444,8 @@ def test_an_index_alias_of_a_state_path_is_refused(tmp_path: pathlib.Path) -> No
         run_push_gate(candidate)
     assert str(refusal.value) == (
         "index carries an alias of a protected path: "
-        "Ledger/official_observations.jsonl (for ledger/official_observations.jsonl)"
+        "Ledger/official_observations.jsonl "
+        "(for ledger/official_observations.jsonl at ledger)"
     )
 
 
@@ -4465,7 +4466,77 @@ def test_an_index_alias_is_refused_against_a_base_as_well(
         run_gate(candidate)
     assert str(refusal.value) == (
         "index carries an alias of a protected path: Releases/README.md "
-        "(for releases)"
+        "(for releases at releases)"
+    )
+
+
+@pytest.mark.parametrize(
+    ("tracked", "alias", "protected", "prefix"),
+    [
+        (
+            "ledger/official_observations.jsonl",
+            "Ledger",
+            "ledger/official_observations.jsonl",
+            "ledger",
+        ),
+        (
+            "ledger/official_observations.jsonl",
+            "Ledger/notes.txt",
+            "ledger/official_observations.jsonl",
+            "ledger",
+        ),
+        ("releases/README.md", "Releases/notes.txt", "releases", "releases"),
+    ],
+    ids=["ancestor-as-a-file", "under-the-ancestor", "under-the-release-root"],
+)
+def test_an_index_alias_of_a_protected_ancestor_is_refused(
+    tmp_path: pathlib.Path, tracked: str, alias: str, protected: str, prefix: str
+) -> None:
+    """Binds S4R4-F6. The alias scan compared an entry against a protected
+    path at that path's own depth alone, and a protected path names each of
+    its ancestors as much as its leaf: ``ledger`` is the directory the state
+    file is read through. An entry spelled ``Ledger`` — a file standing where
+    that directory is — is shorter than the state path, and
+    ``Ledger/notes.txt`` differs from it at the leaf, so at that one depth
+    neither folded onto anything and neither was refused, while both are
+    second committed objects a name-folding checkout materialises in the
+    protected directory or over it. No other check names them either: every
+    index read here asks about a path by its exact spelling, so
+    ``:(literal)ledger/official_observations.jsonl`` never matches them.
+
+    Measured at c45fcd7: the first two trees are accepted outright, as
+    ``thesis-facts append check OK: 2 rows, immutable prefix 1``. The third
+    was already refused, because the release root *is* one component and so
+    its own depth was the prefix depth; it is here because the refusal now
+    names which prefix the entry misspells, and that answer must not change
+    for the case that already had one."""
+
+    candidate = base_repository(tmp_path)
+    index_an_alias(candidate, tracked, alias)
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate)
+    assert str(refusal.value) == (
+        f"index carries an alias of a protected path: {alias} "
+        f"(for {protected} at {prefix})"
+    )
+
+
+def test_an_ordinary_path_under_a_protected_directory_is_not_an_alias(
+    tmp_path: pathlib.Path,
+) -> None:
+    """S4R4-F6's other side: comparing every prefix must not turn an ordinary
+    file into an alias. ``ledger/notes.txt`` is spelled exactly right at every
+    component it shares with the state path and differs from it at the leaf,
+    which is a different file rather than a second spelling of one, and
+    ``releases/README.md`` is the fixture's own. Both stay accepted."""
+
+    candidate = base_repository(tmp_path)
+    (candidate.root / "ledger" / "notes.txt").write_text("notes\n", encoding="utf-8")
+    git(candidate.root, "add", "-A")
+
+    assert run_push_gate(candidate) == (
+        "thesis-facts append check OK: 2 rows, immutable prefix 1"
     )
 
 
