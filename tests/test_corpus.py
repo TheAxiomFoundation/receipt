@@ -242,6 +242,99 @@ def test_binding_accepts_a_journal_that_describes_the_tree(
     assert verification.name_repertoire == name_repertoire
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "rules/scratch+1.txt",
+        "docs/My Notes.md",
+        "docs/règles.md",
+        "docs/COM1.txt",
+    ],
+)
+def test_posix_bytes_accepts_tree_names_outside_the_portable_repertoire(
+    tmp_path: pathlib.Path, path: str
+) -> None:
+    """The declared repertoire changes which committed UTF-8 names pass."""
+
+    write_tree(tmp_path)
+    oid = _commit_extra_blob(tmp_path, path.encode("utf-8"))
+    journal_bytes = render_journal(journal_rows())
+
+    verification = _verify_commit(
+        tmp_path,
+        oid,
+        journal_bytes,
+        spec=corpus_spec(name_repertoire="posix-bytes"),
+    )
+    assert verification.name_repertoire == "posix-bytes"
+
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(
+            tmp_path,
+            oid,
+            journal_bytes,
+            spec=corpus_spec(name_repertoire="portable"),
+        )
+    assert NOT_PORTABLE in str(caught.value)
+    assert path in str(caught.value)
+
+
+def test_posix_bytes_preserves_normalization_and_still_folds_ascii_case(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NFC and NFD stay distinct while ASCII-case siblings still merge."""
+
+    from receipt import corpus as corpus_module
+
+    composed = "rules/tax/règles.yaml"
+    decomposed = unicodedata.normalize("NFD", composed)
+    assert composed != decomposed
+    payload = "name: unicode spelling\n"
+    content = {**CONTENT, composed: payload, decomposed: payload}
+
+    write_tree(tmp_path)
+    _commit_worktree(tmp_path)
+    blob_oid = _hash_blob(tmp_path, payload.encode("utf-8"))
+    oid = _commit_index_updates(
+        tmp_path,
+        [
+            ("100644", blob_oid, composed.encode("utf-8")),
+            ("100644", blob_oid, decomposed.encode("utf-8")),
+        ],
+    )
+
+    validated_tree_names: list[str] = []
+    real_validate = corpus_module.validate_component_text
+
+    def recording_validate(value: str, **kwargs: object) -> str:
+        if str(kwargs.get("label", "")).startswith("tree entry "):
+            validated_tree_names.append(value)
+        return real_validate(value, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(corpus_module, "validate_component_text", recording_validate)
+    journal_bytes = render_journal(journal_rows(content=content))
+    spec = corpus_spec(name_repertoire="posix-bytes")
+    verification = _verify_commit(tmp_path, oid, journal_bytes, spec=spec)
+    assert {composed.rpartition("/")[2], decomposed.rpartition("/")[2]} <= set(
+        validated_tree_names
+    )
+    assert {entry.path for entry in verification.content} == set(content)
+
+    case_oid = _commit_index_updates(
+        tmp_path,
+        [
+            ("100644", blob_oid, b"misc/ASCII"),
+            ("100644", blob_oid, b"misc/ascii"),
+        ],
+    )
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(tmp_path, case_oid, journal_bytes, spec=spec)
+    assert str(caught.value) == (
+        "directory holds two entries a case-insensitive filesystem would merge: "
+        "'misc/ASCII' and 'misc/ascii'"
+    )
+
+
 def test_binding_requires_a_selected_tree_snapshot(tmp_path: pathlib.Path) -> None:
     with pytest.raises(CorpusError) as caught:
         _verify_corpus_binding(
