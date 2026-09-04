@@ -548,10 +548,10 @@ There is a fourth of the same kind, and it is asked before all three, because
 it is a fact about the process this verdict is produced in rather than about
 the tree or the configuration it is produced for. ``GIT_DIR``,
 ``GIT_WORK_TREE``, ``GIT_INDEX_FILE``, ``GIT_OBJECT_DIRECTORY`` and
-``GIT_ALTERNATE_OBJECT_DIRECTORIES`` each redirect every git read this gate
-makes — the base resolution, every index read, the release-root scan, the
-intent-to-add detection — to another repository, index or object store than
-the checkout ``root`` names, from that checkout's own working directory; and
+``GIT_ALTERNATE_OBJECT_DIRECTORIES`` can each decide which repository, index
+or object store some git read this gate makes — the base resolution, an index
+read, the release-root scan, the intent-to-add detection — resolves in, rather
+than the checkout ``root`` names; and
 this gate reads the candidate tree directly as well as through git, so under
 any of them the two halves of one verdict are about two trees. With any of the
 five set, ``verify_append_gate`` refuses before it opens the root, in
@@ -564,7 +564,8 @@ explicitly for every read — is 0.6 work (#45), and
 
 Beside those, and unlike them, is one about the candidate tree: that
 there is none. A ``root`` naming nothing, or naming a regular file, or reached
-through a component that is one, is not a tree this gate can answer about, and
+through a component that is one, or spelled through a symlink loop, is not a
+tree this gate can answer about, and
 it used to escape as the ``OSError`` the root's own open raised — a bare
 ``FileNotFoundError`` or ``NotADirectoryError`` carrying the OS's message and
 not the root, where every other refusal in this module is an ``AppendError``
@@ -731,7 +732,7 @@ def _set_root(root: pathlib.Path, spec: AppendGateSpec) -> _CandidateTree:
     only candidate data paths and git comparisons use ``ROOT``.
 
     A root that is not there to be opened — absent, or a regular file, or
-    reached through one — is refused here as an ``AppendError`` naming the
+    reached through one, or spelled through a symlink loop — is refused here as an ``AppendError`` naming the
     root the caller supplied, before any git command is run (#46). It is the
     open that answers, not an ``lstat`` before it.
     """
@@ -793,10 +794,14 @@ def _set_root(root: pathlib.Path, spec: AppendGateSpec) -> _CandidateTree:
         # It is answered here, at the one open, rather than by an ``lstat``
         # before it: a check ahead of the open is a check on a path this open
         # may not reach, and this module refuses check-then-open everywhere
-        # else it reads. Every other errno still raises as it stands, ``ELOOP``
-        # included — a link at a root this function has already resolved is a
-        # race, not a missing tree, and it is not this refusal's fact.
-        if exc.errno in {errno.ENOENT, errno.ENOTDIR}:
+        # else it reads. ``ELOOP`` is the third: ``Path.resolve`` hands a symlink
+        # loop back unchanged, so a root spelled through one reaches this open
+        # as a static input, and it too answered with the OS's own message
+        # (peer review of the 0.5.2 release PR). A link standing at the root
+        # itself is refused by ``O_NOFOLLOW``, and where the platform spells
+        # that as one of these three errnos it lands in the same refusal.
+        # Every other errno still raises as it stands.
+        if exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
             raise AppendError(
                 "candidate root is missing or not a directory: "
                 f"{root}"
@@ -2706,9 +2711,10 @@ def verify_append_gate(
     # First, ahead of the platform and spec refusals below and ahead of the
     # root's own open, because it is a fact about the process this verdict is
     # produced in rather than about the tree or the configuration it is
-    # produced for: with any of the five set, every git read here — the base
-    # resolution, every index read, the release-root scan — is about another
-    # repository, and this gate reads the candidate tree directly as well, so
+    # produced for: with any of the five set, some git read here — the base
+    # resolution, an index read, the release-root scan — resolves in another
+    # repository, index or object store, and this gate reads the candidate
+    # tree directly as well, so
     # the two halves of one verdict would be about two trees.
     try:
         assert_no_redirecting_git_environment()

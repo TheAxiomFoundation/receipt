@@ -133,12 +133,12 @@ budget charged one entry at a time. Journal parsing gains size and cardinality
 budgets enforced before the work they bound: a row count taken by counting line
 feeds before any row is parsed, a per-row byte cap, a per-gate evidence-entry
 cap, and a stated 64 MiB total checked on the raw payload before anything else
-looks at it — replacing the eight-gibibyte product of two other constants. The
+looks at it (0.5.1 bounded none of this). The
 gate and removed-path budgets charge the exact JSON structure each item renders
 to, and the rendering bound moved into a new `src/receipt/_render.py`,
 importing the standard library alone, so the corpus module charges the same
-string the CLI prints. The journal row cap became a consumer pin defaulting to
-the old value and validated at construction against a derived ceiling.
+string the CLI prints. The journal row cap is a consumer pin, defaulted, validated at construction
+against a derived ceiling.
 
 A tombstoned attested path could remain on disk while `removedPaths` asserted
 its removal. The absence pass is one function called twice — once before the
@@ -170,10 +170,11 @@ change time, which Windows CPython does not report.
 ### Append-gate confinement (#38)
 
 A gate-only proposal that also rewrote an unclassified file returned OK with no
-immutability check. The surface classification returns the unclassified
-remainder now: an unclassified change on the release surface is refused, and
-any other unclassified path is named in the success text, so nothing rides
-along silently. The release root's proper ancestors are on the release surface
+immutability check. The surface classification returns the unclassified remainder now: on the
+gate-only exit an unclassified change on the release surface is refused and any
+other unclassified path is named in the success text, so nothing rides along
+silently; a proposal that touches the data surface runs every immutability
+check instead. The release root's proper ancestors are on the release surface
 — with a root of `data/releases`, replacing `data` decides whether there is a
 release root at all — and the index's own changed set is classified beside the
 working tree's, the union deciding, so a rewrite staged into the commit under
@@ -209,13 +210,17 @@ protected set the way the surface enumeration derives its directories, so an
 entry spelled `Scripts/check_append.py` under a `scripts/**` gate pattern no
 longer classifies as merely unclassified.
 
-The guard that read five caching settings and believed them is deleted, and
-`release_chain.WORKING_TREE_SCAN_OPTIONS` spells all five out on the command
-line of every git read the verifier and the gate make, with one deliberate
+A guard that read four caching settings and believed them — added and removed
+inside #38's own branch, so no release ever shipped it — is gone, and
+`release_chain.WORKING_TREE_SCAN_OPTIONS` spells five settings out (those four
+and `feature.manyFiles`) on the command line of every git read the verifier and the gate make, with one deliberate
 exception in the helper that asks git what a setting *is*. (`receipt.attest`
 runs its own git commands without them; it reads commit history rather than a
-working tree.) The options change no verdict about any tree, and an
-untracked-cache extension already in the index is left byte-identical.
+working tree.) The options change no verdict about any tree. A read that refreshes the index
+— `git diff` against a base does, when its cached stat data has gone stale —
+rewrites it under `core.untrackedCache=false` and drops an untracked-cache
+extension it finds there; the refresh changes no entry's stage, mode or object
+id, which is all the reads compare.
 
 Each state file is read once, through a component walk, an `lstat`, an
 `O_NOFOLLOW|O_NONBLOCK` open, an `fstat` required to be the same regular file,
@@ -240,7 +245,9 @@ values are shape-checked rather than merely present.
 
 `producer_spki_sha256 = None` passed straight to the signing module, which
 reads `None` as "no pin requested" and skips the comparison, so a chain
-re-signed under a substituted key passed custody. An empty `anchors` mapping
+re-signed under a substituted key passed custody and the command failed only
+downstream, slicing a prefix off `None` — the wrong reason, not a live false
+PASS at the command level. An empty `anchors` mapping
 was the same hole from the other side: the receipt-set equality passed
 vacuously, no witness was verified, and the verdict read "the 0 pinned RFC 3161
 authorities ()". `ChainSpec` and `AnchorSpec` validate at construction now —
@@ -253,7 +260,11 @@ A spec that raised `SystemExit` exited the interpreter with its own status and
 printed no verdict, because every boundary in `verify` and `cli` caught
 `Exception` and `SystemExit` is not one. The boundaries catch `BaseException`
 and re-raise only `KeyboardInterrupt`; a non-`Exception` raise is quoted with
-its type. `asyncio.CancelledError` is converted too — this library is
+its type. Two boundaries #41 did not reach — the two in `cli._refuse` that
+print a refusal — still caught `Exception`, so a spec that left `sys.stderr` or
+`sys.stdout` holding an object whose `encoding` raises `SystemExit(0)` made a
+refusal exit 0 with nothing printed; this release closes those two the same
+way (found in the release PR's peer review). `asyncio.CancelledError` is converted too — this library is
 synchronous, so the only way it arrives is a spec raising it explicitly, which
 is the same trick under another name.
 
@@ -297,26 +308,29 @@ unaffected; a fresh venv per job has nothing else to resolve to.
 
 `append_gate.verify_append_gate` refuses a candidate root that is not there
 (#46). `_set_root` recorded the root's identity with an unguarded open, so a
-`--root` naming nothing, or naming a regular file, or reached through one,
-escaped as the OS's own `FileNotFoundError` or `NotADirectoryError` — carrying
+`--root` naming nothing, or naming a regular file, or reached through one, or
+spelled through a symlink loop, escaped as the OS's own `FileNotFoundError` or `NotADirectoryError` — carrying
 the OS's message rather than the root, where every other refusal in the module
-is an `AppendError` naming what it refused. The CLI's fail-closed boundary
-caught it and reported a FAIL, so nothing was ever accepted that should not
-have been; a library caller got an exception from outside the module's
-vocabulary. Both refuse as `candidate root is missing or not a directory: <root>` now —
+is an `AppendError` naming what it refused. A consumer's own command boundary (Chronicle's append-check script catches
+everything and reports a failure) turned it into a FAIL, so nothing was ever
+accepted that should not have been; a library caller got an exception from
+outside the module's vocabulary, and `receipt verify` never reaches this code —
+its own `--root` check refuses a non-directory earlier, in its own words. Both refuse as `candidate root is missing or not a directory: <root>` now —
 the words state what the open tested, and no more — from the open itself rather than from a check placed
 ahead of it, before any git command is run.
 
 Both verifier entries refuse a git environment that would redirect their reads
 (#45, the part that is a check rather than a redesign). `GIT_DIR`,
 `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY` and
-`GIT_ALTERNATE_OBJECT_DIRECTORIES` each send every git read this package makes
-— the base resolution, the index reads, the release-root scan, the
-intent-to-add detection — to another repository, index or object store than the
-checkout named as `root`, from that checkout's own working directory, while the
-verdict still speaks of the checkout named. `verify_release_chain` refuses
-before it resolves the root it was given, and `verify_append_gate` refuses
-ahead of its platform, spec and root checks, both saying `{NAME} is set in the
+`GIT_ALTERNATE_OBJECT_DIRECTORIES` can each decide which repository, index or
+object store some git read this package makes — the base resolution, an index
+read, the release-root scan, the intent-to-add detection — resolves in, rather
+than the checkout named as `root`, while the verdict still speaks of the
+checkout named. `verify_release_chain` refuses before it resolves the root it
+was given; `run_verification` asks before its optional history pass, so
+`receipt verify --base-ref` refuses before any base is resolved, and
+`verify_release_history_immutable` asks at its own entry; `verify_append_gate`
+refuses ahead of its platform, spec and root checks; all saying `{NAME} is set in the
 environment and would redirect git reads; unset it`; `receipt verify`'s custody
 pass answers the same way. They are refused rather than dropped for the child
 processes: a drop would leave the verifier's own environment redirected while
@@ -324,17 +338,24 @@ its children's was not, and both modules read the candidate tree directly as
 well as through git, so the two halves of one verdict would then be about two
 trees. Pinning `GIT_DIR` to `<root>/.git` for every read — stating a command's
 target rather than merely not overriding it — is 0.6 work, and so is asking it
-of every helper rather than of the two public entries: a caller reaching a
-`release_chain` helper directly is still unguarded. `README.md` names the five
-variables beside the rest of the requirements.
+of every helper rather than of the two public entries: a caller reaching a `release_chain` helper directly is still unguarded. One
+consequence is stated rather than hidden: git sets these variables in its own
+hook environments (a client-side `pre-commit` runs with `GIT_INDEX_FILE`; a
+server-side `pre-receive` with `GIT_DIR`, `GIT_OBJECT_DIRECTORY` and
+`GIT_ALTERNATE_OBJECT_DIRECTORIES`), so a consumer that had wired either entry
+into a hook is refused there; the invocation both are written for is a CI job
+over a checkout. `README.md` names the five variables beside the rest of the
+requirements.
 
 ### What a 0.5.x verdict speaks for
 
 The subject of every check in this release is the working tree as the run read
 it, and the working tree is not the commit. A 0.5.x PASS speaks for a clean
 checkout of one commit, read once, with no concurrent writer. Bytes are read
-once through directory descriptors and re-read at the end, which establishes
-that a path held those bytes at the reads the run made; a commit's content is
+once and re-read at the end — through directory descriptors in the custody
+pass and the gate, by whole pathname in the corpus binding pass, which says so
+in its own docstring — which establishes that a path held those bytes at the
+reads the run made; a commit's content is
 bound per protected path where the index differs from the base, with no
 coherent-tree guarantee across correlated files; and every descriptor held is a
 comparison at two instants rather than a confinement of the reads between them,

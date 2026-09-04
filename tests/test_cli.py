@@ -4178,3 +4178,71 @@ def test_the_guarded_writer_survives_a_detached_buffer(
     monkeypatch.setattr(sys, "stdout", _Detached())
     assert run(repo) == EXIT_OK
     assert "VERDICT: PASS" in "".join(written)
+
+
+def test_a_refusal_that_cannot_print_still_returns_its_exit_code(
+    repo: pathlib.Path, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_refuse``'s two emission boundaries catch ``BaseException``.
+
+    The streams are whatever the executed spec left in ``sys.stderr`` and
+    ``sys.stdout``, so asking one for its encoding can raise ``SystemExit``.
+    Before the fix the two guards caught ``Exception`` alone, and a refusal
+    exited 0 with nothing printed — a refusal read as a PASS by anything that
+    keys on the exit status (peer review of the 0.5.2 release PR). The root
+    here is a regular file, so the refusal is the command's own, reached with
+    no verification run at all.
+    """
+
+    class Exiting:
+        @property
+        def encoding(self) -> str:
+            raise SystemExit(0)
+
+        def write(self, text: str) -> int:
+            raise SystemExit(0)
+
+        def flush(self) -> None:
+            raise SystemExit(0)
+
+    not_a_tree = tmp_path / "not-a-tree"
+    not_a_tree.write_text("a file\n", encoding="utf-8")
+    spec = str(repo / "verification/spec.py")
+    monkeypatch.setattr(sys, "stderr", Exiting())
+    monkeypatch.setattr(sys, "stdout", Exiting())
+
+    assert main(["verify", "--spec", spec, "--root", str(not_a_tree)]) == EXIT_USAGE
+    assert (
+        main(["verify", "--spec", spec, "--root", str(not_a_tree), "--json"])
+        == EXIT_USAGE
+    )
+
+
+def test_a_redirecting_git_variable_refuses_before_the_history_pass(
+    committed_repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#45 under ``--base-ref``: refused before any base is resolved.
+
+    The history pass runs before custody, and it resolved the base ref and
+    printed its OID from whichever repository the environment pointed at
+    before the custody pass refused (peer review of the 0.5.2 release PR).
+    ``run_verification`` asks first now, so no history line is printed at all.
+    """
+
+    assert run(committed_repo, "--base-ref", "HEAD") == EXIT_OK
+    capsys.readouterr()
+
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "elsewhere.git"))
+    assert run(committed_repo, "--base-ref", "HEAD") == EXIT_FAIL
+    captured = capsys.readouterr()
+    text = captured.out + captured.err
+    assert (
+        "GIT_DIR is set in the environment and would redirect git reads; "
+        "unset it"
+    ) in text
+    assert "VERDICT: FAIL — custody" in text
+    assert "history" not in captured.out
+    assert "byte- and mode-identical" not in text

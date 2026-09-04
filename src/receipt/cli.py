@@ -1529,6 +1529,13 @@ def _refuse(as_json: bool, stage: str, message: str, code: int) -> int:
     this process can do with a stream that will not take bytes. Failing
     stderr must not suppress the JSON either, which is why the two are
     guarded apart rather than together.
+
+    Both guards catch ``BaseException``, not ``Exception``: the streams are
+    whatever the executed spec left in ``sys.stderr`` and ``sys.stdout``, so
+    asking one for its encoding can raise ``SystemExit`` — and a refusal that
+    exits 0 with nothing printed is the one outcome this function exists to
+    prevent (peer review of the 0.5.2 release PR). ``KeyboardInterrupt`` is
+    re-raised, as at every other boundary.
     """
 
     try:
@@ -1545,7 +1552,9 @@ def _refuse(as_json: bool, stage: str, message: str, code: int) -> int:
             encoding=encoding,
             stream_encoding=stream_codec,
         )
-    except Exception:  # noqa: BLE001 - a refusal that cannot print is still a refusal
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException:  # noqa: BLE001 - a refusal that cannot print is still a refusal
         pass
     if as_json:
         try:
@@ -1563,7 +1572,9 @@ def _refuse(as_json: bool, stage: str, message: str, code: int) -> int:
                 ),
                 stream_encoding=stream_codec,
             )
-        except Exception:  # noqa: BLE001 - as above; the exit code carries it
+        except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+            raise
+        except BaseException:  # noqa: BLE001 - as above; the exit code carries it
             pass
     return code
 

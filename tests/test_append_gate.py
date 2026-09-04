@@ -5907,8 +5907,8 @@ def test_the_redirecting_refusal_names_the_first_variable_set(
 # recorded the root's identity with an unguarded open, so a ``--root`` naming
 # nothing, or naming a regular file, escaped as the OS's own ``OSError``
 # rather than as the ``AppendError`` every other refusal in this module
-# raises. The CLI's fail-closed boundary caught it and reported a FAIL, so
-# nothing was ever accepted that should not have been; a library caller got an
+# raises. A consumer's own command boundary turned it into a FAIL, so nothing
+# was ever accepted that should not have been; a library caller got an
 # exception from outside this module's vocabulary, with the OS's message and
 # no mention of the root it was asked about.
 MISSING_ROOT_REFUSAL = "candidate root is missing or not a directory: "
@@ -7475,3 +7475,29 @@ def test_an_ordinary_proposal_carries_no_hidden_index_entry(
         "thesis-facts append check OK: 3 rows, immutable prefix 1, "
         "+1 appended vs base"
     )
+
+
+@pytest.mark.parametrize("with_base", [False, True], ids=["push", "base-ref"])
+def test_a_root_spelled_through_a_symlink_loop_refuses_in_the_same_words(
+    tmp_path: pathlib.Path, with_base: bool
+) -> None:
+    """#46's third errno: ``ELOOP`` from a static input.
+
+    ``Path.resolve`` hands a symlink loop back unchanged, so a root spelled
+    through one reaches the open and answered with the OS's own message and
+    no mention of the root (peer review of the 0.5.2 release PR). It is the
+    same fact as the other two — there is no candidate tree at this name —
+    and it is refused in the same words.
+    """
+
+    candidate = base_repository(tmp_path)
+    loop = tmp_path / "loop"
+    os.symlink("loop", loop)
+    inside = replace(candidate, root=loop / "inside")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(inside) if with_base else run_push_gate(inside)
+
+    assert str(refusal.value) == MISSING_ROOT_REFUSAL + str(inside.root)
+    assert isinstance(refusal.value.__cause__, OSError)
+    assert refusal.value.__cause__.errno == errno.ELOOP

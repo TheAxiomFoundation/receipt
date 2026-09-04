@@ -41,8 +41,8 @@ import pytest
 from receipt import release_chain
 from receipt.canonical import canonical_sha256
 from receipt.release_chain import (
-    TIME_STAMP_RE,
     ReleaseChainError,
+    TIME_STAMP_RE,
     _combined_anchor_digest,
     _observe_anchor_bytes,
     _parse_receipt_text,
@@ -50,6 +50,7 @@ from receipt.release_chain import (
     assert_index_carries_no_protected_alias,
     verify_receipt,
     verify_release_chain,
+    verify_release_history_immutable,
 )
 from receipt.cli import EXIT_FAIL, main
 from receipt.verify import load_spec, run_verification
@@ -1826,3 +1827,20 @@ def test_the_git_environment_still_carries_the_redirecting_names_through(
         assert environment[name] == "carried through"
     assert environment["GIT_NO_REPLACE_OBJECTS"] == "1"
     assert not set(environment) & set(release_chain.PATHSPEC_ENVIRONMENT)
+
+
+def test_the_history_comparison_is_refused_under_a_redirecting_environment(
+    repo: pathlib.Path, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``verify_release_history_immutable`` asks at its own entry, before the
+    root is resolved, so a direct caller is answered as ``run_verification``
+    is (peer review of the 0.5.2 release PR)."""
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    monkeypatch.setenv("GIT_INDEX_FILE", str(tmp_path / "elsewhere-index"))
+
+    with pytest.raises(ReleaseChainError) as refusal:
+        verify_release_history_immutable(
+            tmp_path / "no-such-tree", "HEAD", spec=spec.chain
+        )
+    assert str(refusal.value) == redirecting_refusal("GIT_INDEX_FILE")
