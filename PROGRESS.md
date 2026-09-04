@@ -53,11 +53,16 @@
 - Added unit coverage for the exact full-candidate-OID refusal, every
   `AppendGateVerdict` identity/repertoire field, and a push verdict remaining
   bound to the explicitly supplied commit after `HEAD` advances.
+- Threaded each committed candidate OID through `run_port` and both legs of
+  every moved append differential case. The existing harness is 21/21 green
+  against the pinned production tree: all 18 verifier cases retain names,
+  markers, messages, and two legs; the three oracle-authentication cases
+  remain unmoved.
 
 ## Next
 
 - Add the port-only immutable-snapshot invariance and corruption cases to the
-  differential harness.
+  differential harness, including the one intentional baseline divergence.
 - Thread the committed candidate OID through the append equivalence harness.
 - Run the focused, equivalence, and full offline suites; perform the pinned production-tree differential.
 - Prepare the complete no-network PR handoff; pushing and opening the draft PR

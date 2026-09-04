@@ -104,7 +104,7 @@ from test_ledger_equivalence import (
     _git,
     assert_copied_surface,
     commit_candidate,
-    committed_fixture_filesystem,
+    committed_fixture_filesystem as _committed_fixture_filesystem,
     detached_oracle_checkout,
 )
 from receipt.append_gate import (
@@ -266,6 +266,8 @@ def run_port(
     tree: pathlib.Path,
     root: pathlib.Path,
     base_ref: str,
+    *,
+    commit: str,
 ) -> tuple[int, str]:
     """Render the silent library entrypoint in the baseline CLI's shape."""
 
@@ -274,6 +276,7 @@ def run_port(
             root.resolve(),
             spec=APPEND_GATE_SPEC,
             base_ref=base_ref,
+            commit=commit,
             trusted_code_root=tree.resolve(),
         )
     except AppendError as exc:
@@ -297,7 +300,6 @@ def _assert_port_silent(capfd: pytest.CaptureFixture[str]) -> None:
         "the port must not write to stdout/stderr; captured "
         f"out={captured.out!r} err={captured.err!r}"
     )
-
 
 
 def commit_tree(root: pathlib.Path, message: str) -> str:
@@ -422,6 +424,7 @@ def _assert_accepts_identically(
     root: pathlib.Path,
     oracle_root: pathlib.Path,
     base_ref: str,
+    commit: str,
     leg: str,
     capfd: pytest.CaptureFixture[str],
 ) -> str:
@@ -431,13 +434,16 @@ def _assert_accepts_identically(
         base_ref,
     )
     capfd.readouterr()
-    port_code, port_message = run_port(tree, root, base_ref)
+    port_code, port_message = run_port(
+        tree,
+        root,
+        base_ref,
+        commit=commit,
+    )
     _assert_port_silent(capfd)
 
     assert baseline_code == 0, f"{leg}: {baseline_err}"
-    assert baseline_err == "", (
-        f"baseline must print no stderr on acceptance, {leg}"
-    )
+    assert baseline_err == "", f"baseline must print no stderr on acceptance, {leg}"
     assert port_code == 0, port_message
     assert port_message.strip() == baseline_out, (
         f"divergent acceptance on {leg}:\n"
@@ -452,6 +458,7 @@ def _assert_refuses_identically(
     root: pathlib.Path,
     oracle_root: pathlib.Path,
     base_ref: str,
+    commit: str,
     marker: str,
     mutation: str,
     leg: str,
@@ -463,20 +470,23 @@ def _assert_refuses_identically(
         base_ref,
     )
     capfd.readouterr()
-    port_code, port_message = run_port(tree, root, base_ref)
+    port_code, port_message = run_port(
+        tree,
+        root,
+        base_ref,
+        commit=commit,
+    )
     _assert_port_silent(capfd)
 
     assert baseline_code == 1, (
-        f"baseline ACCEPTED mutation {mutation} on {leg}: "
-        "fail-closed property broken"
+        f"baseline ACCEPTED mutation {mutation} on {leg}: fail-closed property broken"
     )
     assert baseline_out == "", (
         f"baseline printed to stdout while refusing {mutation} on {leg}: "
         f"{baseline_out!r}"
     )
     assert port_code == 1, (
-        f"port ACCEPTED mutation {mutation} on {leg}: "
-        "fail-closed property broken"
+        f"port ACCEPTED mutation {mutation} on {leg}: fail-closed property broken"
     )
     normalized_baseline = _normalize_openssl_ids(baseline_err)
     normalized_port = _normalize_openssl_ids(port_message)
@@ -503,7 +513,7 @@ def test_clean_valid_append_verdicts_match(
     append_pinned_tree: pathlib.Path,
     tmp_path: pathlib.Path,
     capfd: pytest.CaptureFixture[str],
-    committed_fixture_filesystem: None,
+    _committed_fixture_filesystem: None,
 ) -> None:
     root, base = replay_release_two(append_pinned_tree, tmp_path)
     candidate = commit_candidate(root, "clean_valid_append")
@@ -513,6 +523,7 @@ def test_clean_valid_append_verdicts_match(
         root,
         root,
         base,
+        candidate,
         LEG_ONE,
         capfd,
     )
@@ -523,6 +534,7 @@ def test_clean_valid_append_verdicts_match(
             root,
             checkout,
             base,
+            candidate,
             LEG_TWO,
             capfd,
         )
@@ -533,11 +545,10 @@ def test_candidate_base_anchor_bytes_do_not_replace_trusted_anchors(
     append_pinned_tree: pathlib.Path,
     tmp_path: pathlib.Path,
     capfd: pytest.CaptureFixture[str],
-    committed_fixture_filesystem: None,
+    _committed_fixture_filesystem: None,
 ) -> None:
     anchor_relative = (
-        LEDGER_SPEC.anchor_relative
-        / LEDGER_SPEC.anchors["freetsa"].filename
+        LEDGER_SPEC.anchor_relative / LEDGER_SPEC.anchors["freetsa"].filename
     )
 
     def poison_candidate_base(root: pathlib.Path) -> None:
@@ -561,6 +572,7 @@ def test_candidate_base_anchor_bytes_do_not_replace_trusted_anchors(
         root,
         root,
         base,
+        candidate,
         LEG_ONE,
         capfd,
     )
@@ -571,6 +583,7 @@ def test_candidate_base_anchor_bytes_do_not_replace_trusted_anchors(
             root,
             checkout,
             base,
+            candidate,
             LEG_TWO,
             capfd,
         )
@@ -588,7 +601,7 @@ def test_gate_only_acceptance_verdicts_match(
     append_pinned_tree: pathlib.Path,
     tmp_path: pathlib.Path,
     capfd: pytest.CaptureFixture[str],
-    committed_fixture_filesystem: None,
+    _committed_fixture_filesystem: None,
 ) -> None:
     root, base = gate_only_candidate(append_pinned_tree, tmp_path)
     # The gate-only file was untracked before this commit and is tracked after
@@ -602,6 +615,7 @@ def test_gate_only_acceptance_verdicts_match(
         root,
         root,
         base,
+        candidate,
         LEG_ONE,
         capfd,
     )
@@ -612,6 +626,7 @@ def test_gate_only_acceptance_verdicts_match(
             root,
             checkout,
             base,
+            candidate,
             LEG_TWO,
             capfd,
         )
@@ -846,7 +861,7 @@ def test_mutation_refused_identically(
     append_pinned_tree: pathlib.Path,
     tmp_path: pathlib.Path,
     capfd: pytest.CaptureFixture[str],
-    committed_fixture_filesystem: None,
+    _committed_fixture_filesystem: None,
     mutation: str,
 ) -> None:
     root, base = replay_release_two(append_pinned_tree, tmp_path)
@@ -858,6 +873,7 @@ def test_mutation_refused_identically(
         root,
         root,
         base,
+        candidate,
         marker,
         mutation,
         LEG_ONE,
@@ -869,6 +885,7 @@ def test_mutation_refused_identically(
             root,
             checkout,
             base,
+            candidate,
             marker,
             mutation,
             LEG_TWO,
