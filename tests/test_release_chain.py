@@ -53,7 +53,7 @@ from receipt.release_chain import (
     verify_release_history_immutable,
 )
 from receipt.snapshot import GitEntry as SnapshotGitEntry
-from receipt.snapshot import TreeSnapshot
+from receipt.snapshot import Materialization, SnapshotError, TreeSnapshot
 from receipt.cli import EXIT_FAIL, main
 from receipt.verify import load_spec, run_verification
 
@@ -435,6 +435,132 @@ def test_base_release_chain_materializes_anchors_outside_the_release_root(
     with TreeSnapshot.select(repo, base_oid) as base:
         verification = verify_base_release_chain(chain, base=base)
 
+    assert verification.head is not None
+
+
+@pytest.mark.parametrize("absolute_filenames", [True, False])
+def test_base_release_chain_binds_anchors_before_openssl(
+    repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    absolute_filenames: bool,
+) -> None:
+    chain = load_spec(repo / "verification/spec.py").verification.chain
+    external = tmp_path / "external-anchors"
+    shutil.move(repo / chain.anchor_relative, external)
+    base_oid = commit_snapshot(repo, "base without anchors")
+    if absolute_filenames:
+        chain = replace(
+            chain,
+            producer_public_key_filename=str(
+                external / chain.producer_public_key_filename
+            ),
+            anchors={
+                name: replace(anchor, filename=str(external / anchor.filename))
+                for name, anchor in chain.anchors.items()
+            },
+        )
+
+    def no_openssl() -> None:
+        pytest.fail("base anchor binding must precede the OpenSSL preflight")
+
+    monkeypatch.setattr(release_chain._tsa, "_require_supported_openssl", no_openssl)
+    message = (
+        "configured anchor filename leaves the anchor directory"
+        if absolute_filenames
+        else "configured anchor was not materialized"
+    )
+    with TreeSnapshot.select(repo, base_oid) as base:
+        assert not base.entries(chain.anchor_relative.as_posix()).as_dict()
+        with pytest.raises(SnapshotError, match=message):
+            verify_base_release_chain(chain, base=base)
+
+
+def test_base_release_chain_shares_normalized_spec_with_anchor_binding(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chain = load_spec(repo / "verification/spec.py").verification.chain
+
+    class OncePath:
+        calls = 0
+
+        def __fspath__(self) -> str:
+            self.calls += 1
+            assert self.calls == 1
+            return chain.producer_public_key_filename
+
+    filename = OncePath()
+    configured = replace(chain, producer_public_key_filename=filename)
+    base_oid = commit_snapshot(repo, "base with matching anchors")
+    bound = []
+    original_digest = Materialization.anchor_set_sha256
+    original_verify = release_chain.verify_release_chain
+
+    def bind(materialized: Materialization, normalized: object) -> str:
+        bound.append(normalized)
+        return original_digest(materialized, normalized)
+
+    def verify(root: pathlib.Path, *, spec: object, **kwargs: object):
+        assert len(bound) == 1 and spec is bound[0]
+        assert spec.producer_public_key_filename == chain.producer_public_key_filename
+        return original_verify(root, spec=spec, **kwargs)
+
+    monkeypatch.setattr(Materialization, "anchor_set_sha256", bind)
+    monkeypatch.setattr(release_chain, "verify_release_chain", verify)
+    with TreeSnapshot.select(repo, base_oid) as base:
+        verification = verify_base_release_chain(configured, base=base)
+    assert verification.head is not None
+    assert filename.calls == 1
+
+
+@pytest.mark.parametrize("tree_anchors", ["absent", "invalid"])
+def test_base_release_chain_uses_callers_trusted_anchor_directory(
+    repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tree_anchors: str,
+) -> None:
+    chain = load_spec(repo / "verification/spec.py").verification.chain
+    external = tmp_path / "trusted-anchors"
+    shutil.copytree(repo / chain.anchor_relative, external)
+    if tree_anchors == "absent":
+        shutil.rmtree(repo / chain.anchor_relative)
+    else:
+        for path in (repo / chain.anchor_relative).iterdir():
+            path.write_bytes(b"the base tree is not the caller's trust material")
+    base_oid = commit_snapshot(repo, "base with untrusted anchors")
+    reads = []
+    original_read = release_chain._regular_file_bytes
+
+    def read(root: pathlib.Path, relative: pathlib.PurePosixPath, **kwargs: object):
+        if root.name in {"anchors", external.name}:
+            assert root == external
+            reads.append(relative.as_posix())
+        return original_read(root, relative, **kwargs)
+
+    def no_tree_binding(*args: object) -> str:
+        pytest.fail("caller trust must not bind the base tree's anchor set")
+
+    monkeypatch.setattr(release_chain, "_regular_file_bytes", read)
+    monkeypatch.setattr(Materialization, "anchor_set_sha256", no_tree_binding)
+    with TreeSnapshot.select(repo, base_oid) as base:
+        verification = verify_base_release_chain(chain, base=base, anchor_dir=external)
+    assert verification.head is not None
+    assert set(reads) == {chain.producer_public_key_filename} | {
+        anchor.filename for anchor in chain.anchors.values()
+    }
+
+
+def test_base_release_chain_forwards_pin_and_clock_options(repo: pathlib.Path) -> None:
+    chain = load_spec(repo / "verification/spec.py").verification.chain
+    base_oid = commit_snapshot(repo, "base with matching anchors")
+    wrong_pin = replace(chain, producer_spki_sha256="0" * 64)
+    with TreeSnapshot.select(repo, base_oid) as base:
+        with pytest.raises(ReleaseChainError, match="not code-pinned"):
+            verify_base_release_chain(wrong_pin, base=base)
+        verification = verify_base_release_chain(
+            wrong_pin, base=base, enforce_production_pins=False, clock_skew_seconds=0
+        )
     assert verification.head is not None
 
 

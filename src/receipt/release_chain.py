@@ -2219,30 +2219,46 @@ def verify_base_release_chain(
     spec: ChainSpec,
     *,
     base: TreeSnapshot,
+    anchor_dir: pathlib.Path | None = None,
+    enforce_production_pins: bool = True,
+    clock_skew_seconds: int = DEFAULT_CLOCK_SKEW_SECONDS,
 ) -> ChainVerification:
-    """Materialize and verify one entered base snapshot's release chain."""
+    """Materialize and verify one entered base snapshot's release chain.
 
+    By default every configured anchor must belong to the materialized tree.
+    An explicit ``anchor_dir`` supplies the caller's trust material instead,
+    as the append gate requires; those anchors are not bound to the base tree.
+    """
+
+    normalized = _normalized_spec(spec)
     prefixes = (
-        spec.release_root_relative,
-        spec.manifest_relative,
-        spec.state_relative,
-        spec.prefix_relative,
-        spec.anchor_relative,
+        normalized.release_root_relative,
+        normalized.manifest_relative,
+        normalized.state_relative,
+        normalized.prefix_relative,
+        normalized.anchor_relative,
     )
     with tempfile.TemporaryDirectory(prefix="receipt-release-base-") as name:
         destination = pathlib.Path(name)
         with base.materialize(
             prefixes,
             destination,
-            repertoire=spec.name_repertoire,
+            repertoire=normalized.name_repertoire,
         ) as materialized:
+            if anchor_dir is None:
+                materialized.anchor_set_sha256(normalized)
             return verify_release_chain(
                 materialized.path,
-                spec=spec,
-                anchor_dir=materialized.path / spec.anchor_relative,
+                spec=normalized,
+                anchor_dir=(
+                    materialized.path / normalized.anchor_relative
+                    if anchor_dir is None
+                    else anchor_dir
+                ),
                 require_chain=True,
                 verify_state=True,
-                enforce_production_pins=True,
+                enforce_production_pins=enforce_production_pins,
+                clock_skew_seconds=clock_skew_seconds,
             )
 
 
