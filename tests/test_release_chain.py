@@ -2389,6 +2389,41 @@ def test_the_state_reader_accepts_an_ordinary_regular_file(
 
 
 @pytest.mark.skipif(
+    os.getuid() == 0, reason="root traverses a directory it has no rights on"
+)
+def test_the_shared_state_reader_answers_the_same_way(
+    tmp_path: pathlib.Path, state_relative: pathlib.PurePosixPath
+) -> None:
+    """S4R4-F7 through ``release_chain``'s own reader, which is the one
+    ``verify_release_chain`` — and so ``receipt verify``'s custody pass —
+    uses. ``_regular_file_bytes`` runs the same component walk before its
+    descent, so the requirement is the package's rather than the gate's and
+    both readers state it the same way. That is why ``README.md`` says it
+    where a consumer looks. Measured at 4d8039f with the fold probe answering
+    False: this reader returns the ledger's bytes for a directory that cannot
+    be listed."""
+
+    root = tmp_path / "repo"
+    (root / "ledger").mkdir(parents=True)
+    (root / state_relative).write_text("{}\n", encoding="utf-8")
+    ledger_directory = root / "ledger"
+    expected = (root / state_relative).read_bytes()
+    assert expected
+    ledger_directory.chmod(0o111)
+    try:
+        with pytest.raises(ReleaseChainError) as refusal:
+            _regular_file_bytes(root, state_relative)
+        assert str(refusal.value) == (
+            "cannot bind the spelling of "
+            f"{state_relative.as_posix()}: its directory cannot be "
+            f"listed: {state_relative.as_posix()}"
+        )
+    finally:
+        ledger_directory.chmod(0o755)
+    assert _regular_file_bytes(root, state_relative) == expected
+
+
+@pytest.mark.skipif(
     os.getuid() == 0, reason="root searches a directory it has no rights on"
 )
 def test_a_manifest_path_this_verifier_cannot_stat_is_not_no_chain(
