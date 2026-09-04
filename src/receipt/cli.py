@@ -234,6 +234,11 @@ to replace another (peer review, Sol round 3). The marker carries all
 sixty-four characters now, and because a digest is a distinguisher rather
 than a proof, :func:`_bounded_payload` refuses outright if two keys in one
 object come out of the bound equal.
+
+The boundaries below catch ``BaseException``, because ``SystemExit`` is not an
+``Exception``: a spec or a pass that raised one exited the interpreter with a
+status of its own choosing and printed no verdict at all. ``KeyboardInterrupt``
+is the single deliberate exception — the operator's interrupt is not a verdict.
 """
 
 from __future__ import annotations
@@ -250,7 +255,8 @@ from typing import Any, Sequence, TextIO
 from receipt import __version__
 from receipt._render import MAX_RENDERED_FIELD, bounded_encoded, bounded_key
 from receipt._unicode_repertoire import FORMAT_CONTROL_RANGES
-from receipt.corpus import GATE_TIERS
+# The gate outcome vocabulary belongs to receipt.corpus; see _format_text.
+from receipt.corpus import GATE_TIERS, NOT_RUN, PASS, WAIVED
 from receipt.verify import (
     TIER_MEANING,
     VerifyResult,
@@ -630,7 +636,12 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
     if corpus is not None and corpus.gates:
         lines.append("")
         lines.append("DECLARED IN THE WITNESSED JOURNAL — NOT RE-RUN BY THIS COMMAND")
-        skipped = [gate for gate in corpus.gates if gate.outcome != "pass"]
+        # Compared against receipt.corpus's own constants, never against
+        # literals spelled again here. As literals, a renamed or added outcome
+        # went on rendering as an unmarked gate: "not_run" for "not-run", or a
+        # fourth outcome, prints as a bare gate id beside the ones that
+        # passed — the over-claim the outcome schema exists to stop.
+        skipped = [gate for gate in corpus.gates if gate.outcome != PASS]
         if skipped:
             lines.append(
                 f"  {len(skipped)} of {len(corpus.gates)} declared gate(s) did not "
@@ -643,13 +654,13 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
             lines.append(f"  {tier}: {TIER_MEANING[tier]}")
             for gate in gates:
                 suffix = ""
-                if gate.outcome == "waived":
+                if gate.outcome == WAIVED:
                     # Truncated first and escaped after, so the line still
                     # shows sixteen characters of the value rather than
                     # sixteen characters of its escaping.
                     waiver = gate.evidence.get("waiverSetSha256", "")[:16]
                     suffix = f"  [WAIVED under waiver set {rendered(waiver)}…]"
-                elif gate.outcome == "not-run":
+                elif gate.outcome == NOT_RUN:
                     reason = rendered(gate.evidence.get("reason", ""))
                     suffix = f"  [DID NOT RUN — {reason}]"
                 lines.append(f"    - {rendered(gate.gate_id)}{suffix}")
@@ -663,7 +674,6 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
         # admits no exceptions: nothing reaches a line unescaped.
         witnesses = [rendered(name) for name in sorted(result.witness_times())]
         count = len(witnesses)
-        noun = "authorities" if count != 1 else "authority"
         # Whether a trusted base reference was verified changes what the
         # timing clause may claim: without one, the witnessed times bound
         # only when each recorded prefix existed, not that the history was
@@ -677,15 +687,27 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
             "  This proves the published rule files are exactly the bytes a "
             "code-pinned"
         )
-        lines.append(
-            f"  producer key signed, and the {count} pinned RFC 3161 {noun} "
-            f"({', '.join(witnesses)})"
-        )
-        if history is not None:
+        if count:
+            noun = "authorities" if count != 1 else "authority"
             lines.append(
-                "  witnessed that each recorded prefix existed no later than "
-                "those times,"
+                f"  producer key signed, and the {count} pinned RFC 3161 {noun} "
+                f"({', '.join(witnesses)})"
             )
+            timing = (
+                "  witnessed that each recorded prefix existed no later than "
+                "those times"
+            )
+        else:
+            # Defensive. ChainSpec refuses an empty anchor set, so a verified
+            # chain always carries witnesses. Were one to reach here without
+            # them, "the 0 pinned RFC 3161 authorities ()" would state a
+            # timing claim assembled from no witness at all — so the sentence
+            # closes on what the signature alone proves, and the absence is
+            # said out loud rather than rendered as a count of zero.
+            lines.append("  producer key signed.")
+            timing = "  This verdict makes no witnessed timing claim"
+        if history is not None:
+            lines.append(f"{timing},")
             # Scoped to what verify_release_history_immutable compares: release
             # objects present at the base ref, byte and mode. Objects added
             # after the base, and any state between then and now, are outside
@@ -696,10 +718,7 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
             )
             lines.append("  byte- and mode-identical in this tree. It does")
         else:
-            lines.append(
-                "  witnessed that each recorded prefix existed no later than "
-                "those times."
-            )
+            lines.append(f"{timing}.")
             lines.append(
                 "  It does NOT prove the history was never rewritten — a "
                 "producer holding"
@@ -1570,7 +1589,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         spec, spec_sha256 = load_spec(args.spec)
     except VerifySpecError as exc:
         return _refuse(as_json, "spec", str(exc), EXIT_USAGE)
-    except Exception as exc:  # noqa: BLE001 - reading the spec is fail-closed too
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException as exc:  # noqa: BLE001 - reading the spec is fail-closed
         return _refuse(
             as_json,
             "spec",
@@ -1581,7 +1602,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         root = args.root if args.root is not None else _default_root(args.spec)
         root_ok = root.is_dir()
-    except Exception as exc:  # noqa: BLE001 - resolving the root is fail-closed too
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException as exc:  # noqa: BLE001 - resolving the root is fail-closed
         return _refuse(
             as_json,
             "root",
@@ -1599,7 +1622,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             spec_sha256=spec_sha256,
             base_ref=args.base_ref,
         )
-    except Exception as exc:  # noqa: BLE001 - an unhandled error is still a refusal
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException as exc:  # noqa: BLE001 - an unhandled raise is a refusal
         return _refuse(
             as_json,
             "verification",
@@ -1633,7 +1658,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 encoding=encoding,
                 stream_encoding=stream_codec,
             )
-        except Exception as exc:  # noqa: BLE001 - rendering is inside the contract
+        except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+            raise
+        except BaseException as exc:  # noqa: BLE001 - rendering is in the contract
             return _refuse(
                 as_json,
                 "render",
@@ -1660,7 +1687,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 encoding=encoding,
                 stream_encoding=stream_codec,
             )
-        except Exception as exc:  # noqa: BLE001 - rendering is inside the contract
+        except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+            raise
+        except BaseException as exc:  # noqa: BLE001 - rendering is in the contract
             return _refuse(
                 False,
                 "render",

@@ -86,9 +86,12 @@ NFD, which is not the set of names a filesystem may fold — one that folds
 part of a mixed-case name answers no to every probe and folds the name all
 the same — so it fails closed instead, and the search-only descent below is
 no longer reached with such a parent through either reader; the anchor-set
-digest in
-the result) run beside the extracted checks without altering any of their
-refusals, and carry their own tests. Every one of those index reads names its
+digest in the result; spec validation at construction; reading each receipt
+through one descriptor; and refusing a genTime finer than a microsecond) run
+beside the extracted checks without altering any of their refusals, and carry
+their own tests. None of the additions reworded an extracted refusal or moved
+one in the order they fire; the new refusals cover inputs the upstream battery
+never presents. Every one of those index reads names its
 path as a literal pathspec, so git is asked about the exact path rather than
 handed a name to interpret as a pattern — and so does the base tree's own
 enumeration, which is not an addition but was still handing git a configured
@@ -201,6 +204,39 @@ TIME_STAMP_RE = re.compile(
     r"(?P<second>[0-9]{2})(?P<fraction>\.[0-9]+)?\s+"
     r"(?P<year>[0-9]{4})\s+GMT\Z"
 )
+#: A dotted-decimal object identifier as OpenSSL prints one. Arcs carry no
+#: leading zeros, because a spec pinning "1.02" would be comparing against a
+#: spelling no RFC 3161 receipt ever reports. The pin is compared against the
+#: ``Policy OID:`` line OpenSSL prints, and OpenSSL renders an OID in its own
+#: table by name rather than in dotted decimal; no timestamping policy arc is
+#: in that table, so dotted decimal is the whole domain in practice, but that
+#: coupling is what this pattern assumes.
+OID_RE = re.compile(r"(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*))+\Z")
+
+
+def _spec_relative_path(value: Any, label: str) -> pathlib.PurePosixPath:
+    """Require a spec path that can only ever address the tree under audit.
+
+    Every one of these is joined onto the auditor's root. A string joins by
+    a different rule than a path does, a ``PureWindowsPath`` joins by parts
+    that address a different file than its spelling suggests, and an
+    absolute path or one carrying ``..`` leaves the tree altogether — so a
+    spec could name manifests, anchors, or the witnessed journal somewhere
+    the audit never looked. None of that is detectable later: the join
+    simply succeeds against the wrong file.
+    """
+
+    if not isinstance(value, pathlib.PurePosixPath):
+        raise ReleaseChainError(
+            f"{label} must be a pathlib.PurePosixPath, not "
+            f"{type(value).__name__}"
+        )
+    if not value.parts or value.is_absolute() or ".." in value.parts:
+        raise ReleaseChainError(
+            f"{label} must be a relative path naming at least one component, "
+            f"with no '..': {value.as_posix()!r}"
+        )
+    return value
 
 
 @dataclass(frozen=True)
@@ -210,6 +246,34 @@ class AnchorSpec:
     policy_oid: str
     signer_certificate_sha256: str
     signer_spki_sha256: str
+
+    def __post_init__(self) -> None:
+        """Refuse an anchor whose pins cannot pin anything.
+
+        Each field here is compared against a value recomputed from real
+        bytes during verification. A pin that is None, empty, or the wrong
+        shape never matches — but nothing downstream says so, because the
+        comparison runs normally and simply names the computed digest. The
+        consumer reads a refusal about the authority's certificate when the
+        actual fault is a line of their own spec, or (with the comparison
+        never reached, as an unset producer pin once did) reads a PASS. The
+        configuration is checked where it is written instead.
+        """
+
+        _sha256(self.pem_sha256, "AnchorSpec pem_sha256")
+        _sha256(
+            self.signer_certificate_sha256,
+            "AnchorSpec signer_certificate_sha256",
+        )
+        _sha256(self.signer_spki_sha256, "AnchorSpec signer_spki_sha256")
+        if (
+            type(self.policy_oid) is not str
+            or OID_RE.fullmatch(self.policy_oid) is None
+        ):
+            raise ReleaseChainError(
+                "AnchorSpec policy_oid must be a dotted-decimal OID: "
+                f"{self.policy_oid!r}"
+            )
 
 
 @dataclass(frozen=True)
@@ -231,6 +295,48 @@ class ChainSpec:
     producer_public_key_filename: str
     producer_spki_sha256: str
     anchors: Mapping[str, AnchorSpec]
+
+    def __post_init__(self) -> None:
+        """Refuse a spec that cannot pin what it claims to pin.
+
+        The threat is a pin that is absent rather than wrong. An unset
+        ``producer_spki_sha256`` was passed straight through to the signing
+        module, which reads ``None`` as "no pin requested" and skips the
+        comparison entirely — so a chain re-signed under a substituted key
+        verified, and the command failed only downstream, where the verdict
+        text tried to slice a prefix off ``None``. An empty ``anchors``
+        mapping is the same shape of hole: the receipt-set equality check
+        passes vacuously, no witness is ever verified, and the verdict
+        reports "the 0 pinned RFC 3161 authorities". A spec that pins
+        nothing is a configuration error, not a policy, and it refuses here
+        rather than producing a verdict that reads like custody.
+        """
+
+        for name in (
+            "manifest_relative",
+            "state_relative",
+            "prefix_relative",
+            "anchor_relative",
+            "release_root_relative",
+        ):
+            _spec_relative_path(getattr(self, name), f"ChainSpec {name}")
+        _sha256(self.producer_spki_sha256, "ChainSpec producer_spki_sha256")
+        if not isinstance(self.anchors, Mapping) or not self.anchors:
+            raise ReleaseChainError(
+                "ChainSpec anchors must be a non-empty mapping of TSA name to "
+                "AnchorSpec; a chain with no configured witness cannot be "
+                "witnessed"
+            )
+        for tsa, anchor in self.anchors.items():
+            if type(tsa) is not str or not tsa:
+                raise ReleaseChainError(
+                    f"ChainSpec anchor names must be non-empty strings: {tsa!r}"
+                )
+            if not isinstance(anchor, AnchorSpec):
+                raise ReleaseChainError(
+                    f"ChainSpec anchor {tsa!r} must be an AnchorSpec, not "
+                    f"{type(anchor).__name__}"
+                )
 
     @property
     def state_path(self) -> str:
@@ -728,7 +834,23 @@ def _parse_receipt_text(output: str, receipt: pathlib.Path) -> tuple[datetime, s
         ) from exc
     fraction = match.group("fraction")
     if fraction:
-        parsed = parsed.replace(microsecond=int((fraction[1:] + "000000")[:6]))
+        digits = fraction[1:]
+        if len(digits) > 6 and digits[6:].strip("0"):
+            # Keeping six digits and dropping the rest moves the parsed time
+            # EARLIER than the instant the authority actually signed, and that
+            # time is not merely reported: it is compared against createdAtUtc
+            # and against the previous release's witnesses, and it becomes the
+            # -attime the signer certificate is validated at. A verdict must
+            # not quote, or reason from, a time no receipt carries — so a
+            # precision this verifier cannot represent refuses instead of
+            # being silently rounded down. Digits beyond the sixth that are
+            # all zero carry no precision and are accepted.
+            raise ReleaseChainError(
+                f"RFC 3161 genTime for {receipt} is finer than a microsecond, "
+                f"which this verifier cannot represent exactly: "
+                f"{time_lines[0]!r}"
+            )
+        parsed = parsed.replace(microsecond=int((digits + "000000")[:6]))
     return parsed, policy_lines[0]
 
 
@@ -897,6 +1019,56 @@ def verify_producer_signature(
     )
 
 
+def _receipt_bytes(receipt: pathlib.Path) -> bytes:
+    """Read one RFC 3161 receipt through a single descriptor.
+
+    Three OpenSSL invocations consume each receipt — the ``-text`` inspection
+    that yields its genTime and policy OID, the ``-verify`` that binds it to
+    the manifest digest, and the token extraction the signer pins run over —
+    and each one reopened the path by name. Nothing held the path still
+    between them, so the tree under audit could present a different file to
+    each call: a token inspected for its genTime and policy, and a different
+    token verified and pinned, with the verdict reporting a time no verified
+    token ever carried. The bytes are read once here and every call below is
+    fed a private snapshot of them.
+
+    The lstat below refuses a symlink present at check time; ``O_NOFOLLOW``,
+    where the platform offers it, refuses one swapped in between that check
+    and the open; and the descriptor is stat'ed after opening, so a regular
+    file swapped in the same window addresses a different (device, inode)
+    pair, which says so where the pathname cannot.
+    """
+
+    # O_NOFOLLOW is POSIX but not universal; where it is absent the lstat
+    # below plus the descriptor comparison still catch a swap, they simply
+    # catch it one step later.
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        before = os.lstat(receipt)
+        if not stat.S_ISREG(before.st_mode):
+            raise ReleaseChainError(
+                f"missing or non-regular RFC 3161 receipt: {receipt}"
+            )
+        descriptor = os.open(receipt, flags)
+    except OSError as exc:
+        raise ReleaseChainError(
+            f"cannot read RFC 3161 receipt {receipt}: {type(exc).__name__}"
+        ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or (
+            opened.st_dev,
+            opened.st_ino,
+        ) != (before.st_dev, before.st_ino):
+            raise ReleaseChainError(
+                f"RFC 3161 receipt was replaced while it was being read: {receipt}"
+            )
+        with open(descriptor, "rb", closefd=False) as handle:
+            return handle.read()
+    finally:
+        os.close(descriptor)
+
+
 def _verify_production_signer(
     receipt: pathlib.Path,
     anchor: pathlib.Path,
@@ -904,10 +1076,15 @@ def _verify_production_signer(
     gen_time: datetime,
     temporary: pathlib.Path,
     environment: dict[str, str],
+    *,
+    # The snapshot the caller already read; the receipt path itself is kept
+    # for the labels and refusals, which name the file an auditor has.
+    source: pathlib.Path | None = None,
 ) -> None:
     token = temporary / "token.der"
     signer = temporary / "signer.pem"
     content = temporary / "tst-info.der"
+    read_from = receipt if source is None else source
     _openssl_binary(
         [
             "ts",
@@ -915,7 +1092,7 @@ def _verify_production_signer(
             "-config",
             "/dev/null",
             "-in",
-            str(receipt),
+            str(read_from),
             "-token_out",
             "-out",
             str(token),
@@ -988,7 +1165,13 @@ def verify_receipt(
     now: datetime | None = None,
     anchor_observer: dict[str, str] | None = None,
 ) -> datetime:
-    """Cryptographically verify one receipt and return its signed genTime."""
+    """Cryptographically verify one receipt and return its signed genTime.
+
+    The receipt bytes are read exactly once, through one descriptor, and every
+    OpenSSL invocation is fed a private snapshot of them, so the token whose
+    genTime and policy are reported is the same token that verified against
+    the anchor and satisfied the signer pins (see _receipt_bytes).
+    """
 
     if tsa not in spec.anchors:
         raise ReleaseChainError(f"unknown TSA receipt kind {tsa!r}")
@@ -1038,6 +1221,14 @@ def verify_receipt(
             snapshot = temporary / f"anchor-{tsa}.pem"
             snapshot.write_bytes(anchor_bytes)
             anchor = snapshot
+        # The receipt gets the same treatment, unconditionally: read once
+        # through one descriptor, snapshotted here, and handed to all three
+        # OpenSSL invocations below. Reopening the path per call let the
+        # inspected token and the verified token be different files — see
+        # _receipt_bytes. The original path is still what every label and
+        # refusal names.
+        receipt_source = temporary / f"receipt-{tsa}.tsr"
+        receipt_source.write_bytes(_receipt_bytes(receipt))
         try:
             text_result = subprocess.run(
                 [
@@ -1047,7 +1238,7 @@ def verify_receipt(
                     "-config",
                     "/dev/null",
                     "-in",
-                    str(receipt),
+                    str(receipt_source),
                     "-text",
                 ],
                 check=False,
@@ -1086,7 +1277,7 @@ def verify_receipt(
                 "-digest",
                 manifest_digest,
                 "-in",
-                str(receipt),
+                str(receipt_source),
                 "-CAfile",
                 str(anchor),
                 "-CApath",
@@ -1113,6 +1304,7 @@ def verify_receipt(
                 gen_time,
                 temporary,
                 environment,
+                source=receipt_source,
             )
     return gen_time
 

@@ -41,10 +41,14 @@ import pytest
 from receipt import release_chain
 from receipt.canonical import canonical_sha256
 from receipt.release_chain import (
+    TIME_STAMP_RE,
     ReleaseChainError,
     _combined_anchor_digest,
     _observe_anchor_bytes,
+    _parse_receipt_text,
+    _receipt_bytes,
     assert_index_carries_no_protected_alias,
+    verify_receipt,
     verify_release_chain,
 )
 from receipt.cli import EXIT_FAIL, main
@@ -578,6 +582,182 @@ def test_standalone_receipts_shared_filename_divergence_refuses(
         )
     assert calls["count"] == 1
     assert reads["count"] == 2
+
+
+def test_a_receipt_swapped_mid_verification_cannot_mix_two_tokens(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One receipt, three OpenSSL invocations, and one file between them.
+
+    ``-text`` reads the genTime and the policy OID, ``-verify`` binds the
+    token to the manifest digest, and the signer pins run over a token
+    extracted a third time. Each reopened the path by name, so the tree under
+    audit could hand a different file to each call and the verdict would
+    report a time no verified token carried. Here the alpha receipt becomes
+    the beta receipt the instant the inspection returns — a token from an
+    authority whose root is not the CAfile in force, which the later calls
+    cannot verify.
+
+    With the bytes snapshotted once, the swap is inert: the reported genTime
+    is the inspected token's, and it is the token that verified. Before the
+    snapshot, the same swap refused instead — a refusal is a sound outcome
+    too, but the mixed genTime between them is not, and only reading once
+    rules it out.
+    """
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    manifests = repo / "releases/manifests"
+    manifest_path = sorted(manifests.glob("*.json"))[0]
+    digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    alpha = manifest_path.with_name(f"{manifest_path.stem}.alpha.tsr")
+    beta = manifest_path.with_name(f"{manifest_path.stem}.beta.tsr")
+
+    def check() -> object:
+        return verify_receipt(
+            digest,
+            alpha,
+            "alpha",
+            spec=spec.chain,
+            anchor_dir=repo / ANCHOR_DIR,
+            enforce_production_pins=True,
+        )
+
+    expected = check()
+
+    real_run = subprocess.run
+    swaps = {"count": 0}
+
+    def swapping(arguments: object, **kwargs: object) -> object:
+        completed = real_run(arguments, **kwargs)  # type: ignore[arg-type]
+        if isinstance(arguments, list) and "-text" in arguments:
+            swaps["count"] += 1
+            alpha.write_bytes(beta.read_bytes())
+        return completed
+
+    monkeypatch.setattr("receipt.release_chain.subprocess.run", swapping)
+    observed = check()
+    assert swaps["count"] == 1, "the inspection ran, so the swap landed"
+    assert alpha.read_bytes() == beta.read_bytes(), "the file really was swapped"
+    assert observed == expected
+
+
+def test_a_receipt_that_is_not_a_regular_file_refuses_before_opening(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The lstat runs before the open, deliberately: opening a fifo for
+    reading blocks until a writer arrives, so what kind of file this is has to
+    be decided from the directory entry rather than from the descriptor."""
+
+    import os
+
+    fifo = tmp_path / "receipt.tsr"
+    os.mkfifo(fifo)
+    with pytest.raises(ReleaseChainError, match="non-regular RFC 3161 receipt"):
+        _receipt_bytes(fifo)
+
+
+def test_a_receipt_replaced_between_the_lstat_and_the_open_refuses(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The descriptor is what gets read, so the descriptor is what gets
+    checked. A path that named one file at the lstat and another by the time
+    it was opened addresses a different file, and its (device, inode) pair
+    says so where the pathname cannot."""
+
+    import os
+
+    receipt = tmp_path / "receipt.tsr"
+    receipt.write_bytes(b"the inspected token")
+    other = tmp_path / "other.tsr"
+    other.write_bytes(b"a different token")
+
+    real_lstat = os.lstat
+
+    def lying(path: object, **kwargs: object) -> object:
+        if str(path) == str(receipt):
+            return real_lstat(other)
+        return real_lstat(path, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("receipt.release_chain.os.lstat", lying)
+    with pytest.raises(ReleaseChainError, match="replaced while it was being read"):
+        _receipt_bytes(receipt)
+
+
+def receipt_text(repo: pathlib.Path) -> tuple[str, pathlib.Path]:
+    """The real `openssl ts -reply -text` output the verifier parses."""
+
+    manifest_path = sorted((repo / "releases/manifests").glob("*.json"))[0]
+    alpha = manifest_path.with_name(f"{manifest_path.stem}.alpha.tsr")
+    completed = subprocess.run(
+        ["openssl", "ts", "-reply", "-config", "/dev/null", "-in", str(alpha), "-text"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout, alpha
+
+
+def with_fraction(text: str, fraction: str) -> str:
+    """Rewrite only the genTime's fractional part, leaving the rest as OpenSSL
+    printed it — a locally generated authority stamps whole seconds, but a
+    production one need not."""
+
+    lines = []
+    for line in text.splitlines():
+        if line.startswith("Time stamp:"):
+            match = TIME_STAMP_RE.fullmatch(line.split(":", 1)[1].strip())
+            assert match is not None
+            line = (
+                f"Time stamp: {match.group('month')} {match.group('day')} "
+                f"{match.group('hour')}:{match.group('minute')}:"
+                f"{match.group('second')}{fraction} {match.group('year')} GMT"
+            )
+        lines.append(line)
+    return "\n".join(lines)
+
+
+@pytest.mark.parametrize(
+    ("fraction", "microsecond"),
+    [("", 0), (".1", 100_000), (".123456", 123_456)],
+)
+def test_a_fractional_genTime_keeps_every_digit_it_can_represent(
+    repo: pathlib.Path, fraction: str, microsecond: int
+) -> None:
+    """``.1`` is a tenth of a second, not a microsecond: the digits are the
+    fraction's leading digits, right-padded, never read as a count."""
+
+    text, alpha = receipt_text(repo)
+    parsed, _ = _parse_receipt_text(with_fraction(text, fraction), alpha)
+    assert parsed.microsecond == microsecond
+
+
+def test_a_genTime_finer_than_a_microsecond_refuses(repo: pathlib.Path) -> None:
+    """Truncating to six digits moves the parsed time earlier than the instant
+    the authority signed — and that time is not merely reported. It is
+    compared against createdAtUtc and against the previous release's
+    witnesses, and it selects the -attime the signer certificate is validated
+    at. A precision this verifier cannot hold refuses rather than rounding
+    down into a time no receipt carries."""
+
+    text, alpha = receipt_text(repo)
+    with pytest.raises(ReleaseChainError, match="finer than a microsecond"):
+        _parse_receipt_text(with_fraction(text, ".1234567"), alpha)
+
+
+def test_a_genTime_with_zeros_beyond_the_sixth_digit_is_exact(
+    repo: pathlib.Path,
+) -> None:
+    """Seven digits ending in zero name the same instant six digits do.
+
+    The refusal exists for precision the parser cannot hold; a trailing zero
+    holds none, so refusing it would be over-refusal in the fail-closed
+    direction for no gain. A seventh digit that is not zero still refuses."""
+
+    text, alpha = receipt_text(repo)
+    parsed, _ = _parse_receipt_text(with_fraction(text, ".1234560"), alpha)
+    assert parsed.microsecond == 123456
+    with pytest.raises(ReleaseChainError, match="finer than a microsecond"):
+        _parse_receipt_text(with_fraction(text, ".1234561"), alpha)
 
 
 def test_default_mode_keeps_parts_based_purepath_joins(
@@ -1126,6 +1306,46 @@ def test_verify_result_accessors_before_custody() -> None:
     )
     assert result.anchor_set_sha256 is None
     assert result.anchor_file_sha256s == {}
+    # And it is not a PASS. "No pass failed" is not "the verdict's passes
+    # ran": all() over an empty tuple is true, and this result rendered as
+    # "ESTABLISHED OFFLINE, FROM THIS CLONE ALONE" with exit status 0.
+    assert result.ok is False
+
+
+def test_a_verdict_needs_all_three_of_its_passes() -> None:
+    """Custody, binding, and declaration each carry part of the claim, so a
+    result holding only some of them — every one of them ok — is still not a
+    verdict. The one holding all three is."""
+
+    import dataclasses
+
+    from receipt.verify import REQUIRED_PASSES, PassResult, VerifyResult
+
+    def built(*names: str) -> VerifyResult:
+        return VerifyResult(
+            spec_name="x",
+            spec_path=pathlib.Path("spec.py"),
+            spec_sha256="ab" * 32,
+            root=pathlib.Path("."),
+            receipt_version="0.0.0",
+            producer_spki_sha256="cd" * 32,
+            passes=tuple(PassResult(name, True, "detail") for name in names),
+            chain=None,
+            corpus=None,
+        )
+
+    assert REQUIRED_PASSES == ("custody", "binding", "declaration")
+    for missing in REQUIRED_PASSES:
+        partial = [name for name in REQUIRED_PASSES if name != missing]
+        assert built(*partial).ok is False, missing
+    assert built(*REQUIRED_PASSES).ok is True
+    # A recorded failure still overrides a complete set.
+    complete = built(*REQUIRED_PASSES)
+    failed = dataclasses.replace(
+        complete,
+        passes=complete.passes + (PassResult("history", False, "", "no"),),
+    )
+    assert failed.ok is False
 
 
 def test_module_version_matches_project_metadata() -> None:

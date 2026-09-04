@@ -27,7 +27,7 @@ import pytest
 
 from receipt.cli import EXIT_FAIL, EXIT_OK, EXIT_USAGE, main
 from receipt.sign import generate_signing_keypair, sign_payload
-from receipt.verify import load_spec
+from receipt.verify import VerifySpecError, load_spec
 
 from corpus_fixture import CONTENT, append_release, build_corpus
 
@@ -466,6 +466,10 @@ def test_json_output_marks_gates_as_not_re_run(
     assert payload["chain"]["releases"] == 1
     assert len(payload["chain"]["witnesses"]) == 2
     assert payload["binding"]["contentFiles"] == 3
+    # Named, and in order: a PASS is exactly these three passes having
+    # completed, and a reader keying on this list must not have to infer
+    # which ones a verdict was made of.
+    assert payload["passesCompleted"] == ["custody", "binding", "declaration"]
 
 
 def anchor_set_recomputed(repo: pathlib.Path) -> tuple[str, dict[str, str]]:
@@ -505,16 +509,33 @@ def test_the_json_verdict_names_the_anchor_set_in_force(
     assert payload["chain"]["anchorFiles"] == per_file
 
 
-def test_the_text_verdict_carries_the_full_anchor_set_digest(
+def test_the_text_verdict_carries_every_quotable_digest_in_full(
     repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The digest exists to be quoted from the verdict alone, and it is
-    pinned nowhere else — a prefix would not be quotable evidence."""
+    """Three digests exist to be quoted from the verdict alone.
+
+    The spec digest names the configuration the run was made under, the head
+    digest is what an auditor compares out of band — freshness and uniqueness
+    are the two things this command says it cannot establish from one clone,
+    and comparing head digests is the remedy it names for both — and the
+    anchor-set digest names the trust material in force and is pinned nowhere
+    else. None of them is quotable evidence as a prefix, and the head digest
+    was reaching the text verdict only as the 16 hex characters in the
+    manifest's filename.
+    """
 
     combined, _ = anchor_set_recomputed(repo)
+    spec_digest = hashlib.sha256(
+        (repo / "verification/spec.py").read_bytes()
+    ).hexdigest()
+    head_digest = hashlib.sha256(manifest_stem(repo).read_bytes()).hexdigest()
     assert run(repo) == EXIT_OK
     out = capsys.readouterr().out
+    assert f"sha256 {spec_digest}" in out
+    assert f"head {head_digest}" in out
     assert f"anchor set {combined}" in out
+    for digest in (spec_digest, head_digest, combined):
+        assert len(digest) == 64, "a prefix is not quotable evidence"
 
 
 def test_a_gate_that_did_not_run_is_shouted_not_hidden(
@@ -547,6 +568,132 @@ def test_a_gate_that_did_not_run_is_shouted_not_hidden(
     out = capsys.readouterr().out
     assert "1 of 2 declared gate(s) did not pass cleanly" in out
     assert "DID NOT RUN — run-generated-guard: false in the caller" in out
+
+
+def test_refuses_a_journal_that_omits_a_spec_required_gate(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The declaration pass, refused through the command rather than the
+    library.
+
+    Custody and binding both pass here: the chain is real, the witnesses are
+    real, and the journal describes this tree exactly. The corpus is simply
+    silent about a gate the consumer's committed spec requires, and silence is
+    the failure mode the third pass exists for — a corpus that never mentions
+    its compile gate must not verify more quietly than one that declares it
+    did not run.
+    """
+
+    root = tmp_path / "repo"
+    build_corpus(
+        root,
+        tmp_path / "tsa",
+        gates=[
+            {
+                "gateId": "oracle/licensed-parity",
+                "tier": "restricted",
+                "outcome": "pass",
+                "evidence": {"restrictedInput": "licensed bundle"},
+            },
+        ],
+    )
+    assert (
+        main(
+            [
+                "verify",
+                "--spec",
+                str(root / "verification/spec.py"),
+                "--root",
+                str(root),
+                "--json",
+            ]
+        )
+        == EXIT_FAIL
+    )
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["verdict"] == "FAIL"
+    assert payload["passesCompleted"] == ["custody", "binding"]
+    (declaration,) = [p for p in payload["passes"] if p["name"] == "declaration"]
+    assert declaration["ok"] is False
+    assert (
+        "the witnessed journal does not declare a gate the pinned spec "
+        "requires: 'rulespec/compile'" in declaration["failure"]
+    )
+    assert "VERDICT: FAIL" not in captured.out
+
+
+def test_every_non_passing_outcome_is_marked_in_the_verdict(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The renderer's outcome vocabulary is receipt.corpus's.
+
+    Spelled out as literals in the CLI, a renamed or added outcome went on
+    rendering as an unmarked gate — a fourth outcome, or "not_run" for
+    "not-run", would print as a bare gate id beside the ones that passed,
+    which is exactly the over-claim the outcome schema exists to stop. This
+    walks the whole vocabulary rather than the two cases someone remembered.
+    """
+
+    from receipt.corpus import GATE_OUTCOMES, NOT_RUN, PASS, WAIVED
+
+    evidence: dict[str, dict[str, str]] = {
+        PASS: {"command": "make validate"},
+        WAIVED: {"waiverSetSha256": "f" * 64},
+        NOT_RUN: {"reason": "run-generated-guard: false in the caller"},
+    }
+    assert set(evidence) == set(GATE_OUTCOMES), (
+        "an outcome exists that this battery, and the renderer, do not handle"
+    )
+
+    root = tmp_path / "repo"
+    build_corpus(
+        root,
+        tmp_path / "tsa",
+        gates=[
+            {
+                "gateId": "rulespec/compile",
+                "tier": "public",
+                "outcome": PASS,
+                "evidence": evidence[PASS],
+            },
+            *(
+                {
+                    "gateId": f"guard/{outcome}",
+                    "tier": "ci-attested",
+                    "outcome": outcome,
+                    "evidence": evidence[outcome],
+                }
+                for outcome in sorted(GATE_OUTCOMES - {PASS})
+            ),
+        ],
+    )
+    assert (
+        main(
+            [
+                "verify",
+                "--spec",
+                str(root / "verification/spec.py"),
+                "--root",
+                str(root),
+            ]
+        )
+        == EXIT_OK
+    )
+    out = capsys.readouterr().out
+    non_passing = sorted(GATE_OUTCOMES - {PASS})
+    summary = (
+        f"{len(non_passing)} of {len(non_passing) + 1} declared gate(s) did not "
+        "pass cleanly"
+    )
+    assert summary in out
+    for outcome in non_passing:
+        (line,) = [
+            entry for entry in out.splitlines() if f"- guard/{outcome}" in entry
+        ]
+        assert "[" in line and "]" in line, (outcome, line)
+    (passing,) = [entry for entry in out.splitlines() if "- rulespec/compile" in entry]
+    assert passing.strip() == "- rulespec/compile"
 
 
 def test_json_output_carries_the_spec_digest(
@@ -696,6 +843,81 @@ def test_pass_verdict_derives_the_witness_clause(
     out = capsys.readouterr().out
     assert "the 2 pinned RFC 3161 authorities (alpha, beta)" in out
     assert "newest release" in out  # staleness is named, not implied away
+
+
+def test_a_verdict_with_no_witnesses_states_no_timing_claim(
+    repo: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defensive, and belt-and-braces with the ChainSpec refusal.
+
+    A spec can no longer configure an empty anchor set, so a verified chain
+    always carries witnesses. Were one to reach the renderer without them,
+    "the 0 pinned RFC 3161 authorities ()" would read as a timing claim built
+    from no witness at all — the shape of over-claim this verdict exists to
+    avoid, so the clause is dropped and the absence is stated.
+    """
+
+    from receipt.verify import VerifyResult
+
+    monkeypatch.setattr(VerifyResult, "witness_times", lambda self: {})
+    assert run(repo) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "VERDICT: PASS" in out
+    assert "RFC 3161" not in out
+    assert "This verdict makes no witnessed timing claim." in out
+
+
+def test_a_witnessed_time_with_no_fraction_is_rendered_whole(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The ordinary case reads as the authority wrote it: no trailing
+    ".000000" appears merely because the renderer can print one."""
+
+    import re
+
+    assert run(repo, "--json") == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["chain"]["witnesses"]
+    for stamp in payload["chain"]["witnesses"].values():
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", stamp), stamp
+
+
+@pytest.mark.parametrize("microsecond", [1, 750_000, 999_999])
+def test_a_fractional_witnessed_time_is_quoted_in_full(
+    repo: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    microsecond: int,
+) -> None:
+    """An RFC 3161 authority may sign a fractional genTime, and whole-second
+    formatting printed one witnessed at ...:59.999999Z as ...:59Z — an instant
+    strictly earlier than the receipt's, quoted in a verdict as if exact. The
+    fraction is carried through, and carried through without rolling the
+    second over: the time reported is the time signed."""
+
+    import receipt.release_chain as module
+
+    real = module._parse_receipt_text
+
+    def fractional(output: str, receipt: pathlib.Path) -> object:
+        parsed, policy = real(output, receipt)
+        return parsed.replace(microsecond=microsecond), policy
+
+    monkeypatch.setattr("receipt.release_chain._parse_receipt_text", fractional)
+
+    assert run(repo, "--json") == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    stamps = payload["chain"]["witnesses"]
+    assert stamps
+    for anchor, stamp in stamps.items():
+        assert stamp.endswith(f".{microsecond:06d}Z"), (anchor, stamp)
+
+    assert run(repo) == EXIT_OK
+    out = capsys.readouterr().out
+    for stamp in stamps.values():
+        assert stamp in out
 
 
 def test_refuses_an_edited_attested_file(repo: pathlib.Path) -> None:
@@ -875,7 +1097,15 @@ SPEC = VerificationSpec(
         schema_version="t",
         producer_public_key_filename="p.pub",
         producer_spki_sha256="{spki}",
-        anchors={{}},
+        anchors={{
+            "alpha": AnchorSpec(
+                filename="alpha-root.pem",
+                pem_sha256="c" * 64,
+                policy_oid="1.3.6.1.4.1.99999.1.1",
+                signer_certificate_sha256="d" * 64,
+                signer_spki_sha256="e" * 64,
+            ),
+        }},
     ),
     corpus=CorpusSpec(
         schema_version="t",
@@ -889,6 +1119,36 @@ SPEC = VerificationSpec(
 '''
 
 FROZEN_MTIME = 1_800_000_000
+
+
+def test_refuses_a_symlinked_spec(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The guard used to run after ``resolve()``, which follows every link on
+    the way, so nothing was left for it to catch.
+
+    Every other read in the package refuses a symlink, and the spec is the
+    trust configuration itself. It also breaks the one thing an auditor pins:
+    they record the spec's digest against a path, and a link can be repointed
+    at other bytes afterwards without that path changing.
+    """
+
+    real = tmp_path / "real-spec.py"
+    real.write_text(SPEC_TEMPLATE.format(name="linked", spki="a" * 64))
+    link = tmp_path / "spec.py"
+    link.symlink_to(real)
+
+    with pytest.raises(VerifySpecError, match="spec is a symlink"):
+        load_spec(link)
+
+    assert (
+        main(["verify", "--spec", str(link), "--root", str(tmp_path), "--json"])
+        == EXIT_USAGE
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
+    assert payload["stage"] == "spec"
+    assert "supply the regular file's path" in payload["failure"]
 
 
 def test_the_spec_that_runs_is_always_the_spec_that_was_hashed(
@@ -998,6 +1258,81 @@ def test_unexpected_exception_in_any_pass_is_a_fail_verdict_not_an_escape(
     assert any("RuntimeError: injected surprise" in p["failure"] for p in failed)
 
 
+# --- the fail-closed boundary holds against a raise that is not an Exception --
+
+
+@pytest.mark.parametrize("escape", ["SystemExit(0)", "GeneratorExit()"])
+def test_a_spec_that_exits_the_interpreter_is_refused_not_obeyed(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str], escape: str
+) -> None:
+    """A spec is executed, so a spec can try to end the command.
+
+    ``raise SystemExit(0)`` is not an ``Exception``. It unwound past the
+    Exception-only boundary around ``exec``, past every pass below it, and out
+    of the interpreter with status 0 and no verdict printed at all — the
+    producer's own configuration file declaring the audit successful, and a
+    ``--json`` consumer left with empty stdout. It is a load failure like any
+    other, and it refuses as one.
+    """
+
+    path = tmp_path / "spec.py"
+    path.write_text(
+        SPEC_TEMPLATE.format(name="exiting", spki="a" * 64) + f"\nraise {escape}\n"
+    )
+    assert (
+        main(["verify", "--spec", str(path), "--root", str(tmp_path), "--json"])
+        == EXIT_USAGE
+    )
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["verdict"] == "FAIL"
+    assert payload["stage"] == "spec"
+    assert payload["passesCompleted"] == []
+    assert escape.split("(")[0] in payload["failure"]
+    assert "PASS" not in captured.out
+
+
+def test_a_pass_that_exits_the_interpreter_is_a_fail_verdict(
+    repo: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same boundary, one layer in: a pass that raises SystemExit is a FAIL,
+    not an exit status the verification chose for itself."""
+
+    def exit_zero(*_args: object, **_kwargs: object) -> object:
+        raise SystemExit(0)
+
+    monkeypatch.setattr("receipt.verify.verify_release_chain", exit_zero)
+    assert run(repo, "--json") == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
+    assert payload["passesCompleted"] == []
+    assert any(
+        "SystemExit: 0" in item["failure"]
+        for item in payload["passes"]
+        if not item["ok"]
+    )
+
+
+def test_a_run_that_exits_the_interpreter_is_a_fail_verdict(
+    repo: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """And the CLI's own outer boundary, which is the last one standing."""
+
+    def exit_zero(*_args: object, **_kwargs: object) -> object:
+        raise SystemExit(0)
+
+    monkeypatch.setattr("receipt.cli.run_verification", exit_zero)
+    assert run(repo, "--json") == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
+    assert payload["stage"] == "verification"
+    assert "SystemExit" in payload["failure"]
+
+
 # --- second cross-family round: the coverage it found missing ----------------
 
 
@@ -1050,6 +1385,42 @@ def test_pin_inference_yields_only_to_an_explicit_choice(repo: pathlib.Path) -> 
         verify_state=True,
         enforce_production_pins=False,
     )
+
+
+def test_a_chain_resigned_under_a_substituted_key_refuses_by_spki_pin(
+    repo: pathlib.Path,
+) -> None:
+    """The pin must be what refuses, and it must say so.
+
+    A producer key swapped for a freshly generated one, with every manifest
+    re-signed under it, is internally valid at every step: the signature
+    verifies against the key sitting in the anchor directory. Only the SPKI
+    fingerprint in the consumer's committed spec distinguishes it, and the
+    refusal must name that fingerprint rather than arriving as some later,
+    incidental failure — which is what a spec with no producer pin used to
+    produce, having skipped the comparison entirely.
+    """
+
+    from receipt.release_chain import ReleaseChainError, verify_release_chain
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    private_pem, public_pem = generate_signing_keypair()
+    (repo / "releases/anchors/producer-ed25519.pub").write_bytes(public_pem)
+    manifest = manifest_stem(repo)
+    manifest.with_suffix(".producer.sig").write_bytes(
+        sign_payload(private_pem, manifest.read_bytes(), domain=b"")
+    )
+
+    with pytest.raises(
+        ReleaseChainError, match="producer public-key SPKI is not code-pinned"
+    ):
+        verify_release_chain(
+            repo,
+            spec=spec.chain,
+            require_chain=True,
+            verify_state=True,
+            enforce_production_pins=True,
+        )
 
 
 def _git(repo: pathlib.Path, *args: str) -> None:
@@ -1137,6 +1508,50 @@ def test_base_ref_json_reports_the_history_pass(
     claimed = " ".join(payload["scope"]["established"])
     assert "present at the given base ref" in claimed
     assert "outside this claim" in claimed
+
+
+def test_the_history_verdict_names_the_resolved_commit_not_the_ref(
+    committed_repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A ref spelling is not evidence.
+
+    "HEAD", a branch, or a tag names whatever it pointed at while the command
+    ran, so a verdict quoting only the spelling is reproducible at a different
+    base later and a reader cannot tell which snapshot was compared. The full
+    object id the ref resolved to — the one resolution the comparison itself
+    used — appears in the JSON verdict and in the pass detail the text prints.
+    """
+
+    import re
+    import subprocess
+
+    expected = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=committed_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert re.fullmatch(r"[0-9a-f]{40}", expected)
+
+    assert run(committed_repo, "--base-ref", "HEAD", "--json") == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["history"]["baseCommit"] == expected
+    (history,) = [p for p in payload["passes"] if p["name"] == "history"]
+    assert f"present at HEAD ({expected})" in history["detail"]
+
+    assert run(committed_repo, "--base-ref", "HEAD") == EXIT_OK
+    assert expected in capsys.readouterr().out
+
+
+def test_a_verdict_without_a_base_ref_carries_no_history_block(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No base ref, no commit to name — and no empty block inviting a reader
+    to think one was compared."""
+
+    assert run(repo, "--json") == EXIT_OK
+    assert "history" not in json.loads(capsys.readouterr().out)
 
 
 def test_base_ref_refusal_is_a_fail_verdict(
@@ -1566,8 +1981,10 @@ def _build_pass_result(spec_path: pathlib.Path):
     which is the half of S5-F5 that does not need the run to fail.
     """
 
-    from receipt.verify import VerifyResult
+    from receipt.verify import REQUIRED_PASSES, PassResult, VerifyResult
 
+    # A verdict is made of the three required passes; a result carrying none
+    # renders as a failure, not a PASS, so the fixture carries all three.
     return VerifyResult(
         spec_name="receipt test corpus",
         spec_path=spec_path,
@@ -1575,7 +1992,9 @@ def _build_pass_result(spec_path: pathlib.Path):
         root=spec_path.parent.parent,
         receipt_version="test",
         producer_spki_sha256="0" * 64,
-        passes=(),
+        passes=tuple(
+            PassResult(name=name, ok=True, detail="ok") for name in REQUIRED_PASSES
+        ),
         chain=None,
         corpus=None,
     )
