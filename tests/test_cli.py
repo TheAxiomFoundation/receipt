@@ -1981,8 +1981,10 @@ def _build_pass_result(spec_path: pathlib.Path):
     which is the half of S5-F5 that does not need the run to fail.
     """
 
-    from receipt.verify import VerifyResult
+    from receipt.verify import REQUIRED_PASSES, PassResult, VerifyResult
 
+    # A verdict is made of the three required passes; a result carrying none
+    # renders as a failure, not a PASS, so the fixture carries all three.
     return VerifyResult(
         spec_name="receipt test corpus",
         spec_path=spec_path,
@@ -1990,7 +1992,9 @@ def _build_pass_result(spec_path: pathlib.Path):
         root=spec_path.parent.parent,
         receipt_version="test",
         producer_spki_sha256="0" * 64,
-        passes=(),
+        passes=tuple(
+            PassResult(name=name, ok=True, detail="ok") for name in REQUIRED_PASSES
+        ),
         chain=None,
         corpus=None,
     )

@@ -234,6 +234,7 @@ to replace another (peer review, Sol round 3). The marker carries all
 sixty-four characters now, and because a digest is a distinguisher rather
 than a proof, :func:`_bounded_payload` refuses outright if two keys in one
 object come out of the bound equal.
+
 The boundaries below catch ``BaseException``, because ``SystemExit`` is not an
 ``Exception``: a spec or a pass that raised one exited the interpreter with a
 status of its own choosing and printed no verdict at all. ``KeyboardInterrupt``
