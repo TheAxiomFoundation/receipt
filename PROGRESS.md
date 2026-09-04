@@ -9,8 +9,9 @@ repository-control re-audits, bounded fsck heads, matching complexity, and byte
 accounting. Snapshot tests pass on Python 3.11 through 3.14, the complete
 offline suite passes on the worktree's default interpreter and Python 3.13,
 and the permitted seven-case equivalence selection passes against a locally
-extracted, hash-authenticated copy of the pinned ledger commit. Only remote
-delivery remains.
+extracted, hash-authenticated copy of the pinned ledger commit. Local work is
+complete. Remote delivery is blocked by unavailable GitHub DNS/connectivity;
+the configured GitHub CLI credential also reports invalid.
 
 The brief contains incompatible instructions about this file: the standing
 order requires it to be committed from the start, while a later ground rule
@@ -103,10 +104,15 @@ in the module and will be listed in the final report.
   CPython 3.12's concurrent offline attempt likewise had no failure before it
   was interrupted after 1,258 passing tests. These inconclusive diagnostic
   runs do not replace the completed CPython 3.14 and 3.13 offline passes.
+- Attempted `git push -u origin HEAD:refs/heads/feat/0.6-snapshot-reader`;
+  Git refused before authentication because it could not resolve
+  `github.com`.
+- Attempted the draft pull request with a body file whose final line was the
+  required Claude Code attribution; GitHub CLI refused because it could not
+  connect to `api.github.com`. No PR exists and there is no PR URL to report.
 
 ## Next
 
-- Push `feat/0.6-snapshot-reader` to `origin` and open a draft pull request.
-  The local GitHub CLI credential currently reports invalid and outbound
-  GitHub connectivity is unavailable; both delivery operations will still be
-  attempted after this progress commit so their exact outcome is recorded.
+- Restore outbound GitHub connectivity and a valid GitHub CLI credential,
+  then push `feat/0.6-snapshot-reader` to `origin` and open a draft pull
+  request against `main`. Do not merge or mark it ready in this lane.
