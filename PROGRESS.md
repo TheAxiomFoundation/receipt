@@ -23,6 +23,8 @@ In progress on `feat/0.6-lane-c`, based at `145f3db93d745ddc43aeb47f6b7bd8b30aa3
 - Extended that cache to retain the missing/failing-command refusal as well; repeated unsupported and missing-binary preflights each execute the version command once (2 focused cases pass).
 - Adapted the release-tree test commit helper to Lane D's now-committed corpus fixture; the six history/base materialization tests pass without manufacturing an empty commit.
 - Added an exact-filename fast path so `run_verification` can hand the same normalized `ChainSpec` object to materialization and the directory verifier without a second normalization; stateful direct-caller filenames still normalize once (4 focused cases pass).
+- Implemented commit-addressed `run_verification` over entered candidate/base snapshots, exact candidate expectations and ancestry, optional object-store verification, private five-prefix materialization, anchor-set pinning before OpenSSL, the mandatory journal rehash, snapshot corpus binding, and declaration verification. `VerifyResult` and JSON carry the selected/base identities, object format, repertoire, object-store report, dynamic custody/binding claims, checkout limitation, and spec/anchor trust limitations; all 17 focused verifier tests pass.
+- Removed the module-level `LoadedSpec` construction helper and validate expected spec digests as exact lowercase SHA-256 strings before comparison, closing callable/equality-object forge paths found in peer review.
 
 ## Decisions
 
@@ -37,8 +39,9 @@ In progress on `feat/0.6-lane-c`, based at `145f3db93d745ddc43aeb47f6b7bd8b30aa3
 - Integration dependency: the 0.5.2 `append_gate.py` imports most release-chain guards section 3.5 requires Lane C to delete. The standalone Lane C tree cannot both remove them and collect the append-gate suite until Lane B replaces those callers; keep this visible rather than silently retaining dead compatibility code.
 - Snapshot diagnostic surface: `TreeSnapshot.select` reports an unresolvable base as `cannot resolve commit ...` without the old Git stderr, and `assert_ancestor` names an explicit candidate OID rather than `HEAD`. The ledger differential wrapper uses narrow message adapters so the pre-existing moved-case outputs stay pinned; `snapshot.py` remains unchanged.
 - The brief assigns the exact append-only deliberate-divergence refusal (`change rewrites existing line ...`) to `tests/test_ledger_equivalence.py`, while that module's baseline is the release-chain script and the phrase belongs to the append-gate oracle. Re-check the harness composition before implementing; if the requested case truly cannot be expressed there, preserve the scope conflict in the final record rather than changing either oracle.
+- Peer review of the release-chain and loader surface found three implementation gaps (unsupported OpenSSL exceptions were not cached, `LoadedSpec` had a callable forge helper/non-exact expectation, and an exact normalized spec was replaced again); each is now fixed with focused regression coverage. The rest of the release-chain deletion, refusal-order, regular-read, CA-copy, and tree-history contract reviewed clean.
 
 ## Next
 
-- Implement commit-addressed `run_verification` and the CLI pins/output over the merged snapshot corpus API.
+- Finish the CLI text/JSON renderer and checkpoint the re-pinned 151-case CLI battery after peer review.
 - Re-run the ledger harness after the final verifier/CLI integration, then run the complete 101-case equivalence census.

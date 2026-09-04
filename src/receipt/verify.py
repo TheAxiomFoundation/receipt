@@ -37,6 +37,8 @@ from __future__ import annotations
 
 import hashlib
 import pathlib
+import tempfile
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -50,6 +52,7 @@ from receipt.corpus import (
     CorpusError,
     CorpusSpec,
     CorpusVerification,
+    MAX_JOURNAL_BYTES,
     verify_corpus_binding,
     verify_declarations,
 )
@@ -57,10 +60,12 @@ from receipt.release_chain import (
     ChainSpec,
     ChainVerification,
     ReleaseChainError,
+    _normalized_spec,
     assert_no_redirecting_git_environment,
     verify_release_chain,
     verify_release_history_immutable,
 )
+from receipt.snapshot import ObjectStoreReport, SnapshotError, TreeSnapshot
 
 #: What each tier means to a third party, in the verdict's own words. Stated
 #: once, here, so the CLI cannot drift into a friendlier phrasing.
@@ -103,7 +108,7 @@ _PASS_CLAIMS = {
     "byte- and mode-identical in this tree (objects added after that ref are "
     "outside this claim)",
     "custody": "custody of the release chain",
-    "binding": "binding of the witnessed journal to this working tree",
+    "binding": "binding of the witnessed journal to tree {tree}",
 }
 
 
@@ -167,23 +172,6 @@ class LoadedSpec:
         raise TypeError("LoadedSpec instances are created by load_spec")
 
 
-def _loaded_spec(
-    verification: VerificationSpec,
-    *,
-    path: pathlib.Path,
-    sha256: str,
-    pinned: bool,
-) -> LoadedSpec:
-    """Construct the loader's result without exposing a forgeable initializer."""
-
-    loaded = object.__new__(LoadedSpec)
-    object.__setattr__(loaded, "verification", verification)
-    object.__setattr__(loaded, "path", path)
-    object.__setattr__(loaded, "sha256", sha256)
-    object.__setattr__(loaded, "pinned", pinned)
-    return loaded
-
-
 @dataclass(frozen=True)
 class PassResult:
     name: str
@@ -203,11 +191,24 @@ class VerifyResult:
     passes: tuple[PassResult, ...]
     chain: ChainVerification | None
     corpus: CorpusVerification | None
+    #: The selected, authenticated candidate identity. Both are None only
+    #: when snapshot selection itself refused before an identity existed.
+    commit: str | None = None
+    tree: str | None = None
+    object_format: str | None = None
     #: The full object id ``--base-ref`` resolved to, or None when no base ref
     #: was supplied. A ref spelling is not evidence: "HEAD", a branch name, or
     #: a tag names whatever it points at when the command runs, and the same
     #: verdict text is reproducible at a later commit. The commit is.
     base_commit: str | None = None
+    base_tree: str | None = None
+    name_repertoire: str = "portable"
+    object_store: ObjectStoreReport | None = None
+    _spec_pinned: bool = field(default=False, repr=False)
+    #: Whether custody's anchor-set digest was compared with an auditor-owned
+    #: pin. Private because it qualifies a claim rather than adding another
+    #: public datum to the result contract.
+    _anchor_set_pinned: bool = field(default=False, repr=False)
 
     @property
     def ok(self) -> bool:
@@ -309,6 +310,15 @@ def load_spec(
 
     import types
 
+    if expect_sha256 is not None and (
+        type(expect_sha256) is not str
+        or len(expect_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in expect_sha256)
+    ):
+        raise VerifySpecError(
+            "expected spec SHA-256 must be a lowercase 64-character hex digest"
+        )
+
     # Before resolving, deliberately. Every other read in this package refuses
     # a symlink in the final component — manifests, receipts, anchors, the
     # witnessed journal — and the
@@ -361,12 +371,12 @@ def load_spec(
             f"SPEC is {type(candidate).__name__}, not a receipt.verify."
             f"VerificationSpec: {spec_path}"
         )
-    return _loaded_spec(
-        candidate,
-        path=spec_path,
-        sha256=digest,
-        pinned=expect_sha256 is not None,
-    )
+    loaded = object.__new__(LoadedSpec)
+    object.__setattr__(loaded, "verification", candidate)
+    object.__setattr__(loaded, "path", spec_path)
+    object.__setattr__(loaded, "sha256", digest)
+    object.__setattr__(loaded, "pinned", expect_sha256 is not None)
+    return loaded
 
 
 def _witness_time(value: datetime) -> str:
@@ -440,36 +450,82 @@ def _declaration_detail(verification: CorpusVerification) -> str:
 
 def run_verification(
     root: pathlib.Path,
-    spec: VerificationSpec,
+    spec: LoadedSpec,
     *,
-    spec_path: pathlib.Path,
-    spec_sha256: str,
     base_ref: str | None = None,
+    commit: str = "HEAD",
+    expect_commit: str | None = None,
+    expect_tree: str | None = None,
+    expect_anchor_set: str | None = None,
+    verify_objects: bool = False,
 ) -> VerifyResult:
-    """Run every pass, stopping at the first failure. Never raises on a
-    verification failure — the failure is the return value."""
+    """Verify one authenticated commit, stopping at the first failed pass.
+
+    Verification failures are returned, never raised. The two caller-contract
+    violations are different: comparing history without pinning the candidate
+    commit, or presenting an anchor pin without first pinning the executable
+    spec, raises :class:`ValueError` for the CLI to render as a usage error.
+    """
+
+    if not isinstance(spec, LoadedSpec):
+        raise TypeError("spec must be a LoadedSpec returned by load_spec")
+    if base_ref is not None and expect_commit is None:
+        raise ValueError("base_ref requires expect_commit")
+
+    verification_spec = spec.verification
+    chain_repertoire = verification_spec.chain.name_repertoire
+    # Compatibility for the short merge window in which Lane D's defaulted
+    # CorpusSpec field may not yet be present. Lane B removes this getattr.
+    corpus_repertoire = getattr(
+        verification_spec.corpus, "name_repertoire", "portable"
+    )
+    if chain_repertoire != corpus_repertoire:
+        raise ValueError("spec declares two name repertoires")
+
+    spec_anchor_pin = verification_spec.anchor_set_sha256
+    if expect_anchor_set is not None and not spec.pinned:
+        raise ValueError("an anchor pin requires a pinned spec")
+    anchor_pin_conflict = (
+        expect_anchor_set is not None
+        and spec_anchor_pin is not None
+        and expect_anchor_set != spec_anchor_pin
+    )
+    anchor_pin = (expect_anchor_set or spec_anchor_pin) if spec.pinned else None
 
     root = root.resolve()
     passes: list[PassResult] = []
     chain: ChainVerification | None = None
     corpus: CorpusVerification | None = None
+    candidate_commit: str | None = None
+    candidate_tree: str | None = None
+    object_format: str | None = None
     base_commit: str | None = None
+    base_tree: str | None = None
+    object_store: ObjectStoreReport | None = None
 
     def result(*, incomplete: str | None = None) -> VerifyResult:
         items = list(passes)
         if incomplete is not None:
             items.append(PassResult(incomplete, False, "", "not reached"))
         return VerifyResult(
-            spec_name=spec.name,
-            spec_path=spec_path,
-            spec_sha256=spec_sha256,
+            spec_name=verification_spec.name,
+            spec_path=spec.path,
+            spec_sha256=spec.sha256,
             root=root,
             receipt_version=__version__,
-            producer_spki_sha256=spec.chain.producer_spki_sha256,
+            producer_spki_sha256=verification_spec.chain.producer_spki_sha256,
             passes=tuple(items),
             chain=chain,
             corpus=corpus,
+            commit=candidate_commit,
+            tree=candidate_tree,
+            object_format=object_format,
             base_commit=base_commit,
+            base_tree=base_tree,
+            name_repertoire=chain_repertoire,
+            object_store=object_store,
+            _spec_pinned=spec.pinned,
+            _anchor_set_pinned=anchor_pin is not None,
         )
 
     # Every pass — the verification call AND the detail builder that reports
@@ -485,10 +541,27 @@ def run_verification(
     # re-raised — it is the operator's, not the verification's, to report.
     # Expected domain errors carry their own message; anything else names its
     # type so the surprise is legible.
-    def failed(name: str, exc: BaseException, expected: type[Exception]) -> str:
+    def failed(
+        name: str,
+        exc: BaseException,
+        expected: type[Exception] | tuple[type[Exception], ...],
+    ) -> str:
+        del name
         if isinstance(exc, expected):
             return str(exc)
         return f"{type(exc).__name__}: {exc}"
+
+    if anchor_pin_conflict:
+        passes.append(
+            PassResult(
+                "custody",
+                False,
+                "",
+                "anchor pins disagree: "
+                f"command expects {expect_anchor_set}, spec expects {spec_anchor_pin}",
+            )
+        )
+        return result(incomplete="binding")
 
     # Before any pass runs git: an environment that would redirect git's reads
     # is refused here rather than met by the custody pass after the optional
@@ -507,117 +580,259 @@ def run_verification(
         )
         return result(incomplete="binding")
 
-    # Pass 0 (optional): the published history is immutable relative to a base
-    # git ref. Needs git and a repository; requested explicitly, never implied.
-    if base_ref is not None:
-        try:
-            # The commit the ref resolved to, from the one resolution the
-            # comparison itself used. Quoting only the spelling left the
-            # verdict unfalsifiable: "HEAD", a branch, or a tag names whatever
-            # it pointed at while the command ran, so the same sentence is
-            # reproducible at a different base later, and a reader cannot tell
-            # which snapshot was compared. The object id is the evidence.
-            base_commit, _, _ = verify_release_history_immutable(
-                root, base_ref, spec=spec.chain
+    phase = "custody"
+    try:
+        # A single normalized ChainSpec instance is shared by the pre-crypto
+        # anchor digest and the directory verifier. Stateful PathLike values
+        # cannot answer those two consumers with different spellings.
+        normalized_chain = _normalized_spec(verification_spec.chain)
+        selected = TreeSnapshot.select(
+            root,
+            commit,
+            verify_objects=verify_objects,
+            expect_commit=expect_commit,
+            expect_tree=expect_tree,
+        )
+        candidate_commit = selected.commit
+        candidate_tree = selected.tree
+        object_format = selected.object_format
+
+        with ExitStack() as stack:
+            candidate = stack.enter_context(selected)
+            base: TreeSnapshot | None = None
+            if base_ref is not None:
+                phase = "history"
+                base = stack.enter_context(TreeSnapshot.select(root, base_ref))
+                base_commit = base.commit
+                base_tree = base.tree
+                candidate.assert_ancestor(base)
+
+            # Object-store verification is about the primary store, not one
+            # logical pass, and runs over exactly the already-resolved heads.
+            if verify_objects:
+                phase = "custody"
+                heads = (
+                    (candidate.commit,)
+                    if base is None
+                    else (candidate.commit, base.commit)
+                )
+                object_store = candidate.verify_object_store(heads)
+
+            # Pass 0 (optional): history comparison consumes tree entries only.
+            if base is not None:
+                phase = "history"
+                verify_release_history_immutable(
+                    normalized_chain,
+                    candidate=candidate,
+                    base=base,
+                )
+                passes.append(
+                    PassResult(
+                        "history",
+                        True,
+                        f"every release object present at {base_ref} "
+                        f"({base.commit}) is byte- and mode-identical in tree "
+                        f"{candidate.tree[:12]}",
+                    )
+                )
+
+            phase = "custody"
+
+            def state_blob(relative: pathlib.PurePosixPath) -> bytes:
+                display = relative.as_posix()
+                try:
+                    entry = candidate.entry(display)
+                except SnapshotError as exc:
+                    if str(exc) == f"tree entry does not exist: {display}":
+                        raise ReleaseChainError(
+                            f"state file is missing or not a regular file: {display}"
+                        ) from exc
+                    raise
+                if entry.mode == "120000":
+                    raise ReleaseChainError(f"state file is a symlink: {display}")
+                if entry.mode not in {"100644", "100755"}:
+                    raise ReleaseChainError(
+                        f"state file is not a regular file: {display}"
+                    )
+                return candidate.blob(entry, limit=MAX_JOURNAL_BYTES)
+
+            journal_bytes = state_blob(verification_spec.journal_relative)
+            prefix_bytes = state_blob(normalized_chain.prefix_relative)
+            state_bytes = {
+                verification_spec.journal_relative.as_posix(): journal_bytes,
+                normalized_chain.prefix_relative.as_posix(): prefix_bytes,
+            }
+            prefixes = (
+                normalized_chain.release_root_relative,
+                normalized_chain.manifest_relative,
+                normalized_chain.state_relative,
+                normalized_chain.prefix_relative,
+                normalized_chain.anchor_relative,
             )
-            history_detail = (
-                f"every release object present at {base_ref} ({base_commit}) "
-                "is byte- and mode-identical in this tree"
+            with tempfile.TemporaryDirectory(
+                prefix="receipt-verification-materialization-"
+            ) as directory:
+                with candidate.materialize(
+                    prefixes,
+                    pathlib.Path(directory),
+                    repertoire=chain_repertoire,
+                ) as materialized:
+                    candidate.refuse_transforming_attributes(
+                        materialized.entries.values()
+                    )
+                    materialized_anchor_set = materialized.anchor_set_sha256(
+                        normalized_chain
+                    )
+                    if (
+                        anchor_pin is not None
+                        and materialized_anchor_set != anchor_pin
+                    ):
+                        raise ReleaseChainError(
+                            f"anchor set {materialized_anchor_set} is not the "
+                            f"pinned anchor set {anchor_pin}"
+                        )
+                    chain = verify_release_chain(
+                        materialized.path,
+                        spec=normalized_chain,
+                        require_chain=True,
+                        verify_state=True,
+                        enforce_production_pins=True,
+                        compute_anchor_set_digest=True,
+                        state_bytes=state_bytes,
+                    )
+                    if chain.anchor_set_sha256 != materialized_anchor_set:
+                        raise ReleaseChainError(
+                            f"verified anchor set {chain.anchor_set_sha256} is not "
+                            f"the materialized anchor set {materialized_anchor_set}"
+                        )
+                    custody_detail = _custody_detail(chain, verification_spec)
+            passes.append(PassResult("custody", True, custody_detail))
+
+            # Pass 2: the immutable journal blob already supplied to custody is
+            # handed to binding. Its SHA-256 is repeated against the witnessed
+            # value so the composition remains explicit and independently
+            # reviewable even though an immutable snapshot cannot race itself.
+            phase = "binding"
+            head = chain.head
+            assert head is not None
+            witnessed_digest = head.manifest["state"]["jsonlSha256"]
+            actual_digest = hashlib.sha256(journal_bytes).hexdigest()
+            if actual_digest != witnessed_digest:
+                raise CorpusError(
+                    "journal bytes do not match the custody pass: "
+                    f"{actual_digest} != witnessed {witnessed_digest}"
+                )
+            corpus = verify_corpus_binding(
+                candidate,
+                journal_bytes,
+                spec=verification_spec.corpus,
             )
-        except KeyboardInterrupt:  # the operator's interrupt, never a verdict
-            raise
-        except BaseException as exc:  # noqa: BLE001 - any raise is a FAIL verdict
+            binding_detail = _binding_detail(corpus)
+            passes.append(PassResult("binding", True, binding_detail))
+
+            # Pass 3: declarations are claims recorded in the authenticated
+            # journal, not gates this command re-runs.
+            phase = "declaration"
+            verify_declarations(corpus, spec=verification_spec.corpus)
+            declaration_detail = _declaration_detail(corpus)
+            passes.append(PassResult("declaration", True, declaration_detail))
+            phase = "finalize"
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException as exc:  # noqa: BLE001 - every other raise is a FAIL
+        if phase == "history":
             passes.append(
                 PassResult(
                     "history",
                     False,
                     "",
-                    f"release history is not immutable: "
-                    f"{failed('history', exc, ReleaseChainError)}",
+                    "release history is not immutable: "
+                    f"{failed('history', exc, (ReleaseChainError, SnapshotError))}",
                 )
             )
             return result(incomplete="custody")
-        passes.append(PassResult("history", True, history_detail))
-
-    # Pass 1: custody.
-    try:
-        chain = verify_release_chain(
-            root,
-            spec=spec.chain,
-            require_chain=True,
-            verify_state=True,
-            # Never inferred: the spanning verifier exists for outside
-            # auditors, and its pins are on unconditionally regardless of
-            # how the anchor path resolves on this machine.
-            enforce_production_pins=True,
-            # The verdict names the anchor bytes this run consumed, so an
-            # auditor can confirm from the verdict alone which trust
-            # material was in force (receipt#24).
-            compute_anchor_set_digest=True,
-        )
-        custody_detail = _custody_detail(chain, spec)
-    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
-        raise
-    except BaseException as exc:  # noqa: BLE001 - any raise is a FAIL verdict
-        passes.append(
-            PassResult("custody", False, "", failed("custody", exc, ReleaseChainError))
-        )
-        return result(incomplete="binding")
-    passes.append(PassResult("custody", True, custody_detail))
-
-    # Pass 2: binding. Read the journal once, here, and hand the same bytes to
-    # the binding pass that the custody pass just proved the digest of.
-    journal_path = root / spec.journal_relative
-    try:
-        if journal_path.is_symlink() or not journal_path.is_file():
-            raise CorpusError(
-                f"witnessed journal is missing or not a regular file: "
-                f"{spec.journal_relative}"
+        if phase in {"custody", "finalize"}:
+            # A close-time repository re-audit invalidates every tree-derived
+            # pass even if its body happened to finish first.
+            passes[:] = [item for item in passes if item.name == "history"]
+            chain = None
+            corpus = None
+            passes.append(
+                PassResult(
+                    "custody",
+                    False,
+                    "",
+                    failed("custody", exc, (ReleaseChainError, SnapshotError)),
+                )
             )
-        journal_bytes = journal_path.read_bytes()
-        head = chain.head
-        assert head is not None
-        witnessed_digest = head.manifest["state"]["jsonlSha256"]
-        actual_digest = hashlib.sha256(journal_bytes).hexdigest()
-        if actual_digest != witnessed_digest:
-            # verify_release_chain already proved this for the bytes it read;
-            # re-proving it for the bytes THIS pass read closes the window
-            # between the two reads.
-            raise CorpusError(
-                "journal bytes changed between the custody and binding passes: "
-                f"{actual_digest} != witnessed {witnessed_digest}"
+            return result(incomplete="binding")
+        if phase == "binding":
+            corpus = None
+            passes.append(
+                PassResult(
+                    "binding",
+                    False,
+                    "",
+                    failed("binding", exc, (CorpusError, SnapshotError)),
+                )
             )
-        corpus = verify_corpus_binding(root, journal_bytes, spec=spec.corpus)
-        binding_detail = _binding_detail(corpus)
-    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
-        raise
-    except BaseException as exc:  # noqa: BLE001 - any raise is a FAIL verdict
+            return result(incomplete="declaration")
+        assert phase == "declaration"
         passes.append(
-            PassResult("binding", False, "", failed("binding", exc, CorpusError))
-        )
-        return result(incomplete="declaration")
-    passes.append(PassResult("binding", True, binding_detail))
-
-    # Pass 3: declaration completeness. Row-level tier and outcome validity was
-    # enforced during parsing; this checks the journal covers every gate the
-    # consumer requires, and records what was declared so the verdict can
-    # report it without ever claiming it ran.
-    try:
-        verify_declarations(corpus, spec=spec.corpus)
-        declaration_detail = _declaration_detail(corpus)
-    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
-        raise
-    except BaseException as exc:  # noqa: BLE001 - any raise is a FAIL verdict
-        passes.append(
-            PassResult("declaration", False, "", failed("declaration", exc, CorpusError))
+            PassResult(
+                "declaration",
+                False,
+                "",
+                failed("declaration", exc, CorpusError),
+            )
         )
         return result()
-    passes.append(PassResult("declaration", True, declaration_detail))
     return result()
 
 
 def result_to_dict(result: VerifyResult) -> dict[str, Any]:
     """Machine-readable verdict. Mirrors the text exactly, including its limits."""
+
+    def established_claim(item: PassResult) -> str:
+        if item.name == "binding":
+            assert result.tree is not None
+            return _PASS_CLAIMS["binding"].format(tree=result.tree[:12])
+        if item.name == "custody" and not result._anchor_set_pinned:
+            anchor_set = result.anchor_set_sha256
+            assert anchor_set is not None
+            return (
+                f"custody under the anchor set {anchor_set} the verified tree "
+                "carries"
+            )
+        return _PASS_CLAIMS[item.name]
+
+    base: dict[str, str] | None = None
+    if result.base_commit is not None:
+        assert result.base_tree is not None
+        base = {"commit": result.base_commit, "tree": result.base_tree}
+    object_store: dict[str, int | float] | None = None
+    if result.object_store is not None:
+        object_store = {
+            "objects": result.object_store.objects,
+            "storeKiB": result.object_store.store_kib,
+            "seconds": result.object_store.seconds,
+        }
+
+    not_established = [
+        "that any declared gate actually passed",
+        "that the encoded rules are a correct reading of the law",
+        "that this clone holds the producer's newest release "
+        "(--base-ref only bounds staleness against a head the auditor "
+        "recorded; newest needs an out-of-band comparison)",
+        "that this is the only history the producer maintains "
+        "(equivocation is undetectable from a single clone; compare "
+        "head digests out of band)",
+        "that the files in any checkout equal the verified tree",
+    ]
+    if not result._anchor_set_pinned:
+        not_established.append("that the anchor set is one the auditor trusts")
+    if not result._spec_pinned:
+        not_established.append("that the spec's code was trusted")
 
     payload: dict[str, Any] = {
         "verdict": "PASS" if result.ok else "FAIL",
@@ -629,8 +844,15 @@ def result_to_dict(result: VerifyResult) -> dict[str, Any]:
             "name": result.spec_name,
             "path": str(result.spec_path),
             "sha256": result.spec_sha256,
+            "pinned": result._spec_pinned,
         },
         "root": str(result.root),
+        "commit": result.commit,
+        "tree": result.tree,
+        "objectFormat": result.object_format,
+        "base": base,
+        "nameRepertoire": result.name_repertoire,
+        "objectStore": object_store,
         "receiptVersion": result.receipt_version,
         "passes": [
             {
@@ -646,27 +868,21 @@ def result_to_dict(result: VerifyResult) -> dict[str, Any]:
             # not carry a field named "established" listing things it did not
             # establish (cross-family review finding).
             "established": [
-                _PASS_CLAIMS[item.name]
+                established_claim(item)
                 for item in result.passes
                 if item.ok and item.name in _PASS_CLAIMS
             ],
-            "notEstablished": [
-                "that any declared gate actually passed",
-                "that the encoded rules are a correct reading of the law",
-                "that this clone holds the producer's newest release "
-                "(--base-ref only bounds staleness against a head the auditor "
-                "recorded; newest needs an out-of-band comparison)",
-                "that this is the only history the producer maintains "
-                "(equivocation is undetectable from a single clone; compare "
-                "head digests out of band)",
-            ],
+            "notEstablished": not_established,
         },
     }
     if result.base_commit is not None:
         # The object id the comparison actually ran against. The ref spelling
         # stays in the history pass detail beside it; only one of the two is
         # evidence a reader can re-check.
-        payload["history"] = {"baseCommit": result.base_commit}
+        payload["history"] = {
+            "baseCommit": result.base_commit,
+            "baseTree": result.base_tree,
+        }
     if result.chain is not None and result.chain.head is not None:
         payload["chain"] = {
             "releases": len(result.chain.releases),
