@@ -13,7 +13,9 @@ import io
 import os
 import pathlib
 import subprocess
+import sys
 import threading
+import time
 from collections.abc import Iterable
 
 import pytest
@@ -566,6 +568,57 @@ def test_batch_wait_failure_still_reaps_and_closes_every_pipe(
     with pytest.raises(SnapshotError, match="^Git batch child cleanup failed$"):
         batch.close()
 
+    assert process.poll() is not None
+    assert process.stdin is not None and process.stdin.closed
+    assert process.stdout is not None and process.stdout.closed
+    assert process.stderr is not None and process.stderr.closed
+
+
+def test_batch_close_reaps_with_a_fresh_deadline_after_kill(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_popen = subprocess.Popen
+
+    def sleeping_popen(
+        _arguments: object, **kwargs: object
+    ) -> subprocess.Popen[bytes]:
+        return original_popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            **kwargs,
+        )
+
+    monkeypatch.setattr(snapshot_module.subprocess, "Popen", sleeping_popen)
+    monkeypatch.setattr(snapshot_module, "MAX_GIT_SECONDS", 0.01)
+    batch = _BatchReader(
+        tmp_path,
+        environment=_git_environment(tmp_path / "private.gitconfig"),
+        object_format="sha1",
+    )
+    process = batch.process
+    original_wait = process.wait
+    wait_timeouts: list[float | None] = []
+
+    def deadline_sensitive_wait(timeout: float | None = None) -> int:
+        wait_timeouts.append(timeout)
+        if len(wait_timeouts) == 1:
+            time.sleep((timeout or 0.0) + 0.01)
+            raise subprocess.TimeoutExpired(process.args, timeout)
+        if timeout is not None and timeout <= 0.0:
+            raise subprocess.TimeoutExpired(process.args, timeout)
+        return original_wait(timeout=timeout)
+
+    process.wait = deadline_sensitive_wait  # type: ignore[method-assign]
+    try:
+        with pytest.raises(SnapshotError, match=r"^Git batch child failed:"):
+            batch.close()
+    finally:
+        process.wait = original_wait  # type: ignore[method-assign]
+        if process.poll() is None:
+            process.kill()
+        original_wait(timeout=5)
+
+    assert len(wait_timeouts) == 2
+    assert wait_timeouts[1] is not None and wait_timeouts[1] > 0.0
     assert process.poll() is not None
     assert process.stdin is not None and process.stdin.closed
     assert process.stdout is not None and process.stdout.closed

@@ -1030,6 +1030,7 @@ def test_reader_budget_constants_are_pinned_to_the_frozen_values() -> None:
         "MAX_PATH_BYTES_TOTAL": 256 * 1024 * 1024,
         "MAX_GIT_OUTPUT_BYTES": 1 * 1024 * 1024,
         "MAX_GIT_SECONDS": 60,
+        "BATCH_KILL_REAP_SECONDS": 5,
         "MAX_TREE_DEPTH": 256,
         "MAX_ANCESTRY_COMMITS": 1_048_576,
         "MAX_ATTRIBUTE_BYTES": 1 * 1024 * 1024,

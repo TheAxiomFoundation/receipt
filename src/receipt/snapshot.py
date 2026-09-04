@@ -54,7 +54,8 @@ materialization totals are then enforced across both snapshots together.
   are hierarchical so a long prefix is stored once rather than per leaf.
 * ``MAX_GIT_OUTPUT_BYTES`` is 1 MiB for every non-batch, non-fsck Git call.
   ``MAX_GIT_SECONDS`` is 60 seconds for those calls and each batch response
-  and graceful close.
+  and graceful close. ``BATCH_KILL_REAP_SECONDS`` gives a killed batch child a
+  fresh 5 seconds to be reaped after that graceful-close budget is spent.
 * ``MAX_TREE_DEPTH`` is 256 and ``MAX_ANCESTRY_COMMITS`` is 1,048,576,
   bounding hostile nesting and parent walks while remaining above real trees.
 * ``MAX_ATTRIBUTE_BYTES`` is 1 MiB per attributes file;
@@ -129,6 +130,7 @@ MAX_PATH_BYTES = 4_096
 MAX_PATH_BYTES_TOTAL = 256 * 1024 * 1024
 MAX_GIT_OUTPUT_BYTES = 1 * 1024 * 1024
 MAX_GIT_SECONDS = 60
+BATCH_KILL_REAP_SECONDS = 5
 MAX_TREE_DEPTH = 256
 MAX_ANCESTRY_COMMITS = 1_048_576
 MAX_ATTRIBUTE_BYTES = 1 * 1024 * 1024
@@ -1440,10 +1442,10 @@ class _BatchReader:
             except BaseException as caught:
                 failures.append(caught)
 
-        def wait() -> bool:
+        def wait(wait_deadline: float) -> bool:
             try:
                 self._process.wait(
-                    timeout=max(0.0, deadline - time.monotonic())
+                    timeout=max(0.0, wait_deadline - time.monotonic())
                 )
             except subprocess.TimeoutExpired:
                 return False
@@ -1453,26 +1455,30 @@ class _BatchReader:
             return True
 
         reaped = False
+        wait_deadline = deadline
         try:
             if was_abandoned and self._process.poll() is None:
                 kill()
+                wait_deadline = time.monotonic() + BATCH_KILL_REAP_SECONDS
             try:
                 self._stdin.close()
             except OSError:
                 pass
-            reaped = wait()
+            reaped = wait(wait_deadline)
             if not reaped:
                 kill()
-                reaped = wait()
+                wait_deadline = time.monotonic() + BATCH_KILL_REAP_SECONDS
+                reaped = wait(wait_deadline)
         finally:
             # Cleanup is deliberately independent: an injected failure in one
             # operation must not skip the remaining pipe closes or reap attempt.
             if not reaped:
                 kill()
-                reaped = wait()
+                wait_deadline = time.monotonic() + BATCH_KILL_REAP_SECONDS
+                reaped = wait(wait_deadline)
             try:
                 self._stderr_thread.join(
-                    max(0.0, deadline - time.monotonic())
+                    max(0.0, wait_deadline - time.monotonic())
                 )
             except BaseException as caught:
                 failures.append(caught)
@@ -3376,6 +3382,7 @@ class Materialization:
 
 
 __all__ = [
+    "BATCH_KILL_REAP_SECONDS",
     "GIT_COMMANDS",
     "GIT_ENVIRONMENT_DROPPED",
     "GIT_ENVIRONMENT_DROPPED_UNDOCUMENTED",
