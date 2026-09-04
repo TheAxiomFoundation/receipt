@@ -95,12 +95,13 @@ import pytest
 # ``committed_fixture_filesystem`` is a session-scoped fixture; importing it
 # here registers it for this module's tests. The probe behind it is memoized
 # in that module, so it runs once per session however many modules request
-# the fixture. ``assert_copied_surface``, ``commit_candidate`` and
-# ``detached_oracle_checkout`` are the one definition of the committed-fixture
-# contract, shared so the two harnesses cannot drift apart (peer review,
-# round 1).
+# the fixture. ``assert_copied_surface``, ``commit_candidate``,
+# ``detached_oracle_checkout`` and ``_git`` itself are the one definition of
+# the committed-fixture contract and the one git environment it runs under,
+# shared so the two harnesses cannot drift apart (peer review, rounds 1 and 2).
 from test_ledger_equivalence import (
     LEDGER_SPEC,
+    _git,
     assert_copied_surface,
     commit_candidate,
     committed_fixture_filesystem,
@@ -298,26 +299,6 @@ def _assert_port_silent(capfd: pytest.CaptureFixture[str]) -> None:
     )
 
 
-def _git(root: pathlib.Path, *arguments: str) -> str:
-    """Run fixture git commands with ambient user configuration isolated."""
-
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "GIT_CONFIG_GLOBAL": "/dev/null",
-            "GIT_CONFIG_SYSTEM": "/dev/null",
-            "GIT_CONFIG_NOSYSTEM": "1",
-        }
-    )
-    completed = subprocess.run(
-        ["git", "-C", str(root), *arguments],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    return completed.stdout.strip()
-
 
 def commit_tree(root: pathlib.Path, message: str) -> str:
     _git(root, "init", "--quiet")
@@ -326,7 +307,6 @@ def commit_tree(root: pathlib.Path, message: str) -> str:
     _git(root, "add", "-A")
     _git(root, "commit", "--quiet", "-m", message)
     return _git(root, "rev-parse", "HEAD")
-
 
 
 def release_file(root: pathlib.Path, stem: str, suffix: str) -> pathlib.Path:

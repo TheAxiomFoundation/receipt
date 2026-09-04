@@ -102,8 +102,6 @@ import sys
 from collections.abc import Callable, Iterator
 
 import pytest
-
-from receipt.release_chain import _git_bool as release_chain_git_bool
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
@@ -113,6 +111,7 @@ from receipt.release_chain import (
     ChainSpec,
     ReleaseChainError,
     _format_time,
+    _git_bool as release_chain_git_bool,
     verify_release_chain,
     verify_release_history_immutable,
 )
