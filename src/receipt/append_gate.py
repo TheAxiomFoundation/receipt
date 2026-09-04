@@ -548,8 +548,8 @@ There is a fourth of the same kind, and it is asked before all three, because
 it is a fact about the process this verdict is produced in rather than about
 the tree or the configuration it is produced for. ``GIT_DIR``,
 ``GIT_WORK_TREE``, ``GIT_INDEX_FILE``, ``GIT_OBJECT_DIRECTORY`` and
-``GIT_ALTERNATE_OBJECT_DIRECTORIES`` can each decide which repository, index
-or object store some git read this gate makes — the base resolution, an index
+``GIT_ALTERNATE_OBJECT_DIRECTORIES`` can each decide which repository, working
+tree, index or object store some git read this gate makes — the base resolution, an index
 read, the release-root scan, the intent-to-add detection — resolves in, rather
 than the checkout ``root`` names; and
 this gate reads the candidate tree directly as well as through git, so under
@@ -564,17 +564,22 @@ explicitly for every read — is 0.6 work (#45), and
 
 Beside those, and unlike them, is one about the candidate tree: that
 there is none. A ``root`` naming nothing, or naming a regular file, or reached
-through a component that is one, or spelled through a symlink loop, is not a
-tree this gate can answer about, and
-it used to escape as the ``OSError`` the root's own open raised — a bare
+through a component that is one, is not a tree this gate can answer about,
+and it used to escape as the ``OSError`` the root's own open raised — a bare
 ``FileNotFoundError`` or ``NotADirectoryError`` carrying the OS's message and
 not the root, where every other refusal in this module is an ``AppendError``
-naming what it refused. A CLI boundary that catches everything reported that
-as a failure, so the fail-closed property was never in question; a library
-caller got an exception from outside this module's vocabulary. ``_set_root``
-now answers both in one sentence — ``candidate root is missing or not a
-directory`` — from the open itself rather than from a check placed ahead
-of it, which would be a statement about a path this open may not reach (#46).
+naming what it refused; a root spelled through a symlink loop escaped the
+same way as a bare ``OSError`` (``ELOOP``) or, on CPython 3.11 and 3.12, as
+``pathlib``'s own ``RuntimeError`` from ``resolve``. This package's command
+never reaches this code — ``receipt verify`` refuses a non-directory root in
+its own words first — and the consumer command that does reach it catches
+``AppendError`` alone, so the bare exception ended that run non-zero with a
+traceback: fail-closed, and in nobody's vocabulary. ``_set_root`` now
+answers all of them in one sentence — ``candidate root is missing or not a
+directory`` — from the open itself for the absent and regular-file shapes,
+rather than from a check placed ahead of it, which would be a statement
+about a path this open may not reach, and at the resolve for a loop where
+``pathlib`` reports it there (#46).
 
 All of it carries its own tests in tests/test_append_gate.py.
 """
@@ -732,18 +737,21 @@ def _set_root(root: pathlib.Path, spec: AppendGateSpec) -> _CandidateTree:
     only candidate data paths and git comparisons use ``ROOT``.
 
     A root that is not there to be opened — absent, or a regular file, or
-    reached through one, or spelled through a symlink loop — is refused here as an ``AppendError`` naming the
-    root the caller supplied, before any git command is run (#46). It is the
-    open that answers, not an ``lstat`` before it.
+    reached through one, or spelled through a symlink loop — is refused here
+    as an ``AppendError`` naming the root the caller supplied, before any git
+    command is run (#46). For the first three it is the open that answers,
+    not an ``lstat`` before it; a loop is answered wherever ``pathlib``
+    reports it, at the resolve on CPython 3.11 and 3.12 and at the open after.
     """
 
     try:
         candidate_root = root.resolve()
     except RuntimeError as exc:
-        # ``pathlib`` on Linux answers a symlink loop from ``resolve`` itself,
-        # as ``RuntimeError("Symlink loop from ...")`` with the ``ELOOP``
-        # ``OSError`` as its context (CPython 3.11 to 3.13); on darwin the
-        # loop comes back unresolved and the open below answers ``ELOOP``.
+        # ``pathlib`` on CPython 3.11 and 3.12 answers a symlink loop from
+        # ``resolve`` itself, as ``RuntimeError("Symlink loop from ...")`` with
+        # the ``ELOOP`` ``OSError`` as its context, on every platform; from
+        # 3.13 ``resolve`` hands the loop back unchanged and the open below
+        # answers ``ELOOP``.
         # Both are the same fact about the root the caller named, refused in
         # the same words (#46); anything else ``resolve`` raises is left as
         # it stands.
@@ -808,14 +816,19 @@ def _set_root(root: pathlib.Path, spec: AppendGateSpec) -> _CandidateTree:
         # It is answered here, at the one open, rather than by an ``lstat``
         # before it: a check ahead of the open is a check on a path this open
         # may not reach, and this module refuses check-then-open everywhere
-        # else it reads. ``ELOOP`` is the third: on darwin ``Path.resolve`` hands a
+        # else it reads. ``ELOOP`` is the third: from CPython 3.13 ``Path.resolve`` hands a
         # symlink loop back unchanged, so a root spelled through one reaches
         # this open as a static input, and it too answered with the OS's own
-        # message (peer review of the 0.5.2 release PR); on Linux ``resolve``
-        # itself raises for the loop, and that is converted above. A link standing at the root
-        # itself is refused by ``O_NOFOLLOW``, and where the platform spells
-        # that as one of these three errnos it lands in the same refusal.
-        # Every other errno still raises as it stands.
+        # message (peer review of the 0.5.2 release PR); on 3.11 and 3.12
+        # ``resolve`` itself raises for the loop, and that is converted above.
+        # On those two interpreters this branch is therefore reached only when
+        # the root becomes a link between the resolve and the open — a writer
+        # during the run, outside the 0.5.x contract — and it is then refused
+        # in these same words, which name the static fact rather than the
+        # race. A link standing at the root itself is refused by
+        # ``O_NOFOLLOW``, and where the platform spells that as one of these
+        # three errnos it lands in the same refusal. Every other errno still
+        # raises as it stands.
         if exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
             raise AppendError(
                 "candidate root is missing or not a directory: "
@@ -2728,7 +2741,7 @@ def verify_append_gate(
     # produced in rather than about the tree or the configuration it is
     # produced for: with any of the five set, some git read here — the base
     # resolution, an index read, the release-root scan — resolves in another
-    # repository, index or object store, and this gate reads the candidate
+    # repository, working tree, index or object store, and this gate reads the candidate
     # tree directly as well, so
     # the two halves of one verdict would be about two trees.
     try:

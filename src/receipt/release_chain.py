@@ -117,8 +117,8 @@ that refreshes the index — ``git diff`` against a base does, when the stat
 data it caches has gone stale — rewrites it under ``core.untrackedCache=false``
 and drops an untracked-cache extension it finds there (measured on git
 2.53.0, peer review of the 0.5.2 release PR); the refresh changes no entry's
-stage, mode or object id, which is all the reads here compare, and no verdict
-depends on the extension. Each
+stage, mode, object id or flag word, which is all the reads here compare, and
+no verdict depends on the extension. Each
 also reads the entry's own flag word, because mode and object id do not say
 whether an entry records content: an intent-to-add entry (``git add -N``) is
 stage 0 at the working tree's mode with the empty blob's object id, which is
@@ -160,8 +160,8 @@ reads as behind the OID a verdict names. And ``verify_release_chain`` refuses
 outright, before it resolves the root it was given, when any of ``GIT_DIR``,
 ``GIT_WORK_TREE``, ``GIT_INDEX_FILE``, ``GIT_OBJECT_DIRECTORY`` or
 ``GIT_ALTERNATE_OBJECT_DIRECTORIES`` is set in the process environment: each
-can decide which repository, index or object store some git read below
-resolves in, while the verdict still speaks of the checkout named.
+can decide which repository, working tree, index or object store some git
+read below resolves in, while the verdict still speaks of the checkout named.
 Refused rather than dropped, because dropping them for the child processes
 would leave the verifier's own environment redirected while its children's was
 not, and this module reads the candidate tree directly as well as through git;
@@ -2759,11 +2759,13 @@ def assert_no_redirecting_git_environment() -> None:
     ``GIT_OBJECT_DIRECTORY`` (peer review of the 0.5.2 release PR) — and
     none needs to be: one read answering about something other than the
     checkout named as ``root`` is enough for a verdict to be about two trees.
-    git sets these variables in its own hook environments (a client-side
-    ``pre-commit`` runs with ``GIT_INDEX_FILE``; a server-side ``pre-receive``
+    git sets some of these variables in its own hook environments (measured
+    on git 2.53.0: ``pre-commit``, ``prepare-commit-msg``, ``commit-msg`` and
+    ``post-commit`` run with ``GIT_INDEX_FILE``; a server-side ``pre-receive``
     with ``GIT_DIR``, ``GIT_OBJECT_DIRECTORY`` and
-    ``GIT_ALTERNATE_OBJECT_DIRECTORIES``), so neither entry can run inside a
-    git hook; the invocation both are written for is a CI job over a
+    ``GIT_ALTERNATE_OBJECT_DIRECTORIES``; ``pre-push`` and ``post-checkout``
+    with none of the five), so an entry wired into one of the former is
+    refused there; the invocation both are written for is a CI job over a
     checkout, and the refusal names the variable so a hook author sees why.
     A verifier run
     under such an environment answers about a tree it was not asked about,
@@ -2887,15 +2889,16 @@ def _git_environment() -> dict[str, str]:
     checked and each make ``ls-files`` report another repository's entry for
     the path asked about, from this repository's working directory. Those five
     (with ``GIT_WORK_TREE``, ``GIT_OBJECT_DIRECTORY`` and
-    ``GIT_ALTERNATE_OBJECT_DIRECTORIES``) are now refused at the two public
+    ``GIT_ALTERNATE_OBJECT_DIRECTORIES``) are now refused at the public
     verifier entries rather than dropped here: see
     ``assert_no_redirecting_git_environment`` for why the refusal is not a
     drop — a drop would leave the verifier's own environment redirected while
     its children's was not, and both this module and ``append_gate`` read the
     candidate tree directly as well as through git. So a run that reaches this
-    function through ``verify_release_chain`` or ``verify_append_gate`` has
-    already been told none of the five is set. A caller reaching one of this
-    module's helpers directly has not, and pinning ``GIT_DIR`` to
+    function through ``verify_release_chain``,
+    ``verify_release_history_immutable`` or ``verify_append_gate`` has
+    already been told none of the five is set. A caller reaching another of
+    this module's helpers directly has not, and pinning ``GIT_DIR`` to
     ``<root>/.git`` for every read — which is what would make a command's
     target stated rather than merely not overridden, and is a change to what
     every consumer's git reads see — remains 0.6 work.

@@ -4246,3 +4246,37 @@ def test_a_redirecting_git_variable_refuses_before_the_history_pass(
     assert "VERDICT: FAIL — custody" in text
     assert "history" not in captured.out
     assert "byte- and mode-identical" not in text
+
+
+def test_a_refusal_still_lets_the_operator_interrupt_through(
+    repo: pathlib.Path, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``BaseException`` guards in ``_refuse`` re-raise ``KeyboardInterrupt``.
+
+    At the base ``except Exception`` could not catch an interrupt by language
+    rule; now that the guards catch ``BaseException``, the carve-out is a
+    hand-written clause, and this pins it (peer review of the 0.5.2 release
+    PR, round 2).
+    """
+
+    class Interrupting:
+        @property
+        def encoding(self) -> str:
+            raise KeyboardInterrupt
+
+        def write(self, text: str) -> int:
+            raise KeyboardInterrupt
+
+        def flush(self) -> None:
+            raise KeyboardInterrupt
+
+    not_a_tree = tmp_path / "not-a-tree"
+    not_a_tree.write_text("a file\n", encoding="utf-8")
+    spec = str(repo / "verification/spec.py")
+    monkeypatch.setattr(sys, "stderr", Interrupting())
+    monkeypatch.setattr(sys, "stdout", Interrupting())
+
+    with pytest.raises(KeyboardInterrupt):
+        main(["verify", "--spec", spec, "--root", str(not_a_tree)])
+    with pytest.raises(KeyboardInterrupt):
+        main(["verify", "--spec", spec, "--root", str(not_a_tree), "--json"])

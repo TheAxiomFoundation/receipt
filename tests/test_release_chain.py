@@ -1734,11 +1734,12 @@ def test_the_alias_scan_protects_only_what_its_caller_names(
 
 
 # #45, the cheap half, at the public verifier rather than at the gate. Five
-# variables redirect every git read this package makes — the base resolution,
-# every index read behind the state and release checks, the release-root scan
-# — to another repository, index or object store than the checkout named as
-# ``root``, from that checkout's own working directory, while the verdict is
-# still phrased about the checkout named. They are refused at the entry rather
+# variables can each decide which repository, working tree, index or object
+# store some git read this package makes — the base resolution, an index read
+# behind the state and release checks, the release-root scan — resolves in,
+# rather than the checkout named as ``root`` (not every read moves under every
+# variable; the refusal's docstring says which), while the verdict is still
+# phrased about the checkout named. They are refused at the entry rather
 # than dropped for the child processes: a drop would leave the verifier's own
 # environment redirected while its children's was not, and this module reads
 # the candidate tree directly as well as through git. The full pin — GIT_DIR

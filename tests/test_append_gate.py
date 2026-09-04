@@ -5776,12 +5776,13 @@ def test_an_ordinary_spec_names_a_subdirectory_for_every_release_path(
     )
 
 
-# The environment that redirects every git read this gate makes (#45, the
+# The environment that can redirect a git read this gate makes (#45, the
 # cheap half). GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY
-# and GIT_ALTERNATE_OBJECT_DIRECTORIES each send git to another repository,
-# index or object store than the checkout `root` names, from that checkout's
-# own working directory, while the verdict still speaks of the checkout named
-# — and this gate reads the candidate tree directly as well, so under any of
+# and GIT_ALTERNATE_OBJECT_DIRECTORIES can each decide which repository,
+# working tree, index or object store some read resolves in, rather than the
+# checkout `root` names (not every read moves under every variable; see
+# release_chain.assert_no_redirecting_git_environment), while the verdict
+# still speaks of the checkout named — and this gate reads the candidate tree directly as well, so under any of
 # them the two halves of one verdict are about two trees. They are refused
 # rather than dropped for the child processes: dropping them would leave the
 # verifier's own environment redirected while its children's was not.
@@ -5907,8 +5908,9 @@ def test_the_redirecting_refusal_names_the_first_variable_set(
 # recorded the root's identity with an unguarded open, so a ``--root`` naming
 # nothing, or naming a regular file, escaped as the OS's own ``OSError``
 # rather than as the ``AppendError`` every other refusal in this module
-# raises. A consumer's own command boundary turned it into a FAIL, so nothing
-# was ever accepted that should not have been; a library caller got an
+# raises. The consumer command that reaches this code catches ``AppendError``
+# alone, so the bare exception ended that run non-zero with a traceback and
+# nothing was ever accepted that should not have been; a library caller got an
 # exception from outside this module's vocabulary, with the OS's message and
 # no mention of the root it was asked about.
 MISSING_ROOT_REFUSAL = "candidate root is missing or not a directory: "
@@ -7500,8 +7502,9 @@ def test_a_root_spelled_through_a_symlink_loop_refuses_in_the_same_words(
 
     assert str(refusal.value) == MISSING_ROOT_REFUSAL + str(inside.root)
     # The cause is the loop however the platform reports it: ``ELOOP`` from
-    # the open on darwin, or pathlib's own ``RuntimeError`` from ``resolve``
-    # on Linux, which carries the ``ELOOP`` ``OSError`` as its context.
+    # the open on CPython 3.13 and later, or pathlib's own ``RuntimeError``
+    # from ``resolve`` on 3.11 and 3.12, which carries the ``ELOOP``
+    # ``OSError`` as its context.
     cause = refusal.value.__cause__
     if isinstance(cause, OSError):
         assert cause.errno == errno.ELOOP
@@ -7518,10 +7521,11 @@ def test_a_symlink_loop_reported_by_resolve_refuses_in_the_same_words(
 ) -> None:
     """The resolve-time shape, on every platform.
 
-    Linux ``pathlib`` (CPython 3.11 to 3.13) raises ``RuntimeError("Symlink
-    loop from ...")`` from ``resolve`` before any open; darwin never does. So
-    the conversion above the open is exercised here by making ``resolve``
-    raise what Linux raises, with the ``ELOOP`` ``OSError`` as its context.
+    ``pathlib`` on CPython 3.11 and 3.12 raises ``RuntimeError("Symlink loop
+    from ...")`` from ``resolve`` before any open, on every platform; 3.13 and
+    later hand the loop back unchanged. So the conversion above the open is
+    exercised here on every interpreter by making ``resolve`` raise what the
+    older ones raise, with the ``ELOOP`` ``OSError`` as its context.
     """
 
     candidate = base_repository(tmp_path)
