@@ -29,6 +29,7 @@ import pytest
 
 from receipt.cli import EXIT_FAIL, EXIT_OK, EXIT_USAGE, main
 from receipt.sign import generate_signing_keypair, sign_payload
+from receipt.snapshot import TreeSnapshot
 from receipt.verify import VerifySpecError, load_spec
 
 from corpus_fixture import CONTENT, append_release, build_corpus
@@ -691,6 +692,62 @@ def anchor_set_recomputed(repo: pathlib.Path) -> tuple[str, dict[str, str]]:
         json.dumps(per_file, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     return combined, per_file
+
+
+def anchor_set_from_materialized_tree(
+    repo: pathlib.Path, destination: pathlib.Path
+) -> str:
+    """Compute the auditor pin through the same materialized-tree API as the run."""
+
+    chain = load_spec(repo / "verification/spec.py").verification.chain
+    prefixes = (
+        chain.release_root_relative,
+        chain.manifest_relative,
+        chain.state_relative,
+        chain.prefix_relative,
+        chain.anchor_relative,
+    )
+    with TreeSnapshot.select(repo, "HEAD") as snapshot:
+        with snapshot.materialize(
+            prefixes,
+            destination,
+            repertoire=chain.name_repertoire,
+        ) as materialized:
+            return materialized.anchor_set_sha256(chain)
+
+
+def test_matching_spec_and_anchor_pins_publish_full_custody(
+    repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    spec_path = repo / "verification/spec.py"
+    spec_digest = hashlib.sha256(spec_path.read_bytes()).hexdigest()
+    anchor_digest = anchor_set_from_materialized_tree(repo, tmp_path)
+    pins = (
+        "--expect-spec-sha256",
+        spec_digest,
+        "--expect-anchor-set",
+        anchor_digest,
+    )
+
+    assert run(repo, *pins) == EXIT_OK
+    text = capsys.readouterr().out
+    assert "the 2 auditor-pinned RFC 3161 authorities (alpha, beta)" in text
+    assert "Custody is under the anchor set" not in text
+    assert "anchor set is one the auditor trusts" not in text
+    assert "spec's code was trusted" not in text
+
+    assert run(repo, *pins, "--json") == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["scope"]["established"][0] == "custody of the release chain"
+    assert payload["chain"]["anchorSetSha256"] == anchor_digest
+    assert "that the anchor set is one the auditor trusts" not in (
+        payload["scope"]["notEstablished"]
+    )
+    assert "that the spec's code was trusted" not in (
+        payload["scope"]["notEstablished"]
+    )
 
 
 def test_the_json_verdict_names_the_anchor_set_in_force(
