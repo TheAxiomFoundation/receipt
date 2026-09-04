@@ -790,10 +790,8 @@ def _alias_capable_suffix(suffix: str) -> bool:
 
     The written spelling is the measurement, and under the portable-name
     policy that is not a shortcut: :data:`CONTENT_SUFFIX_RE` admits only
-    repertoire characters after the period, and NFC plus case folding changes
-    neither the length nor the character count of ASCII. Measuring the fold
-    key instead was necessary while a pin could be an NFD spelling of
-    something non-ASCII, which is a state the schema no longer admits.
+    repertoire characters after the period, and ASCII folding changes neither
+    the length nor the character count.
 
     The low end is a statement rather than a guard: the shortest pin the
     schema admits is two characters, so nothing reaching here is shorter.

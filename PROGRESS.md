@@ -29,7 +29,7 @@
 - Corrected the immutable listing screen to flatten the authenticated `TreeListing` exactly once before validating entry names and directory sibling sets. This avoids charging every full path twice against the reader's shared path-byte budget and keeps snapshot failures translated to `CorpusError`.
 - Restored the pre-existing `CorpusSpec content root` portable-name diagnostic while allowing `posix-bytes` roots through the general repertoire-aware path screen.
 - Production review smoke: five focused binding/spec cases pass after the single-flattening correction.
-- Deleted exactly 57 tests whose host-filesystem, race, re-sweep, ctime, identity, or superseded work-index subject no longer exists, plus four fake-directory-listing collision tests that the committed-tree shape matrix replaces. Nineteen test-only filesystem scaffolds went with them.
+- Deleted exactly 58 tests whose host-filesystem, platform, race, re-sweep, ctime, identity, or superseded work-index subject no longer exists, plus four fake-directory-listing collision tests that the committed-tree shape matrix replaces. Nineteen test-only filesystem scaffolds went with them.
 - Retained focused battery after that deletion: 198 passing cases and 18 expected migration failures. Those failures are confined to stale Unicode-normalization assertions, host-conditional spelling assertions, fake `os.scandir` entries, and removed private instrumentation; no parser, digest, membership, or declaration regression appears.
 - Converted all 18 retained migration failures to immutable-tree semantics. Raw index fixtures now express names the checkout cannot, exact attested and membership spelling no longer branches on host case behavior, and tests explicitly freeze ASCII-only folding rather than the deleted Unicode normalization/casefold model.
 - Retained corpus plus shared-name battery: 216 passed.
@@ -39,6 +39,7 @@
 - Focused corpus plus shared-name battery with replacements: 227 passed.
 - Final review found and closed one entry-kind gap: the portable 8.3 suffix screen now runs before mode classification, so a suffix-bearing alias cannot hide behind a symlink or directory; four portable/`posix-bytes` mode cases cover the boundary.
 - `build_corpus` now follows the plan literally by returning its commit OID directly (`str | None` with `commit=False`), matching `append_release`; a default build-plus-append smoke returned two distinct OIDs.
+- Added end-to-end fixture coverage: both default returns equal `HEAD`, the two release OIDs differ, `append_release(commit=False)` leaves `HEAD` unchanged and the tree dirty, and `build_corpus(commit=False)` creates no repository.
 
 ## Next
 

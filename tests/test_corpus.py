@@ -8,7 +8,6 @@ happy-path test is one line; the value is entirely in the refusals.
 from __future__ import annotations
 
 import json
-import os
 import pathlib
 import subprocess
 import unicodedata
@@ -41,6 +40,8 @@ from corpus_fixture import (
     ATTESTED,
     CONTENT,
     JOURNAL_SCHEMA,
+    append_release,
+    build_corpus,
     corpus_spec,
     journal_rows,
     render_journal,
@@ -387,6 +388,51 @@ def test_binding_materializes_each_listing_path_once(tmp_path: pathlib.Path) -> 
     expected_listing = sum(len(path.encode()) for path in tree_paths)
     expected_attested_lookups = sum(len(path.encode()) for path in ATTESTED)
     assert charged == expected_listing + expected_attested_lookups
+
+
+def test_corpus_fixture_commit_controls_return_the_selected_oid(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Both fixture builders return HEAD by default and honor their opt-out."""
+
+    root = tmp_path / "committed"
+    root.mkdir()
+    workspace = tmp_path / "committed-tsa"
+    first = build_corpus(root, workspace)
+    assert first == _git(root, "rev-parse", "HEAD").decode("ascii").strip()
+
+    corrected = {**CONTENT, "rules/tax/rate.yaml": "name: rate\nvalue: 0.16\n"}
+    second = append_release(root, workspace, content=corrected)
+    assert second != first
+    assert second == _git(root, "rev-parse", "HEAD").decode("ascii").strip()
+
+    uncommitted_append = {
+        **corrected,
+        "rules/tax/rate.yaml": "name: rate\nvalue: 0.17\n",
+    }
+    assert (
+        append_release(
+            root,
+            workspace,
+            content=uncommitted_append,
+            commit=False,
+        )
+        is None
+    )
+    assert second == _git(root, "rev-parse", "HEAD").decode("ascii").strip()
+    assert _git(root, "status", "--porcelain")
+
+    uncommitted_root = tmp_path / "uncommitted"
+    uncommitted_root.mkdir()
+    assert (
+        build_corpus(
+            uncommitted_root,
+            tmp_path / "uncommitted-tsa",
+            commit=False,
+        )
+        is None
+    )
+    assert not (uncommitted_root / ".git").exists()
 
 
 def test_refuses_a_content_file_edited_after_witnessing(tmp_path: pathlib.Path) -> None:
@@ -2972,22 +3018,6 @@ def test_an_ordinary_non_content_file_under_a_content_root_still_verifies(
     write_tree(tmp_path)
     (tmp_path / "rules/README.md").write_text("# rules\n")
     (tmp_path / "rules/tax/notes.txt").write_text("scratch\n")
-    verification = verify_corpus_binding(
-        tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-    )
-    assert len(verification.content) == len(CONTENT)
-
-
-def test_the_same_corpus_verifies_on_posix(tmp_path: pathlib.Path) -> None:
-    """Binds S4-F3, the control: the refusal above is about the platform.
-
-    The identical tree, journal and spec, with ``os.name`` left alone. If
-    this ever fails alongside the test above passing, the platform screen has
-    become the only reason anything refuses.
-    """
-
-    write_tree(tmp_path)
-    assert os.name == "posix"
     verification = verify_corpus_binding(
         tmp_path, render_journal(journal_rows()), spec=corpus_spec()
     )
