@@ -2,11 +2,15 @@
 
 ## State
 
-The immutable reader and name-policy modules are implemented. Two independent
-read-only audits have been applied across process lifecycle, parser allocation
-bounds, entry provenance, iterator ownership, repository-control re-audits,
-bounded fsck heads, matching complexity, and byte accounting. The snapshot
-suite is green; the interpreter matrix, offline suite, and delivery remain.
+The immutable reader and name-policy modules are implemented and locally
+verified. Two independent read-only audits have been applied across process
+lifecycle, parser allocation bounds, entry provenance, iterator ownership,
+repository-control re-audits, bounded fsck heads, matching complexity, and byte
+accounting. Snapshot tests pass on Python 3.11 through 3.14, the complete
+offline suite passes on the worktree's default interpreter and Python 3.13,
+and the permitted seven-case equivalence selection passes against a locally
+extracted, hash-authenticated copy of the pinned ledger commit. Only remote
+delivery remains.
 
 The brief contains incompatible instructions about this file: the standing
 order requires it to be committed from the start, while a later ground rule
@@ -78,11 +82,31 @@ in the module and will be listed in the final report.
   principal counters are 60,000 tree entries (20,000 maximum in one walk),
   860,185 tree bytes, 900,000 path bytes, and 134,217,728 bytes each streamed
   and materialized, all below their ceilings.
-- Passed all 385 snapshot tests on the worktree's default interpreter. The
-  earlier offline checkpoint passed 951 tests with 94 equivalence tests
-  deselected; the final offline count will be refreshed after this commit.
+- Passed the exact focused command on the worktree's default CPython 3.14.4:
+  81 tests in 4.52 seconds.
+- Passed all 385 split snapshot tests on CPython 3.14.4 in 40.33 seconds,
+  CPython 3.11.15 in 70.26 seconds, CPython 3.12.13 in 48.07 seconds, and
+  CPython 3.13.12 in 48.23 seconds.
+- Passed the exact focused command on CPython 3.11.15: 81 tests in 6.75
+  seconds.
+- Passed the complete offline suite on CPython 3.14.4: 1,336 passed and 94
+  equivalence cases deselected in 194.08 seconds. The same suite passed on
+  CPython 3.13.12: 1,336 passed and 94 deselected in 193.77 seconds.
+- Passed the sole permitted equivalence selection, seven of seven, in 2.23
+  seconds. Its fixture was generated under a private temporary directory from
+  the local Chronicle object database at ledger pin
+  `9dafe8174f42a06c00817fe596d5a8e686cb17b7`; both oracle source hashes matched
+  the pins before the tests ran, and the directory was removed on exit.
+- A CPython 3.11 offline attempt was interrupted after 787 passing tests and
+  94 deselections when concurrent interpreter matrices stopped progressing;
+  an isolated retry emitted no output for 12 minutes and was interrupted.
+  CPython 3.12's concurrent offline attempt likewise had no failure before it
+  was interrupted after 1,258 passing tests. These inconclusive diagnostic
+  runs do not replace the completed CPython 3.14 and 3.13 offline passes.
 
 ## Next
 
-- Run the permitted focused, offline, and equivalence selections on Python
-  3.11 and the worktree's default interpreter, then push and open a draft PR.
+- Push `feat/0.6-snapshot-reader` to `origin` and open a draft pull request.
+  The local GitHub CLI credential currently reports invalid and outbound
+  GitHub connectivity is unavailable; both delivery operations will still be
+  attempted after this progress commit so their exact outcome is recorded.
