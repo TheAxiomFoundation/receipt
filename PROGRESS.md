@@ -3,7 +3,7 @@
 ## State
 
 - Branch: `feat/0.6-lane-d` at baseline `145f3db93d745ddc43aeb47f6b7bd8b30aa331a3`.
-- Phase: immutable-tree public verifier implemented; obsolete filesystem implementation and tests are being removed next.
+- Phase: obsolete filesystem implementation removed; corpus test migration is next.
 - Scope: immutable-tree corpus verification, shared name-policy additions, corpus fixture commit helpers, and focused tests.
 - Network is sandbox-disabled; local work, tests, commits, and a complete draft PR body remain possible. Push/PR creation will be attempted only after all gates pass.
 
@@ -22,13 +22,15 @@
 - Implemented the required pass order over one whole-tree listing: shared per-directory name screens, listing-derived content and tombstone indexes, exact attested lookups, then one streamed `snapshot.digests` pass.
 - Preserved the content membership, digest, required-attested, tombstone, root-alias, and 8.3 refusal texts in the new path; added explicit symlink and gitlink diagnostics for tree modes.
 - Snapshot smoke battery: 7 targeted corpus cases passed (happy path, Path refusal, digest/membership failures, and repertoire construction).
+- Deleted the private worktree verifier and all subjectless filesystem machinery: directory listing/generations, sweep/spelling/tombstone work indexes, symlink component walks, file identity/digest reads, closing re-sweep/re-checks, the POSIX ctime precondition, and their three superseded tree-work constants.
+- Replaced the 485-line filesystem/pass-order module narrative with the immutable-tree claim and checkout-fidelity boundary.
+- Production source now has no worktree read, stat call, per-blob process, or second tree pass; 75 targeted corpus/name cases pass after the deletion.
 
 ## Next
 
-1. Delete the now-subjectless filesystem verifier, helpers, constants, and ctime/race prose in one justified group.
-2. Delete the 57 subjectless host/race/budget tests and convert retained tests to committed snapshots.
-3. Add repertoire/tree-shape/property coverage and update fixture commit helpers.
-4. Run focused, offline, and equivalence gates; prepare the required PR body and final report with exact totals and OIDs.
+1. Delete the 57 subjectless host/race/budget tests and convert retained tests to committed snapshots.
+2. Add repertoire/tree-shape/property coverage and update fixture commit helpers.
+3. Run focused, offline, and equivalence gates; prepare the required PR body and final report with exact totals and OIDs.
 
 ## Findings
 
