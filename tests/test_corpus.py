@@ -1241,6 +1241,24 @@ def test_the_spec_pins_a_suffix_by_one_rule_or_refuses_it() -> None:
         assert corpus_spec(content_suffixes=(suffix,)).content_suffixes == (suffix,)
 
 
+def test_spec_refuses_the_dot_dot_content_suffix_at_construction() -> None:
+    with pytest.raises(CorpusError) as caught:
+        corpus_spec(content_suffixes=("..",))
+    assert str(caught.value) == (
+        "CorpusSpec content suffix cannot be the Git dot-dot component: '..'"
+    )
+
+
+@pytest.mark.parametrize("predicate", ["content_root_of", "is_content_path"])
+def test_content_predicates_raise_for_an_invalid_git_component(
+    predicate: str,
+) -> None:
+    spec = corpus_spec()
+    with pytest.raises(CorpusError) as caught:
+        getattr(spec, predicate)("rules/../x.yaml")
+    assert str(caught.value) == "tree entry name is a dot component: b'..'"
+
+
 def test_the_spec_refuses_a_content_root_outside_the_portable_repertoire() -> None:
     """Binds the policy, root half: the same screen, named for the spec.
 

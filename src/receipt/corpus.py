@@ -431,6 +431,11 @@ class CorpusSpec:
                     "more portable characters (ASCII letters, digits, '.', "
                     f"'_' and '-'): {_quoted(suffix)}"
                 )
+            if suffix == "..":
+                raise CorpusError(
+                    "CorpusSpec content suffix cannot be the Git dot-dot "
+                    f"component: {_quoted(suffix)}"
+                )
         if type(self.required_attested_paths) is not frozenset:
             raise CorpusError("CorpusSpec required_attested_paths must be a frozenset")
         for path in sorted(self.required_attested_paths):
@@ -457,7 +462,11 @@ class CorpusSpec:
                 )
 
     def content_root_of(self, path: str) -> pathlib.PurePosixPath | None:
-        """Return the pinned root prefix after component-wise ASCII folding."""
+        """Return the pinned root prefix after component-wise ASCII folding.
+
+        Raise :class:`CorpusError` if ``path`` contains a component Git cannot
+        store.
+        """
 
         folded = _path_fold(path)
         for root in self.content_roots:
@@ -466,6 +475,12 @@ class CorpusSpec:
         return None
 
     def is_content_path(self, path: str) -> bool:
+        """Return whether ``path`` is content under this spec.
+
+        Raise :class:`CorpusError` if ``path`` contains a component Git cannot
+        store.
+        """
+
         if self.content_root_of(path) is None:
             return False
         return _has_pinned_suffix(path, self.content_suffixes)
