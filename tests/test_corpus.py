@@ -2278,9 +2278,11 @@ def test_refuses_a_lone_surrogate_in_gate_evidence(tmp_path: pathlib.Path) -> No
 def test_refuses_a_lone_surrogate_in_a_journal_path(tmp_path: pathlib.Path) -> None:
     """A path carrying a lone surrogate cannot be looked for at all.
 
-    ``os.lstat`` raises ``UnicodeEncodeError`` on it, a ``ValueError`` that no
-    ``OSError`` handler in this module sees, so without the screen the row
-    escaped as an unclassified exception instead of a refusal that names it.
+    On the filesystem walk this module no longer makes, ``os.lstat`` raised
+    ``UnicodeEncodeError`` on it, a ``ValueError`` no ``OSError`` handler saw,
+    so without the screen the row escaped as an unclassified exception; the
+    tree listing never looks such a path up, and the screen refuses the row
+    by name before any lookup.
 
     Binds the policy for the message: a lone surrogate is outside the
     portable repertoire, so the refusal is the portable-name one and the
@@ -4529,7 +4531,8 @@ def test_refuses_a_tombstone_survivor_windows_strips_to_the_tombstoned_name(
     ``retired/gone.`` and ``retired/gone `` open ``retired/gone`` on Win32,
     which removes a trailing dot or space from a component before the
     lookup. Neither of the two questions a tombstone asks can see that: the
-    exact ``os.lstat`` of ``retired/gone`` misses on POSIX, and the fold key
+    exact lookup of ``retired/gone`` (once an ``os.lstat``, now the listing's
+    exact index) misses on POSIX, and the fold key
     of ``gone.`` is not the fold key of ``gone``, so the survivor sits in a
     different bucket from the one the search reads. Both answered "absent",
     the verdict named the path under removedPaths, and the file still opened
