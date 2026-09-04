@@ -322,6 +322,32 @@ def test_every_repository_configuration_deny_family_refuses(
     )
 
 
+def test_valueless_local_configuration_is_implicit_true(
+    git_repo: pathlib.Path,
+) -> None:
+    config = git_repo / ".git" / "config"
+    config.write_bytes(config.read_bytes() + b"\n[probe]\n\tflag\n")
+
+    selected = TreeSnapshot.select(git_repo)
+
+    assert ("local", "probe.flag", "true") in selected._state.config_records
+
+
+def test_valueless_denied_configuration_refuses_through_deny_list(
+    git_repo: pathlib.Path,
+) -> None:
+    config = git_repo / ".git" / "config"
+    config.write_bytes(config.read_bytes() + b"\n[core]\n\tfsmonitor\n")
+
+    with pytest.raises(SnapshotError) as caught:
+        TreeSnapshot.select(git_repo)
+
+    assert str(caught.value) == (
+        "repository configuration key 'core.fsmonitor' is not allowed for "
+        "immutable tree reads"
+    )
+
+
 def test_worktree_scope_configuration_is_included_in_the_deny_audit(
     git_repo: pathlib.Path,
 ) -> None:

@@ -672,6 +672,8 @@ def _parse_version(output: bytes) -> tuple[int, int, int]:
 
 
 def _parse_config(output: bytes) -> tuple[tuple[str, str, str], ...]:
+    """Parse scoped ``--list -z`` records, including implicit booleans."""
+
     fields = output.split(b"\0")
     if fields and fields[-1] == b"":
         fields.pop()
@@ -685,8 +687,10 @@ def _parse_config(output: bytes) -> tuple[tuple[str, str, str], ...]:
         except UnicodeDecodeError as exc:
             raise SnapshotError("repository configuration is not UTF-8") from exc
         key, separator, value = key_value.partition("\n")
-        if not separator or not scope or not key:
+        if not scope or not key:
             raise SnapshotError("repository configuration listing is malformed")
+        if not separator:
+            value = "true"
         records.append((scope, key, value))
     return tuple(records)
 
