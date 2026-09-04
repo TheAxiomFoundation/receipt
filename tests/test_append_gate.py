@@ -552,6 +552,148 @@ def test_a_tree_alias_of_the_gate_path_refuses_before_classification(
     )
 
 
+def proposal_with_tree_names(
+    tmp_path: pathlib.Path,
+    directory: str,
+    names: tuple[str, ...],
+    *,
+    gate_only: bool,
+) -> tuple[Candidate, str]:
+    """Put exact names in objects even when the fixture host folds siblings."""
+
+    candidate = base_repository(tmp_path)
+    blob = git(candidate.root, "hash-object", "-w", "--stdin", stdin="policy\n")
+    for name in names:
+        git(
+            candidate.root,
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            f"100644,{blob},{directory}/{name}",
+        )
+    tree = git(candidate.root, "write-tree")
+    base = git(
+        candidate.root, "commit-tree", tree, "-p", candidate.base, "-m", "tree names"
+    )
+    if not gate_only or directory == "ledger":
+        candidate = replace(candidate, base=base)
+    if gate_only:
+        add_gate_file(candidate)
+        git(candidate.root, "add", GATE_FILE)
+    else:
+        append_one_row(candidate)
+        git(candidate.root, "add", CHAIN_SPEC.state_relative.as_posix())
+    tree = git(candidate.root, "write-tree")
+    oid = git(
+        candidate.root, "commit-tree", tree, "-p", candidate.base, "-m", "proposal"
+    )
+    return candidate, oid
+
+
+@pytest.mark.parametrize("repertoire", ["portable", "posix-bytes"])
+@pytest.mark.parametrize("gate_only", [True, False], ids=["gate-only", "data"])
+@pytest.mark.parametrize("directory", ["releases/policy", "releases/anchors", "ledger"])
+def test_protected_tree_siblings_refuse_before_gate_only_success(
+    tmp_path: pathlib.Path,
+    repertoire: str,
+    gate_only: bool,
+    directory: str,
+) -> None:
+    candidate, oid = proposal_with_tree_names(
+        tmp_path, directory, ("Foo.txt", "foo.txt"), gate_only=gate_only
+    )
+    spec = replace(
+        GATE_SPEC,
+        chain=replace(CHAIN_SPEC, name_repertoire=repertoire),
+        gate_surface=GATE_SPEC.gate_surface | {"releases/policy/**"},
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate, spec=spec, commit=oid)
+
+    assert str(refusal.value) == (
+        f"tree directory '{directory}' contains names that merge under ASCII "
+        "case folding: 'Foo.txt' and 'foo.txt'"
+    )
+
+
+@pytest.mark.parametrize("name", ["bad?.txt", "NUL.txt"])
+@pytest.mark.parametrize("gate_only", [True, False], ids=["gate-only", "data"])
+@pytest.mark.parametrize("directory", ["releases/policy", "ledger"])
+def test_portable_tree_components_refuse_before_gate_only_success(
+    tmp_path: pathlib.Path,
+    name: str,
+    gate_only: bool,
+    directory: str,
+) -> None:
+    candidate, oid = proposal_with_tree_names(
+        tmp_path, directory, (name,), gate_only=gate_only
+    )
+    spec = replace(
+        GATE_SPEC, gate_surface=GATE_SPEC.gate_surface | {"releases/policy/**"}
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate, spec=spec, commit=oid)
+
+    assert str(refusal.value) == (
+        f"tree entry '{directory}/{name}' is not a portable name "
+        "(ASCII letters, digits, '.', '_' and '-', not ending in '.', "
+        f"not a Win32 device name): {name!r}"
+    )
+
+
+@pytest.mark.parametrize("name", ["bad?.txt", "NUL.txt"])
+@pytest.mark.parametrize("gate_only", [True, False], ids=["gate-only", "data"])
+def test_posix_tree_components_only_require_portability_when_materialized(
+    tmp_path: pathlib.Path,
+    name: str,
+    gate_only: bool,
+) -> None:
+    candidate, oid = proposal_with_tree_names(
+        tmp_path, "releases/policy", (name,), gate_only=gate_only
+    )
+    spec = replace(
+        GATE_SPEC,
+        chain=replace(CHAIN_SPEC, name_repertoire="posix-bytes"),
+        gate_surface=GATE_SPEC.gate_surface | {"releases/policy/**"},
+    )
+
+    if gate_only:
+        assert "gate-only proposal" in run_gate(candidate, spec=spec, commit=oid)
+    else:
+        with pytest.raises(AppendError) as refusal:
+            run_gate(candidate, spec=spec, commit=oid)
+        assert str(refusal.value) == (
+            "tree entry name is not a portable name (ASCII letters, digits, '.', "
+            "'_' and '-', not ending in '.', not a Win32 device name) under "
+            f"name repertoire 'posix-bytes': {name!r}"
+        )
+
+
+@pytest.mark.parametrize("release_root", ["releases?", "bad?/releases"])
+@pytest.mark.parametrize("gate_only", [True, False], ids=["gate-only", "data"])
+def test_portable_protected_prefix_components_are_screened(
+    tmp_path: pathlib.Path, release_root: str, gate_only: bool
+) -> None:
+    candidate = base_repository(tmp_path, release_root)
+    spec = spec_with_release_root(release_root)
+    if gate_only:
+        add_gate_file(candidate)
+    else:
+        append_one_row(candidate)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate, spec=spec)
+
+    component = release_root.split("/")[0]
+    assert str(refusal.value) == (
+        f"tree entry {component!r} is not a portable name (ASCII letters, digits, "
+        "'.', '_' and '-', not ending in '.', not a Win32 device name): "
+        f"{component!r}"
+    )
+
+
 @pytest.mark.parametrize("name", ["smuggled.sigx", "smuggled.tsrx"])
 @pytest.mark.parametrize("shape", ["blob", "symlink", "tree"])
 def test_portable_release_names_screen_short_aliases_for_every_entry_kind(
@@ -1435,6 +1577,7 @@ def test_a_release_root_beginning_with_a_colon_is_enumerated_at_the_base(
     """Tree lookup treats a leading colon as a literal path byte."""
 
     spec = spec_with_release_root(":releases")
+    spec = replace(spec, chain=replace(spec.chain, name_repertoire="posix-bytes"))
     candidate = base_repository(tmp_path, ":releases")
     append_one_row(candidate)
     readme = candidate.root / ":releases" / "README.md"

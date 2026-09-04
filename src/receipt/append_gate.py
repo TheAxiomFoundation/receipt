@@ -25,7 +25,10 @@ from typing import Any
 from receipt._names import (
     NamePolicyError,
     ascii_fold_text,
+    assert_no_merging_entries,
+    assert_portable_name,
     short_name_carries_pinned_suffix,
+    validate_component_text,
 )
 from receipt.canonical import canonical_sha256
 from receipt.corpus import MAX_JOURNAL_BYTES
@@ -827,7 +830,7 @@ def _protected_paths(candidate: _CandidateTree) -> tuple[str, ...]:
 def _screen_candidate_tree_aliases(
     candidate: _CandidateTree,
 ) -> dict[str, GitEntry]:
-    """Screen protected ancestor shapes and aliases over the complete tree."""
+    """Screen protected shapes, aliases and names over the complete tree."""
 
     entries = candidate.snapshot.entries("").as_dict(include_trees=True)
     protected = _protected_paths(candidate)
@@ -864,8 +867,55 @@ def _screen_candidate_tree_aliases(
                     f"(for {path} at {prefix})"
                 )
 
-    if candidate.spec.chain.name_repertoire == "portable":
-        release_root = candidate.spec.chain.release_root_relative.as_posix()
+    # Screen the release subtree and each state file's directory even when a
+    # gate-only proposal will return before materialization. Derive immediate
+    # sibling sets from the already authenticated listing, never the checkout.
+    chain = candidate.spec.chain
+    release_root = chain.release_root_relative.as_posix()
+    state_directories = {
+        relative.parent.as_posix() if relative.parent.parts else ""
+        for relative in (chain.state_relative, chain.prefix_relative)
+    }
+    protected_components = {
+        "/".join(relative.parts[:depth])
+        for relative in (
+            chain.release_root_relative,
+            chain.state_relative,
+            chain.prefix_relative,
+        )
+        for depth in range(1, len(relative.parts) + 1)
+    }
+    by_directory: dict[str, list[str]] = {}
+    try:
+        for relative in sorted(entries):
+            directory, _, name = relative.rpartition("/")
+            if not (
+                relative in protected_components
+                or directory in state_directories
+                or directory == release_root
+                or directory.startswith(f"{release_root}/")
+            ):
+                continue
+            ascii_fold_text(name)
+            if chain.name_repertoire == "portable":
+                assert_portable_name(name, f"tree entry {relative!r}")
+            else:
+                validate_component_text(
+                    name,
+                    repertoire=chain.name_repertoire,
+                    label=f"tree entry {relative!r}",
+                )
+            by_directory.setdefault(directory, []).append(name)
+        for directory, names in sorted(by_directory.items()):
+            assert_no_merging_entries(
+                names,
+                repertoire=chain.name_repertoire,
+                label=f"tree directory {directory or '.'!r}",
+            )
+    except NamePolicyError as exc:
+        raise AppendError(str(exc)) from exc
+
+    if chain.name_repertoire == "portable":
         release_prefix = f"{release_root}/"
         for relative in sorted(entries):
             if not relative.startswith(release_prefix):
