@@ -15,7 +15,9 @@ every object operation thereafter carries an absolute ``--git-dir`` and
 the three variables in :func:`_git_environment` are installed, and ``HOME``
 is deliberately preserved. Repository configuration is audited without
 includes at selection and again at close. A same-owner configuration writer
-is not excluded, but a changed audit is refused at close.
+is not excluded, but changed configuration or repository-control sentinel
+files are rechecked at child boundaries and refused. A writer racing between
+one check and the following system call remains a same-owner residual.
 
 The default SHA-1 rehash closes substitution only to ordinary SHA-1 collision
 resistance. :meth:`TreeSnapshot.verify_object_store` widens the subject from
@@ -28,6 +30,11 @@ supported.
 
 Resource budgets are constants rather than input-derived guesses:
 
+Candidate and base snapshots join one verification budget when they are
+compared or ancestry is proved with the base snapshot object. Tree-object
+bytes remain per snapshot as specified; path, attribute, content, and
+materialization totals are then enforced across both snapshots together.
+
 * ``MAX_TREE_ENTRIES`` is 1,048,576 entries per walk, versus 15,216 measured
   rulespec-us blobs, and bounds traversal and whole-tree alias work.
 * ``MAX_TREE_OBJECT_BYTES`` is 64 MiB per commit or tree, checked from ``info``
@@ -36,13 +43,14 @@ Resource budgets are constants rather than input-derived guesses:
 * ``MAX_ENTRY_NAME_BYTES`` and ``MAX_PATH_BYTES`` are each 4,096 bytes.
   ``MAX_PATH_BYTES_TOTAL`` is 256 MiB across paths built on demand. Listings
   are hierarchical so a long prefix is stored once rather than per leaf.
-* ``MAX_GIT_OUTPUT_BYTES`` is 1 MiB and ``MAX_GIT_SECONDS`` is 60 seconds for
-  every non-batch, non-fsck Git call.
+* ``MAX_GIT_OUTPUT_BYTES`` is 1 MiB for every non-batch, non-fsck Git call.
+  ``MAX_GIT_SECONDS`` is 60 seconds for those calls and each batch response
+  and graceful close.
 * ``MAX_TREE_DEPTH`` is 256 and ``MAX_ANCESTRY_COMMITS`` is 1,048,576,
   bounding hostile nesting and parent walks while remaining above real trees.
 * ``MAX_ATTRIBUTE_BYTES`` is 1 MiB per attributes file;
   ``MAX_ATTRIBUTE_BYTES_TOTAL`` is 16 MiB and
-  ``MAX_ATTRIBUTE_RULES_TOTAL`` is 65,536 per snapshot.
+  ``MAX_ATTRIBUTE_RULES_TOTAL`` is 65,536 per verification.
   ``MAX_ATTRIBUTE_MATCH_WORK`` is 67,108,864 matcher transitions. Checks cover
   protected paths only, making this generous for Chronicle's small surface.
 * ``MAX_CONTENT_BLOB_BYTES`` is 256 MiB per streamed content object and
@@ -82,12 +90,11 @@ import time
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, BinaryIO, Callable
+from typing import BinaryIO, Callable
 
 from receipt._names import (
     NamePolicyError,
     assert_no_merging_entries,
-    decode_component,
     validate_component_bytes,
     validate_repertoire,
 )
@@ -182,6 +189,20 @@ class SnapshotWork:
     max_materialized_blob_bytes: int = 0
 
 
+@dataclass
+class _WorkPool:
+    """Union-find node grouping verification-wide counters across snapshots."""
+
+    works: list[SnapshotWork]
+    parent: "_WorkPool | None" = None
+
+    def root(self) -> "_WorkPool":
+        if self.parent is None:
+            return self
+        self.parent = self.parent.root()
+        return self.parent
+
+
 @dataclass(frozen=True)
 class _RawTreeEntry:
     mode: bytes
@@ -220,6 +241,7 @@ class _SnapshotState:
     selected_commit: _CommitObject
     root_tree: tuple[_RawTreeEntry, ...]
     work: SnapshotWork
+    work_pool: _WorkPool
     tree_cache: dict[str, tuple[_RawTreeEntry, ...]]
     commit_cache: dict[str, _CommitObject]
     entry_token: object = field(default_factory=object)
@@ -381,6 +403,26 @@ def _git_environment(global_config: pathlib.Path | str) -> dict[str, str]:
     return environment
 
 
+def _kill_reap_and_close(process: subprocess.Popen[bytes]) -> None:
+    """Best-effort cleanup for a child which could not finish setup."""
+
+    if process.poll() is None:
+        try:
+            process.kill()
+        except OSError:
+            pass
+    try:
+        process.wait(timeout=MAX_GIT_SECONDS)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    for pipe in (process.stdin, process.stdout, process.stderr):
+        if pipe is not None:
+            try:
+                pipe.close()
+            except OSError:
+                pass
+
+
 def _bounded_process(
     argv: Sequence[str],
     *,
@@ -429,19 +471,35 @@ def _bounded_process(
                     except ProcessLookupError:
                         pass
 
-    threads = (
-        threading.Thread(target=drain, args=(process.stdout, output[0]), daemon=True),
-        threading.Thread(target=drain, args=(process.stderr, output[1]), daemon=True),
-    )
-    for thread in threads:
-        thread.start()
+    started_threads: list[threading.Thread] = []
+    try:
+        threads = (
+            threading.Thread(
+                target=drain, args=(process.stdout, output[0]), daemon=True
+            ),
+            threading.Thread(
+                target=drain, args=(process.stderr, output[1]), daemon=True
+            ),
+        )
+        for thread in threads:
+            thread.start()
+            started_threads.append(thread)
+    except BaseException:
+        _kill_reap_and_close(process)
+        for thread in started_threads:
+            thread.join(MAX_GIT_SECONDS)
+        raise
     if input_bytes is not None:
         assert process.stdin is not None
         try:
             process.stdin.write(input_bytes)
-            process.stdin.close()
-        except BrokenPipeError:
+        except (BrokenPipeError, OSError):
             pass
+        finally:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
     try:
         returncode = process.wait(timeout=seconds)
     except subprocess.TimeoutExpired as exc:
@@ -449,9 +507,13 @@ def _bounded_process(
         process.wait()
         for thread in threads:
             thread.join()
+        process.stdout.close()
+        process.stderr.close()
         raise SnapshotError(f"git command exceeded its {seconds:g} second budget") from exc
     for thread in threads:
         thread.join()
+    process.stdout.close()
+    process.stderr.close()
     if exceeded:
         raise SnapshotError(f"git output exceeds the budget of {output_limit} bytes")
     return subprocess.CompletedProcess(
@@ -887,18 +949,24 @@ class _BatchReader:
             )
         except FileNotFoundError as exc:
             raise SnapshotError("git is required to read an immutable tree snapshot") from exc
-        if self._process.stdin is None or self._process.stdout is None:
-            self._process.kill()
-            self._process.wait()
-            raise SnapshotError("cannot open the Git batch object's pipes")
-        self._stdin = self._process.stdin
-        self._stdout = self._process.stdout
-        self._stderr_thread = threading.Thread(
-            target=self._drain_stderr,
-            name="receipt-git-batch-stderr",
-            daemon=True,
-        )
-        self._stderr_thread.start()
+        try:
+            if (
+                self._process.stdin is None
+                or self._process.stdout is None
+                or self._process.stderr is None
+            ):
+                raise SnapshotError("cannot open the Git batch object's pipes")
+            self._stdin = self._process.stdin
+            self._stdout = self._process.stdout
+            self._stderr_thread = threading.Thread(
+                target=self._drain_stderr,
+                name="receipt-git-batch-stderr",
+                daemon=True,
+            )
+            self._stderr_thread.start()
+        except BaseException:
+            _kill_reap_and_close(self._process)
+            raise
 
     def _drain_stderr(self) -> None:
         """Drain stderr continuously while retaining only the bounded prefix."""
@@ -1304,7 +1372,7 @@ class _DigestIterator(Iterator[tuple[GitEntry, str]]):
             raise SnapshotError(
                 f"content bytes exceed the budget of {self._total} bytes"
             )
-        if work.content_bytes + size > MAX_CONTENT_BYTES_TOTAL:
+        if self._snapshot._verification_total("content_bytes") + size > MAX_CONTENT_BYTES_TOTAL:
             self.close()
             raise SnapshotError(
                 f"content bytes exceed the snapshot budget of "
@@ -1314,7 +1382,15 @@ class _DigestIterator(Iterator[tuple[GitEntry, str]]):
 
         def consume(chunk: bytes) -> None:
             digest.update(chunk)
-            work.content_bytes += len(chunk)
+            self._snapshot._charge_verification(
+                "content_bytes",
+                len(chunk),
+                ceiling=MAX_CONTENT_BYTES_TOTAL,
+                message=(
+                    f"content bytes exceed the snapshot budget of "
+                    f"{MAX_CONTENT_BYTES_TOTAL} bytes"
+                ),
+            )
 
         try:
             batch.consume(
@@ -1393,7 +1469,7 @@ class TreeSnapshot:
             global_path.write_bytes(global_bytes)
             environment = _git_environment(global_path)
 
-            version_arguments = ["version"]
+            version_arguments = ["-C", os.fspath(selected_root), "version"]
             if verify_objects:
                 version_arguments.append("--build-options")
             version_result = _git_run(
@@ -1580,6 +1656,7 @@ class TreeSnapshot:
             selected_commit=parsed_commit,
             root_tree=root_tree,
             work=work,
+            work_pool=_WorkPool([work]),
             tree_cache={parsed_commit.tree: root_tree},
             commit_cache={candidate_oid: parsed_commit},
         )
@@ -1597,14 +1674,26 @@ class TreeSnapshot:
     ) -> tuple[pathlib.Path, ...]:
         return tuple(dict.fromkeys((git_dir, common_dir)))
 
+    @staticmethod
+    def _repository_control_exists(path: pathlib.Path) -> bool:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise SnapshotError(
+                f"cannot inspect repository control path: {path}"
+            ) from exc
+        return True
+
     @classmethod
     def _refuse_grafts_and_shallow(
         cls, git_dir: pathlib.Path, common_dir: pathlib.Path
     ) -> None:
         for directory in cls._repository_directories(git_dir, common_dir):
-            if (directory / "info" / "grafts").exists():
+            if cls._repository_control_exists(directory / "info" / "grafts"):
                 raise SnapshotError("repository grafts are unsupported")
-            if (directory / "shallow").exists():
+            if cls._repository_control_exists(directory / "shallow"):
                 raise SnapshotError("shallow repositories are unsupported")
 
     @classmethod
@@ -1612,7 +1701,9 @@ class TreeSnapshot:
         cls, git_dir: pathlib.Path, common_dir: pathlib.Path
     ) -> None:
         for directory in cls._repository_directories(git_dir, common_dir):
-            if (directory / "objects" / "info" / "alternates").exists():
+            if cls._repository_control_exists(
+                directory / "objects" / "info" / "alternates"
+            ):
                 raise SnapshotError("alternate object databases are unsupported")
 
     def _reaudit_repository_files(self) -> None:
@@ -1726,6 +1817,69 @@ class TreeSnapshot:
     @property
     def work(self) -> SnapshotWork:
         return self._state.work
+
+    def _verification_total(self, field_name: str) -> int:
+        pool = self._state.work_pool.root()
+        return sum(getattr(work, field_name) for work in pool.works)
+
+    def _charge_verification(
+        self,
+        field_name: str,
+        amount: int,
+        *,
+        ceiling: int,
+        message: str,
+    ) -> None:
+        if self._verification_total(field_name) + amount > ceiling:
+            raise SnapshotError(message)
+        work = self._state.work
+        setattr(work, field_name, getattr(work, field_name) + amount)
+
+    def _link_verification_work(self, other: "TreeSnapshot") -> None:
+        """Make verification-wide budgets cumulative across a snapshot pair."""
+
+        left = self._state.work_pool.root()
+        right = other._state.work_pool.root()
+        if left is right:
+            return
+        combined = (*left.works, *right.works)
+        limits = (
+            (
+                "path_bytes",
+                MAX_PATH_BYTES_TOTAL,
+                f"tree paths exceed the snapshot budget of {MAX_PATH_BYTES_TOTAL} bytes",
+            ),
+            (
+                "attribute_bytes",
+                MAX_ATTRIBUTE_BYTES_TOTAL,
+                f"attribute bytes exceed the snapshot budget of {MAX_ATTRIBUTE_BYTES_TOTAL} bytes",
+            ),
+            (
+                "attribute_rules",
+                MAX_ATTRIBUTE_RULES_TOTAL,
+                f"attribute rules exceed the snapshot budget of {MAX_ATTRIBUTE_RULES_TOTAL} rules",
+            ),
+            (
+                "attribute_match_work",
+                MAX_ATTRIBUTE_MATCH_WORK,
+                f"attribute matching exceeds the work budget of {MAX_ATTRIBUTE_MATCH_WORK} steps",
+            ),
+            (
+                "content_bytes",
+                MAX_CONTENT_BYTES_TOTAL,
+                f"content bytes exceed the snapshot budget of {MAX_CONTENT_BYTES_TOTAL} bytes",
+            ),
+            (
+                "materialized_bytes",
+                MAX_MATERIALIZED_BYTES,
+                f"materialized bytes exceed the budget of {MAX_MATERIALIZED_BYTES} bytes",
+            ),
+        )
+        for field_name, ceiling, message in limits:
+            if sum(getattr(work, field_name) for work in combined) > ceiling:
+                raise SnapshotError(message)
+        left.works.extend(right.works)
+        right.parent = left
 
     @property
     def batch_pid(self) -> int | None:
@@ -1894,12 +2048,12 @@ class TreeSnapshot:
                 f"tree path exceeds the budget of {MAX_PATH_BYTES} bytes"
             )
         work = self._state.work
-        if work.path_bytes + size > MAX_PATH_BYTES_TOTAL:
-            raise SnapshotError(
-                f"tree paths exceed the snapshot budget of "
-                f"{MAX_PATH_BYTES_TOTAL} bytes"
-            )
-        work.path_bytes += size
+        self._charge_verification(
+            "path_bytes",
+            size,
+            ceiling=MAX_PATH_BYTES_TOTAL,
+            message=f"tree paths exceed the snapshot budget of {MAX_PATH_BYTES_TOTAL} bytes",
+        )
         work.max_path_bytes = max(work.max_path_bytes, size)
         path_text = os.fsdecode(path_bytes)
         return GitEntry(
@@ -2066,6 +2220,11 @@ class TreeSnapshot:
 
         if not isinstance(base, TreeSnapshot):
             raise SnapshotError("changed_paths base must be a TreeSnapshot")
+        if base.git_dir != self.git_dir or base.object_format != self.object_format:
+            raise SnapshotError("candidate and base snapshots must share an object store")
+        self._batch()
+        base._batch()
+        self._link_verification_work(base)
         candidate_entries = self.entries("").as_dict()
         base_entries = base.entries("").as_dict()
         changed: set[str] = set()
@@ -2101,6 +2260,7 @@ class TreeSnapshot:
                 or base.object_format != self.object_format
             ):
                 raise SnapshotError("candidate and base snapshots must share an object store")
+            base._batch()
             base_oid = base.commit
         else:
             base_oid = self._validate_oid(base)
@@ -2120,6 +2280,8 @@ class TreeSnapshot:
             work.ancestry_commits += 1
             commit = self._commit_object(current)
             if current == base_oid:
+                if isinstance(base, TreeSnapshot):
+                    self._link_verification_work(base)
                 self._state.ancestry_bases.add(base_oid)
                 return base_oid
             if work.ancestry_edges + len(commit.parents) > MAX_ANCESTRY_COMMITS:
@@ -2297,33 +2459,44 @@ class TreeSnapshot:
                 f"unsupported .gitattributes entry at {path}: mode {raw.display_mode}"
             )
         _kind, size = self._batch().info(raw.oid, role="blob")
-        work = self._state.work
-        if work.attribute_bytes + size > MAX_ATTRIBUTE_BYTES_TOTAL:
+        if self._verification_total("attribute_bytes") + size > MAX_ATTRIBUTE_BYTES_TOTAL:
             raise SnapshotError(
                 f"attribute bytes exceed the snapshot budget of "
                 f"{MAX_ATTRIBUTE_BYTES_TOTAL} bytes"
             )
         entry = self._public_entry(parts, raw)
         payload = self.blob(entry, limit=MAX_ATTRIBUTE_BYTES)
-        work.attribute_bytes += size
+        self._charge_verification(
+            "attribute_bytes",
+            size,
+            ceiling=MAX_ATTRIBUTE_BYTES_TOTAL,
+            message=f"attribute bytes exceed the snapshot budget of {MAX_ATTRIBUTE_BYTES_TOTAL} bytes",
+        )
         rules = _parse_attribute_file(path, payload)
-        if work.attribute_rules + len(rules) > MAX_ATTRIBUTE_RULES_TOTAL:
+        if self._verification_total("attribute_rules") + len(rules) > MAX_ATTRIBUTE_RULES_TOTAL:
             raise SnapshotError(
                 f"attribute rules exceed the snapshot budget of "
                 f"{MAX_ATTRIBUTE_RULES_TOTAL} rules"
             )
-        work.attribute_rules += len(rules)
+        self._charge_verification(
+            "attribute_rules",
+            len(rules),
+            ceiling=MAX_ATTRIBUTE_RULES_TOTAL,
+            message=f"attribute rules exceed the snapshot budget of {MAX_ATTRIBUTE_RULES_TOTAL} rules",
+        )
         self._state.attribute_cache[path] = rules
         return rules
 
     def _attribute_step(self) -> None:
-        work = self._state.work
-        work.attribute_match_work += 1
-        if work.attribute_match_work > MAX_ATTRIBUTE_MATCH_WORK:
-            raise SnapshotError(
+        self._charge_verification(
+            "attribute_match_work",
+            1,
+            ceiling=MAX_ATTRIBUTE_MATCH_WORK,
+            message=(
                 f"attribute matching exceeds the work budget of "
                 f"{MAX_ATTRIBUTE_MATCH_WORK} steps"
-            )
+            ),
+        )
 
     def refuse_transforming_attributes(
         self, paths: Iterable[str | bytes | GitEntry]
@@ -2489,7 +2662,12 @@ class Materialization:
             if count is None or count <= 0:
                 raise OSError("materialized file write made no progress")
             written += count
-            self._snapshot.work.materialized_bytes += count
+            self._snapshot._charge_verification(
+                "materialized_bytes",
+                count,
+                ceiling=MAX_MATERIALIZED_BYTES,
+                message=f"materialized bytes exceed the budget of {MAX_MATERIALIZED_BYTES} bytes",
+            )
 
     def __enter__(self) -> "Materialization":
         if self._closed:
@@ -2529,7 +2707,7 @@ class Materialization:
                 work = self._snapshot.work
                 if (
                     local_total + size > MAX_MATERIALIZED_BYTES
-                    or work.materialized_bytes + size > MAX_MATERIALIZED_BYTES
+                    or self._snapshot._verification_total("materialized_bytes") + size > MAX_MATERIALIZED_BYTES
                 ):
                     raise SnapshotError(
                         f"materialized bytes exceed the budget of "

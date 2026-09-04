@@ -13,6 +13,7 @@ import io
 import os
 import pathlib
 import subprocess
+import threading
 from collections.abc import Iterable
 
 import pytest
@@ -286,6 +287,47 @@ def test_selection_failure_reaps_its_short_lived_batch(
     monkeypatch.setattr(_BatchReader, "consume", original_consume)
 
 
+@pytest.mark.parametrize("batch", [False, True], ids=["bounded-call", "batch"])
+def test_thread_start_failure_reaps_a_spawned_git_child(
+    git_repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    batch: bool,
+) -> None:
+    spawned: list[subprocess.Popen[bytes]] = []
+    original_popen = subprocess.Popen
+
+    def recording_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        process = original_popen(*args, **kwargs)
+        spawned.append(process)
+        return process
+
+    def fail_start(_thread: threading.Thread) -> None:
+        raise RuntimeError("injected thread-start failure")
+
+    monkeypatch.setattr(snapshot_module.subprocess, "Popen", recording_popen)
+    monkeypatch.setattr(snapshot_module.threading.Thread, "start", fail_start)
+    private = tmp_path / "private.gitconfig"
+    with pytest.raises(RuntimeError, match="injected thread-start failure"):
+        if batch:
+            snapshot_module._BatchReader(
+                git_repo / ".git",
+                environment=_git_environment(private),
+                object_format="sha1",
+            )
+        else:
+            snapshot_module._bounded_process(
+                ("git", "version"),
+                cwd=None,
+                environment=_git_environment(private),
+                input_bytes=None,
+                output_limit=1024,
+                seconds=5,
+            )
+
+    assert spawned and all(process.poll() is not None for process in spawned)
+
+
 def test_snapshot_reads_commit_after_checkout_and_index_mutate(
     git_repo: pathlib.Path,
 ) -> None:
@@ -456,14 +498,18 @@ def test_every_git_child_receives_frozen_environment_and_allowed_command(
     monkeypatch.setenv("GIT_WORK_TREE", os.fspath(tmp_path / "wrong-tree"))
     monkeypatch.setenv("GIT_INDEX_FILE", os.fspath(tmp_path / "wrong-index"))
     monkeypatch.setenv("GIT_OBJECT_DIRECTORY", os.fspath(tmp_path / "wrong-objects"))
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'core.fsmonitor'='hostile'")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", os.fspath(tmp_path / "hooks"))
     monkeypatch.setenv("GIT_FUTURE_REDIRECT", "hostile")
     original_popen = subprocess.Popen
-    calls: list[tuple[tuple[str, ...], dict[str, str]]] = []
+    calls: list[tuple[tuple[str, ...], dict[str, str], object]] = []
 
     def recording_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
         argv = tuple(os.fspath(part) for part in args[0])
         environment = dict(kwargs["env"])
-        calls.append((argv, environment))
+        calls.append((argv, environment, kwargs.get("cwd")))
         return original_popen(*args, **kwargs)
 
     monkeypatch.setattr(snapshot_module.subprocess, "Popen", recording_popen)
@@ -473,35 +519,64 @@ def test_every_git_child_receives_frozen_environment_and_allowed_command(
         assert selected.assert_ancestor(selected.commit) == selected.commit
 
     assert calls
-    for argv, environment in calls:
+    for argv, environment, cwd in calls:
         assert argv[0] == "git"
+        assert cwd is None
         assert environment["HOME"] == home
         assert {name for name in environment if name.startswith("GIT_")} == {
             "GIT_NO_REPLACE_OBJECTS",
             "GIT_CONFIG_NOSYSTEM",
             "GIT_CONFIG_GLOBAL",
         }
-    command_names = []
-    for argv, _environment in calls:
+        assert not any(
+            name in environment
+            for name in {
+                "GIT_CONFIG_PARAMETERS",
+                "GIT_CONFIG_COUNT",
+                "GIT_CONFIG_KEY_0",
+                "GIT_CONFIG_VALUE_0",
+                "GIT_FUTURE_REDIRECT",
+            }
+        )
+    commands: list[tuple[str, ...]] = []
+    for argv, _environment, _cwd in calls:
         command = list(argv[1:])
-        if command[:1] == ["-C"]:
+        if command[:2] == ["-C", os.fspath(git_repo)]:
+            phase = "discovery"
             command = command[2:]
-        if command and command[0].startswith("--git-dir="):
+        elif command and command[0].startswith("--git-dir="):
+            phase = "object"
+            assert command[0] == f"--git-dir={git_repo / '.git'}"
             assert command[1] == "--no-replace-objects"
             command = command[2:]
-        command_names.append(command[0])
-    assert set(command_names) <= {"config", "version", "rev-parse", "cat-file"}
-    assert command_names.count("cat-file") == 2
-    for forbidden in {
-        "read-tree",
-        "check-attr",
-        "merge-base",
-        "ls-tree",
-        "diff",
-        "diff-tree",
-        "show",
-    }:
-        assert forbidden not in command_names
+        else:
+            phase = "setup"
+        if phase == "setup":
+            assert command[0:2] == ["config", "-f"]
+            command[2] = "<global>"
+            command[-1] = "<root>"
+        elif phase == "object" and command[0] == "rev-parse":
+            command[-1] = "<rev>^{commit}"
+        normalized = (phase, *command)
+        assert normalized in GIT_COMMANDS
+        commands.append(normalized)
+    assert commands == [
+        ("setup", "config", "-f", "<global>", "safe.directory", "<root>"),
+        ("discovery", "version"),
+        (
+            "discovery",
+            "rev-parse",
+            "--show-toplevel",
+            "--absolute-git-dir",
+            "--git-common-dir",
+            "--show-object-format",
+        ),
+        ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
+        ("object", "rev-parse", "--verify", "--end-of-options", "<rev>^{commit}"),
+        ("object", "cat-file", "--batch-command"),
+        ("object", "cat-file", "--batch-command"),
+        ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
+    ]
 
 
 def test_git_floor_pins_batch_command_introduction() -> None:
@@ -842,6 +917,35 @@ def test_crafted_parent_type_mismatch_is_bound_before_parent_bytes() -> None:
     ):
         reader.info(parsed.parents[0], role="commit")
     assert reader._stdin.getvalue() == b""
+
+
+def test_selection_type_binds_a_crafted_parent_before_using_it(
+    git_repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent_tree = _tree_object(git_repo, [])
+    root_tree = _oid(git_repo, "HEAD^{tree}")
+    commit = _commit_object(git_repo, root_tree, parents=(parent_tree,))
+    original_git_run = snapshot_module._git_run
+
+    def preserve_crafted_candidate(
+        arguments: Iterable[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        argv = list(arguments)
+        if argv[-1:] == [f"{commit}^{{commit}}"]:
+            return subprocess.CompletedProcess(
+                ["git", *argv], 0, f"{commit}\n".encode("ascii"), b""
+            )
+        return original_git_run(argv, **kwargs)
+
+    # Git itself rejects the malformed parent during ``rev-parse OID^{commit}``.
+    # Stub only that resolution response so the reader's own real batch child
+    # must demonstrate the independently required role binding.
+    monkeypatch.setattr(snapshot_module, "_git_run", preserve_crafted_candidate)
+    with pytest.raises(
+        SnapshotError,
+        match=rf"^object {parent_tree} is a tree, not the commit its reference requires$",
+    ):
+        TreeSnapshot.select(git_repo, commit)
 
 
 def test_parents_and_ancestry_walk_cover_both_merge_parents(
