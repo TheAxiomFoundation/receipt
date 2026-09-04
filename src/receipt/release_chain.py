@@ -586,9 +586,11 @@ def validate_manifest_schema(manifest: Any, spec: ChainSpec) -> dict[str, Any]:
 def load_manifest(
     path: pathlib.Path, spec: ChainSpec
 ) -> tuple[dict[str, Any], bytes, str]:
-    if path.is_symlink() or not path.is_file():
-        raise ReleaseChainError(f"manifest is not a regular file: {path}")
-    raw = path.read_bytes()
+    raw = _regular_file_bytes(
+        path.parent,
+        pathlib.PurePosixPath(path.name),
+        nonregular=f"manifest is not a regular file: {path}",
+    )
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -1001,10 +1003,27 @@ def verify_producer_signature_bytes(
     )
     public_key_path = anchor_dir / key_spec.public_key_filename
     try:
+        public_key_relative = pathlib.PurePosixPath(
+            public_key_path.relative_to(anchor_dir).as_posix()
+        )
+        public_key_root = anchor_dir
+    except ValueError:
+        # An absolute configured filename historically overrides anchor_dir.
+        # Keep that direct-caller behavior while still giving its leaf the
+        # non-following regular-file read.
+        public_key_relative = pathlib.PurePosixPath(public_key_path.name)
+        public_key_root = public_key_path.parent
+    try:
         # Preserve the upstream branch order: bad payload/signature inputs
         # refuse before a missing producer-key path is inspected.
         _sign._validate_signature_inputs(manifest, signature, label)
-        public_key_pem = _sign.read_producer_public_key(anchor_dir, key_spec)
+        public_key_pem = _regular_file_bytes(
+            public_key_root,
+            public_key_relative,
+            nonregular=(
+                f"missing or non-regular producer public key: {public_key_path}"
+            ),
+        )
         # These exact bytes feed both verification branches below, so the
         # observed digest is the digest of the key material actually used.
         _observe_anchor_bytes(
@@ -1054,13 +1073,16 @@ def verify_producer_signature(
     enforce_production_pin: bool,
     anchor_observer: dict[str, str] | None = None,
 ) -> None:
-    if signature_path.is_symlink() or not signature_path.is_file():
-        raise ReleaseChainError(
+    signature = _regular_file_bytes(
+        signature_path.parent,
+        pathlib.PurePosixPath(signature_path.name),
+        nonregular=(
             f"missing or non-regular producer signature: {signature_path}"
-        )
+        ),
+    )
     verify_producer_signature_bytes(
         manifest,
-        signature_path.read_bytes(),
+        signature,
         spec=spec,
         anchor_dir=anchor_dir,
         enforce_production_pin=enforce_production_pin,
@@ -1089,34 +1111,15 @@ def _receipt_bytes(receipt: pathlib.Path) -> bytes:
     pair, which says so where the pathname cannot.
     """
 
-    # O_NOFOLLOW is POSIX but not universal; where it is absent the lstat
-    # below plus the descriptor comparison still catch a swap, they simply
-    # catch it one step later.
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
-    try:
-        before = os.lstat(receipt)
-        if not stat.S_ISREG(before.st_mode):
-            raise ReleaseChainError(
-                f"missing or non-regular RFC 3161 receipt: {receipt}"
-            )
-        descriptor = os.open(receipt, flags)
-    except OSError as exc:
-        raise ReleaseChainError(
+    return _regular_file_bytes(
+        receipt.parent,
+        pathlib.PurePosixPath(receipt.name),
+        nonregular=f"missing or non-regular RFC 3161 receipt: {receipt}",
+        unreadable=lambda exc: (
             f"cannot read RFC 3161 receipt {receipt}: {type(exc).__name__}"
-        ) from exc
-    try:
-        opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode) or (
-            opened.st_dev,
-            opened.st_ino,
-        ) != (before.st_dev, before.st_ino):
-            raise ReleaseChainError(
-                f"RFC 3161 receipt was replaced while it was being read: {receipt}"
-            )
-        with open(descriptor, "rb", closefd=False) as handle:
-            return handle.read()
-    finally:
-        os.close(descriptor)
+        ),
+        replaced=f"RFC 3161 receipt was replaced while it was being read: {receipt}",
+    )
 
 
 def _verify_production_signer(
@@ -1244,7 +1247,19 @@ def verify_receipt(
     # OpenSSL accepts only a pathname for -CAfile. Read the selected anchor
     # once and hand every OpenSSL child a private copy of these exact bytes,
     # including when production pins and digest observation are both off.
-    anchor_bytes = anchor.read_bytes()
+    try:
+        anchor_relative = pathlib.PurePosixPath(
+            anchor.relative_to(anchor_dir).as_posix()
+        )
+        anchor_root = anchor_dir
+    except ValueError:
+        anchor_relative = pathlib.PurePosixPath(anchor.name)
+        anchor_root = anchor.parent
+    anchor_bytes = _regular_file_bytes(
+        anchor_root,
+        anchor_relative,
+        nonregular=f"missing or non-regular TSA anchor: {anchor}",
+    )
     if enforce_production_pins:
         anchor_digest = sha256_bytes(anchor_bytes)
         if anchor_digest != anchor_spec.pem_sha256:
@@ -2164,30 +2179,86 @@ def read_state_descriptor(descriptor: int) -> bytes:
     return b"".join(chunks)
 
 
-def _regular_file_bytes(root: pathlib.Path, relative: pathlib.PurePosixPath) -> bytes:
-    # The final-component check keeps its own refusal and runs first, so every
-    # input it already rejected is rejected identically; the component walk
-    # below only ever fires for a path this reader used to accept. Both state
-    # reads in _verify_state_history come through here, so the walk covers the
-    # ledger and the immutable prefix alike. The read itself then goes through
-    # the descriptor walk rather than the pathname, so a component swapped
-    # between the walk and the open cannot be followed; every input either
-    # check already refused still gets that check's message, in its place.
-    path = root / relative
-    if path.is_symlink() or not path.is_file():
+def _regular_file_bytes(
+    root: pathlib.Path,
+    relative: pathlib.PurePosixPath,
+    *,
+    nonregular: str | None = None,
+    unreadable: Any | None = None,
+    replaced: str | None = None,
+) -> bytes:
+    """Read a regular file after component ``lstat`` and one bounded open.
+
+    Every component is checked without following links and has its spelling
+    bound before the leaf is opened once with ``O_NOFOLLOW | O_NONBLOCK``.
+    The opened descriptor must still name the regular inode approved by the
+    walk. This is deliberately a read-once directory contract, not a lock
+    against a concurrent writer.
+    """
+
+    if not getattr(os, "O_NOFOLLOW", 0):
         raise ReleaseChainError(
-            f"required state file is missing or non-regular: {path}"
+            "state files cannot be read with secure descent on this platform "
+            "(os.open lacks dir_fd support); receipt requires a POSIX platform"
         )
-    assert_no_symlinked_state_component(root, relative)
-    confined = confined_state_descriptor(root, relative)
+    if relative.is_absolute():
+        path = pathlib.Path(relative)
+        current = pathlib.Path(relative.anchor)
+        components = relative.parts[1:]
+    else:
+        path = root / relative
+        current = root
+        components = relative.parts
+    missing = nonregular or f"required state file is missing or non-regular: {path}"
+    changed = replaced or f"required state file was replaced while being read: {path}"
+    approved: os.stat_result | None = None
+    walked: tuple[str, ...] = ()
     try:
-        if not stat.S_ISREG(os.fstat(confined.descriptor).st_mode):
-            raise ReleaseChainError(
-                f"required state file is missing or non-regular: {path}"
+        for depth, segment in enumerate(components, start=1):
+            current = current / segment
+            walked = (*walked, segment)
+            approved = os.lstat(current)
+            linked = stat.S_ISLNK(approved.st_mode) or bool(
+                getattr(approved, "st_reparse_tag", 0)
             )
-        return read_state_descriptor(confined.descriptor)
+            if linked:
+                if nonregular is None and depth < len(components):
+                    raise _symlinked_component_error(relative, walked)
+                raise ReleaseChainError(missing)
+            _assert_component_spelled(current.parent, segment, walked, relative)
+            if depth < len(components) and not stat.S_ISDIR(approved.st_mode):
+                raise ReleaseChainError(missing)
+        if approved is None or not stat.S_ISREG(approved.st_mode):
+            raise ReleaseChainError(missing)
+        descriptor = os.open(path, STATE_OPEN_FLAGS)
+    except ReleaseChainError:
+        raise
+    except OSError as exc:
+        message = unreadable(exc) if unreadable is not None else missing
+        raise ReleaseChainError(message) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or (
+            opened.st_dev,
+            opened.st_ino,
+        ) != (approved.st_dev, approved.st_ino):
+            raise ReleaseChainError(changed)
+        chunks: list[bytes] = []
+        remaining = opened.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(1 << 20, remaining))
+            if not chunk:
+                raise ReleaseChainError(changed)
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise ReleaseChainError(changed)
+        return b"".join(chunks)
+    except OSError as exc:
+        message = unreadable(exc) if unreadable is not None else missing
+        raise ReleaseChainError(message) from exc
     finally:
-        os.close(confined.descriptor)
+        os.close(descriptor)
 
 
 def _exact_state_bytes(state_bytes: Mapping[str, bytes] | None) -> dict[str, bytes]:
@@ -2489,72 +2560,36 @@ def verify_release_chain(
 ) -> ChainVerification:
     """Verify all manifests, signatures, receipts, links, and state bytes.
 
-    With ``compute_anchor_set_digest=True`` the result additionally names the
-    anchor set the run consumed: every signature and receipt verification
-    digests the anchor bytes at its own read site (OpenSSL calls are then fed
-    a private snapshot of those exact bytes), a filename whose bytes differ
-    between two consumptions refuses, and the combined digest is documented
-    on _combined_anchor_digest. Observing mode consumes each configured
-    filename as the single pathname ``os.fsdecode`` yields for it, asked of
-    the object exactly once per run — a cross-flavour PurePath whose
-    parts-based join would address a different file is consumed by pathname
-    here, by parts in default mode. Off by default: existing callers keep
-    identical verification behavior — the same reads through the same raw
-    configured values, the same acceptances, the same refusals in the same
-    order with the same messages. The returned object does carry the two new
-    (unset) fields, which is visible to reflection such as
-    ``dataclasses.asdict``.
+    Breaking contract: ``verify_release_chain(root)`` speaks for the
+    directory as it was read, once, by this process. A caller that needs a
+    verdict about a commit uses ``verify_append_gate`` or
+    ``run_verification``, which read only objects. A caller on a directory it
+    does not own carries the concurrent-writer residual.
 
-    The release tree's own confinement walk runs at the top of this function,
-    before any manifest is enumerated: every component of the release root,
-    the manifest path and the anchor path is required to be spelled by the
-    directory that holds it and to be reached through no symlink. It was
-    added for the append gate and reached only from there, through
-    ``hold_release_root``, which left this function — and so ``receipt
-    verify``, whose custody pass is this function — verifying a chain reached
-    through a symlinked interior component of a multi-component manifest path,
-    and one stored under a leaf spelled some other way wherever names fold.
-    Measured before the move: ``receipt verify`` over a clone whose
-    ``releases/journal`` is a link to a directory outside it returned
-    ``VERDICT: PASS — custody and corpus binding``, for a release history no
-    part of which was in the tree the auditor had been handed.
-
-    The gate's own call is kept rather than removed as a duplicate, because it
-    is not one. It reaches the walk through ``hold_release_root``, which opens
-    and holds the directory the walk approved for the whole of a proposal, and
-    it stands at the top of both release-proposal paths, ahead of the
-    release-history pass and the push path's type decision. This one stands
-    inside the chain verification those paths eventually call. Moving the
-    gate's to here would move every pre-emption round 12 established and
-    pinned — a dangling release-root link answered as a link rather than as a
-    deleted release file, a folded ``Releases`` answered as a spelling rather
-    than as changed bytes — and would leave ``hold_release_root`` holding a
-    descriptor for a root nothing had walked.
-
-    ``state_bytes`` maps a relative POSIX state path to the bytes a caller
-    has already read for it, and those bytes are used in place of reading
-    that path. It exists for a caller that reads each state file once and
-    holds the verdict to that one read: without it this verifier opened the
-    ledger and the frozen prefix again by name, so an A-to-B-to-A
-    replacement could show the caller's checks one file and the release
-    history another. Omitted (the default, and every pre-existing caller),
-    both files are read here exactly as before.
-
-    Before any of that: an environment that would redirect git's reads away
-    from ``root`` is refused rather than answered under. See
-    ``assert_no_redirecting_git_environment``; the full pin is 0.6 (#45).
+    Every input file is opened once through :func:`_regular_file_bytes` after
+    the configured path walks. With ``compute_anchor_set_digest=True`` the
+    result additionally names the exact configured anchor bytes consumed;
+    OpenSSL always receives a private byte-for-byte ``-CAfile`` copy.
+    Caller-supplied ``state_bytes`` replace the two state-file reads.
     """
+
+    if type(clock_skew_seconds) is not int or clock_skew_seconds < 0:
+        raise ReleaseChainError("clock_skew_seconds must be a non-negative integer")
+    if type(compute_anchor_set_digest) is not bool:
+        raise ReleaseChainError("compute_anchor_set_digest must be a boolean")
+    supplied_state = _exact_state_bytes(state_bytes)
+    if type(allow_pending_append) is not bool:
+        raise ReleaseChainError("allow_pending_append must be a boolean")
+    if allow_pending_append and not verify_state:
+        raise ReleaseChainError(
+            "allow_pending_append requires historical state verification"
+        )
 
     try:
         _tsa._require_supported_openssl()
     except _tsa.TsaError as exc:
         raise ReleaseChainError(str(exc)) from exc
 
-    # Before the root is even resolved: an ambient GIT_DIR, GIT_WORK_TREE,
-    # GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY or GIT_ALTERNATE_OBJECT_DIRECTORIES
-    # redirects every git read below away from the checkout this argument
-    # names, while the verdict is still phrased about that checkout.
-    assert_no_redirecting_git_environment()
     root = root.resolve()
     default_anchor_dir = root / spec.anchor_relative
     if anchor_dir is None:
@@ -2576,11 +2611,6 @@ def verify_release_chain(
     selected_anchors = (anchor_dir or default_anchor_dir).resolve()
     if enforce_production_pins is None:
         enforce_production_pins = selected_anchors == default_anchor_dir.resolve()
-    if type(clock_skew_seconds) is not int or clock_skew_seconds < 0:
-        raise ReleaseChainError("clock_skew_seconds must be a non-negative integer")
-    if type(compute_anchor_set_digest) is not bool:
-        raise ReleaseChainError("compute_anchor_set_digest must be a boolean")
-    supplied_state = _exact_state_bytes(state_bytes)
     anchor_observer: dict[str, str] | None = (
         {} if compute_anchor_set_digest else None
     )
@@ -2603,6 +2633,8 @@ def verify_release_chain(
     # about the leaf's type, which is where a caller's override legitimately
     # differs.
     assert_no_symlinked_release_root(root, spec)
+
+    assert_manifest_directory_regular(root, spec)
 
     enumerated = _enumerate_manifest_files(root, spec)
     if not enumerated:
@@ -2707,12 +2739,6 @@ def verify_release_chain(
         previous_hash = digest
         previous_times = receipt_times
 
-    if type(allow_pending_append) is not bool:
-        raise ReleaseChainError("allow_pending_append must be a boolean")
-    if allow_pending_append and not verify_state:
-        raise ReleaseChainError(
-            "allow_pending_append requires historical state verification"
-        )
     if verify_state:
         _verify_state_history(
             records,

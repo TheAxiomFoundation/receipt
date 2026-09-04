@@ -161,9 +161,7 @@ def test_verification_spec_anchor_set_pin_is_defaulted_and_validated(
 
 
 def test_observing_adds_no_anchor_reads(built: pathlib.Path, tmp_path: pathlib.Path) -> None:
-    """Default mode reads each anchor exactly as 0.5.0 did (producer key once
-    per release for the signature, each TSA anchor once per receipt for the
-    byte pin); observing must ride those same reads, adding none."""
+    """Digest observation rides the same regular-file reads as default mode."""
 
     import pytest as _pytest
 
@@ -173,16 +171,20 @@ def test_observing_adds_no_anchor_reads(built: pathlib.Path, tmp_path: pathlib.P
         shutil.copytree(built, repo, symlinks=True)
         spec, _ = load_spec(repo / "verification/spec.py")
         reads = {"count": 0}
-        original_read_bytes = pathlib.Path.read_bytes
+        original = release_chain._regular_file_bytes
 
-        def counting_read_bytes(self: pathlib.Path) -> bytes:
-            if self.parent.name == "anchors":
+        def counting_read(
+            root: pathlib.Path,
+            relative: pathlib.PurePosixPath,
+            **kwargs: object,
+        ) -> bytes:
+            if root.name == "anchors":
                 reads["count"] += 1
-            return original_read_bytes(self)
+            return original(root, relative, **kwargs)
 
         monkeypatch = _pytest.MonkeyPatch()
         try:
-            monkeypatch.setattr(pathlib.Path, "read_bytes", counting_read_bytes)
+            monkeypatch.setattr(release_chain, "_regular_file_bytes", counting_read)
             verify_release_chain(
                 repo, spec=spec.chain, compute_anchor_set_digest=flag
             )
@@ -286,6 +288,83 @@ def test_release_chain_runs_the_openssl_floor_preflight_before_paths(
     assert str(refusal.value) == (
         "receipt requires OpenSSL 3.0 or newer as `openssl` on the path; "
         "found: LibreSSL 3.3.6"
+    )
+
+
+def test_release_chain_validates_arguments_then_runs_its_path_guards(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from receipt import tsa
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    events: list[str] = []
+    monkeypatch.setattr(
+        tsa, "_require_supported_openssl", lambda: events.append("openssl")
+    )
+    monkeypatch.setattr(
+        release_chain,
+        "assert_no_symlinked_release_root",
+        lambda *_args: events.append("paths"),
+    )
+    monkeypatch.setattr(
+        release_chain,
+        "assert_manifest_directory_regular",
+        lambda *_args: events.append("manifest-shape"),
+    )
+    monkeypatch.setattr(
+        release_chain,
+        "_enumerate_manifest_files",
+        lambda *_args: events.append("enumerate") or [],
+    )
+
+    verification = verify_release_chain(
+        repo,
+        spec=spec.chain,
+        require_chain=False,
+        verify_state=False,
+    )
+    assert verification.releases == ()
+    assert events == ["openssl", "paths", "manifest-shape", "enumerate"]
+
+    events.clear()
+    with pytest.raises(
+        ReleaseChainError,
+        match="clock_skew_seconds must be a non-negative integer",
+    ):
+        verify_release_chain(repo, spec=spec.chain, clock_skew_seconds=-1)
+    assert events == []
+
+
+def test_release_chain_routes_every_input_file_through_the_regular_reader(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec, _ = load_spec(repo / "verification/spec.py")
+    original = release_chain._regular_file_bytes
+    reads: list[str] = []
+
+    def observe(
+        root: pathlib.Path,
+        relative: pathlib.PurePosixPath,
+        **kwargs: object,
+    ) -> bytes:
+        reads.append((root / relative).name)
+        return original(root, relative, **kwargs)
+
+    monkeypatch.setattr(release_chain, "_regular_file_bytes", observe)
+    verify_release_chain(repo, spec=spec.chain)
+
+    manifest = next((repo / "releases/manifests").glob("*.json"))
+    stem = manifest.stem
+    assert sorted(reads) == sorted(
+        [
+            manifest.name,
+            f"{stem}.producer.sig",
+            *(f"{stem}.{name}.tsr" for name in spec.chain.anchors),
+            spec.chain.producer_public_key_filename,
+            *(anchor.filename for anchor in spec.chain.anchors.values()),
+            spec.chain.state_relative.name,
+            spec.chain.prefix_relative.name,
+        ]
     )
 
 
@@ -552,13 +631,10 @@ def test_a_stateful_pathlike_gets_exactly_one_pathname_call(
     assert "reported.pem" not in dict(verification.anchor_file_sha256s)
 
 
-def test_default_mode_fspath_counts_match_origin(
+def test_default_mode_resolves_each_anchor_filename_once_per_consumption(
     repo: pathlib.Path,
 ) -> None:
-    """Origin's default-mode joins ask a PathLike for its pathname a fixed
-    number of times per release: twice for the producer key (the diagnostic
-    path and read_producer_public_key's own join) and once per TSA receipt.
-    Observing-mode normalization must not change any of these counts."""
+    """The read-once path asks each configured filename once per release."""
 
     import dataclasses
 
@@ -588,7 +664,7 @@ def test_default_mode_fspath_counts_match_origin(
     )
     verify_release_chain(repo, spec=chain)
     tsa_labels = sorted(spec.chain.anchors)
-    assert counts == {"producer": 2, tsa_labels[0]: 1, tsa_labels[1]: 1}
+    assert counts == {"producer": 1, tsa_labels[0]: 1, tsa_labels[1]: 1}
 
 
 def test_standalone_receipts_shared_filename_divergence_refuses(
@@ -634,17 +710,21 @@ def test_standalone_receipts_shared_filename_divergence_refuses(
     }
 
     reads = {"count": 0}
-    original_read_bytes = pathlib.Path.read_bytes
+    original = module._regular_file_bytes
 
-    def flipping_read_bytes(self: pathlib.Path) -> bytes:
-        data = original_read_bytes(self)
-        if self.name == shared_name and self.parent.name == "anchors":
+    def flipping_read(
+        root: pathlib.Path,
+        relative: pathlib.PurePosixPath,
+        **kwargs: object,
+    ) -> bytes:
+        data = original(root, relative, **kwargs)
+        if relative.name == shared_name and root.name == "anchors":
             reads["count"] += 1
             if reads["count"] >= 2:
                 return data + b"# diverged between roles\n"
         return data
 
-    monkeypatch.setattr(pathlib.Path, "read_bytes", flipping_read_bytes)
+    monkeypatch.setattr(module, "_regular_file_bytes", flipping_read)
     observer: dict[str, str] = {}
     with pytest.raises(ReleaseChainError, match="changed during verification"):
         module.verify_release_receipts(
@@ -1027,17 +1107,21 @@ def test_a_mid_run_anchor_change_refuses_end_to_end(
     shutil.copytree(root / ANCHOR_DIR, aside)
 
     reads = {"count": 0}
-    original_read_bytes = pathlib.Path.read_bytes
+    original = release_chain._regular_file_bytes
 
-    def flipping_read_bytes(self: pathlib.Path) -> bytes:
-        data = original_read_bytes(self)
-        if self.name == target and self.parent.name == aside.name:
+    def flipping_read(
+        read_root: pathlib.Path,
+        relative: pathlib.PurePosixPath,
+        **kwargs: object,
+    ) -> bytes:
+        data = original(read_root, relative, **kwargs)
+        if relative.name == target and read_root.name == aside.name:
             reads["count"] += 1
             if reads["count"] >= 2:
                 return data + b"# drifted between consumptions\n"
         return data
 
-    monkeypatch.setattr(pathlib.Path, "read_bytes", flipping_read_bytes)
+    monkeypatch.setattr(release_chain, "_regular_file_bytes", flipping_read)
     with pytest.raises(ReleaseChainError, match="changed during verification"):
         # The caller-supplied anchor directory turns pins off, so the
         # observer — not the byte pin — must be what catches the drift.
@@ -1502,8 +1586,16 @@ def test_supplied_state_bytes_are_used_instead_of_reading_the_state_paths(
     ledger.write_bytes(b'{"decoy":true}\n')
     prefix.write_bytes(b"{}\n")
 
-    def refuse(root: pathlib.Path, relative: pathlib.PurePosixPath) -> bytes:
-        raise AssertionError(f"state path was read by name: {relative}")
+    original = release_chain._regular_file_bytes
+
+    def refuse(
+        root: pathlib.Path,
+        relative: pathlib.PurePosixPath,
+        **kwargs: object,
+    ) -> bytes:
+        if relative in {spec.chain.state_relative, spec.chain.prefix_relative}:
+            raise AssertionError(f"state path was read by name: {relative}")
+        return original(root, relative, **kwargs)
 
     monkeypatch.setattr(release_chain, "_regular_file_bytes", refuse)
 
@@ -1562,15 +1654,13 @@ PLATFORM_REFUSAL = (
 )
 
 
-def without_dir_fd(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Present a platform whose ``os.open`` takes no ``dir_fd``, as Windows is."""
+def without_no_follow(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Present a platform without the non-following open the reader requires."""
 
-    monkeypatch.setattr(
-        os, "supports_dir_fd", frozenset(os.supports_dir_fd) - {os.open}
-    )
+    monkeypatch.setattr(os, "O_NOFOLLOW", 0)
 
 
-def test_the_custody_state_read_refuses_a_platform_without_dir_fd(
+def test_the_custody_read_refuses_a_platform_without_no_follow(
     repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Binds S4-F6: the ``dir_fd`` requirement was documented as the append
@@ -1582,7 +1672,7 @@ def test_the_custody_state_read_refuses_a_platform_without_dir_fd(
     left to infer how far it reaches."""
 
     spec, _ = load_spec(repo / "verification/spec.py")
-    without_dir_fd(monkeypatch)
+    without_no_follow(monkeypatch)
 
     with pytest.raises(ReleaseChainError) as refusal:
         verify_release_chain(repo, spec=spec.chain)
@@ -1600,7 +1690,7 @@ def test_receipt_verify_reports_the_platform_refusal_as_the_custody_failure(
     refusal verbatim, so an auditor is told what the platform costs rather
     than left with a failure they cannot place."""
 
-    without_dir_fd(monkeypatch)
+    without_no_follow(monkeypatch)
 
     assert main(
         ["verify", "--spec", str(repo / "verification/spec.py"), "--root", str(repo)]
@@ -1824,28 +1914,6 @@ def redirecting_refusal(name: str) -> str:
     return f"{name} is set in the environment and would redirect git reads; unset it"
 
 
-@pytest.mark.parametrize("name", release_chain.REDIRECTING_GIT_ENVIRONMENT)
-def test_a_redirecting_git_variable_refuses_the_custody_verdict(
-    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch, name: str
-) -> None:
-    """One case per variable, over a chain that verifies without it.
-
-    The same call is made twice against the same tree: once with the variable
-    set and once without. Only the environment differs, so the refusal is the
-    environment's and not the tree's.
-    """
-
-    spec, _ = load_spec(repo / "verification/spec.py")
-
-    monkeypatch.setenv(name, str(repo / "elsewhere"))
-    with pytest.raises(ReleaseChainError) as refusal:
-        verify_release_chain(repo, spec=spec.chain)
-    assert str(refusal.value) == redirecting_refusal(name)
-
-    monkeypatch.delenv(name)
-    assert verify_release_chain(repo, spec=spec.chain).releases
-
-
 def test_the_ordinary_environment_still_reaches_a_custody_verdict(
     repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1866,20 +1934,6 @@ def test_the_ordinary_environment_still_reaches_a_custody_verdict(
         monkeypatch.delenv(name, raising=False)
 
     assert verify_release_chain(repo, spec=spec.chain).releases
-
-
-def test_the_redirecting_refusal_precedes_resolving_the_root(
-    repo: pathlib.Path, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """It is asked before the argument is even resolved, so nothing about the
-    tree can pre-empt it: the root here does not exist."""
-
-    spec, _ = load_spec(repo / "verification/spec.py")
-    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path / "elsewhere"))
-
-    with pytest.raises(ReleaseChainError) as refusal:
-        verify_release_chain(tmp_path / "no-such-tree", spec=spec.chain)
-    assert str(refusal.value) == redirecting_refusal("GIT_WORK_TREE")
 
 
 def test_the_git_environment_still_carries_the_redirecting_names_through(

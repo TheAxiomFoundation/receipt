@@ -11,6 +11,7 @@ In progress on `feat/0.6-lane-c`, based at `145f3db93d745ddc43aeb47f6b7bd8b30aa3
 - Confirmed the branch is clean and starts at the requested Lane E merge.
 - Added and validated the defaulted `ChainSpec.name_repertoire` and `VerificationSpec.anchor_set_sha256` fields; focused tests pass (2 passed).
 - Wired the cached OpenSSL 3.0 preflight into `verify_release_chain` and made every RFC 3161 `-CAfile` a 0600 private byte-for-byte copy, including unpinned/unobserved calls; focused tests pass (2 passed).
+- Reworked `verify_release_chain` as a directory-as-read verifier: argument validation and OpenSSL preflight precede the anchor/path/manifest-shape/enumeration ladder, every input routes through the bounded lstat-plus-`O_NOFOLLOW` reader, and the docstring states the breaking concurrent-writer precondition. `tests/test_release_chain.py` is green (61 passed).
 
 ## Decisions
 
@@ -27,5 +28,5 @@ In progress on `feat/0.6-lane-c`, based at `145f3db93d745ddc43aeb47f6b7bd8b30aa3
 
 ## Next
 
-- Rewrite the retained directory verifier surface and delete guards whose subjects no longer exist.
-- Add tree-based release history/base verification, then `LoadedSpec`, commit-addressed `run_verification`, CLI pins/output, and harness re-pin extras in coherent commits.
+- Add tree-based release history/base verification, then delete its obsolete Git plumbing.
+- Add `LoadedSpec`, commit-addressed `run_verification`, CLI pins/output, and harness re-pin extras in coherent commits.
