@@ -564,6 +564,28 @@ def test_base_release_chain_forwards_pin_and_clock_options(repo: pathlib.Path) -
     assert verification.head is not None
 
 
+def test_base_release_chain_refuses_transforming_attributes_before_openssl(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chain = load_spec(repo / "verification/spec.py").verification.chain
+    (repo / ".gitattributes").write_text("releases/** filter=evil\n", encoding="utf-8")
+    base_oid = commit_snapshot(repo, "base with transforming release attributes")
+
+    def no_openssl() -> None:
+        pytest.fail("base attributes must be checked before the OpenSSL preflight")
+
+    monkeypatch.setattr(release_chain._tsa, "_require_supported_openssl", no_openssl)
+    with TreeSnapshot.select(repo, base_oid) as base:
+        with pytest.raises(SnapshotError) as expected:
+            base.refuse_transforming_attributes(base.entries("releases").as_dict().values())
+        with pytest.raises(SnapshotError) as caught:
+            verify_base_release_chain(chain, base=base)
+    assert str(caught.value) == str(expected.value)
+    assert "transforming attribute filter applies to protected path releases/" in str(
+        caught.value
+    )
+
+
 def test_observing_adds_no_anchor_reads(built: pathlib.Path, tmp_path: pathlib.Path) -> None:
     """Digest observation rides the same regular-file reads as default mode."""
 

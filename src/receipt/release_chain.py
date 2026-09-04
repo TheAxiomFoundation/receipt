@@ -2245,6 +2245,7 @@ def verify_base_release_chain(
             destination,
             repertoire=normalized.name_repertoire,
         ) as materialized:
+            base.refuse_transforming_attributes(materialized.entries.values())
             if anchor_dir is None:
                 materialized.anchor_set_sha256(normalized)
             return verify_release_chain(
