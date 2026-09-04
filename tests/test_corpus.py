@@ -812,6 +812,26 @@ def test_refuses_an_attested_path_the_spec_requires_but_the_journal_omits(
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
 
 
+def test_required_attestation_precedes_a_content_digest_mismatch(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Completeness is checked before the combined bound-file digest stream."""
+
+    write_tree(tmp_path)
+    rows = [row for row in journal_rows() if row.get("kind") != "attested"]
+    for row in rows:
+        if row.get("path") == "rules/benefit/amount.yaml":
+            row["sha256"] = "0" * 64
+    reindex(rows)
+
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+    assert str(caught.value) == (
+        "the witnessed journal does not attest a path the pinned spec requires: "
+        "'.axiom/toolchain.toml'"
+    )
+
+
 def test_refuses_a_required_gate_the_journal_omits(tmp_path: pathlib.Path) -> None:
     """Completeness is a DECLARATION failure, not a binding failure — the pass
     boundary the verdict describes."""
