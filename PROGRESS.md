@@ -90,10 +90,11 @@
   test's obsolete checkout-guard setup and name.
 - Tightened the Lane C base-chain workaround so the base verifier always uses
   the caller-owned trusted anchor directory and respects custom-anchor pin
-  policy. It no longer reads candidate/base anchor blobs merely to decide
-  whether to switch trust sources, so a corrupt unrelated anchor cannot mask
-  its original snapshot error. Added a post-genesis chain test where committed
-  anchor bytes equal the custom trusted directory but production pins differ.
+  policy. It no longer compares candidate/base anchor bytes to choose the
+  trust source; the required release-root materialization still rehashes and
+  writes descendant anchor blobs. Added a post-genesis chain test where
+  committed anchor bytes equal the custom trusted directory but production
+  pins differ.
 - Kept `release path is a symlink` / `release path is not regular` for
   non-regular release leaves. A release root or interior manifest ancestor is
   instead a mandated section 3.3 reader-shape refusal, while the exact manifest
