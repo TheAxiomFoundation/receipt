@@ -206,6 +206,11 @@ def git_repo(tmp_path: pathlib.Path) -> pathlib.Path:
 def test_exact_chronicle_eight_line_attributes_fixture_is_accepted(
     git_repo: pathlib.Path,
 ) -> None:
+    """Carry the actual eight lines: five rules, two comments, and one blank.
+
+    The fifth rule is ``releases/manifests/*.tsr binary``.
+    """
+
     paths = (
         "ledger/official_observations.jsonl",
         "ledger/immutable_prefix.json",
