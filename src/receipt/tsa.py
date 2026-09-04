@@ -74,7 +74,17 @@ class's signers beside a key that is nobody's --
 which is neither a rename nor a new authority and so is refused rather than
 skipped or admitted, since skipping it activates something with no
 supplemental evidence and admitting it lets an authority the chain already
-trusts produce the very token the new key is supposed to prove -- asked now
+trusts produce the very token the new key is supposed to prove -- asked of an
+anchor whose owned keys resolve to a class the chain already trusts, and of
+no other, because a class nothing trusts yet contributes exactly one
+candidate however many names it has been filed under and that candidate must
+answer for itself whichever name is elected: the escape saying so used to sit
+inside the requirement that every key be one the graph already owns, so a
+never-activated authority renamed and rotated at once in a later bundle of
+the same transition was refused for splitting or merging active authorities
+when no active authority is anywhere in its class (peer review, first Opus
+round) -- one class, since an anchor carrying two pending-only classes merges
+them and stays refused; asked now
 of every pending anchor, including one whose ``(ID, root SPKI)`` is already
 active, which used to be exempt from this question and so could commit the
 very merge the clause claims to refuse: such an anchor is a rotation, but
@@ -2978,6 +2988,17 @@ class _AuthorityHistory:
         protect there, and applying it would refuse a later pending version
         that carries a name the class has already used (peer review, sixth
         gate round two).
+
+        Asked before the alias test rather than inside it.  Inside, the escape
+        was reachable only for an anchor whose every key the graph already
+        owned, so a never-activated authority renamed *and* rotated in a later
+        bundle of the same transition -- a new key beside its own, and no
+        active authority anywhere in its class -- was refused as splitting or
+        merging active authorities' signers, a category its input does not
+        belong to, in the candidate walk where no supplemental outcome can
+        answer it (peer review, first Opus round).  Asked of the one class the
+        anchor's owned keys resolve to: an anchor carrying two classes is a
+        merge of them, and being new is not a licence to commit one.
         """
 
         root = self.find(authority)
@@ -3276,13 +3297,28 @@ def _build_authority_history(
                 continue
             if not roots:
                 continue
+            if len(roots) == 1 and not history.holds_an_active_anchor(
+                next(iter(roots))
+            ):
+                # A class nothing trusts yet contributes one candidate however
+                # many names it is filed under, so the election below decides
+                # it and this test has nothing to protect.  Asked here rather
+                # than inside the gate below, because what that gate protects
+                # is active authorities and this anchor touches none: inside
+                # it, the escape was reachable only where the anchor's every
+                # key was already owned, so a never-activated authority
+                # renamed *and* rotated in a later bundle of the same
+                # transition failed the unknown-key half and was refused as
+                # splitting or merging active authorities' signers -- a
+                # category its input does not belong to, in the walk where no
+                # supplemental outcome can answer (peer review, first Opus
+                # round).  One class, because two pending-only classes carried
+                # by one anchor is a merge of them and stays refused.
+                continue
             unknown = occurrence.signers.difference(history.signer_owner)
             valid_alias = False
             if len(roots) == 1 and not unknown:
                 root = next(iter(roots))
-                # A class nothing trusts yet contributes one candidate however
-                # many names it is filed under, so the election below decides
-                # it and this test has nothing to protect.
                 # Every key the class allows today, and no key it has never
                 # held.  Dropping a live key is the split this refuses; a key
                 # outside the class's own history is the merge or the
@@ -3294,8 +3330,7 @@ def _build_authority_history(
                 # a refusal no evidence could answer (peer review, first Opus
                 # round).
                 valid_alias = (
-                    not history.holds_an_active_anchor(root)
-                    or occurrence.signers == history.newest_pending_era(root)
+                    occurrence.signers == history.newest_pending_era(root)
                     or history.current_signers(root)
                     <= occurrence.signers
                     <= history.class_signers(root)
@@ -3508,7 +3543,18 @@ def _supplemental_candidates(
     supplemental token; a pending-only component has exactly one candidate,
     its newest occurrence, because succession changes the representation
     that survives without changing the authority's class (peer review, sixth
-    gate round two).
+    gate round two).  Which is also why the split-or-merge test is asked only
+    of an anchor whose owned keys resolve to a class holding an active anchor.
+    A pending-only class has nothing there to protect -- one candidate, one
+    supplemental outcome, whichever of its names is elected -- and the escape
+    saying so sat inside the requirement that every key be one the graph
+    already owns, so it was reachable only for an anchor introducing no new
+    key.  A pending authority renamed *and* rotated in a later bundle of the
+    same transition introduces one, and was refused for splitting or merging
+    active authorities' signers with no active authority anywhere in its
+    class (peer review, first Opus round).  One class, though: an anchor
+    carrying the keys of two pending-only classes merges them, and being new
+    is not a licence to commit a merge.
 
     A class may be represented only once inside any one pending bundle.  The
     ordinary bundle check catches two anchors sharing a *current* signer, but

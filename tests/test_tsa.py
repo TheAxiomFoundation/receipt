@@ -5650,6 +5650,123 @@ def test_a_rename_after_an_activated_rotation_is_measured_against_the_live_era(
     assert evidence.supplemental_tokens == ()
 
 
+def test_a_pending_only_class_may_rename_and_rotate_in_one_transition(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_beta: LocalTsa,
+) -> None:
+    """S6-OP1-F3: the split-or-merge rule is about active authorities.
+
+    A class with no active anchor is an authority nothing trusts yet: every
+    occurrence of it is pending, exactly one of them is elected, and that one
+    answers with a supplemental outcome whichever of its names wins. The
+    escape saying so sat *inside* the gate that requires every key of the
+    anchor to be one the graph already owns, so it was reachable only for an
+    anchor introducing no new key. A pending authority renamed and rotated in
+    a later bundle of the same transition introduces one -- and was refused
+    for splitting or merging active authorities' signers, when no active
+    authority is anywhere in its class, in the candidate walk where no
+    supplemental outcome can answer.
+
+    The question is now asked before that gate, of the one class the anchor's
+    owned keys resolve to. One class, because an anchor carrying two
+    pending-only classes merges them, and being new is not a licence to commit
+    a merge; that shape keeps its refusal and its own test.
+
+    Without the fix the first assertion raises the split-or-merge verdict
+    instead of returning the renamed anchor as the class's one candidate. The
+    three controls below pass either way and are here to say what the fix does
+    not change: a rotation under the same name, a rename with a key of its
+    own, and a rename carrying nothing new.
+    """
+
+    beta = local_anchors[1]
+    rotated = certificate_pins(rotated_beta.signer_pem)
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    assert verify_tree(tree).status == "available"
+    active = {BUNDLE_LOGICAL: tree.reference}
+
+    # The authority nothing trusts yet, introduced by a pending bundle.
+    arrival, spec = pending_authority(tree, beta, version=2)
+    renamed = alias_of(beta, anchor_id="beta-renamed-2026")
+    # The transition this finding is about: renamed and rotated at once.
+    rename_and_rotate, spec = add_bundle_version(
+        tree,
+        [renamed],
+        version=3,
+        extra_signers={renamed.anchor_id: [rotated]},
+        base=spec,
+    )
+    # The controls: a rotation under the name it arrived under, a rename onto
+    # a key of its own, and a rename carrying nothing new.
+    rotation, spec = add_bundle_version(
+        tree,
+        [beta],
+        version=4,
+        extra_signers={beta.anchor_id: [rotated]},
+        base=spec,
+    )
+    stranger = alias_of(beta, anchor_id="beta-stranger-2026")
+    fresh_key, spec = add_bundle_version(
+        tree,
+        [stranger],
+        version=5,
+        signers={stranger.anchor_id: rotated},
+        base=spec,
+    )
+    pure_rename, spec = add_bundle_version(
+        tree, [renamed], version=6, base=spec
+    )
+
+    # The premises: no active anchor shares anything with the arrival, and the
+    # anchor under test carries the arrival's key beside a key nobody owns.
+    assert json.loads(tree.bundle.read_text())["anchors"][0]["id"] == (
+        local_anchors[0].anchor_id
+    )
+    keys = {
+        version: {
+            signer["spkiSha256"]
+            for signer in json.loads(
+                (tree.records / "trust" / f"tsa-anchors-v{version}.json").read_text()
+            )["anchors"][0]["allowedSigners"]
+        }
+        for version in (1, 2, 3, 4, 5, 6)
+    }
+    assert keys[1] == {local_anchors[0].signer_pins["spkiSha256"]}
+    assert keys[2] == {beta.signer_pins["spkiSha256"]}
+    assert keys[3] == {beta.signer_pins["spkiSha256"], rotated["spkiSha256"]}
+    assert keys[4] == keys[3]
+    assert keys[5] == {rotated["spkiSha256"]}
+    assert keys[6] == keys[2]
+    assert not keys[1] & keys[3]
+
+    def candidates_for(*pending: dict[str, Any]) -> set[tuple[str, str]]:
+        return set(
+            tsa_module._supplemental_candidates(
+                tree.records, active, list(pending), spec=spec
+            )
+        )
+
+    # One class, one candidate: the newest name, which is the anchor a witness
+    # answers for once the transition activates.
+    assert candidates_for(arrival, rename_and_rotate) == {
+        (str(rename_and_rotate["path"]), renamed.anchor_id)
+    }
+    # A rotation under the name it arrived under: the same one candidate.
+    assert candidates_for(arrival, rotation) == {
+        (str(rotation["path"]), beta.anchor_id)
+    }
+    # A rename onto a key nobody owns is a second authority, not a rename.
+    assert candidates_for(arrival, fresh_key) == {
+        (str(arrival["path"]), beta.anchor_id),
+        (str(fresh_key["path"]), stranger.anchor_id),
+    }
+    # And a rename carrying nothing new: one candidate, under the new name.
+    assert candidates_for(arrival, pure_rename) == {
+        (str(pure_rename["path"]), renamed.anchor_id)
+    }
+
+
 def test_a_skipped_pending_rotation_is_history_for_a_later_rename(
     tmp_path: pathlib.Path,
     local_anchors: tuple[LocalAnchor, ...],
