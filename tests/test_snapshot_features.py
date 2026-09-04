@@ -54,6 +54,13 @@ def _git(
     return completed
 
 
+def _init(root: pathlib.Path) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "snapshot@example.test")
+    _git(root, "config", "user.name", "Snapshot Test")
+
+
 def _commit(root: pathlib.Path, message: str = "fixture") -> str:
     _git(root, "add", "-A")
     _git(root, "commit", "-q", "-m", message)
@@ -1380,3 +1387,76 @@ def test_verify_object_store_count_and_size_budgets(
     with TreeSnapshot.select(git_repo, commit, verify_objects=True) as selected:
         with pytest.raises(SnapshotError, match=message):
             selected.verify_object_store((selected.commit,))
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        b"RELEASES/manifests/x.json filter=evil\n",
+        b"releases/MANIFESTS/x.json filter=evil\n",
+        b"releases/manifests/*.JSON filter=evil\n",
+        b"RELEASES/manifests/*.json filter=evil\n",
+    ],
+)
+def test_ignorecase_folds_attribute_patterns_like_git(
+    tmp_path: pathlib.Path, line: bytes
+) -> None:
+    """Under core.ignoreCase git applies a case-differing pattern; so does the reader.
+
+    Every git init or clone on a case-insensitive filesystem writes
+    ``core.ignoreCase=true`` into the local configuration, and git then matches
+    attribute patterns with ``WM_CASEFOLD``. A byte-exact matcher missed a
+    transforming attribute git applied (peer review, round 2, probed). The
+    hermetic ``check-attr --cached`` oracle is consulted under the same setting.
+    """
+
+    root = tmp_path / "repo"
+    _init(root)
+    _git(root, "config", "core.ignorecase", "true")
+    snapshot = _snapshot_with_attributes(root, line, ["releases/manifests/x.json"])
+    (tmp_path / "empty").write_bytes(b"")
+    (tmp_path / "empty-global").write_bytes(b"")
+    oracle = subprocess.run(
+        ["git", "-c", "core.ignorecase=true", "-c", f"core.attributesFile={tmp_path / 'empty'}",
+         "check-attr", "--cached", "-z", "filter", "--", "releases/manifests/x.json"],
+        cwd=root, env=snapshot_module._git_environment(tmp_path / "empty-global"),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+    ).stdout.split(b"\0")
+    assert oracle[2] == b"evil", oracle
+    with snapshot:
+        with pytest.raises(SnapshotError, match="transforming attribute filter applies"):
+            snapshot.refuse_transforming_attributes(["releases/manifests/x.json"])
+
+
+def test_without_ignorecase_a_case_differing_pattern_does_not_apply(
+    tmp_path: pathlib.Path,
+) -> None:
+    root = tmp_path / "repo"
+    _init(root)
+    _git(root, "config", "core.ignorecase", "false")
+    snapshot = _snapshot_with_attributes(
+        root, b"RELEASES/manifests/x.json filter=evil\n", ["releases/manifests/x.json"]
+    )
+    with snapshot:
+        snapshot.refuse_transforming_attributes(["releases/manifests/x.json"])
+
+
+def test_a_non_boolean_ignorecase_value_refuses_at_selection(
+    tmp_path: pathlib.Path,
+) -> None:
+    """git dies on ``core.ignoreCase=maybe`` during discovery, so selection
+    refuses before any read; the reader's own classifier refuses the same
+    value if a record ever reaches it."""
+
+    root = tmp_path / "repo"
+    _init(root)
+    _write(root, "protected.txt", b"bytes\n")
+    commit = _commit(root)
+    _git(root, "config", "core.ignorecase", "maybe")
+    with pytest.raises(SnapshotError):
+        TreeSnapshot.select(root, commit)
+    with pytest.raises(SnapshotError, match="non-boolean value 'maybe'"):
+        snapshot_module._config_ignorecase((("local", "core.ignorecase", "maybe"),))
+    assert snapshot_module._config_ignorecase((("local", "core.ignorecase", ""),)) is True
+    assert snapshot_module._config_ignorecase((("local", "core.ignorecase", "Off"),)) is False
+    assert snapshot_module._config_ignorecase((("global", "core.ignorecase", "true"),)) is False

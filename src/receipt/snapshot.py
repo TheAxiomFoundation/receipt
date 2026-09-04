@@ -695,6 +695,42 @@ def _parse_config(output: bytes) -> tuple[tuple[str, str, str], ...]:
     return tuple(records)
 
 
+def _config_bool(key: str, value: str) -> bool:
+    """Read a configuration value the way ``git_config_bool`` does.
+
+    ``true``, ``yes``, ``on``, ``1`` and the empty (valueless) form are true;
+    ``false``, ``no``, ``off`` and ``0`` are false; git dies on anything else,
+    and so does this reader, because a value it cannot classify is one it
+    cannot apply the same way git will.
+    """
+
+    lowered = value.strip().lower()
+    if lowered in {"", "true", "yes", "on", "1"}:
+        return True
+    if lowered in {"false", "no", "off", "0"}:
+        return False
+    raise SnapshotError(f"repository configuration key {key!r} has a non-boolean value {value!r}")
+
+
+def _config_ignorecase(records: tuple[tuple[str, str, str], ...]) -> bool:
+    """Whether git folds ASCII case when matching attribute patterns here.
+
+    ``core.ignoreCase`` is written into the local configuration by every
+    ``git init`` and ``git clone`` on a case-insensitive filesystem (macOS APFS
+    among them), and under it git matches ``.gitattributes`` patterns with
+    ``WM_CASEFOLD``. A byte-exact matcher would then miss a transforming
+    attribute git applies (peer review of the Lane A PR, round 2). The last
+    record wins, as in git; only the repository's own scopes can set it here,
+    since the global file is the reader's and the system file is disabled.
+    """
+
+    result = False
+    for scope, key, value in records:
+        if scope in {"local", "worktree"} and key.lower() == "core.ignorecase":
+            result = _config_bool(key, value)
+    return result
+
+
 def _config_key_denied(key: str) -> bool:
     lowered = key.lower()
     return (
@@ -742,6 +778,7 @@ def _audit_config(
                 f"repository configuration key {key!r} is not allowed for "
                 "immutable tree reads"
             )
+    _config_ignorecase(records)  # refuses a value git could not classify either
 
 
 def _create_global_config(root: pathlib.Path) -> bytes:
@@ -2982,7 +3019,10 @@ class TreeSnapshot:
         """Evaluate the fail-closed committed-attribute subset over paths.
 
         Only ``filter``, ``ident`` and ``working-tree-encoding`` transform raw
-        blob bytes. Their set and valued states refuse; unset, absent, and an
+        blob bytes. Under ``core.ignoreCase`` in the repository's own scopes
+        the patterns and the paths are compared after an ASCII case fold, as
+        git's ``WM_CASEFOLD`` does; a value of that key git could not classify
+        as a boolean is refused at selection. Their set and valued states refuse; unset, absent, and an
         explicit unspecified state are harmless. ``text`` and ``eol`` are
         accepted in every state, and the built-in ``binary`` macro expands to
         ``-diff -merge -text``. No non-tree attribute source is consulted.
@@ -3012,13 +3052,35 @@ class TreeSnapshot:
             unique.setdefault(path_bytes, parts)
 
         transforms = {"filter", "ident", "working-tree-encoding"}
+        # Under core.ignoreCase git matches attribute patterns with
+        # WM_CASEFOLD, an ASCII fold of both sides; the same fold is applied
+        # here so a pattern spelled in another case still reaches the
+        # transforming-attribute refusal (peer review, round 2). bytes.lower
+        # folds ASCII letters alone, which is what git's tolower does.
+        fold = _config_ignorecase(self._state.config_records)
+        folded_rules: dict[int, _AttributeRule] = {}
         for path_bytes, parts in unique.items():
             final: dict[str, str] = {}
             for depth in range(len(parts)):
                 attribute_parts = (*parts[:depth], b".gitattributes")
                 rules = self._attribute_rules(attribute_parts)
                 relative = parts[depth:]
+                if fold:
+                    relative = tuple(segment.lower() for segment in relative)
                 for rule in rules:
+                    if fold:
+                        candidate_rule = folded_rules.get(id(rule))
+                        if candidate_rule is None:
+                            candidate_rule = _AttributeRule(
+                                rule.pattern.lower(),
+                                tuple(s.lower() for s in rule.segments),
+                                tuple(s.lower() for s in rule.match_segments),
+                                rule.has_slash,
+                                rule.trailing_descendants,
+                                rule.states,
+                            )
+                            folded_rules[id(rule)] = candidate_rule
+                        rule = candidate_rule
                     if _attribute_matches(rule, relative, self._attribute_step):
                         for name, disposition in rule.states:
                             self._attribute_step()
