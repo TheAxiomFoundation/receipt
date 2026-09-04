@@ -7,7 +7,7 @@ byte-identical behavior, and the combined digest is receipt-canonical JSON —
 an injective encoding for any accepted filename strings.
 
 Two tests at the end are labelled S4-F6 and belong to a fourth review gate's
-first round on the append-gate branch: the ``dir_fd`` requirement was
+first round on the append-gate branch: the ``O_NOFOLLOW`` requirement was
 documented as the append gate's, and this is where it is shown to be the
 package's — ``verify_release_chain`` and ``receipt verify``'s custody pass
 refuse on the same platforms, in the same words, with no append gate in the
@@ -1851,7 +1851,7 @@ def test_state_bytes_must_map_exact_strings_to_exact_bytes(
 
 PLATFORM_REFUSAL = (
     "state files cannot be read with secure descent on this platform "
-    "(os.open lacks dir_fd support); receipt requires a POSIX platform"
+    "(os.O_NOFOLLOW is unavailable); receipt requires a POSIX platform"
 )
 
 
@@ -1864,7 +1864,7 @@ def without_no_follow(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_the_custody_read_refuses_a_platform_without_no_follow(
     repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Binds S4-F6: the ``dir_fd`` requirement was documented as the append
+    """Binds S4-F6: the ``O_NOFOLLOW`` requirement was documented as the append
     gate's, but ``_regular_file_bytes`` is where it lives and this verifier is
     that function's other caller — so ``verify_release_chain`` stops on the
     same refusal, on the public path, with no append gate anywhere in the

@@ -12,6 +12,10 @@ to lock out a concurrent writer. Callers that need a verdict about a commit use
 ``run_verification`` or the append gate, which select immutable git objects and
 hand this function a private materialization. Release-history comparison is
 likewise over two entered :class:`receipt.snapshot.TreeSnapshot` instances.
+This directory verifier performs no Git reads, so redirecting Git environment
+variables cannot change its verdict; ``run_verification`` and
+``verify_append_gate`` retain that refusal before their snapshot reads. Its
+three subprocess call sites invoke OpenSSL only.
 
 The cryptographic and serialization behavior remains gated against the
 PolicyEngine/ledger source recorded in
@@ -1548,13 +1552,15 @@ def _regular_file_bytes(
     bound before the leaf is opened once with ``O_NOFOLLOW | O_NONBLOCK``.
     The opened descriptor must still name the regular inode approved by the
     walk. This is deliberately a read-once directory contract, not a lock
-    against a concurrent writer.
+    against a concurrent writer. ``O_NOFOLLOW`` is mandatory even for private
+    materializations, so commit-addressed verification retains the POSIX
+    requirement.
     """
 
     if not getattr(os, "O_NOFOLLOW", 0):
         raise ReleaseChainError(
             "state files cannot be read with secure descent on this platform "
-            "(os.open lacks dir_fd support); receipt requires a POSIX platform"
+            "(os.O_NOFOLLOW is unavailable); receipt requires a POSIX platform"
         )
     if relative.is_absolute():
         path = pathlib.Path(relative)
