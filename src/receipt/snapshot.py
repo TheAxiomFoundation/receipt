@@ -792,6 +792,8 @@ def _attribute_pattern(
     if not anchored:
         raise _unsupported_attribute(path, line, "empty pattern")
     segments = anchored.split(b"/")
+    if any(not segment for segment in segments):
+        raise _unsupported_attribute(path, line, "empty pattern segment")
     for segment in segments:
         if b"**" in segment and segment != b"**":
             raise _unsupported_attribute(path, line, "misplaced **")
@@ -1024,12 +1026,20 @@ class _BatchReader:
             except BaseException as exc:
                 failure.append(exc)
 
-        reader = threading.Thread(
-            target=read,
-            name="receipt-git-batch-stdout",
-            daemon=True,
-        )
-        reader.start()
+        try:
+            reader = threading.Thread(
+                target=read,
+                name="receipt-git-batch-stdout",
+                daemon=True,
+            )
+            reader.start()
+        except BaseException:
+            self._abandoned = True
+            try:
+                self._process.kill()
+            except OSError:
+                pass
+            raise
         reader.join(max(0.0, deadline - time.monotonic()))
         if reader.is_alive():
             self._abandoned = True
@@ -1317,6 +1327,7 @@ class _DigestIterator(Iterator[tuple[GitEntry, str]]):
         self._per_blob = per_blob
         self._total = total
         self._charged = 0
+        self._count = 0
         self._done = False
         self._closed = False
 
@@ -1334,6 +1345,12 @@ class _DigestIterator(Iterator[tuple[GitEntry, str]]):
         except BaseException:
             self.close()
             raise
+        self._count += 1
+        if self._count > MAX_TREE_ENTRIES:
+            self.close()
+            raise SnapshotError(
+                f"content entries exceed the budget of {MAX_TREE_ENTRIES} entries"
+            )
         if not isinstance(entry, GitEntry):
             self.close()
             raise SnapshotError("digests entries must all be GitEntry objects")
@@ -1729,9 +1746,15 @@ class TreeSnapshot:
                 environment=_git_environment(global_path),
                 object_format=self.object_format,
             )
-        except BaseException:
+        except BaseException as caught:
             if temporary is not None:
-                temporary.cleanup()
+                try:
+                    temporary.cleanup()
+                except BaseException as cleanup_error:
+                    caught.add_note(
+                        f"Snapshot startup cleanup also failed: {cleanup_error}"
+                    )
+            self._state.closed = True
             raise
         self._state.tempdir = temporary
         self._state.global_config = global_path
@@ -2067,7 +2090,6 @@ class TreeSnapshot:
     def _build_listing(
         self,
         tree_oid: str,
-        prefix: tuple[bytes, ...],
         *,
         depth: int,
         count: list[int],
@@ -2094,7 +2116,6 @@ class TreeSnapshot:
             if raw.mode == b"40000":
                 child = self._build_listing(
                     raw.oid,
-                    (*prefix, raw.name),
                     depth=depth + 1,
                     count=count,
                 )
@@ -2131,7 +2152,7 @@ class TreeSnapshot:
 
         parts = self._path_parts(prefix, allow_empty=True)
         if not parts:
-            node = self._build_listing(self.tree, (), depth=0, count=[0])
+            node = self._build_listing(self.tree, depth=0, count=[0])
             return TreeListing(self, (), node)
         tree_oid = self.tree
         count = [0]
@@ -2147,7 +2168,7 @@ class TreeSnapshot:
             if last:
                 if raw.mode == b"40000":
                     node = self._build_listing(
-                        raw.oid, parts, depth=len(parts), count=count
+                        raw.oid, depth=len(parts), count=count
                     )
                     return TreeListing(self, parts, node)
                 return TreeListing(
@@ -2245,25 +2266,22 @@ class TreeSnapshot:
 
         return self._commit_object(self._validate_oid(commit)).parents
 
-    def assert_ancestor(self, base: "TreeSnapshot | str") -> str:
+    def assert_ancestor(self, base: "TreeSnapshot") -> str:
         """Prove a selected base commit is in this candidate's parent graph.
 
         A symbolic base is selected exactly once by its own
-        :meth:`TreeSnapshot.select` call. Accepting only that snapshot or a
-        full OID prevents a moving ref from being resolved a second time.
+        :meth:`TreeSnapshot.select` call. Requiring that entered snapshot
+        prevents a moving ref from being resolved a second time and joins the
+        verification-wide work budgets before either tree is consumed.
         """
 
         self._batch()
-        if isinstance(base, TreeSnapshot):
-            if (
-                base.git_dir != self.git_dir
-                or base.object_format != self.object_format
-            ):
-                raise SnapshotError("candidate and base snapshots must share an object store")
-            base._batch()
-            base_oid = base.commit
-        else:
-            base_oid = self._validate_oid(base)
+        if not isinstance(base, TreeSnapshot):
+            raise SnapshotError("assert_ancestor base must be a TreeSnapshot")
+        if base.git_dir != self.git_dir or base.object_format != self.object_format:
+            raise SnapshotError("candidate and base snapshots must share an object store")
+        base._batch()
+        base_oid = base.commit
         stack = [self.commit]
         seen: set[str] = set()
         while stack:
@@ -2280,8 +2298,7 @@ class TreeSnapshot:
             work.ancestry_commits += 1
             commit = self._commit_object(current)
             if current == base_oid:
-                if isinstance(base, TreeSnapshot):
-                    self._link_verification_work(base)
+                self._link_verification_work(base)
                 self._state.ancestry_bases.add(base_oid)
                 return base_oid
             if work.ancestry_edges + len(commit.parents) > MAX_ANCESTRY_COMMITS:
@@ -2517,7 +2534,11 @@ class TreeSnapshot:
         except TypeError as exc:
             raise SnapshotError("attribute paths must be an iterable of paths") from exc
         unique: dict[bytes, tuple[bytes, ...]] = {}
-        for supplied in iterator:
+        for count, supplied in enumerate(iterator, start=1):
+            if count > MAX_TREE_ENTRIES:
+                raise SnapshotError(
+                    f"attribute paths exceed the budget of {MAX_TREE_ENTRIES} entries"
+                )
             value: str | bytes
             if isinstance(supplied, GitEntry):
                 value = supplied.path
@@ -2537,9 +2558,14 @@ class TreeSnapshot:
                     if _attribute_matches(rule, relative, self._attribute_step):
                         for name, disposition in rule.states:
                             final[name] = disposition
-            path = os.fsdecode(path_bytes)
             for name in sorted(transforms):
                 if final.get(name) in {"set", "value"}:
+                    try:
+                        path = path_bytes.decode("utf-8", errors="strict")
+                    except UnicodeDecodeError as exc:
+                        raise SnapshotError(
+                            "tree entry name is not valid UTF-8 for quoting"
+                        ) from exc
                     raise SnapshotError(
                         f"transforming attribute {name} applies to protected "
                         f"path {path}"
@@ -2561,7 +2587,15 @@ class TreeSnapshot:
         if isinstance(prefixes, (str, bytes)):
             raise SnapshotError("materialization prefixes must be an iterable of paths")
         try:
-            requested = tuple(prefixes)
+            requested_list: list[str | bytes] = []
+            for prefix in prefixes:
+                if len(requested_list) >= MAX_TREE_ENTRIES:
+                    raise SnapshotError(
+                        f"materialization prefixes exceed the budget of "
+                        f"{MAX_TREE_ENTRIES} entries"
+                    )
+                requested_list.append(prefix)
+            requested = tuple(requested_list)
         except TypeError as exc:
             raise SnapshotError("materialization prefixes must be iterable") from exc
         try:
@@ -2740,6 +2774,7 @@ class Materialization:
                     caught.add_note(
                         f"Materialization cleanup also failed: {cleanup_error}"
                     )
+            self._closed = True
             raise
         self._path = created
         self._entries = written_entries

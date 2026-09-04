@@ -280,6 +280,7 @@ def test_attribute_precedence_uses_later_and_nearer_rules(
         (b"!file filter\n", "negative pattern"),
         (b"[attr]xf filter=evil\n", "attribute macro definition"),
         (b"directory/ filter\n", "trailing slash"),
+        (b"directory//file filter\n", "empty pattern segment"),
         (b"ab**cd filter\n", r"misplaced \*\*"),
         (b"** filter\n", r"misplaced \*\*"),
         (b"file\n", "line has no attribute state"),
