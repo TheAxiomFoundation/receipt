@@ -191,6 +191,7 @@ from receipt import sign as _sign
 from receipt import tsa as _tsa
 from receipt._names import NamePolicyError, validate_repertoire
 from receipt.canonical import canonical_bytes, canonical_sha256
+from receipt.snapshot import GitEntry, TreeSnapshot
 
 # One availability gate for the whole package: producer-signature verification
 # lives in receipt.sign, and this module's only remaining cryptography use is
@@ -375,14 +376,6 @@ def _receipt_re(spec: ChainSpec) -> re.Pattern[str]:
 
 class ReleaseChainError(ValueError):
     """The release journal is malformed, inconsistent, or untrusted."""
-
-
-@dataclass(frozen=True)
-class GitEntry:
-    mode: str
-    object_type: str
-    object_id: str
-    path: str
 
 
 @dataclass(frozen=True)
@@ -4106,123 +4099,82 @@ def assert_release_root_index_regular(root: pathlib.Path, spec: ChainSpec) -> No
 
 
 def verify_release_history_immutable(
-    root: pathlib.Path, base_ref: str, spec: ChainSpec
+    spec: ChainSpec,
+    *,
+    candidate: TreeSnapshot,
+    base: TreeSnapshot,
 ) -> tuple[str, set[str], dict[str, GitEntry]]:
-    """Compare every base ``releases/`` file byte and mode to the candidate.
+    """Compare release entries in two entered, authenticated tree snapshots."""
 
-    Asked first, before the root is resolved: an environment that would
-    redirect the base resolution or the tree reads below is refused, so a
-    direct caller gets the same answer ``run_verification`` gives before its
-    history pass (#45, the checkable half).
-    """
+    release_root = spec.release_root_relative.as_posix()
+    base_entries = base.entries(release_root).as_dict()
+    candidate_entries = candidate.entries(release_root).as_dict()
 
-    assert_no_redirecting_git_environment()
-    root = root.resolve()
-    # The base ref is resolved first so a checkout the guard would refuse
-    # cannot mask a base that names nothing; the guard then runs ahead of
-    # every file-level comparison below, which is the one place a refusal
-    # added after the extraction precedes a pre-existing one.
-    commit = resolve_base_commit(root, base_ref)
-    assert_file_modes_authoritative(root)
-    base_entries = git_tree_entries(root, commit, str(spec.release_root_relative))
-    current_files = _working_release_files(root, spec)
-    for relative, entry in base_entries.items():
+    # The old working-directory enumeration refused every candidate link or
+    # non-regular entry before comparing base bytes. Preserve that ordering
+    # over the tree's modes, without opening any blob.
+    for relative, entry in sorted(candidate_entries.items()):
+        if entry.mode == "120000":
+            raise ReleaseChainError(f"release path is a symlink: {relative}")
         if entry.mode not in {"100644", "100755"}:
+            raise ReleaseChainError(f"release path is not regular: {relative}")
+
+    for relative, prior in sorted(base_entries.items()):
+        if prior.mode not in {"100644", "100755"}:
             raise ReleaseChainError(
-                f"base release entry has non-regular git mode {entry.mode}: {relative}"
+                f"base release entry has non-regular git mode {prior.mode}: {relative}"
             )
-        current = current_files.get(relative)
+        current = candidate_entries.get(relative)
         if current is None:
             raise ReleaseChainError(
-                f"existing release file was deleted relative to {commit}: {relative}"
+                f"existing release file was deleted relative to "
+                f"{base.commit}: {relative}"
             )
-        # Git keys the executable category on the owner bit alone; see
-        # append_gate.check_state_modes for the reasoning.
-        candidate_mode = "100755" if current.stat().st_mode & 0o100 else "100644"
-        if candidate_mode != entry.mode:
+        if current.mode != prior.mode:
             raise ReleaseChainError(
-                f"existing release file mode changed relative to {commit}: "
-                f"{relative} ({entry.mode} -> {candidate_mode})"
+                f"existing release file mode changed relative to {base.commit}: "
+                f"{relative} ({prior.mode} -> {current.mode})"
             )
-        candidate_bytes = current.read_bytes()
-        if candidate_bytes != git_blob_bytes(root, entry):
+        if current.object_id != prior.object_id:
             raise ReleaseChainError(
-                f"existing release file bytes changed relative to {commit}: {relative}"
+                f"existing release file bytes changed relative to "
+                f"{base.commit}: {relative}"
             )
-        # After the two comparisons it qualifies, deliberately. The mode read
-        # above is only evidence if the working tree carries what git
-        # recorded, which the config settings alone do not establish; but a
-        # file whose mode or bytes already differ from the base gets the
-        # refusal the upstream verifier gives, whose text the differential
-        # harness pins for a committed chmod; the unit test pins the order for
-        # the unstaged one (both a mode change and an index disagreement). A
-        # comparison that passed fail-open is caught here.
-        assert_index_agrees_with_tree(root, relative)
-        # And the entry has to still be there. Both comparisons above read the
-        # working tree, which `git rm --cached` leaves exactly as it found it,
-        # so a proposal that drops an existing release file from the index
-        # alone passed every one of them while deleting release history.
-        assert_release_file_still_indexed(root, relative)
-        # And what it records has to be the bytes just compared. Both
-        # comparisons above read the working tree; the index is what the
-        # commit carries, and a rewrite staged and then restored on disk left
-        # the mode equal, the bytes equal, the entry present, and the commit
-        # under review changing a file this pass calls immutable.
-        assert_index_content_bound(root, commit, relative, candidate_bytes)
-    # After every per-file comparison, and for the same reason: the release
-    # root's own index entries, which the working-tree enumeration above
-    # cannot see when they are directories it skips or gitlinks nothing
-    # checked out.
-    assert_release_root_index_regular(root, spec)
-    return commit, set(current_files) - set(base_entries), base_entries
-
-
-def materialize_base_tree(
-    root: pathlib.Path,
-    commit: str,
-    destination: pathlib.Path,
-    release_entries: dict[str, GitEntry],
-    spec: ChainSpec,
-) -> None:
-    entries = dict(release_entries)
-    for relative in (
-        spec.state_relative.as_posix(),
-        spec.prefix_relative.as_posix(),
-    ):
-        entries[relative] = git_file_entry(root, commit, relative)
-    for relative, entry in entries.items():
-        if entry.mode not in {"100644", "100755"}:
-            raise ReleaseChainError(
-                f"base tree entry has non-regular mode {entry.mode}: {relative}"
-            )
-        output = destination / pathlib.PurePosixPath(relative)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(git_blob_bytes(root, entry))
+    return (
+        base.commit,
+        set(candidate_entries) - set(base_entries),
+        base_entries,
+    )
 
 
 def verify_base_release_chain(
-    root: pathlib.Path,
-    commit: str,
-    release_entries: dict[str, GitEntry],
-    *,
     spec: ChainSpec,
-    anchor_dir: pathlib.Path | None = None,
-    enforce_production_pins: bool = True,
-    clock_skew_seconds: int = DEFAULT_CLOCK_SKEW_SECONDS,
+    *,
+    base: TreeSnapshot,
 ) -> ChainVerification:
-    with tempfile.TemporaryDirectory(prefix="thesis-release-base-") as name:
-        base_root = pathlib.Path(name)
-        materialize_base_tree(root, commit, base_root, release_entries, spec)
-        base_anchor_dir = anchor_dir or (base_root / spec.anchor_relative)
-        return verify_release_chain(
-            base_root,
-            spec=spec,
-            anchor_dir=base_anchor_dir,
-            require_chain=True,
-            verify_state=True,
-            enforce_production_pins=enforce_production_pins,
-            clock_skew_seconds=clock_skew_seconds,
-        )
+    """Materialize and verify one entered base snapshot's release chain."""
+
+    prefixes = (
+        spec.release_root_relative,
+        spec.manifest_relative,
+        spec.state_relative,
+        spec.prefix_relative,
+    )
+    with tempfile.TemporaryDirectory(prefix="receipt-release-base-") as name:
+        destination = pathlib.Path(name)
+        with base.materialize(
+            prefixes,
+            destination,
+            repertoire=spec.name_repertoire,
+        ) as materialized:
+            return verify_release_chain(
+                materialized.path,
+                spec=spec,
+                anchor_dir=materialized.path / spec.anchor_relative,
+                require_chain=True,
+                verify_state=True,
+                enforce_production_pins=True,
+            )
 
 
 def _format_time(value: datetime) -> str:

@@ -48,10 +48,13 @@ from receipt.release_chain import (
     _parse_receipt_text,
     _receipt_bytes,
     assert_index_carries_no_protected_alias,
+    verify_base_release_chain,
     verify_receipt,
     verify_release_chain,
     verify_release_history_immutable,
 )
+from receipt.snapshot import GitEntry as SnapshotGitEntry
+from receipt.snapshot import TreeSnapshot
 from receipt.cli import EXIT_FAIL, main
 from receipt.verify import load_spec, run_verification
 
@@ -76,6 +79,56 @@ def repo(built: pathlib.Path, tmp_path: pathlib.Path) -> pathlib.Path:
     destination = tmp_path / "repo"
     shutil.copytree(built, destination, symlinks=True)
     return destination
+
+
+def commit_snapshot(root: pathlib.Path, message: str) -> str:
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+    )
+    if not (root / ".git").exists():
+        subprocess.run(
+            ["git", "-C", str(root), "init", "--quiet"],
+            check=True,
+            env=environment,
+        )
+        subprocess.run(
+            ["git", "-C", str(root), "config", "user.name", "Receipt Test"],
+            check=True,
+            env=environment,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "config",
+                "user.email",
+                "receipt@example.invalid",
+            ],
+            check=True,
+            env=environment,
+        )
+    subprocess.run(
+        ["git", "-C", str(root), "add", "-A"], check=True, env=environment
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "--quiet", "-m", message],
+        check=True,
+        env=environment,
+    )
+    completed = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    return completed.stdout.strip()
 
 
 def configured_filenames(repo: pathlib.Path) -> set[str]:
@@ -158,6 +211,88 @@ def test_verification_spec_anchor_set_pin_is_defaulted_and_validated(
         match="VerificationSpec anchor_set_sha256 must be a lowercase SHA-256 digest",
     ):
         replace(spec, anchor_set_sha256="A" * 64)
+
+
+def test_release_chain_reexports_the_snapshot_git_entry() -> None:
+    assert release_chain.GitEntry is SnapshotGitEntry
+
+
+def test_release_history_compares_two_entered_trees_and_returns_new_files(
+    repo: pathlib.Path,
+) -> None:
+    spec, _ = load_spec(repo / "verification/spec.py")
+    base_oid = commit_snapshot(repo, "base")
+    added = repo / "releases" / "new-note.txt"
+    added.write_text("new release note\n", encoding="utf-8")
+    candidate_oid = commit_snapshot(repo, "candidate")
+
+    with TreeSnapshot.select(repo, candidate_oid) as candidate:
+        with TreeSnapshot.select(repo, base_oid) as base:
+            candidate.assert_ancestor(base)
+            resolved, new_files, base_entries = verify_release_history_immutable(
+                spec.chain,
+                candidate=candidate,
+                base=base,
+            )
+
+    assert resolved == base_oid
+    assert new_files == {"releases/new-note.txt"}
+    assert "releases/new-note.txt" not in base_entries
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("delete", "existing release file was deleted relative to"),
+        ("mode", "existing release file mode changed relative to"),
+        ("bytes", "existing release file bytes changed relative to"),
+        ("symlink", "release path is a symlink:"),
+    ],
+)
+def test_release_history_retains_the_directory_verifier_refusals(
+    repo: pathlib.Path,
+    mutation: str,
+    message: str,
+) -> None:
+    spec, _ = load_spec(repo / "verification/spec.py")
+    base_oid = commit_snapshot(repo, "base")
+    manifest = next((repo / "releases/manifests").glob("*.json"))
+    if mutation == "delete":
+        manifest.unlink()
+    elif mutation == "mode":
+        manifest.chmod(0o755)
+    elif mutation == "bytes":
+        manifest.write_bytes(manifest.read_bytes() + b" ")
+    else:
+        manifest.unlink()
+        manifest.symlink_to(repo / "receipt/corpus-journal.jsonl")
+    candidate_oid = commit_snapshot(repo, mutation)
+
+    with TreeSnapshot.select(repo, candidate_oid) as candidate:
+        with TreeSnapshot.select(repo, base_oid) as base:
+            candidate.assert_ancestor(base)
+            with pytest.raises(ReleaseChainError, match=message):
+                verify_release_history_immutable(
+                    spec.chain,
+                    candidate=candidate,
+                    base=base,
+                )
+
+
+def test_base_release_chain_materializes_the_entered_snapshot(
+    repo: pathlib.Path,
+) -> None:
+    spec, _ = load_spec(repo / "verification/spec.py")
+    base_oid = commit_snapshot(repo, "base")
+    shutil.rmtree(repo / "releases")
+    (repo / "receipt/corpus-journal.jsonl").write_text(
+        '{"workingTree":"does not matter"}\n', encoding="utf-8"
+    )
+
+    with TreeSnapshot.select(repo, base_oid) as base:
+        verification = verify_base_release_chain(spec.chain, base=base)
+
+    assert verification.head is not None
 
 
 def test_observing_adds_no_anchor_reads(built: pathlib.Path, tmp_path: pathlib.Path) -> None:
@@ -1958,20 +2093,3 @@ def test_the_git_environment_still_carries_the_redirecting_names_through(
         assert environment[name] == "carried through"
     assert environment["GIT_NO_REPLACE_OBJECTS"] == "1"
     assert not set(environment) & set(release_chain.PATHSPEC_ENVIRONMENT)
-
-
-def test_the_history_comparison_is_refused_under_a_redirecting_environment(
-    repo: pathlib.Path, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``verify_release_history_immutable`` asks at its own entry, before the
-    root is resolved, so a direct caller is answered as ``run_verification``
-    is (peer review of the 0.5.2 release PR)."""
-
-    spec, _ = load_spec(repo / "verification/spec.py")
-    monkeypatch.setenv("GIT_INDEX_FILE", str(tmp_path / "elsewhere-index"))
-
-    with pytest.raises(ReleaseChainError) as refusal:
-        verify_release_history_immutable(
-            tmp_path / "no-such-tree", "HEAD", spec=spec.chain
-        )
-    assert str(refusal.value) == redirecting_refusal("GIT_INDEX_FILE")
