@@ -247,14 +247,27 @@ def test_large_fixture_refuses_path_budgets(
 
 
 def test_tree_depth_budget_refuses_before_a_deeper_walk(
+    tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    root = tmp_path / "deep-repository"
+    root.mkdir()
+    _git(root, "init", "-q")
+    blob = _hash_object(root, "blob", b"leaf\n")
+    child = _hash_object(root, "tree", _tree_entry(b"leaf.txt", blob))
+    tree = _hash_object(
+        root,
+        "tree",
+        _tree_entry(b"directory", child, mode=b"40000"),
+    )
+    commit, _commit_bytes = _commit_object(root, tree)
     monkeypatch.setattr(snapshot_module, "MAX_TREE_DEPTH", 0)
 
-    with pytest.raises(
-        SnapshotError, match="tree path exceeds the depth budget of 0"
-    ):
-        TreeSnapshot._path_parts("directory/file", allow_empty=False)
+    with TreeSnapshot.select(root, commit) as selected:
+        with pytest.raises(
+            SnapshotError, match="tree depth exceeds the budget of 0"
+        ):
+            selected.entries("")
 
 
 @pytest.mark.parametrize(
