@@ -2569,9 +2569,11 @@ def test_file_level_release_refusals_precede_the_index_refusal(
 
     An unstaged chmod on a base release file is both a mode change against
     the base and an index/worktree disagreement. The upstream verifier
-    refuses it as a mode change, and the ledger differential harness pins
-    that text (`base_mode_change`), so the index refusal must not pre-empt
-    it: a comparison that passed fail-open is caught afterwards instead.
+    refuses it as a mode change, in the text the ledger differential harness
+    pins for a committed chmod (`base_mode_change`, whose fixture has been a
+    committed tree since 0.6 Lane E), so the index refusal must not pre-empt
+    it: this test is the one place the unstaged case is held, and a
+    comparison that passed fail-open is caught afterwards instead.
     """
 
     candidate = base_repository(tmp_path)

@@ -3673,8 +3673,10 @@ def assert_index_agrees_with_tree(
 
     Unlike the checkout guard, this runs after the comparisons it qualifies:
     an unstaged chmod is both a mode change and an index disagreement, and
-    the upstream verifier's mode-change refusal is what the differential
-    harness pins for it. A comparison that passed while the working tree
+    the upstream verifier's mode-change refusal is what must win, as the
+    differential harness pins for a committed chmod and the unit test
+    ``test_file_level_release_refusals_precede_the_index_refusal`` for the
+    unstaged one. A comparison that passed while the working tree
     was not carrying what git recorded is caught here, afterwards; nothing
     pre-existing is pre-empted.
     """
@@ -4093,8 +4095,9 @@ def verify_release_history_immutable(
         # recorded, which the config settings alone do not establish; but a
         # file whose mode or bytes already differ from the base gets the
         # refusal the upstream verifier gives, which the differential harness
-        # pins (an unstaged chmod is both a mode change and an index
-        # disagreement). A comparison that passed fail-open is caught here.
+        # pins for a committed chmod and the unit test for the unstaged one
+        # (both a mode change and an index disagreement). A comparison that
+        # passed fail-open is caught here.
         assert_index_agrees_with_tree(root, relative)
         # And the entry has to still be there. Both comparisons above read the
         # working tree, which `git rm --cached` leaves exactly as it found it,

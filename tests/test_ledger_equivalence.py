@@ -57,9 +57,11 @@ and the fixture says so rather than assuming it.
 
 Two legs per such case. Leg one gives the oracle and the port the same main
 worktree, which is now a clean checkout of that commit. Leg two is the shape
-the consumer's CI has: ``git worktree add --detach`` makes a second,
-independent checkout of the same commit, the oracle reads that one and the
-port reads the main worktree; the checkout is removed afterwards with ``git
+the consumer's CI has, an independent detached checkout of the named commit
+(at the pin its workflow makes one with ``git clone --no-checkout`` and
+``git checkout --detach``); ``git worktree add --detach`` is how this
+harness, and the coming 0.5.2 shim, make one. The oracle reads that one and
+the port reads the main worktree; the checkout is removed afterwards with ``git
 worktree remove --force`` on that worktree alone — never ``git worktree
 prune``, which deregisters every prunable worktree of the repository. At this
 release the port is still a working-tree verifier reading an equal checkout,
@@ -83,7 +85,8 @@ per session on the filesystem the fixtures are built on, so
 than failing, because there the port refuses the checkout in words of its own
 (``release_chain.assert_file_modes_authoritative``) that the oracle never
 prints, and a divergence about the filesystem is not a divergence about the
-port.
+port. A run of these harnesses counts only at zero skips: the skip names the
+filesystem, and a skipped moved case is a case not measured.
 """
 
 from __future__ import annotations
@@ -99,6 +102,8 @@ import sys
 from collections.abc import Callable, Iterator
 
 import pytest
+
+from receipt.release_chain import _git_bool as release_chain_git_bool
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
@@ -936,7 +941,8 @@ def detached_oracle_checkout(
 ) -> Iterator[pathlib.Path]:
     """A second, independent checkout of ``commit`` for the oracle: leg two.
 
-    ``git worktree add --detach`` is the shape the consumer's CI job has. The
+    An independent detached checkout of the commit is the shape the consumer's
+    CI job has; ``git worktree add --detach`` is how this harness makes one. The
     removal is ``git worktree remove --force`` on this checkout alone, never
     ``git worktree prune``, which deregisters every prunable worktree of the
     repository; it runs from a ``finally`` so a divergence leaves neither a
@@ -971,18 +977,25 @@ def _unsupported_git_capabilities(
 
     Probed once per session in a throwaway repository under pytest's own base
     temporary directory, which is the filesystem every fixture root is built
-    on, so the answer is about the filesystem under test.
+    on, and read the way the port reads it, so the answer is about the
+    filesystem under test as the port will see it.
     """
 
     global _UNSUPPORTED_GIT_CAPABILITIES
     if _UNSUPPORTED_GIT_CAPABILITIES is None:
         probe = tmp_path_factory.mktemp("git-capability-probe")
         _git(probe, "init", "--quiet")
+        # Read through the port's own reader under the port's own environment.
+        # The harness's ``_git`` isolates the ambient global config, but
+        # ``assert_file_modes_authoritative`` does not, and ``git init`` writes
+        # ``core.fileMode`` into the repository config while leaving
+        # ``core.symlinks`` to the global scope (peer review, round 1): a probe
+        # through ``_git`` would answer true where the port reads a global
+        # ``core.symlinks=false`` and refuses every moved case.
         _UNSUPPORTED_GIT_CAPABILITIES = [
             key
             for key in ("core.fileMode", "core.symlinks")
-            if _git(probe, "config", "--type=bool", "--default", "true", "--get", key)
-            == "false"
+            if release_chain_git_bool(probe, key) is False
         ]
     return _UNSUPPORTED_GIT_CAPABILITIES
 

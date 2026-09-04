@@ -42,9 +42,11 @@ tree, and the fixture says so rather than assuming it.
 
 Two legs per case. Leg one gives the oracle and the port the same main
 worktree, which is now a clean checkout of that commit. Leg two is the shape
-the consumer's CI has: ``git worktree add --detach`` makes a second,
-independent checkout of the same commit, the oracle reads that one and the
-port reads the main worktree; the checkout is removed afterwards with ``git
+the consumer's CI has, an independent detached checkout of the named commit
+(at the pin its workflow makes one with ``git clone --no-checkout`` and
+``git checkout --detach``); ``git worktree add --detach`` is how this
+harness, and the coming 0.5.2 shim, make one. The oracle reads that one and
+the port reads the main worktree; the checkout is removed afterwards with ``git
 worktree remove --force`` on that worktree alone — never ``git worktree
 prune``, which deregisters every prunable worktree of the repository. At this
 release the port is still a working-tree verifier reading an equal checkout,
@@ -71,12 +73,13 @@ where either is false these cases skip with that reason rather than failing,
 because the port refuses such a checkout in words of its own
 (``release_chain.assert_file_modes_authoritative``, which
 ``verify_append_gate`` calls once for both paths, after it resolves the base
-ref and before it reads any state file) that the oracle never prints.
+ref and before it reads any state file) that the oracle never prints. A run
+of these harnesses counts only at zero skips: the skip names the filesystem,
+and a skipped moved case is a case not measured.
 """
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import json
 import os
@@ -85,19 +88,23 @@ import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 
 import pytest
 
 # ``committed_fixture_filesystem`` is a session-scoped fixture; importing it
 # here registers it for this module's tests. The probe behind it is memoized
 # in that module, so it runs once per session however many modules request
-# the fixture. ``assert_copied_surface`` states the same fixture-shape fact
-# for both harnesses.
+# the fixture. ``assert_copied_surface``, ``commit_candidate`` and
+# ``detached_oracle_checkout`` are the one definition of the committed-fixture
+# contract, shared so the two harnesses cannot drift apart (peer review,
+# round 1).
 from test_ledger_equivalence import (
     LEDGER_SPEC,
     assert_copied_surface,
+    commit_candidate,
     committed_fixture_filesystem,
+    detached_oracle_checkout,
 )
 from receipt.append_gate import (
     AppendError,
@@ -320,67 +327,6 @@ def commit_tree(root: pathlib.Path, message: str) -> str:
     _git(root, "commit", "--quiet", "-m", message)
     return _git(root, "rev-parse", "HEAD")
 
-
-def commit_candidate(root: pathlib.Path, name: str) -> str:
-    """Commit the proposal and return the commit both verifiers speak for.
-
-    ``git add -A``, then ``git commit`` when the index differs from HEAD, and
-    HEAD itself where a case changed no tracked content, rather than asking
-    git to commit nothing. The cleanliness the two legs rest on is asserted
-    here, at the one point that can still name the fixture that produced it:
-    the working tree carries no change git would report, no ignored file was
-    left outside the commit (``git status`` would not have said so), and the
-    index — which the empty status has just bound to the checkout the port
-    reads — hashes to the commit's own tree.
-    """
-
-    _git(root, "add", "-A")
-    if _git(root, "diff-index", "--cached", "--name-only", "HEAD"):
-        _git(root, "commit", "--quiet", "-m", f"candidate: {name}")
-    commit = _git(root, "rev-parse", "HEAD")
-
-    status = _git(root, "status", "--porcelain", "--ignore-submodules=none")
-    assert status == "", (
-        f"{name}: the working tree still differs from {commit} after "
-        f"committing the candidate:\n{status}"
-    )
-    ignored = _git(root, "ls-files", "--others", "--ignored", "--exclude-standard")
-    assert ignored == "", (
-        f"{name}: ignored files stayed outside {commit}, so the commit is not "
-        f"the tree the port reads:\n{ignored}"
-    )
-    tree = _git(root, "rev-parse", f"{commit}^{{tree}}")
-    written = _git(root, "write-tree")
-    assert written == tree, (
-        f"{name}: the tree the port will be handed ({written}) is not the "
-        f"tree of {commit} ({tree})"
-    )
-    return commit
-
-
-@contextlib.contextmanager
-def detached_oracle_checkout(
-    root: pathlib.Path, commit: str, destination: pathlib.Path
-) -> Iterator[pathlib.Path]:
-    """A second, independent checkout of ``commit`` for the oracle: leg two.
-
-    ``git worktree add --detach`` is the shape the consumer's CI job has. The
-    removal is ``git worktree remove --force`` on this checkout alone, never
-    ``git worktree prune``, which deregisters every prunable worktree of the
-    repository; it runs from a ``finally`` so a divergence leaves neither a
-    registration nor a directory behind.
-    """
-
-    _git(root, "worktree", "add", "--detach", "--quiet", str(destination), commit)
-    try:
-        checked_out = _git(destination, "rev-parse", "HEAD")
-        assert checked_out == commit, (
-            f"the oracle's checkout is at {checked_out}, not the candidate "
-            f"commit {commit}"
-        )
-        yield destination
-    finally:
-        _git(root, "worktree", "remove", "--force", str(destination))
 
 
 def release_file(root: pathlib.Path, stem: str, suffix: str) -> pathlib.Path:
