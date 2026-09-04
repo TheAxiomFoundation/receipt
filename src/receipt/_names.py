@@ -267,18 +267,18 @@ def assert_no_merging_entries(
     for value in names:
         if type(value) is bytes:
             raw = validate_component_bytes(value, label="tree entry name")
-            try:
-                raw.decode("utf-8", errors="strict")
-            except UnicodeDecodeError as exc:
-                raise NamePolicyError(
-                    "tree entry name is not valid UTF-8 for folding"
-                ) from exc
             text = decode_component(
                 raw,
                 repertoire=selected,
                 materializing=materializing,
                 label="tree entry name",
             )
+            try:
+                raw.decode("utf-8", errors="strict")
+            except UnicodeDecodeError as exc:
+                raise NamePolicyError(
+                    "tree entry name is not valid UTF-8 for folding"
+                ) from exc
         elif type(value) is str:
             text = validate_component_text(
                 value,

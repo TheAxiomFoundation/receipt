@@ -19,6 +19,15 @@ is not excluded, but changed configuration or repository-control sentinel
 files are rechecked at child boundaries and refused. A writer racing between
 one check and the following system call remains a same-owner residual.
 
+The configuration audit is scoped to the frozen :data:`GIT_COMMANDS`: private
+``safe.directory`` setup; version, repository discovery, and configuration
+listing; explicit revision resolution and the batch child; and the optional
+object count and ``fsck``. Includes, program-valued keys, partial-clone and
+promisor keys, and every family that can weaken ``fsck`` are denied in local
+or worktree scope. Other repository keys are inert for this exact command set;
+adding a command therefore requires revisiting both the allow-list and that
+claim.
+
 The default SHA-1 rehash closes substitution only to ordinary SHA-1 collision
 resistance. :meth:`TreeSnapshot.verify_object_store` widens the subject from
 the selected trees to the whole primary object database and asks Git's SHA1DC
@@ -87,6 +96,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from bisect import bisect_left
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -135,6 +145,33 @@ _VERSION_RE = re.compile(r"\bgit version (\d+)\.(\d+)\.(\d+)")
 _SURROGATE_PAIR_RE = re.compile("[\ud800-\udbff][\udc00-\udfff]")
 
 
+def _tree_path_decode(value: bytes) -> str:
+    """Decode logical Git path bytes independently of the host filesystem."""
+
+    return value.decode("utf-8", errors="surrogateescape")
+
+
+def _tree_path_encode(value: str) -> bytes:
+    """Encode logical Git path text independently of the host filesystem."""
+
+    return value.encode("utf-8", errors="surrogateescape")
+
+
+def _validate_expected_oid(value: object, *, label: str, object_format: str) -> str:
+    """Return an exact auditor expectation without invoking hostile equality."""
+
+    width = hashlib.new(object_format).digest_size * 2
+    if (
+        type(value) is not str
+        or len(value) != width
+        or re.fullmatch(r"[0-9a-f]+", value) is None
+    ):
+        raise SnapshotError(
+            f"expected {label} must be a full lowercase hexadecimal object name"
+        )
+    return value
+
+
 class SnapshotError(ValueError):
     """The repository cannot produce the authenticated immutable snapshot."""
 
@@ -143,11 +180,11 @@ class SnapshotError(ValueError):
 class GitEntry:
     """One tree entry, with Git's six-digit display mode and full path.
 
-    The private token is deliberately excluded from equality and repr.  It
-    lets payload APIs refuse entries forged by a caller or obtained from a
-    different snapshot without turning every streamed blob into a second
-    path walk.  Four-argument construction remains source-compatible, but an
-    unbound entry cannot authorize an object read.
+    The private binding is deliberately excluded from equality and repr. It
+    lets payload APIs refuse entries forged, altered with ``replace()``, or
+    obtained from a different snapshot without turning every streamed blob
+    into a second path walk. Four-argument construction remains
+    source-compatible, but an unbound entry cannot authorize an object read.
     """
 
     mode: str
@@ -157,6 +194,15 @@ class GitEntry:
     _snapshot_token: object | None = field(
         default=None, repr=False, compare=False
     )
+
+
+@dataclass(frozen=True)
+class _EntryBinding:
+    snapshot_token: object
+    mode: str
+    object_type: str
+    object_id: str
+    path: str
 
 
 @dataclass(frozen=True)
@@ -253,6 +299,7 @@ class _SnapshotState:
     entered: bool = False
     closed: bool = False
     abandoned: bool = False
+    active_digest_token: object | None = None
     batch: "_BatchReader | None" = None
     tempdir: "tempfile.TemporaryDirectory[str] | None" = None
     global_config: pathlib.Path | None = None
@@ -449,29 +496,39 @@ def _bounded_process(
     assert process.stdout is not None
     assert process.stderr is not None
     output = [bytearray(), bytearray()]
+    drain_failures: list[BaseException] = []
     total = 0
     exceeded = False
     lock = threading.Lock()
+    started_threads: list[threading.Thread] = []
+    primary_error: BaseException | None = None
 
     def drain(pipe: BinaryIO, target: bytearray) -> None:
         nonlocal total, exceeded
-        while True:
-            chunk = pipe.read(65_536)
-            if not chunk:
-                return
+        try:
+            while True:
+                chunk = pipe.read(65_536)
+                if not chunk:
+                    return
+                with lock:
+                    remaining = output_limit + 1 - total
+                    if remaining > 0:
+                        target.extend(chunk[:remaining])
+                        total += min(len(chunk), remaining)
+                    if len(chunk) > remaining or total > output_limit:
+                        exceeded = True
+                        try:
+                            process.kill()
+                        except ProcessLookupError:
+                            pass
+        except BaseException as caught:
             with lock:
-                remaining = output_limit + 1 - total
-                if remaining > 0:
-                    target.extend(chunk[:remaining])
-                    total += min(len(chunk), remaining)
-                if len(chunk) > remaining or total > output_limit:
-                    exceeded = True
-                    try:
-                        process.kill()
-                    except ProcessLookupError:
-                        pass
+                drain_failures.append(caught)
+            try:
+                process.kill()
+            except OSError:
+                pass
 
-    started_threads: list[threading.Thread] = []
     try:
         threads = (
             threading.Thread(
@@ -484,41 +541,82 @@ def _bounded_process(
         for thread in threads:
             thread.start()
             started_threads.append(thread)
-    except BaseException:
-        _kill_reap_and_close(process)
-        for thread in started_threads:
-            thread.join(MAX_GIT_SECONDS)
-        raise
-    if input_bytes is not None:
-        assert process.stdin is not None
-        try:
-            process.stdin.write(input_bytes)
-        except (BrokenPipeError, OSError):
-            pass
-        finally:
+        if input_bytes is not None:
+            assert process.stdin is not None
             try:
-                process.stdin.close()
+                process.stdin.write(input_bytes)
+            except (BrokenPipeError, OSError):
+                pass
+            finally:
+                try:
+                    process.stdin.close()
+                except OSError:
+                    pass
+        try:
+            returncode = process.wait(timeout=seconds)
+        except subprocess.TimeoutExpired as exc:
+            raise SnapshotError(
+                f"git command exceeded its {seconds:g} second budget"
+            ) from exc
+        for thread in threads:
+            thread.join(MAX_GIT_SECONDS)
+            if thread.is_alive():
+                raise SnapshotError("git output drain did not finish")
+        if drain_failures:
+            raise SnapshotError("git output could not be read") from drain_failures[0]
+        if exceeded:
+            raise SnapshotError(
+                f"git output exceeds the budget of {output_limit} bytes"
+            )
+        return subprocess.CompletedProcess(
+            list(argv), returncode, bytes(output[0]), bytes(output[1])
+        )
+    except BaseException as caught:
+        primary_error = caught
+        raise
+    finally:
+        cleanup_failures: list[BaseException] = []
+        reaped = getattr(process, "returncode", None) is not None
+        if not reaped:
+            try:
+                process.kill()
             except OSError:
                 pass
-    try:
-        returncode = process.wait(timeout=seconds)
-    except subprocess.TimeoutExpired as exc:
-        process.kill()
-        process.wait()
-        for thread in threads:
-            thread.join()
-        process.stdout.close()
-        process.stderr.close()
-        raise SnapshotError(f"git command exceeded its {seconds:g} second budget") from exc
-    for thread in threads:
-        thread.join()
-    process.stdout.close()
-    process.stderr.close()
-    if exceeded:
-        raise SnapshotError(f"git output exceeds the budget of {output_limit} bytes")
-    return subprocess.CompletedProcess(
-        list(argv), returncode, bytes(output[0]), bytes(output[1])
-    )
+            except BaseException as caught:
+                cleanup_failures.append(caught)
+            try:
+                process.wait(timeout=MAX_GIT_SECONDS)
+            except BaseException as caught:
+                cleanup_failures.append(caught)
+            else:
+                reaped = True
+        deadline = time.monotonic() + MAX_GIT_SECONDS
+        for thread in started_threads:
+            try:
+                thread.join(max(0.0, deadline - time.monotonic()))
+            except BaseException as caught:
+                cleanup_failures.append(caught)
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            if pipe is None:
+                continue
+            try:
+                pipe.close()
+            except OSError:
+                pass
+            except BaseException as caught:
+                cleanup_failures.append(caught)
+        if any(thread.is_alive() for thread in started_threads):
+            cleanup_failures.append(SnapshotError("git output drain did not finish"))
+        if not reaped:
+            cleanup_failures.append(SnapshotError("git child could not be reaped"))
+        if cleanup_failures:
+            cleanup_error = SnapshotError("git child cleanup failed")
+            for failure in cleanup_failures[1:]:
+                cleanup_error.add_note(f"Additional cleanup failure: {failure}")
+            if primary_error is not None:
+                primary_error.add_note(f"Git child cleanup also failed: {cleanup_error}")
+            else:
+                raise cleanup_error from cleanup_failures[0]
 
 
 def _git_run(
@@ -663,6 +761,10 @@ def _parse_raw_tree(
     names: set[bytes] = set()
     previous_key: bytes | None = None
     while position < len(payload):
+        if len(entries) >= MAX_TREE_ENTRIES:
+            raise SnapshotError(
+                f"tree walk exceeds the budget of {MAX_TREE_ENTRIES} entries"
+            )
         space = payload.find(b" ", position)
         if space < 0:
             raise SnapshotError(f"tree {oid} has a malformed entry")
@@ -701,36 +803,20 @@ def _parse_raw_tree(
 
 
 def _canonical_commit(
-    oid: str, payload: bytes, *, object_format: str
+    oid: str,
+    payload: bytes,
+    *,
+    object_format: str,
+    parent_limit: int | None = None,
 ) -> _CommitObject:
     """Parse exactly the canonical commit-header shape fixed by the plan."""
 
     separator = payload.find(b"\n\n")
     if separator < 0:
         raise SnapshotError(f"commit {oid} is not a canonical commit object")
-    # Commit framing names LF exactly. ``bytes.splitlines`` also treats CR,
-    # VT, FF, and several other bytes as separators, which would interpret an
-    # opaque future header value instead of carrying it unchanged.
-    physical = payload[:separator].split(b"\n")
-    headers: list[tuple[bytes, bytes]] = []
-    for line in physical:
-        if line.startswith(b" "):
-            if not headers:
-                raise SnapshotError(f"commit {oid} is not a canonical commit object")
-            name, value = headers[-1]
-            headers[-1] = (name, value + b"\n" + line[1:])
-            continue
-        name, space, value = line.partition(b" ")
-        if (
-            not space
-            or not name
-            or any(byte <= 0x20 or byte >= 0x7F for byte in name)
-        ):
-            raise SnapshotError(f"commit {oid} is not a canonical commit object")
-        headers.append((name, value))
-    if not headers or headers[0][0] != b"tree":
-        raise SnapshotError(f"commit {oid} is not a canonical commit object")
 
+    if parent_limit is None:
+        parent_limit = MAX_ANCESTRY_COMMITS
     hex_length = hashlib.new(object_format).digest_size * 2
 
     def object_name(value: bytes) -> str:
@@ -738,21 +824,84 @@ def _canonical_commit(
             raise SnapshotError(f"commit {oid} is not a canonical commit object")
         return value.decode("ascii")
 
-    tree = object_name(headers[0][1])
-    index = 1
+    tree: str | None = None
     parents: list[str] = []
-    while index < len(headers) and headers[index][0] == b"parent":
-        parents.append(object_name(headers[index][1]))
-        index += 1
-    if index >= len(headers) or headers[index][0] != b"author":
-        raise SnapshotError(f"commit {oid} is not a canonical commit object")
-    index += 1
-    if index >= len(headers) or headers[index][0] != b"committer":
-        raise SnapshotError(f"commit {oid} is not a canonical commit object")
-    index += 1
-    for name, _ in headers[index:]:
+    parent_overflow = False
+    phase = "tree"
+
+    def accept_header(name: bytes, value: bytes) -> None:
+        nonlocal parent_overflow, phase, tree
+        if phase == "tree":
+            if name != b"tree":
+                raise SnapshotError(
+                    f"commit {oid} is not a canonical commit object"
+                )
+            tree = object_name(value)
+            phase = "parents"
+            return
+        if phase == "parents":
+            if name == b"parent":
+                parent = object_name(value)
+                if len(parents) >= parent_limit:
+                    parent_overflow = True
+                else:
+                    parents.append(parent)
+                return
+            if name != b"author":
+                raise SnapshotError(
+                    f"commit {oid} is not a canonical commit object"
+                )
+            phase = "committer"
+            return
+        if phase == "committer":
+            if name != b"committer":
+                raise SnapshotError(
+                    f"commit {oid} is not a canonical commit object"
+                )
+            phase = "later"
+            return
         if name in {b"tree", b"parent", b"author", b"committer"}:
             raise SnapshotError(f"commit {oid} is not a canonical commit object")
+
+    # Commit framing names LF exactly. Scan it directly so a hostile commit
+    # cannot allocate a second list containing every physical header line.
+    position = 0
+    current_name: bytes | None = None
+    current_value = b""
+    while position <= separator:
+        line_end = payload.find(b"\n", position, separator)
+        if line_end < 0:
+            line_end = separator
+        line = payload[position:line_end]
+        position = line_end + 1
+        if line.startswith(b" "):
+            if current_name is None:
+                raise SnapshotError(
+                    f"commit {oid} is not a canonical commit object"
+                )
+            if current_name in {b"tree", b"parent"}:
+                current_value += b"\n" + line[1:]
+            continue
+        if current_name is not None:
+            accept_header(current_name, current_value)
+        name, space, value = line.partition(b" ")
+        if (
+            not space
+            or not name
+            or any(byte <= 0x20 or byte >= 0x7F for byte in name)
+        ):
+            raise SnapshotError(f"commit {oid} is not a canonical commit object")
+        current_name = name
+        current_value = value if name in {b"tree", b"parent"} else b""
+    if current_name is not None:
+        accept_header(current_name, current_value)
+    if tree is None or phase != "later":
+        raise SnapshotError(f"commit {oid} is not a canonical commit object")
+    if parent_overflow:
+        raise SnapshotError(
+            f"ancestry walk exceeds the budget of "
+            f"{MAX_ANCESTRY_COMMITS} commits"
+        )
     return _CommitObject(oid=oid, tree=tree, parents=tuple(parents))
 
 
@@ -801,60 +950,81 @@ def _attribute_pattern(
     return anchored, tuple(segments), token.startswith(b"/") or b"/" in anchored
 
 
-def _parse_attribute_file(path: str, payload: bytes) -> tuple[_AttributeRule, ...]:
+def _parse_attribute_file(
+    path: str, payload: bytes, *, rule_limit: int
+) -> tuple[_AttributeRule, ...]:
     rules: list[_AttributeRule] = []
-    for line_number, original in enumerate(payload.split(b"\n"), start=1):
-        if any(byte < 0x20 and byte != 0x09 for byte in original):
-            raise _unsupported_attribute(path, line_number, "control byte")
+    rule_overflow = False
+    line_number = 0
+    position = 0
+    while True:
+        line_number += 1
+        line_end = payload.find(b"\n", position)
+        if line_end < 0:
+            original = payload[position:]
+        else:
+            original = payload[position:line_end]
         line = original.strip(b" \t")
-        if not line or line.startswith(b"#"):
-            continue
-        fields = re.split(rb"[ \t]+", line)
-        if len(fields) < 2:
-            raise _unsupported_attribute(path, line_number, "line has no attribute state")
-        if fields[0].startswith(b"[attr]"):
-            raise _unsupported_attribute(path, line_number, "attribute macro definition")
-        pattern, segments, has_slash = _attribute_pattern(
-            fields[0], path=path, line=line_number
-        )
-        states: list[tuple[str, str]] = []
-        for raw_state in fields[1:]:
-            try:
-                state = raw_state.decode("ascii", errors="strict")
-            except UnicodeDecodeError as exc:
+        if line and not line.startswith(b"#"):
+            if any(byte < 0x20 and byte != 0x09 for byte in original):
+                raise _unsupported_attribute(path, line_number, "control byte")
+            fields = re.split(rb"[ \t]+", line)
+            if len(fields) < 2:
                 raise _unsupported_attribute(
-                    path, line_number, "non-ASCII attribute state"
-                ) from exc
-            if state == "binary":
-                states.extend(
-                    (("diff", "unset"), ("merge", "unset"), ("text", "unset"))
+                    path, line_number, "line has no attribute state"
                 )
-                continue
-            disposition = "set"
-            name = state
-            if state.startswith("-"):
-                disposition, name = "unset", state[1:]
-            elif state.startswith("!"):
-                disposition, name = "unspecified", state[1:]
-            elif "=" in state:
-                name, value = state.split("=", 1)
-                disposition = "value"
-            if re.fullmatch(r"[A-Za-z0-9_.-]+", name) is None:
-                raise _unsupported_attribute(path, line_number, f"state {state!r}")
-            states.append((name, disposition))
-        trailing_globstars = 0
-        for segment in reversed(segments):
-            if segment != b"**":
-                break
-            trailing_globstars += 1
-        trailing_descendants = bool(
-            trailing_globstars and trailing_globstars < len(segments)
-        )
-        match_segments = (
-            segments[:-trailing_globstars] if trailing_descendants else segments
-        )
-        rules.append(
-            _AttributeRule(
+            if fields[0].startswith(b"[attr]"):
+                raise _unsupported_attribute(
+                    path, line_number, "attribute macro definition"
+                )
+            pattern, segments, has_slash = _attribute_pattern(
+                fields[0], path=path, line=line_number
+            )
+            states: list[tuple[str, str]] = []
+            for raw_state in fields[1:]:
+                try:
+                    state = raw_state.decode("ascii", errors="strict")
+                except UnicodeDecodeError as exc:
+                    raise _unsupported_attribute(
+                        path, line_number, "non-ASCII attribute state"
+                    ) from exc
+                if state == "binary":
+                    states.extend(
+                        (
+                            ("diff", "unset"),
+                            ("merge", "unset"),
+                            ("text", "unset"),
+                        )
+                    )
+                    continue
+                disposition = "set"
+                name = state
+                if state.startswith("-"):
+                    disposition, name = "unset", state[1:]
+                elif state.startswith("!"):
+                    disposition, name = "unspecified", state[1:]
+                elif "=" in state:
+                    name, value = state.split("=", 1)
+                    disposition = "value"
+                if re.fullmatch(r"[A-Za-z0-9_.-]+", name) is None:
+                    raise _unsupported_attribute(
+                        path, line_number, f"state {state!r}"
+                    )
+                states.append((name, disposition))
+            trailing_globstars = 0
+            for segment in reversed(segments):
+                if segment != b"**":
+                    break
+                trailing_globstars += 1
+            trailing_descendants = bool(
+                trailing_globstars and trailing_globstars < len(segments)
+            )
+            match_segments = (
+                segments[:-trailing_globstars]
+                if trailing_descendants
+                else segments
+            )
+            rule = _AttributeRule(
                 pattern,
                 segments,
                 match_segments,
@@ -862,6 +1032,17 @@ def _parse_attribute_file(path: str, payload: bytes) -> tuple[_AttributeRule, ..
                 trailing_descendants,
                 tuple(states),
             )
+            if len(rules) >= rule_limit:
+                rule_overflow = True
+            else:
+                rules.append(rule)
+        if line_end < 0:
+            break
+        position = line_end + 1
+    if rule_overflow:
+        raise SnapshotError(
+            f"attribute rules exceed the snapshot budget of "
+            f"{MAX_ATTRIBUTE_RULES_TOTAL} rules"
         )
     return tuple(rules)
 
@@ -904,30 +1085,50 @@ def _attribute_matches(
         return bool(relative) and _segment_matches(
             rule.segments[0], relative[-1], step
         )
-    previous = [False] * (len(relative) + 1)
-    previous[0] = True
-    for pattern_segment in rule.match_segments:
-        current = [False] * (len(relative) + 1)
-        if pattern_segment == b"**":
-            for index in range(len(relative) + 1):
-                step()
-                current[index] = previous[index] or (
-                    index > 0 and current[index - 1]
-                )
+    pattern_index = value_index = 0
+    globstar = -1
+    retry = 0
+    while value_index < len(relative):
+        if (
+            rule.trailing_descendants
+            and pattern_index == len(rule.match_segments)
+        ):
+            # The non-globstar prefix matched and at least one descendant
+            # remains. Git's trailing ``/**`` excludes the directory itself.
+            return True
+        step()
+        if (
+            pattern_index < len(rule.match_segments)
+            and rule.match_segments[pattern_index] == b"**"
+        ):
+            globstar = pattern_index
+            pattern_index += 1
+            retry = value_index
+        elif (
+            pattern_index < len(rule.match_segments)
+            and _segment_matches(
+                rule.match_segments[pattern_index],
+                relative[value_index],
+                step,
+            )
+        ):
+            pattern_index += 1
+            value_index += 1
+        elif globstar >= 0:
+            retry += 1
+            value_index = retry
+            pattern_index = globstar + 1
         else:
-            for index in range(1, len(relative) + 1):
-                step()
-                current[index] = previous[index - 1] and _segment_matches(
-                    pattern_segment, relative[index - 1], step
-                )
-        previous = current
+            return False
+    while (
+        pattern_index < len(rule.match_segments)
+        and rule.match_segments[pattern_index] == b"**"
+    ):
+        step()
+        pattern_index += 1
     if rule.trailing_descendants:
-        # Git's trailing ``/**`` means descendants, not the directory itself.
-        # One or several trailing globstars must therefore consume at least
-        # one component.  An all-globstar pattern has no literal directory
-        # whose self-match needs excluding and follows the ordinary DP above.
-        return any(previous[:-1])
-    return previous[len(relative)]
+        return False
+    return pattern_index == len(rule.match_segments)
 
 
 class _BatchReader:
@@ -1021,6 +1222,15 @@ class _BatchReader:
         except (BrokenPipeError, OSError) as exc:
             self._abandoned = True
             raise SnapshotError("Git batch child stopped accepting requests") from exc
+        except BaseException:
+            # The write may have stopped after an arbitrary prefix. No later
+            # request may guess whether Git received a complete command.
+            self._abandoned = True
+            try:
+                self._process.kill()
+            except OSError:
+                pass
+            raise
 
     def _read_with_deadline(
         self, operation: Callable[[], bytes], *, deadline: float
@@ -1050,21 +1260,31 @@ class _BatchReader:
             except OSError:
                 pass
             raise
-        reader.join(max(0.0, deadline - time.monotonic()))
-        if reader.is_alive():
+        try:
+            reader.join(max(0.0, deadline - time.monotonic()))
+            if reader.is_alive():
+                raise SnapshotError(
+                    f"Git batch child exceeded the budget of "
+                    f"{MAX_GIT_SECONDS} seconds"
+                )
+            if failure:
+                raise SnapshotError("Git batch child could not be read") from failure[0]
+            if not result:
+                raise SnapshotError("Git batch child could not be read")
+            return result[0]
+        except BaseException:
+            # An interruption while the helper thread owns stdout leaves the
+            # frame position unknowable even if that thread later completes.
             self._abandoned = True
             try:
                 self._process.kill()
             except OSError:
                 pass
-            reader.join(MAX_GIT_SECONDS)
-            raise SnapshotError(
-                f"Git batch child exceeded the budget of {MAX_GIT_SECONDS} seconds"
-            )
-        if failure:
-            self._abandoned = True
-            raise SnapshotError("Git batch child could not be read") from failure[0]
-        return result[0]
+            try:
+                reader.join(max(0.0, deadline - time.monotonic()))
+            except BaseException:
+                pass
+            raise
 
     def _line(self, *, deadline: float) -> bytes:
         line = self._read_with_deadline(
@@ -1179,27 +1399,74 @@ class _BatchReader:
             return
         self._closed = True
         was_abandoned = self._abandoned
-        if was_abandoned and self._process.poll() is None:
+        deadline = time.monotonic() + MAX_GIT_SECONDS
+
+        failures: list[BaseException] = []
+
+        def kill() -> None:
             try:
                 self._process.kill()
             except OSError:
                 pass
+            except BaseException as caught:
+                failures.append(caught)
+
+        def wait() -> bool:
+            try:
+                self._process.wait(
+                    timeout=max(0.0, deadline - time.monotonic())
+                )
+            except subprocess.TimeoutExpired:
+                return False
+            except BaseException as caught:
+                failures.append(caught)
+                return False
+            return True
+
+        reaped = False
         try:
-            self._stdin.close()
-        except OSError:
-            pass
-        try:
-            self._process.wait(timeout=MAX_GIT_SECONDS)
-        except subprocess.TimeoutExpired:
-            self._process.kill()
-            self._process.wait()
-        self._stderr_thread.join(MAX_GIT_SECONDS)
-        for pipe in (self._stdout, self._process.stderr):
-            if pipe is not None:
+            if was_abandoned and self._process.poll() is None:
+                kill()
+            try:
+                self._stdin.close()
+            except OSError:
+                pass
+            reaped = wait()
+            if not reaped:
+                kill()
+                reaped = wait()
+        finally:
+            # Cleanup is deliberately independent: an injected failure in one
+            # operation must not skip the remaining pipe closes or reap attempt.
+            if not reaped:
+                kill()
+                reaped = wait()
+            try:
+                self._stderr_thread.join(
+                    max(0.0, deadline - time.monotonic())
+                )
+            except BaseException as caught:
+                failures.append(caught)
+            for pipe in (self._stdin, self._stdout, self._process.stderr):
+                if pipe is None:
+                    continue
                 try:
                     pipe.close()
                 except OSError:
                     pass
+                except BaseException as caught:
+                    failures.append(caught)
+            if self._stderr_thread.is_alive():
+                failures.append(
+                    SnapshotError("Git batch stderr drain did not finish")
+                )
+        if not reaped:
+            failures.append(SnapshotError("Git batch child could not be reaped"))
+        if failures:
+            error = SnapshotError("Git batch child cleanup failed")
+            for failure in failures[1:]:
+                error.add_note(f"Additional cleanup failure: {failure}")
+            raise error from failures[0]
         if not was_abandoned and self._process.returncode != 0:
             detail = bytes(self._stderr_bytes).decode(
                 "utf-8", errors="replace"
@@ -1284,9 +1551,15 @@ class TreeListing:
             self._node, self._prefix, include_trees=include_trees
         )
 
-    def iter_entries(self, *, include_trees: bool = False) -> Iterator[GitEntry]:
+    def iter_entries(
+        self,
+        *,
+        include_trees: bool = False,
+        _digest_token: object | None = None,
+    ) -> Iterator[GitEntry]:
         """Build and charge full paths only as the caller asks for them."""
 
+        self._snapshot._batch(digest_token=_digest_token)
         for parts, raw in self._walk(include_trees=include_trees):
             yield self._snapshot._public_entry(parts, raw)
 
@@ -1294,15 +1567,17 @@ class TreeListing:
         return self.iter_entries()
 
     def __len__(self) -> int:
+        self._snapshot._batch()
         return sum(1 for _parts, raw in self._walk() if raw.mode != b"40000")
 
     @property
     def children(self) -> Mapping[str, GitEntry | "TreeListing"]:
         """Immediate children keyed by a lossless surrogateescaped spelling."""
 
+        self._snapshot._batch()
         children: dict[str, GitEntry | TreeListing] = {}
         for record in self._node.records:
-            name = os.fsdecode(record.raw.name)
+            name = _tree_path_decode(record.raw.name)
             if record.child is not None:
                 children[name] = TreeListing(
                     self._snapshot,
@@ -1336,7 +1611,22 @@ class _DigestIterator(Iterator[tuple[GitEntry, str]]):
         total: int,
     ) -> None:
         self._snapshot = snapshot
-        self._entries = iter(entries)
+        self._token = object()
+        if snapshot._state.active_digest_token is not None:
+            snapshot._abandon()
+            raise SnapshotError("snapshot stream was abandoned")
+        try:
+            if type(entries) is TreeListing:
+                self._entries = entries.iter_entries(
+                    _digest_token=self._token
+                )
+            else:
+                self._entries = iter(entries)
+        except TypeError as exc:
+            raise SnapshotError(
+                "digests entries must be an iterable of GitEntry objects"
+            ) from exc
+        snapshot._state.active_digest_token = self._token
         self._per_blob = per_blob
         self._total = total
         self._charged = 0
@@ -1351,9 +1641,16 @@ class _DigestIterator(Iterator[tuple[GitEntry, str]]):
         if self._done or self._closed:
             raise StopIteration
         try:
+            self._snapshot._batch(digest_token=self._token)
+        except BaseException:
+            self.close()
+            raise
+        try:
             entry = next(self._entries)
         except StopIteration:
             self._done = True
+            if self._snapshot._state.active_digest_token is self._token:
+                self._snapshot._state.active_digest_token = None
             raise
         except BaseException:
             self.close()
@@ -1383,7 +1680,7 @@ class _DigestIterator(Iterator[tuple[GitEntry, str]]):
             raise SnapshotError(
                 f"tree entry has non-regular mode {entry.mode}: {entry.path}"
             )
-        batch = self._snapshot._batch()
+        batch = self._snapshot._batch(digest_token=self._token)
         try:
             _object_type, size = batch.info(object_id, role="blob")
         except BaseException:
@@ -1442,6 +1739,8 @@ class _DigestIterator(Iterator[tuple[GitEntry, str]]):
         self._closed = True
         if not self._done:
             self._snapshot._abandon()
+        if self._snapshot._state.active_digest_token is self._token:
+            self._snapshot._state.active_digest_token = None
 
     def __del__(self) -> None:
         try:
@@ -1506,6 +1805,15 @@ class TreeSnapshot:
                 version_arguments, cwd=None, environment=environment
             )
             if version_result.returncode != 0:
+                try:
+                    root_is_directory = selected_root.is_dir()
+                except OSError:
+                    root_is_directory = False
+                if not root_is_directory:
+                    raise SnapshotError(
+                        "candidate repository is missing or not a git repository: "
+                        f"{selected_root}"
+                    )
                 raise SnapshotError(f"cannot run git version: {_first_error(version_result)}")
             version = _parse_version(version_result.stdout)
             if version < GIT_MIN_VERSION:
@@ -1636,8 +1944,11 @@ class TreeSnapshot:
                 parsed_commit = _canonical_commit(
                     candidate_oid, commit_payload, object_format=object_format
                 )
-                for parent in parsed_commit.parents:
-                    batch.info(parent, role="commit")
+                if len(parsed_commit.parents) > MAX_ANCESTRY_COMMITS:
+                    raise SnapshotError(
+                        f"ancestry walk exceeds the budget of "
+                        f"{MAX_ANCESTRY_COMMITS} commits"
+                    )
                 _kind, tree_size = batch.info(parsed_commit.tree, role="tree")
                 if commit_size + tree_size > MAX_TREE_BYTES_TOTAL:
                     raise SnapshotError(
@@ -1658,18 +1969,34 @@ class TreeSnapshot:
                     raise SnapshotError(
                         f"tree walk exceeds the budget of {MAX_TREE_ENTRIES} entries"
                     )
+                for parent in parsed_commit.parents:
+                    batch.info(parent, role="commit")
                 for raw in root_tree:
                     if raw.mode != b"160000":
                         batch.info(raw.oid, role=raw.object_type)
 
-        if expect_commit is not None and candidate_oid != expect_commit:
-            raise SnapshotError(
-                f"commit {candidate_oid} is not the expected commit {expect_commit}"
+        if expect_commit is not None:
+            expected_commit = _validate_expected_oid(
+                expect_commit,
+                label="commit",
+                object_format=object_format,
             )
-        if expect_tree is not None and parsed_commit.tree != expect_tree:
-            raise SnapshotError(
-                f"tree {parsed_commit.tree} is not the expected tree {expect_tree}"
+            if candidate_oid != expected_commit:
+                raise SnapshotError(
+                    f"commit {candidate_oid} is not the expected commit "
+                    f"{expected_commit}"
+                )
+        if expect_tree is not None:
+            expected_tree = _validate_expected_oid(
+                expect_tree,
+                label="tree",
+                object_format=object_format,
             )
+            if parsed_commit.tree != expected_tree:
+                raise SnapshotError(
+                    f"tree {parsed_commit.tree} is not the expected tree "
+                    f"{expected_tree}"
+                )
 
         work = SnapshotWork(
             tree_bytes=commit_size + tree_size,
@@ -1783,6 +2110,8 @@ class TreeSnapshot:
     ) -> None:
         closing_errors: list[BaseException] = []
         try:
+            if self._state.active_digest_token is not None:
+                self._abandon()
             if self._state.batch is not None:
                 try:
                     self._state.batch.close()
@@ -1927,8 +2256,14 @@ class TreeSnapshot:
         temporary = self._state.tempdir
         return pathlib.Path(temporary.name) if temporary is not None else None
 
-    def _batch(self) -> _BatchReader:
+    def _batch(self, *, digest_token: object | None = None) -> _BatchReader:
         if self._state.abandoned:
+            raise SnapshotError("snapshot stream was abandoned")
+        if (
+            self._state.active_digest_token is not None
+            and digest_token is not self._state.active_digest_token
+        ):
+            self._abandon()
             raise SnapshotError("snapshot stream was abandoned")
         if not self._state.entered or self._state.batch is None:
             raise SnapshotError("snapshot must be entered before object reads")
@@ -1955,9 +2290,34 @@ class TreeSnapshot:
     def _require_entry(self, entry: GitEntry) -> str:
         """Bind an entry argument to this snapshot before using its OID."""
 
-        if not isinstance(entry, GitEntry):
+        if type(entry) is not GitEntry:
             raise SnapshotError("blob entry must be a GitEntry")
-        if entry._snapshot_token is not self._state.entry_token:
+        binding = entry._snapshot_token
+        if (
+            type(binding) is not _EntryBinding
+            or binding.snapshot_token is not self._state.entry_token
+            or any(
+                type(value) is not str
+                for value in (
+                    entry.mode,
+                    entry.object_type,
+                    entry.object_id,
+                    entry.path,
+                )
+            )
+            or (
+                entry.mode,
+                entry.object_type,
+                entry.object_id,
+                entry.path,
+            )
+            != (
+                binding.mode,
+                binding.object_type,
+                binding.object_id,
+                binding.path,
+            )
+        ):
             raise SnapshotError("GitEntry does not belong to this snapshot")
         return self._validate_oid(entry.object_id)
 
@@ -1977,10 +2337,10 @@ class TreeSnapshot:
         work.max_tree_object_bytes = max(work.max_tree_object_bytes, size)
 
     def _tree_object(self, oid: str) -> tuple[_RawTreeEntry, ...]:
+        batch = self._batch()
         cached = self._state.tree_cache.get(oid)
         if cached is not None:
             return cached
-        batch = self._batch()
         _kind, size = batch.info(oid, role="tree")
         if self._state.work.tree_bytes + size > MAX_TREE_BYTES_TOTAL:
             raise SnapshotError(
@@ -2003,11 +2363,13 @@ class TreeSnapshot:
         self._state.tree_cache[oid] = parsed
         return parsed
 
-    def _commit_object(self, oid: str) -> _CommitObject:
+    def _commit_object(
+        self, oid: str, *, parent_budget: int | None = None
+    ) -> _CommitObject:
+        batch = self._batch()
         cached = self._state.commit_cache.get(oid)
         if cached is not None:
             return cached
-        batch = self._batch()
         _kind, size = batch.info(oid, role="commit")
         if self._state.work.tree_bytes + size > MAX_TREE_BYTES_TOTAL:
             raise SnapshotError(
@@ -2019,13 +2381,25 @@ class TreeSnapshot:
         )
         assert payload is not None
         self._charge_tree_object(size)
-        parsed = _canonical_commit(oid, payload, object_format=self.object_format)
+        if parent_budget is None:
+            parent_budget = MAX_ANCESTRY_COMMITS
+        parsed = _canonical_commit(
+            oid,
+            payload,
+            object_format=self.object_format,
+            parent_limit=parent_budget,
+        )
         batch.info(parsed.tree, role="tree")
-        for parent in parsed.parents:
-            batch.info(parent, role="commit")
+        if len(parsed.parents) > parent_budget:
+            raise SnapshotError(
+                f"ancestry walk exceeds the budget of "
+                f"{MAX_ANCESTRY_COMMITS} commits"
+            )
         # Every tree line reached by the ancestry walk is authenticated even
         # though parentage itself needs only the commit payload.
         self._tree_object(parsed.tree)
+        for parent in parsed.parents:
+            batch.info(parent, role="commit")
         self._state.commit_cache[oid] = parsed
         return parsed
 
@@ -2044,10 +2418,22 @@ class TreeSnapshot:
             )
 
     @staticmethod
+    def _find_raw_entry(
+        records: Sequence[_RawTreeEntry], component: bytes
+    ) -> _RawTreeEntry | None:
+        """Find an exact raw name in canonical Git order in logarithmic work."""
+
+        for key in (component, component + b"/"):
+            index = bisect_left(records, key, key=_raw_tree_sort_key)
+            if index < len(records) and records[index].name == component:
+                return records[index]
+        return None
+
+    @staticmethod
     def _path_parts(path: str | bytes, *, allow_empty: bool) -> tuple[bytes, ...]:
         if type(path) is str:
             try:
-                raw_path = os.fsencode(path)
+                raw_path = _tree_path_encode(path)
             except UnicodeEncodeError as exc:
                 raise SnapshotError(f"tree path cannot be encoded: {path!r}") from exc
         elif type(path) is bytes:
@@ -2078,6 +2464,28 @@ class TreeSnapshot:
         self, parts: tuple[bytes, ...], raw: _RawTreeEntry
     ) -> GitEntry:
         path_bytes = b"/".join(parts)
+        self._charge_path_bytes(path_bytes)
+        path_text = _tree_path_decode(path_bytes)
+        mode = raw.display_mode
+        object_type = raw.object_type
+        binding = _EntryBinding(
+            self._state.entry_token,
+            mode,
+            object_type,
+            raw.oid,
+            path_text,
+        )
+        return GitEntry(
+            mode=mode,
+            object_type=object_type,
+            object_id=raw.oid,
+            path=path_text,
+            _snapshot_token=binding,
+        )
+
+    def _charge_path_bytes(self, path_bytes: bytes) -> None:
+        """Charge one full logical path at the moment it is materialized."""
+
         size = len(path_bytes)
         if size > MAX_PATH_BYTES:
             raise SnapshotError(
@@ -2091,14 +2499,6 @@ class TreeSnapshot:
             message=f"tree paths exceed the snapshot budget of {MAX_PATH_BYTES_TOTAL} bytes",
         )
         work.max_path_bytes = max(work.max_path_bytes, size)
-        path_text = os.fsdecode(path_bytes)
-        return GitEntry(
-            mode=raw.display_mode,
-            object_type=raw.object_type,
-            object_id=raw.oid,
-            path=path_text,
-            _snapshot_token=self._state.entry_token,
-        )
 
     def _build_listing(
         self,
@@ -2138,22 +2538,26 @@ class TreeSnapshot:
     def entry(self, path: str | bytes) -> GitEntry:
         """Look up one path by its exact component bytes."""
 
+        self._batch()
         parts = self._path_parts(path, allow_empty=False)
         tree_oid = self.tree
         count = [0]
         for index, component in enumerate(parts):
             records = self._tree_object(tree_oid)
             self._charge_walk_records(records, count)
-            raw = next((item for item in records if item.name == component), None)
+            raw = self._find_raw_entry(records, component)
             if raw is None:
-                raise SnapshotError(f"tree entry does not exist: {os.fsdecode(b'/'.join(parts))}")
+                raise SnapshotError(
+                    "tree entry does not exist: "
+                    f"{_tree_path_decode(b'/'.join(parts))}"
+                )
             last = index == len(parts) - 1
             if raw.mode != b"160000":
                 self._batch().info(raw.oid, role=raw.object_type)
             if last:
                 return self._public_entry(parts, raw)
             if raw.mode != b"40000":
-                prefix = os.fsdecode(b"/".join(parts[: index + 1]))
+                prefix = _tree_path_decode(b"/".join(parts[: index + 1]))
                 if raw.mode == b"120000":
                     raise SnapshotError(f"state path has a symlinked component: {prefix}")
                 raise SnapshotError(f"tree path ancestor is not a directory: {prefix}")
@@ -2163,6 +2567,7 @@ class TreeSnapshot:
     def entries(self, prefix: str | bytes = "") -> TreeListing:
         """Walk a subtree into a hierarchical listing under the walk budgets."""
 
+        self._batch()
         parts = self._path_parts(prefix, allow_empty=True)
         if not parts:
             node = self._build_listing(self.tree, depth=0, count=[0])
@@ -2172,7 +2577,7 @@ class TreeSnapshot:
         for index, component in enumerate(parts):
             records = self._tree_object(tree_oid)
             self._charge_walk_records(records, count)
-            raw = next((item for item in records if item.name == component), None)
+            raw = self._find_raw_entry(records, component)
             if raw is None:
                 return TreeListing(self, parts, _TreeNode((), None))
             last = index == len(parts) - 1
@@ -2190,7 +2595,7 @@ class TreeSnapshot:
                     _TreeNode((_ListingRecord(raw=raw),), None),
                 )
             if raw.mode != b"40000":
-                prefix_text = os.fsdecode(b"/".join(parts[: index + 1]))
+                prefix_text = _tree_path_decode(b"/".join(parts[: index + 1]))
                 if raw.mode == b"120000":
                     raise SnapshotError(
                         f"state path has a symlinked component: {prefix_text}"
@@ -2240,12 +2645,6 @@ class TreeSnapshot:
             raise SnapshotError("total must be a non-negative integer")
         if isinstance(entries, (str, bytes, GitEntry)):
             raise SnapshotError("digests entries must be an iterable of GitEntry objects")
-        try:
-            iter(entries)
-        except TypeError as exc:
-            raise SnapshotError(
-                "digests entries must be an iterable of GitEntry objects"
-            ) from exc
         self._batch()
         return _DigestIterator(self, entries, per_blob=per_blob, total=total)
 
@@ -2277,6 +2676,7 @@ class TreeSnapshot:
     def parents(self, commit: str) -> tuple[str, ...]:
         """Return parents from an authenticated canonical commit object."""
 
+        self._batch()
         return self._commit_object(self._validate_oid(commit)).parents
 
     def assert_ancestor(self, base: "TreeSnapshot") -> str:
@@ -2309,7 +2709,10 @@ class TreeSnapshot:
                     f"{MAX_ANCESTRY_COMMITS} commits"
                 )
             work.ancestry_commits += 1
-            commit = self._commit_object(current)
+            commit = self._commit_object(
+                current,
+                parent_budget=MAX_ANCESTRY_COMMITS - work.ancestry_edges,
+            )
             if current == base_oid:
                 self._link_verification_work(base)
                 self._state.ancestry_bases.add(base_oid)
@@ -2450,14 +2853,7 @@ class TreeSnapshot:
         for index, component in enumerate(parts):
             records = self._tree_object(tree_oid)
             self._charge_walk_records(records, count)
-            raw = next(
-                (
-                    item
-                    for item in records
-                    if item.name == component
-                ),
-                None,
-            )
+            raw = self._find_raw_entry(records, component)
             if raw is None:
                 return None
             if raw.mode != b"160000":
@@ -2465,7 +2861,7 @@ class TreeSnapshot:
             if index == len(parts) - 1:
                 return raw
             if raw.mode != b"40000":
-                ancestor = os.fsdecode(b"/".join(parts[: index + 1]))
+                ancestor = _tree_path_decode(b"/".join(parts[: index + 1]))
                 raise SnapshotError(
                     f"protected path ancestor is not a directory: {ancestor}"
                 )
@@ -2476,7 +2872,7 @@ class TreeSnapshot:
         self, parts: tuple[bytes, ...]
     ) -> tuple[_AttributeRule, ...]:
         path_bytes = b"/".join(parts)
-        path = os.fsdecode(path_bytes)
+        path = _tree_path_decode(path_bytes)
         cached = self._state.attribute_cache.get(path)
         if cached is not None:
             return cached
@@ -2502,7 +2898,13 @@ class TreeSnapshot:
             ceiling=MAX_ATTRIBUTE_BYTES_TOTAL,
             message=f"attribute bytes exceed the snapshot budget of {MAX_ATTRIBUTE_BYTES_TOTAL} bytes",
         )
-        rules = _parse_attribute_file(path, payload)
+        remaining_rules = (
+            MAX_ATTRIBUTE_RULES_TOTAL
+            - self._verification_total("attribute_rules")
+        )
+        rules = _parse_attribute_file(
+            path, payload, rule_limit=max(0, remaining_rules)
+        )
         if self._verification_total("attribute_rules") + len(rules) > MAX_ATTRIBUTE_RULES_TOTAL:
             raise SnapshotError(
                 f"attribute rules exceed the snapshot budget of "
@@ -2540,6 +2942,7 @@ class TreeSnapshot:
         ``-diff -merge -text``. No non-tree attribute source is consulted.
         """
 
+        self._batch()
         if isinstance(paths, (str, bytes, GitEntry)):
             raise SnapshotError("attribute paths must be an iterable of paths")
         try:
@@ -2558,7 +2961,9 @@ class TreeSnapshot:
             else:
                 value = supplied
             parts = self._path_parts(value, allow_empty=False)
-            unique.setdefault(b"/".join(parts), parts)
+            path_bytes = b"/".join(parts)
+            self._charge_path_bytes(path_bytes)
+            unique.setdefault(path_bytes, parts)
 
         transforms = {"filter", "ident", "working-tree-encoding"}
         for path_bytes, parts in unique.items():
@@ -2586,7 +2991,7 @@ class TreeSnapshot:
 
     def materialize(
         self,
-        prefixes: Iterable[str | bytes],
+        prefixes: Iterable[str | bytes | pathlib.PurePosixPath],
         destination: os.PathLike[str] | str,
         *,
         repertoire: str,
@@ -2597,7 +3002,7 @@ class TreeSnapshot:
             selected_repertoire = validate_repertoire(repertoire)
         except NamePolicyError as exc:
             raise SnapshotError(str(exc)) from exc
-        if isinstance(prefixes, (str, bytes)):
+        if isinstance(prefixes, (str, bytes, pathlib.PurePath)):
             raise SnapshotError("materialization prefixes must be an iterable of paths")
         try:
             requested_list: list[str | bytes] = []
@@ -2607,7 +3012,15 @@ class TreeSnapshot:
                         f"materialization prefixes exceed the budget of "
                         f"{MAX_TREE_ENTRIES} entries"
                     )
-                requested_list.append(prefix)
+                if type(prefix) is pathlib.PurePosixPath:
+                    requested_list.append(prefix.as_posix())
+                elif type(prefix) in {str, bytes}:
+                    requested_list.append(prefix)
+                else:
+                    raise SnapshotError(
+                        "materialization prefix must be str, bytes, or "
+                        f"PurePosixPath: {prefix!r}"
+                    )
             requested = tuple(requested_list)
         except TypeError as exc:
             raise SnapshotError("materialization prefixes must be iterable") from exc
@@ -2650,14 +3063,19 @@ class Materialization:
         return dict(self._entries)
 
     def _deduplicated_prefixes(self) -> tuple[tuple[bytes, ...], ...]:
-        parts = {
-            self._snapshot._path_parts(prefix, allow_empty=True)
-            for prefix in self._prefixes
-        }
-        ordered = sorted(parts, key=lambda value: (len(value), value))
+        parts: set[tuple[bytes, ...]] = set()
+        for prefix in self._prefixes:
+            parsed = self._snapshot._path_parts(prefix, allow_empty=True)
+            path_bytes = b"/".join(parsed)
+            self._snapshot._charge_path_bytes(path_bytes)
+            parts.add(parsed)
+        # Lexicographic tuple order places an ancestor immediately before all
+        # of its descendants. Keeping only the last retained prefix therefore
+        # avoids the quadratic all-parents scan for many disjoint prefixes.
+        ordered = sorted(parts)
         kept: list[tuple[bytes, ...]] = []
         for candidate in ordered:
-            if any(candidate[: len(parent)] == parent for parent in kept):
+            if kept and candidate[: len(kept[-1])] == kept[-1]:
                 continue
             kept.append(candidate)
         return tuple(kept)
@@ -2668,6 +3086,11 @@ class Materialization:
             if not parts:
                 for entry in self._snapshot.entries(""):
                     selected[entry.path] = entry
+                    if len(selected) > MAX_TREE_ENTRIES:
+                        raise SnapshotError(
+                            f"tree walk exceeds the budget of "
+                            f"{MAX_TREE_ENTRIES} entries"
+                        )
                 continue
             raw = self._snapshot._raw_entry_at(parts)
             if raw is None:
@@ -2675,9 +3098,19 @@ class Materialization:
             if raw.mode == b"40000":
                 for entry in self._snapshot.entries(b"/".join(parts)):
                     selected[entry.path] = entry
+                    if len(selected) > MAX_TREE_ENTRIES:
+                        raise SnapshotError(
+                            f"tree walk exceeds the budget of "
+                            f"{MAX_TREE_ENTRIES} entries"
+                        )
             else:
                 entry = self._snapshot._public_entry(parts, raw)
                 selected[entry.path] = entry
+                if len(selected) > MAX_TREE_ENTRIES:
+                    raise SnapshotError(
+                        f"tree walk exceeds the budget of "
+                        f"{MAX_TREE_ENTRIES} entries"
+                    )
 
         sibling_names: dict[tuple[bytes, ...], set[bytes]] = {}
         for path, entry in sorted(selected.items()):
@@ -2689,10 +3122,12 @@ class Materialization:
             for index, name in enumerate(raw_parts):
                 sibling_names.setdefault(raw_parts[:index], set()).add(name)
         for parent, names in sibling_names.items():
-            label = os.fsdecode(b"/".join(parent)) if parent else "tree root"
+            label = (
+                _tree_path_decode(b"/".join(parent)) if parent else "tree root"
+            )
             try:
                 assert_no_merging_entries(
-                    names,
+                    sorted(names),
                     repertoire=self._repertoire,
                     materializing=True,
                     label=label,

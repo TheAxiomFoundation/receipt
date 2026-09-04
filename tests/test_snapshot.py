@@ -172,6 +172,33 @@ def test_select_records_authenticated_identity_before_entry(
         selected.header(tree)
 
 
+def test_cached_reads_still_require_an_entered_snapshot(
+    git_repo: pathlib.Path,
+) -> None:
+    selected = TreeSnapshot.select(git_repo)
+    operations = (
+        lambda: selected.parents(selected.commit),
+        lambda: selected.entries(""),
+        lambda: selected.entry("missing"),
+        lambda: selected.refuse_transforming_attributes(()),
+    )
+
+    for operation in operations:
+        with pytest.raises(
+            SnapshotError, match="snapshot must be entered before object reads"
+        ):
+            operation()
+
+    with selected:
+        listing = selected.entries("")
+    with pytest.raises(SnapshotError, match="snapshot must be entered"):
+        tuple(listing)
+    with pytest.raises(SnapshotError, match="snapshot must be entered"):
+        len(listing)
+    with pytest.raises(SnapshotError, match="snapshot must be entered"):
+        _ = listing.children
+
+
 def test_select_expectations_are_checked_commit_then_tree(
     git_repo: pathlib.Path,
 ) -> None:
@@ -193,6 +220,77 @@ def test_select_expectations_are_checked_commit_then_tree(
         match=rf"^tree {tree} is not the expected tree {ZERO_OID}$",
     ):
         TreeSnapshot.select(git_repo, expect_tree=ZERO_OID)
+
+
+class _EqualToEveryObject:
+    def __eq__(self, _other: object) -> bool:
+        return True
+
+    def __ne__(self, _other: object) -> bool:
+        return False
+
+
+@pytest.mark.parametrize(
+    ("keyword", "value", "label"),
+    (
+        ("expect_commit", _EqualToEveryObject(), "commit"),
+        ("expect_commit", "A" * 40, "commit"),
+        ("expect_commit", "1" * 39, "commit"),
+        ("expect_tree", _EqualToEveryObject(), "tree"),
+        ("expect_tree", "g" * 40, "tree"),
+    ),
+)
+def test_expectations_require_exact_full_object_names(
+    git_repo: pathlib.Path, keyword: str, value: object, label: str
+) -> None:
+    with pytest.raises(
+        SnapshotError,
+        match=rf"^expected {label} must be a full lowercase hexadecimal object name$",
+    ):
+        TreeSnapshot.select(git_repo, **{keyword: value})  # type: ignore[arg-type]
+
+
+def test_candidate_resolution_and_commit_shape_precede_expectations(
+    git_repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(
+        SnapshotError, match="^cannot resolve commit 'missing-revision'$"
+    ):
+        TreeSnapshot.select(
+            git_repo,
+            "missing-revision",
+            expect_commit=ZERO_OID,
+            expect_tree=ONE_OID,
+        )
+
+    malformed_payload = (
+        b"author Snapshot Test <snapshot@example.test> 0 +0000\n"
+        b"committer Snapshot Test <snapshot@example.test> 0 +0000\n\n"
+    )
+    malformed = _hash_object(git_repo, "commit", malformed_payload)
+    original_git_run = snapshot_module._git_run
+
+    def preserve_malformed_candidate(
+        arguments: Iterable[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        argv = tuple(arguments)
+        if argv[-1:] == (f"{malformed}^{{commit}}",):
+            return subprocess.CompletedProcess(
+                ["git", *argv], 0, f"{malformed}\n".encode("ascii"), b""
+            )
+        return original_git_run(argv, **kwargs)
+
+    monkeypatch.setattr(snapshot_module, "_git_run", preserve_malformed_candidate)
+    with pytest.raises(
+        SnapshotError,
+        match=rf"^commit {malformed} is not a canonical commit object$",
+    ):
+        TreeSnapshot.select(
+            git_repo,
+            malformed,
+            expect_commit=ZERO_OID,
+            expect_tree=ONE_OID,
+        )
 
 
 def test_commit_identity_distinguishes_commits_with_the_same_tree(
@@ -396,6 +494,150 @@ def test_thread_start_failure_reaps_a_spawned_git_child(
             )
 
     assert spawned and all(process.poll() is not None for process in spawned)
+    assert all(
+        pipe is None or pipe.closed
+        for process in spawned
+        for pipe in (process.stdin, process.stdout, process.stderr)
+    )
+
+
+def test_bounded_git_wait_failure_still_reaps_and_closes_pipes(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spawned: list[subprocess.Popen[bytes]] = []
+    original_popen = subprocess.Popen
+
+    def failing_wait_popen(
+        *args: object, **kwargs: object
+    ) -> subprocess.Popen[bytes]:
+        process = original_popen(*args, **kwargs)
+        spawned.append(process)
+        original_wait = process.wait
+        calls = 0
+
+        def fail_once(*wait_args: object, **wait_kwargs: object) -> int:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("injected wait failure")
+            return original_wait(*wait_args, **wait_kwargs)
+
+        process.wait = fail_once  # type: ignore[method-assign]
+        return process
+
+    monkeypatch.setattr(snapshot_module.subprocess, "Popen", failing_wait_popen)
+    with pytest.raises(RuntimeError, match="injected wait failure"):
+        snapshot_module._bounded_process(
+            ("git", "version"),
+            cwd=None,
+            environment=_git_environment(tmp_path / "private.gitconfig"),
+            input_bytes=None,
+            output_limit=1024,
+            seconds=5,
+        )
+
+    assert len(spawned) == 1
+    process = spawned[0]
+    assert process.poll() is not None
+    assert process.stdout is not None and process.stdout.closed
+    assert process.stderr is not None and process.stderr.closed
+
+
+def test_batch_wait_failure_still_reaps_and_closes_every_pipe(
+    git_repo: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    batch = _BatchReader(
+        git_repo / ".git",
+        environment=_git_environment(tmp_path / "private.gitconfig"),
+        object_format="sha1",
+    )
+    process = batch.process
+    original_wait = process.wait
+    calls = 0
+
+    def fail_once(*wait_args: object, **wait_kwargs: object) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("injected wait failure")
+        return original_wait(*wait_args, **wait_kwargs)
+
+    process.wait = fail_once  # type: ignore[method-assign]
+    with pytest.raises(SnapshotError, match="^Git batch child cleanup failed$"):
+        batch.close()
+
+    assert process.poll() is not None
+    assert process.stdin is not None and process.stdin.closed
+    assert process.stdout is not None and process.stdout.closed
+    assert process.stderr is not None and process.stderr.closed
+
+
+def test_batch_read_join_interruption_abandons_stream_and_reaps_child(
+    git_repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    selected = TreeSnapshot.select(git_repo)
+    original_join = threading.Thread.join
+    interrupted = False
+
+    def interrupt_stdout_join(
+        thread: threading.Thread, timeout: float | None = None
+    ) -> None:
+        nonlocal interrupted
+        if thread.name == "receipt-git-batch-stdout" and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt("injected read join interruption")
+        original_join(thread, timeout)
+
+    monkeypatch.setattr(threading.Thread, "join", interrupt_stdout_join)
+    with selected:
+        process = selected._state.batch.process
+        temporary = selected.temporary_directory
+        with pytest.raises(KeyboardInterrupt, match="injected read join interruption"):
+            selected.header(selected.tree)
+        with pytest.raises(SnapshotError, match="^snapshot stream was abandoned$"):
+            selected.header(selected.tree)
+
+    assert interrupted
+    assert process.poll() is not None
+    assert process.stdin is not None and process.stdin.closed
+    assert process.stdout is not None and process.stdout.closed
+    assert process.stderr is not None and process.stderr.closed
+    assert temporary is not None and not temporary.exists()
+
+
+def test_batch_request_interruption_abandons_stream_and_reaps_child(
+    git_repo: pathlib.Path,
+) -> None:
+    selected = TreeSnapshot.select(git_repo)
+
+    class InterruptingInput:
+        def __init__(self, wrapped: object) -> None:
+            self._wrapped = wrapped
+
+        def write(self, _payload: bytes) -> int:
+            raise KeyboardInterrupt("injected request interruption")
+
+        def flush(self) -> None:
+            self._wrapped.flush()  # type: ignore[attr-defined]
+
+        def close(self) -> None:
+            self._wrapped.close()  # type: ignore[attr-defined]
+
+    with selected:
+        batch = selected._state.batch
+        process = batch.process
+        temporary = selected.temporary_directory
+        batch._stdin = InterruptingInput(batch._stdin)  # type: ignore[assignment]
+        with pytest.raises(KeyboardInterrupt, match="injected request interruption"):
+            selected.header(selected.tree)
+        with pytest.raises(SnapshotError, match="^snapshot stream was abandoned$"):
+            selected.header(selected.tree)
+
+    assert process.poll() is not None
+    assert process.stdin is not None and process.stdin.closed
+    assert process.stdout is not None and process.stdout.closed
+    assert process.stderr is not None and process.stderr.closed
+    assert temporary is not None and not temporary.exists()
 
 
 def test_snapshot_reads_commit_after_checkout_and_index_mutate(
@@ -665,6 +907,35 @@ def test_git_floor_pins_batch_command_introduction() -> None:
     assert installed >= GIT_MIN_VERSION
 
 
+def test_git_floor_preflight_refuses_before_repository_discovery(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    missing_root = tmp_path / "missing-repository"
+    original_git_run = snapshot_module._git_run
+    calls: list[tuple[str, ...]] = []
+
+    def old_git(
+        arguments: Iterable[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        argv = tuple(arguments)
+        calls.append(argv)
+        if argv[-1:] == ("version",):
+            return subprocess.CompletedProcess(
+                ["git", *argv], 0, b"git version 2.35.9\n", b""
+            )
+        return original_git_run(argv, **kwargs)
+
+    monkeypatch.setattr(snapshot_module, "_git_run", old_git)
+    with pytest.raises(
+        SnapshotError,
+        match="Git 2.36.0 or later is required for cat-file --batch-command",
+    ):
+        TreeSnapshot.select(missing_root)
+
+    assert calls[-1][-1] == "version"
+    assert not any("rev-parse" in call for call in calls)
+
+
 def _valid_commit_payload(
     *,
     tree: str = ONE_OID,
@@ -703,6 +974,39 @@ def test_canonical_commit_parses_merge_signed_header_and_ignores_message() -> No
     assert parsed.oid == "f" * 40
     assert parsed.tree == ONE_OID
     assert parsed.parents == (ZERO_OID, TWO_OID)
+
+
+def test_canonical_commit_enforces_parent_budget_while_expanding() -> None:
+    payload = _valid_commit_payload(parents=(ZERO_OID, TWO_OID))
+
+    with pytest.raises(SnapshotError, match="^ancestry walk exceeds the budget"):
+        _canonical_commit(
+            "f" * 40,
+            payload,
+            object_format="sha1",
+            parent_limit=1,
+        )
+
+
+def test_canonical_shape_refusal_precedes_parent_budget() -> None:
+    payload = (
+        f"tree {ONE_OID}\nparent {ZERO_OID}\nparent {TWO_OID}\n".encode(
+            "ascii"
+        )
+        + b"author A <a@example.test> 0 +0000\n\n"
+    )
+    oid = "f" * 40
+
+    with pytest.raises(
+        SnapshotError,
+        match=rf"^commit {oid} is not a canonical commit object$",
+    ):
+        _canonical_commit(
+            oid,
+            payload,
+            object_format="sha1",
+            parent_limit=1,
+        )
 
 
 def test_canonical_commit_uses_only_lf_as_a_header_line_delimiter() -> None:
@@ -802,6 +1106,23 @@ def test_raw_tree_parser_accepts_five_modes_and_git_directory_sort_rule() -> Non
     assert parsed[1].object_type == "tree"
     assert parsed[3].object_type == "blob"
     assert parsed[4].object_type == "commit"
+
+
+def test_raw_tree_parser_enforces_entry_budget_while_expanding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"".join(
+        (
+            _tree_entry(b"100644", b"a", ZERO_OID),
+            _tree_entry(b"100644", b"b", ONE_OID),
+        )
+    )
+    monkeypatch.setattr(snapshot_module, "MAX_TREE_ENTRIES", 1)
+
+    with pytest.raises(
+        SnapshotError, match="^tree walk exceeds the budget of 1 entries$"
+    ):
+        _parse_raw_tree("f" * 40, payload, object_format="sha1")
 
 
 @pytest.mark.parametrize(
@@ -904,6 +1225,35 @@ def test_abandoned_digest_iterator_blocks_later_requests_but_is_reaped(
 
     assert process.poll() is not None
     assert temporary is not None and not temporary.exists()
+
+
+def test_retained_partial_digest_iterator_owns_the_batch_stream(
+    git_repo: pathlib.Path,
+) -> None:
+    (git_repo / "second.txt").write_bytes(b"second\n")
+    _commit_worktree(git_repo, "second blob")
+    selected = TreeSnapshot.select(git_repo)
+
+    with selected:
+        entries = [selected.entry("tracked.txt"), selected.entry("second.txt")]
+        digests = selected.digests(entries, per_blob=100, total=200)
+        assert next(digests)[0] == entries[0]
+        with pytest.raises(SnapshotError, match="^snapshot stream was abandoned$"):
+            selected.header(entries[1].object_id)
+        with pytest.raises(SnapshotError, match="^snapshot stream was abandoned$"):
+            next(digests)
+
+
+def test_exhausted_digest_listing_releases_the_batch_stream(
+    git_repo: pathlib.Path,
+) -> None:
+    selected = TreeSnapshot.select(git_repo)
+
+    with selected:
+        listing = selected.entries("")
+        digests = tuple(selected.digests(listing, per_blob=100, total=200))
+        assert [entry.path for entry, _digest in digests] == ["tracked.txt"]
+        assert selected.header(selected.tree)[0] == "tree"
 
 
 def test_digest_interrupted_mid_frame_abandons_and_reaps_the_batch_child(
@@ -1036,7 +1386,12 @@ def test_selection_refuses_crafted_type_to_role_mismatch(
             rf"{required_role} its reference requires$"
         ),
     ):
-        TreeSnapshot.select(git_repo, commit)
+        TreeSnapshot.select(
+            git_repo,
+            commit,
+            expect_commit=ZERO_OID,
+            expect_tree=ZERO_OID,
+        )
 
 
 def test_crafted_parent_type_mismatch_is_bound_before_parent_bytes() -> None:

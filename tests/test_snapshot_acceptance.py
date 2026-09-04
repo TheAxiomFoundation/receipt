@@ -148,7 +148,7 @@ def test_generated_twenty_thousand_entry_128_mib_fixture_verifies_under_defaults
         )
         assert (
             work.path_bytes
-            == 2 * path_bytes_once
+            == 3 * path_bytes_once
             < snapshot_module.MAX_PATH_BYTES_TOTAL
         )
         assert (
