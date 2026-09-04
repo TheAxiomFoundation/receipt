@@ -33,6 +33,7 @@ from receipt.append_gate import (
     _assert_release_paths_are_subdirectories,
     expected_assertion_version_id,
     verify_append_gate,
+    verify_append_gate_verdict,
 )
 from receipt.canonical import canonical_bytes
 from receipt.release_chain import (
@@ -353,6 +354,75 @@ def test_an_ordinary_append_is_accepted(tmp_path: pathlib.Path) -> None:
     assert run_gate(candidate) == (
         "thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base"
     )
+
+
+def test_base_ref_requires_full_candidate_oid(tmp_path: pathlib.Path) -> None:
+    candidate = base_repository(tmp_path)
+
+    with pytest.raises(AppendError) as refusal:
+        verify_append_gate(
+            candidate.root,
+            spec=GATE_SPEC,
+            base_ref=candidate.base,
+            commit="HEAD",
+        )
+
+    assert str(refusal.value) == "base_ref requires a full commit OID"
+
+
+def test_verdict_names_candidate_and_base_objects(tmp_path: pathlib.Path) -> None:
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    oid = commit_candidate(candidate, "candidate append")
+
+    verdict = verify_append_gate_verdict(
+        candidate.root,
+        spec=GATE_SPEC,
+        base_ref=candidate.base,
+        commit=oid,
+    )
+
+    assert verdict.summary == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base"
+    )
+    assert verdict.candidate_commit == oid
+    assert verdict.candidate_tree == git(candidate.root, "rev-parse", f"{oid}^{{tree}}")
+    assert verdict.base_commit == candidate.base
+    assert verdict.base_tree == git(
+        candidate.root,
+        "rev-parse",
+        f"{candidate.base}^{{tree}}",
+    )
+    assert verdict.object_format == "sha1"
+    assert verdict.name_repertoire == GATE_SPEC.chain.name_repertoire
+
+
+def test_push_verdict_is_bound_to_the_pushed_commit(tmp_path: pathlib.Path) -> None:
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    pushed = commit_candidate(candidate, "pushed append")
+    pushed_tree = git(candidate.root, "rev-parse", f"{pushed}^{{tree}}")
+
+    write_ledger(
+        candidate.root,
+        [observation_row(number) for number in range(1, BASE_ROW_COUNT + 1)],
+    )
+    later = commit_candidate(candidate, "later head")
+    assert later != pushed
+
+    verdict = verify_append_gate_verdict(
+        candidate.root,
+        spec=GATE_SPEC,
+        commit=pushed,
+    )
+
+    assert verdict.summary == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 1"
+    )
+    assert verdict.candidate_commit == pushed
+    assert verdict.candidate_tree == pushed_tree
+    assert verdict.base_commit is None
+    assert verdict.base_tree is None
 
 
 def test_a_gate_only_proposal_cannot_rewrite_the_release_tree(

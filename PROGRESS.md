@@ -50,11 +50,14 @@
   release history, manifest shapes, specs, environment entry refusals, and
   the exact #46 missing-repository wording. The resulting unit suite is 84/84
   green under the cached Python 3.13 environment.
+- Added unit coverage for the exact full-candidate-OID refusal, every
+  `AppendGateVerdict` identity/repertoire field, and a push verdict remaining
+  bound to the explicitly supplied commit after `HEAD` advances.
 
 ## Next
 
-- Add the full-OID, verdict-field, pushed-commit, and immutable-snapshot
-  invariance cases.
+- Add the port-only immutable-snapshot invariance and corruption cases to the
+  differential harness.
 - Thread the committed candidate OID through the append equivalence harness.
 - Run the focused, equivalence, and full offline suites; perform the pinned production-tree differential.
 - Prepare the complete no-network PR handoff; pushing and opening the draft PR
