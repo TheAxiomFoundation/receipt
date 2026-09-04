@@ -4,7 +4,7 @@
 
 - Branch: `feat/0.6-lane-b`
 - Recorded starting OID: `e3af1950ff39f1eaa5ff3aad60e89b18e73a943c`
-- Phase: snapshot unit suite green; adding verdict and harness coverage
+- Phase: append unit and differential suites green; running integration census
 - Network status: sandbox-disabled; GitHub API access fails immediately
 
 ## Done
@@ -48,7 +48,7 @@
 - Retained and ported the semantic refusal battery over committed objects,
   including surface separation, append/prefix/row/binding rules, tree modes,
   release history, manifest shapes, specs, environment entry refusals, and
-  the exact #46 missing-repository wording. The resulting unit suite is 84/84
+  the exact #46 missing-repository wording. The resulting unit suite is 87/87
   green under the cached Python 3.13 environment.
 - Added unit coverage for the exact full-candidate-OID refusal, every
   `AppendGateVerdict` identity/repertoire field, and a push verdict remaining
@@ -58,13 +58,19 @@
   against the pinned production tree: all 18 verifier cases retain names,
   markers, messages, and two legs; the three oracle-authentication cases
   remain unmoved.
+- Added all seven port-only snapshot cases: deliberate baseline/port
+  divergence after an unstaged row rewrite; later working-tree and index
+  invariance; late `GIT_DIR` and `GIT_INDEX_FILE` invariance; effective
+  `refs/replace` immunity; and an exact rehash refusal after a logical byte
+  flip in a loose candidate-tree object. The append differential is now 28/28
+  green against the pinned tree with zero skips.
 
 ## Next
 
-- Add the port-only immutable-snapshot invariance and corruption cases to the
-  differential harness, including the one intentional baseline divergence.
-- Thread the committed candidate OID through the append equivalence harness.
-- Run the focused, equivalence, and full offline suites; perform the pinned production-tree differential.
+- Run the four-harness 108-case equivalence census and the full offline suite;
+  perform the separate pinned production-tree 17/17 differential.
+- Write `receipts/repin-0.6-tree-object.md` with the fixture change, deliberate
+  divergence, and 26/68/94-plus-additions census.
 - Prepare the complete no-network PR handoff; pushing and opening the draft PR
   will require a networked environment unless connectivity becomes available.
 

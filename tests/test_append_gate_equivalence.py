@@ -46,18 +46,27 @@ the consumer's CI has, an independent detached checkout of the named commit
 (at the pin its workflow makes one with ``git clone --no-checkout`` and
 ``git checkout --detach``); ``git worktree add --detach`` is how this
 harness, and the coming 0.5.2 shim, make one. The oracle reads that one and
-the port reads the main worktree; the checkout is removed afterwards with ``git
-worktree remove --force`` on that worktree alone — never ``git worktree
+the port reads the named candidate commit from the main repository; the
+checkout is removed afterwards with ``git worktree remove --force`` on that
+worktree alone — never ``git worktree
 prune``, which deregisters every prunable worktree of the repository. At this
-release the port is still a working-tree verifier reading an equal checkout,
-so both legs must agree; when it becomes commit-addressed, leg two is what
-measures that it needs no checkout at all.
+release the port is commit-addressed, so leg two measures both that the
+checkout of C equals C and that the port needs no checkout at all.
 
 Which cases moved: the three acceptances and the fifteen mutations, eighteen
 in all. The three oracle-authentication cases did not, because they build no
 repository and run no verifier —
 ``test_each_oracle_source_is_authenticated`` is about this harness's own trust
 check on the pinned scripts.
+
+Seven port-only extras state what the tree-object contract newly closes: a
+post-commit working-tree or index mutation is inert; a foreign ``GIT_DIR`` or
+``GIT_INDEX_FILE`` introduced after the entry guard is inert; a candidate
+``refs/replace`` is inert; and a flipped byte in a loose candidate object
+refuses. The seventh is the deliberate divergence: an unstaged historical-row
+rewrite makes the directory oracle refuse while the port, given the unaltered
+commit, accepts. That is the one input class on which the two verifiers are
+meant to disagree.
 
 The fixtures copy only ``ledger/`` and ``releases/``, and carry no
 ``.gitattributes`` (``assert_copied_surface``, shared with the ledger
@@ -70,12 +79,10 @@ candidate commit like the rest of the mutation. ``core.fileMode`` and
 ``core.symlinks`` are asserted once per session by
 ``committed_fixture_filesystem`` on the filesystem the fixtures are built on;
 where either is false these cases skip with that reason rather than failing,
-because the port refuses such a checkout in words of its own
-(``release_chain.assert_file_modes_authoritative``, which
-``verify_append_gate`` calls once for both paths, after it resolves the base
-ref and before it reads any state file) that the oracle never prints. A run
-of these harnesses counts only at zero skips: the skip names the filesystem,
-and a skipped moved case is a case not measured.
+because the committed-fixture contract cannot faithfully exercise every Git
+mode there. The port itself no longer reads those checkout settings. A run of
+these harnesses counts only at zero skips: the skip names the filesystem, and
+a skipped moved case is a case not measured.
 """
 
 from __future__ import annotations
@@ -88,6 +95,7 @@ import re
 import shutil
 import subprocess
 import sys
+import zlib
 from collections.abc import Callable
 
 import pytest
@@ -107,6 +115,7 @@ from test_ledger_equivalence import (
     committed_fixture_filesystem,  # noqa: F401 - registered pytest fixture
     detached_oracle_checkout,
 )
+import receipt.append_gate as append_gate_module
 from receipt.append_gate import (
     AppendError,
     AppendGateSpec,
@@ -178,6 +187,7 @@ BASE_LINE_COUNT = 145
 CANDIDATE_LINE_COUNT = 147
 NEW_RELEASE_STEM = "0002-a69272175b73c83b"
 BASE_RELEASE_STEM = "0001-916626696d034b80"
+BASE_MANIFEST_RELATIVE = f"releases/manifests/{BASE_RELEASE_STEM}.json"
 RELEASE_FILE_SUFFIXES = (
     ".json",
     ".producer.sig",
@@ -411,12 +421,11 @@ def _flip_middle_byte(path: pathlib.Path) -> None:
 
 # The two legs every case runs. Leg one hands the oracle and the port the same
 # main worktree, now a clean checkout of the candidate commit; leg two hands
-# the oracle an independent detached checkout of that same commit and leaves
-# the port on the main worktree. At this release the port is still a
-# working-tree verifier, so the legs must agree; when it becomes
-# commit-addressed, leg two is what measures that it needs no checkout.
+# the oracle an independent detached checkout of that same commit while the
+# port reads the named commit from the main repository. Both legs must agree;
+# leg two also measures that the port needs no checkout.
 LEG_ONE = "leg one (oracle and port on the main worktree)"
-LEG_TWO = "leg two (oracle on a detached checkout, port on the main worktree)"
+LEG_TWO = "leg two (oracle detached; port on the named commit)"
 
 
 def _assert_accepts_identically(
@@ -891,3 +900,238 @@ def test_mutation_refused_identically(
             LEG_TWO,
             capfd,
         )
+
+
+# --- commit-addressed port-only extras ------------------------------------
+
+
+def _committed_clean_candidate(
+    tree: pathlib.Path,
+    tmp_path: pathlib.Path,
+    name: str,
+) -> tuple[pathlib.Path, str, str]:
+    """Build the clean base/candidate pair used by the port-only cases."""
+
+    root, base = replay_release_two(tree, tmp_path)
+    candidate = commit_candidate(root, name)
+    return root, base, candidate
+
+
+def _assert_selected_commit_accepts(
+    tree: pathlib.Path,
+    root: pathlib.Path,
+    candidate: str,
+    base: str,
+    capfd: pytest.CaptureFixture[str],
+) -> str:
+    """Assert a commit-addressed port verdict accepts without writing output."""
+
+    capfd.readouterr()
+    code, message = run_port(tree, root, base, commit=candidate)
+    _assert_port_silent(capfd)
+    assert code == 0, message
+    assert message == CLEAN_APPEND_SUMMARY
+    return message
+
+
+@pytest.mark.usefixtures("committed_fixture_filesystem")
+def test_deliberate_divergence_dirty_checkout_affects_only_append_baseline(
+    append_pinned_tree: pathlib.Path,
+    tmp_path: pathlib.Path,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """An unstaged post-commit edit changes only the directory-based oracle."""
+
+    root, base, candidate = _committed_clean_candidate(
+        append_pinned_tree,
+        tmp_path,
+        "deliberate_divergence",
+    )
+    marker = historical_non_append(root, base)
+
+    baseline_code, baseline_out, baseline_err = run_baseline(
+        append_pinned_tree,
+        root,
+        base,
+    )
+    assert baseline_code == 1
+    assert baseline_out == ""
+    assert baseline_err == f"thesis-facts append check failed: {marker}"
+
+    _assert_selected_commit_accepts(
+        append_pinned_tree,
+        root,
+        candidate,
+        base,
+        capfd,
+    )
+
+
+@pytest.mark.usefixtures("committed_fixture_filesystem")
+def test_port_is_invariant_under_later_working_tree_mutation(
+    append_pinned_tree: pathlib.Path,
+    tmp_path: pathlib.Path,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    root, base, candidate = _committed_clean_candidate(
+        append_pinned_tree,
+        tmp_path,
+        "later_working_tree_mutation",
+    )
+    _flip_middle_byte(root / BASE_MANIFEST_RELATIVE)
+
+    _assert_selected_commit_accepts(
+        append_pinned_tree,
+        root,
+        candidate,
+        base,
+        capfd,
+    )
+
+
+@pytest.mark.usefixtures("committed_fixture_filesystem")
+def test_port_is_invariant_under_later_index_mutation(
+    append_pinned_tree: pathlib.Path,
+    tmp_path: pathlib.Path,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    root, base, candidate = _committed_clean_candidate(
+        append_pinned_tree,
+        tmp_path,
+        "later_index_mutation",
+    )
+    manifest = root / BASE_MANIFEST_RELATIVE
+    committed_bytes = manifest.read_bytes()
+    _flip_middle_byte(manifest)
+    _git(root, "add", "--", BASE_MANIFEST_RELATIVE)
+    manifest.write_bytes(committed_bytes)
+    assert _git(root, "diff", "--cached", "--name-only") == BASE_MANIFEST_RELATIVE
+
+    _assert_selected_commit_accepts(
+        append_pinned_tree,
+        root,
+        candidate,
+        base,
+        capfd,
+    )
+
+
+@pytest.mark.usefixtures("committed_fixture_filesystem")
+@pytest.mark.parametrize("variable", ["GIT_DIR", "GIT_INDEX_FILE"])
+def test_port_is_invariant_under_late_foreign_git_environment(
+    append_pinned_tree: pathlib.Path,
+    tmp_path: pathlib.Path,
+    capfd: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    variable: str,
+) -> None:
+    """Snapshot children ignore a redirect introduced after the entry guard."""
+
+    root, base, candidate = _committed_clean_candidate(
+        append_pinned_tree,
+        tmp_path,
+        f"late_foreign_{variable.lower()}",
+    )
+    entry_guard = append_gate_module.assert_no_redirecting_git_environment
+
+    def redirect_after_entry_guard() -> None:
+        entry_guard()
+        monkeypatch.setenv(variable, os.fspath(tmp_path / "foreign-git-state"))
+
+    monkeypatch.setattr(
+        append_gate_module,
+        "assert_no_redirecting_git_environment",
+        redirect_after_entry_guard,
+    )
+
+    _assert_selected_commit_accepts(
+        append_pinned_tree,
+        root,
+        candidate,
+        base,
+        capfd,
+    )
+
+
+@pytest.mark.usefixtures("committed_fixture_filesystem")
+def test_candidate_refs_replace_does_not_change_selected_commit(
+    append_pinned_tree: pathlib.Path,
+    tmp_path: pathlib.Path,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    root, base, candidate = _committed_clean_candidate(
+        append_pinned_tree,
+        tmp_path,
+        "refs_replace_subject",
+    )
+    historical_non_append(root, base)
+    replacement = commit_candidate(root, "refs_replace_replacement")
+    _git(root, "replace", candidate, replacement)
+
+    replacement_tree = _git(root, "rev-parse", f"{replacement}^{{tree}}")
+    replaced_view = _git(root, "rev-parse", f"{candidate}^{{tree}}")
+    object_view = _git(
+        root,
+        "--no-replace-objects",
+        "rev-parse",
+        f"{candidate}^{{tree}}",
+    )
+    assert replaced_view == replacement_tree
+    assert object_view != replacement_tree
+
+    _assert_selected_commit_accepts(
+        append_pinned_tree,
+        root,
+        candidate,
+        base,
+        capfd,
+    )
+
+
+def _flip_loose_object_payload_byte(root: pathlib.Path, oid: str) -> pathlib.Path:
+    """Rewrite one loose object with a one-byte payload flip under its old OID."""
+
+    git_dir = pathlib.Path(_git(root, "rev-parse", "--absolute-git-dir"))
+    loose_object = git_dir / "objects" / oid[:2] / oid[2:]
+    assert loose_object.is_file(), f"fixture object was not loose: {oid}"
+    framed = bytearray(zlib.decompress(loose_object.read_bytes()))
+    separator = framed.index(0)
+    flip_at = len(framed) - 2
+    assert flip_at > separator
+    framed[flip_at] ^= 0x01
+    loose_object.chmod(0o600)
+    loose_object.write_bytes(zlib.compress(framed))
+    return loose_object
+
+
+@pytest.mark.usefixtures("committed_fixture_filesystem")
+def test_flipped_candidate_loose_object_refuses(
+    append_pinned_tree: pathlib.Path,
+    tmp_path: pathlib.Path,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    root, base, candidate = _committed_clean_candidate(
+        append_pinned_tree,
+        tmp_path,
+        "flipped_candidate_loose_object",
+    )
+    tree = _git(
+        root,
+        "--no-replace-objects",
+        "rev-parse",
+        f"{candidate}^{{tree}}",
+    )
+    _flip_loose_object_payload_byte(root, tree)
+
+    capfd.readouterr()
+    code, message = run_port(
+        append_pinned_tree,
+        root,
+        base,
+        commit=candidate,
+    )
+    _assert_port_silent(capfd)
+    assert code == 1
+    assert message == (
+        f"thesis-facts append check failed: object {tree} does not hash to its name"
+    )
