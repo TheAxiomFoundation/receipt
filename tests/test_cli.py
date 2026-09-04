@@ -662,6 +662,13 @@ def test_requested_object_store_failure_is_not_rendered_as_not_requested(
     assert "objects requested; verification did not complete" in error
     assert "objects not requested" not in error
 
+    assert run(repo, "--verify-objects", "--json") == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["objectStore"] == {
+        "requested": True,
+        "report": None,
+    }
+
 
 def anchor_set_recomputed(repo: pathlib.Path) -> tuple[str, dict[str, str]]:
     """The recomputation an auditor would script, sharing no package code:

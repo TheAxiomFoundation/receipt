@@ -557,6 +557,10 @@ def test_object_store_refusal_keeps_the_requested_failure_shape(
     assert result.object_store is None
     assert result._object_store_requested is True
     assert result.passes[0].failure == message
+    assert result_to_dict(result)["objectStore"] == {
+        "requested": True,
+        "report": None,
+    }
 
 
 def test_unpinned_spec_anchor_field_is_a_producer_proposal(
