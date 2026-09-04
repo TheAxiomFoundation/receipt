@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import subprocess
 import unicodedata
 
 import pytest
@@ -31,9 +32,10 @@ from receipt.corpus import (
     MAX_REMOVED_TEXT,
     REMOVED_PATH_RENDER_STRUCTURE,
     CorpusError,
-    verify_corpus_binding,
+    verify_corpus_binding as _verify_corpus_binding,
     verify_declarations,
 )
+from receipt.snapshot import TreeSnapshot
 
 from corpus_fixture import (
     ATTESTED,
@@ -53,6 +55,54 @@ NOT_PORTABLE = (
     "is not a portable name (ASCII letters, digits, '.', '_' and '-', not "
     "ending in '.', not a Win32 device name)"
 )
+
+
+def _git(
+    root: pathlib.Path,
+    *arguments: str,
+    input_bytes: bytes | None = None,
+    check: bool = True,
+) -> bytes:
+    completed = subprocess.run(
+        ["git", "-C", str(root), *arguments],
+        input=input_bytes,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if check and completed.returncode:
+        raise AssertionError(
+            f"git {' '.join(arguments)} failed: "
+            f"{completed.stderr.decode('utf-8', 'replace')}"
+        )
+    return completed.stdout
+
+
+def _commit_worktree(root: pathlib.Path) -> str:
+    """Commit the fixture tree and return the immutable subject OID."""
+
+    if not (root / ".git").exists():
+        _git(root, "init", "-q")
+        _git(root, "config", "user.name", "Receipt Tests")
+        _git(root, "config", "user.email", "receipt-tests@example.invalid")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "--allow-empty", "-m", "corpus fixture")
+    return _git(root, "rev-parse", "HEAD").decode("ascii").strip()
+
+
+def verify_corpus_binding(
+    subject: pathlib.Path | TreeSnapshot,
+    journal_bytes: bytes,
+    *,
+    spec,
+):
+    """Adapt ordinary fixtures to the commit-addressed production API."""
+
+    if isinstance(subject, TreeSnapshot):
+        return _verify_corpus_binding(subject, journal_bytes, spec=spec)
+    oid = _commit_worktree(subject)
+    with TreeSnapshot.select(subject, oid) as snapshot:
+        return _verify_corpus_binding(snapshot, journal_bytes, spec=spec)
 
 
 def write_tree(
@@ -123,6 +173,20 @@ def test_binding_accepts_a_journal_that_describes_the_tree(tmp_path: pathlib.Pat
     assert [entry.path for entry in verification.content] == sorted(CONTENT)
     assert [entry.path for entry in verification.attested] == sorted(ATTESTED)
     assert len(verification.gates) == 3
+    assert verification.name_repertoire == "portable"
+
+
+def test_binding_requires_a_selected_tree_snapshot(tmp_path: pathlib.Path) -> None:
+    with pytest.raises(CorpusError) as caught:
+        _verify_corpus_binding(
+            tmp_path,
+            render_journal(journal_rows()),
+            spec=corpus_spec(),
+        )  # type: ignore[arg-type]
+    assert str(caught.value) == (
+        "verify_corpus_binding requires a TreeSnapshot; select one with "
+        "TreeSnapshot.select"
+    )
 
 
 def test_refuses_a_content_file_edited_after_witnessing(tmp_path: pathlib.Path) -> None:
@@ -822,6 +886,25 @@ def test_refuses_removing_a_path_that_was_never_present(tmp_path: pathlib.Path) 
 def test_spec_refuses_an_unknown_tier_at_construction() -> None:
     with pytest.raises(CorpusError, match="unknown reproducibility tier"):
         corpus_spec(accepted_gate_tiers=frozenset({"vibes"}))
+
+
+def test_spec_declares_a_defaulted_closed_name_repertoire() -> None:
+    assert corpus_spec().name_repertoire == "portable"
+    assert corpus_spec(name_repertoire="posix-bytes").name_repertoire == "posix-bytes"
+    with pytest.raises(
+        CorpusError,
+        match="name repertoire must be 'portable' or 'posix-bytes'",
+    ):
+        corpus_spec(name_repertoire="unicode")
+
+
+def test_posix_bytes_spec_accepts_nonportable_utf8_paths() -> None:
+    spec = corpus_spec(
+        content_roots=(pathlib.PurePosixPath("règles"),),
+        required_attested_paths=frozenset({".axiom/outil:chaîne.toml"}),
+        name_repertoire="posix-bytes",
+    )
+    assert spec.content_roots == (pathlib.PurePosixPath("règles"),)
 
 
 def test_spec_refuses_an_empty_content_root() -> None:

@@ -498,8 +498,31 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
+from receipt._names import (
+    ALIAS_CAPABLE_SUFFIX_RE,
+    PORTABLE_NAME_RE,
+    SHORT_NAME_PUNCTUATION,
+    WIN32_RESERVED_DEVICE_NAMES,
+    NamePolicyError,
+    _win32_device_basename,
+    ascii_fold_text,
+    assert_no_merging_entries as assert_no_merging_tree_names,
+    assert_portable_name,
+    short_name_carries_pinned_suffix,
+    short_name_extension,
+    validate_component_text,
+    validate_repertoire,
+)
 from receipt._render import bounded_encoded, bounded_key
 from receipt._unicode_repertoire import FORMAT_CONTROL_RANGES
+from receipt.snapshot import (
+    MAX_CONTENT_BLOB_BYTES,
+    MAX_CONTENT_BYTES_TOTAL,
+    GitEntry,
+    SnapshotError,
+    TreeListing,
+    TreeSnapshot,
+)
 
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 GATE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._/-]{0,127}\Z")
@@ -508,7 +531,6 @@ GATE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._/-]{0,127}\Z")
 #: underscore when Win32 derives a short name — except a space, which is
 #: removed rather than replaced, and which is why
 #: :func:`_short_name_extension` strips spaces before it maps anything.
-SHORT_NAME_PUNCTUATION = frozenset("$%'-_@~`!(){}^#&")
 #: Every name this module screens, as one path component. The whole of the
 #: portability model is here: ASCII letters, digits, ``.``, ``_`` and ``-``.
 #: :func:`_assert_portable_name` asks two more questions of a component that
@@ -521,7 +543,6 @@ SHORT_NAME_PUNCTUATION = frozenset("$%'-_@~`!(){}^#&")
 #: refused it would refuse every corpus this package exists to verify. It
 #: does not admit an empty component, nor ``.`` or ``..``, both of which end
 #: in a period.
-PORTABLE_NAME_RE = re.compile(r"[A-Za-z0-9._-]+\Z")
 #: A pinned content suffix: a period, then one or more characters of the
 #: portable repertoire, refused by :class:`CorpusSpec` at construction if it
 #: is anything else. What it adds to :data:`PORTABLE_NAME_RE` is the leading
@@ -552,7 +573,6 @@ CONTENT_SUFFIX_RE = re.compile(r"\.[A-Za-z0-9._-]+\Z")
 #: be. A pin carrying a second period, or more than three characters after
 #: the period, is the extension of no short name and
 #: :func:`_short_name_carries_pinned_suffix` ignores it.
-ALIAS_CAPABLE_SUFFIX_RE = re.compile(r"\.[A-Za-z0-9_-]{1,3}\Z")
 
 CONTENT_KIND = "content"
 ATTESTED_KIND = "attested"
@@ -1032,7 +1052,7 @@ _ROW_KEYS: dict[str, frozenset[str]] = {
 
 
 class CorpusError(ValueError):
-    """The journal is malformed, or it does not describe this working tree."""
+    """The journal is malformed, or it does not describe the selected tree."""
 
 
 @dataclass(frozen=True)
@@ -1054,8 +1074,13 @@ class CorpusSpec:
     accepted_gate_tiers: frozenset[str]
     required_gates: frozenset[str]
     journal_row_capacity: int = MAX_JOURNAL_ROWS
+    name_repertoire: str = "portable"
 
     def __post_init__(self) -> None:
+        try:
+            selected_repertoire = validate_repertoire(self.name_repertoire)
+        except NamePolicyError as exc:
+            raise CorpusError(str(exc)) from exc
         if type(self.schema_version) is not str or not self.schema_version:
             raise CorpusError("CorpusSpec schema_version must be a non-empty string")
         if (
@@ -1075,9 +1100,11 @@ class CorpusSpec:
             # rules, so a refusal names the committed spec that carries the
             # fault rather than a path. A root also reaches
             # _validate_relative_path below, which screens it again.
-            for component in root.as_posix().split("/"):
-                _assert_portable_name(component, "CorpusSpec content root")
-            _validate_relative_path(root.as_posix(), "content root")
+            _validate_relative_path(
+                root.as_posix(),
+                "CorpusSpec content root",
+                repertoire=selected_repertoire,
+            )
         if type(self.content_suffixes) is not tuple or not self.content_suffixes:
             raise CorpusError("CorpusSpec must declare at least one content suffix")
         for suffix in self.content_suffixes:
@@ -1100,7 +1127,11 @@ class CorpusSpec:
         if type(self.required_attested_paths) is not frozenset:
             raise CorpusError("CorpusSpec required_attested_paths must be a frozenset")
         for path in sorted(self.required_attested_paths):
-            _validate_relative_path(path, "required attested path")
+            _validate_relative_path(
+                path,
+                "required attested path",
+                repertoire=selected_repertoire,
+            )
         if type(self.accepted_gate_tiers) is not frozenset:
             raise CorpusError("CorpusSpec accepted_gate_tiers must be a frozenset")
         unknown = sorted(self.accepted_gate_tiers - set(GATE_TIERS))
@@ -1180,6 +1211,7 @@ class CorpusVerification:
     attested: tuple[FileBinding, ...]
     gates: tuple[GateDeclaration, ...]
     removed_paths: tuple[str, ...]
+    name_repertoire: str
 
     def gates_in_tier(self, tier: str) -> tuple[GateDeclaration, ...]:
         return tuple(gate for gate in self.gates if gate.tier == tier)
@@ -1497,18 +1529,14 @@ def _assert_portable_name(value: str, label: str) -> str:
     one, and every message quotes the value whole through :func:`_quoted`.
     """
 
-    for component in value.split("/"):
-        if (
-            PORTABLE_NAME_RE.fullmatch(component) is None
-            or component.endswith(".")
-            or _win32_device_basename(component) in WIN32_RESERVED_DEVICE_NAMES
-        ):
-            raise CorpusError(
-                f"{label} is not a portable name (ASCII letters, digits, "
-                "'.', '_' and '-', not ending in '.', not a Win32 device "
-                f"name): {_quoted(value)}"
-            )
-    return value
+    try:
+        return assert_portable_name(value, label)
+    except NamePolicyError as exc:
+        raise CorpusError(
+            f"{label} is not a portable name (ASCII letters, digits, "
+            "'.', '_' and '-', not ending in '.', not a Win32 device "
+            f"name): {_quoted(value)}"
+        ) from exc
 
 
 def _alias_capable_suffix(suffix: str) -> bool:
@@ -1590,26 +1618,7 @@ def _short_name_extension(name: str) -> str | None:
     a short name and looking for it.
     """
 
-    stripped = name.replace(" ", "").lstrip(".")
-    _, dot, extension = stripped.rpartition(".")
-    if not dot:
-        return None
-    # An 8.3 extension is three characters; the fourth and later characters
-    # of the extension source are dropped whatever they are.
-    source = extension[:3]
-    return (
-        "".join(
-            character.upper()
-            if "a" <= character <= "z" or "A" <= character <= "Z"
-            else (
-                character
-                if "0" <= character <= "9" or character in SHORT_NAME_PUNCTUATION
-                else "_"
-            )
-            for character in source
-        )
-        or None
-    )
+    return short_name_extension(name)
 
 
 def _short_name_carries_pinned_suffix(name: str, suffixes: tuple[str, ...]) -> bool:
@@ -1648,19 +1657,12 @@ def _short_name_carries_pinned_suffix(name: str, suffixes: tuple[str, ...]) -> b
     suffix here exactly as they are there.
     """
 
-    capable = [suffix for suffix in suffixes if _alias_capable_suffix(suffix)]
-    if not capable:
-        return False
-    extension = _short_name_extension(name)
-    if extension is None:
-        # No extension, so 8.3 generation produces a short name with none
-        # either, and a pinned suffix always begins with a dot.
-        return False
-    alias = "." + extension
-    return any(_path_fold(alias) == _path_fold(suffix) for suffix in capable)
+    return short_name_carries_pinned_suffix(name, suffixes)
 
 
-def _validate_relative_path(value: Any, label: str) -> str:
+def _validate_relative_path(
+    value: Any, label: str, *, repertoire: str = "portable"
+) -> str:
     """Reject anything that could escape the root or mean two things at once.
 
     Four shape rules and then the name screen. The shape rules are about the
@@ -1696,7 +1698,26 @@ def _validate_relative_path(value: Any, label: str) -> str:
             raise CorpusError(f"{label} has an empty path segment: {_quoted(value)}")
         if segment in (".", ".."):
             raise CorpusError(f"{label} contains a relative segment: {_quoted(value)}")
-    _assert_portable_name(value, label)
+    try:
+        selected_repertoire = validate_repertoire(repertoire)
+    except NamePolicyError as exc:
+        raise CorpusError(str(exc)) from exc
+    if selected_repertoire == "portable":
+        _assert_portable_name(value, label)
+    else:
+        for segment in value.split("/"):
+            try:
+                validate_component_text(
+                    segment,
+                    repertoire=selected_repertoire,
+                    label=label,
+                )
+                # Every path enters an ASCII-fold index later. This strict
+                # boundary refuses surrogateescaped, non-UTF-8 tree bytes
+                # before the value can be quoted in a verdict.
+                ascii_fold_text(segment)
+            except NamePolicyError as exc:
+                raise CorpusError(str(exc)) from exc
     return value
 
 
@@ -1989,7 +2010,11 @@ def parse_journal(
                 )
             continue
 
-        path = _validate_relative_path(row["path"], f"journal row {number} path")
+        path = _validate_relative_path(
+            row["path"],
+            f"journal row {number} path",
+            repertoire=spec.name_repertoire,
+        )
         digest = _sha256(row["sha256"], f"journal row {number} sha256")
         state = _string(row["state"], f"journal row {number} state")
         if state not in FILE_STATES:
@@ -2839,33 +2864,12 @@ def _assert_tombstones_absent(
 
 
 def _path_fold(relative: str) -> str:
-    """A filesystem-insensitivity-proof key for a relative path.
+    """Fold ASCII letters component-wise and preserve every other code point."""
 
-    NFC folds NFD/NFC spellings of the same characters together; casefold folds
-    case together. Two distinct declared paths sharing a fold key would alias on
-    some real filesystem, so the fold key is what closed-world uniqueness is
-    checked over.
-
-    Over the portable repertoire this is exactly ASCII case-insensitivity:
-    NFC is the identity on ASCII, ``casefold`` lowercases the letters and
-    leaves the digits, ``.``, ``_`` and ``-`` alone, and the second NFC has
-    nothing to compose. It is written as the general fold rather than as
-    ``str.lower`` because it is also asked of names that have *not* been
-    screened — the siblings of an attested path's components, which are
-    someone else's files — and because what it means is "the same name on
-    some real filesystem", which is not a claim about ASCII.
-    """
-
-    # Normalized again after folding, deliberately: casefold itself can
-    # produce decomposed text (U+00DF followed by U+0301 folds to s, s,
-    # U+0301, whose composed form is s, U+015B), so a variant that differs
-    # in case AND normalization at once produced an unequal key and the
-    # suffix predicate let it out of the sweep (peer review). That pair is
-    # outside the portable repertoire now; the key is still computed this
-    # way because it is asked of unscreened names too.
-    return unicodedata.normalize(
-        "NFC", unicodedata.normalize("NFC", relative).casefold()
-    )
+    try:
+        return "/".join(ascii_fold_text(component) for component in relative.split("/"))
+    except NamePolicyError as exc:
+        raise CorpusError(str(exc)) from exc
 
 
 def _has_pinned_suffix(relative: str, suffixes: tuple[str, ...]) -> bool:
@@ -3013,6 +3017,244 @@ def _reject_aliasing_paths(
             )
         previous_folded, previous_spelled = folded, spelled
     return nodes
+
+
+_REGULAR_BLOB_MODES = frozenset({"100644", "100755"})
+_TREE_MODE = "040000"
+
+
+def _screen_tree_listing(
+    listing: TreeListing,
+    *,
+    repertoire: str,
+    directory: str = "",
+) -> None:
+    """Validate every component and every sibling set before classification."""
+
+    children = listing.children
+    names = tuple(sorted(children))
+    for name in names:
+        relative = _under(directory, name)
+        if repertoire == "portable":
+            _assert_portable_name(name, f"tree entry {_quoted(relative)}")
+        else:
+            try:
+                validate_component_text(
+                    name,
+                    repertoire=repertoire,
+                    label=f"tree entry {_quoted(relative)}",
+                )
+                # Folding is required under both repertoires. In particular,
+                # this refuses surrogateescaped non-UTF-8 bytes before a
+                # verdict could quote or fold them.
+                ascii_fold_text(name)
+            except NamePolicyError as exc:
+                raise CorpusError(str(exc)) from exc
+
+    # Keep the established corpus refusal text. The shared helper still runs
+    # for every directory; this pre-check only supplies the retained path-rich
+    # diagnostic when the sibling pair itself is the fault.
+    seen: dict[str, str] = {}
+    for name in names:
+        folded = _path_fold(name)
+        previous = seen.get(folded)
+        if previous is not None:
+            raise CorpusError(
+                "directory holds two entries a case-insensitive filesystem "
+                f"would merge: {_quoted(_under(directory, previous))} and "
+                f"{_quoted(_under(directory, name))}"
+            )
+        seen[folded] = name
+    try:
+        assert_no_merging_tree_names(
+            names,
+            repertoire=repertoire,
+            label=f"tree directory {_quoted(directory or '.')}",
+        )
+    except NamePolicyError as exc:
+        raise CorpusError(str(exc)) from exc
+
+    for name in names:
+        child = children[name]
+        if isinstance(child, TreeListing):
+            _screen_tree_listing(
+                child,
+                repertoire=repertoire,
+                directory=_under(directory, name),
+            )
+
+
+def _entries_by_directory(
+    entries: Mapping[str, GitEntry],
+) -> dict[str, dict[str, GitEntry]]:
+    """Index an authenticated flat listing by each entry's immediate parent."""
+
+    result: dict[str, dict[str, GitEntry]] = {}
+    for path, entry in entries.items():
+        parent, separator, name = path.rpartition("/")
+        if not separator:
+            parent, name = "", path
+        result.setdefault(parent, {})[name] = entry
+    return result
+
+
+def _assert_content_root_spellings(
+    entries: Mapping[str, GitEntry],
+    by_directory: Mapping[str, Mapping[str, GitEntry]],
+    spec: CorpusSpec,
+) -> None:
+    """Retain the pinned-root alias refusal over immutable listing names."""
+
+    for root in spec.content_roots:
+        relative = root.as_posix()
+        parent = ""
+        for component in relative.split("/"):
+            for name in sorted(by_directory.get(parent, {})):
+                if name != component and _path_fold(name) == _path_fold(component):
+                    raise CorpusError(
+                        f"tree entry {_quoted(name)} aliases the pinned content "
+                        f"root component {_quoted(component)} on a case- or "
+                        "normalization-insensitive filesystem"
+                    )
+            exact = _under(parent, component)
+            entry = entries.get(exact)
+            if entry is None or entry.mode != _TREE_MODE:
+                break
+            parent = exact
+
+
+def _content_entries_from_listing(
+    entries: Mapping[str, GitEntry], spec: CorpusSpec
+) -> dict[str, GitEntry]:
+    """Return the exact closed-world content set from one tree listing."""
+
+    found: dict[str, GitEntry] = {}
+    for content_root in spec.content_roots:
+        base_relative = content_root.as_posix()
+        root_entry = entries.get(base_relative)
+        if root_entry is None:
+            raise CorpusError(
+                f"pinned content root is absent from the tree: {base_relative}"
+            )
+        if root_entry.mode != _TREE_MODE:
+            raise CorpusError(
+                f"pinned content root is not a directory: {base_relative}"
+            )
+
+        prefix = base_relative + "/"
+        for relative in sorted(entries):
+            if not relative.startswith(prefix):
+                continue
+            entry = entries[relative]
+            if entry.mode == "160000":
+                raise CorpusError(
+                    f"content root contains a gitlink: {_quoted(relative)}"
+                )
+
+            carries_suffix = _has_pinned_suffix(relative, spec.content_suffixes)
+            if not carries_suffix:
+                if (
+                    spec.name_repertoire == "portable"
+                    and entry.mode in _REGULAR_BLOB_MODES
+                    and _short_name_carries_pinned_suffix(
+                        relative.rpartition("/")[2], spec.content_suffixes
+                    )
+                ):
+                    raise CorpusError(
+                        "content root contains a file whose short-name alias "
+                        "would carry a pinned suffix: "
+                        f"{_quoted(relative)}"
+                    )
+                continue
+
+            if entry.mode == "120000":
+                raise CorpusError(
+                    "content root contains a symlink where a regular file was "
+                    f"recorded: {_quoted(relative)}"
+                )
+            if entry.mode not in _REGULAR_BLOB_MODES or entry.object_type != "blob":
+                raise CorpusError(
+                    f"content root contains a non-regular file: {_quoted(relative)}"
+                )
+            found[relative] = entry
+    return found
+
+
+def _assert_tombstones_absent_from_listing(
+    entries: Mapping[str, GitEntry], removed: tuple[str, ...]
+) -> None:
+    """Ask exact and ASCII-fold indexes once whether a removed path survives."""
+
+    folded: dict[str, str] = {}
+    for path in sorted(entries):
+        folded.setdefault(_path_fold(path), path)
+    for path in removed:
+        if path in entries:
+            raise CorpusError(f"removed path is still present in the tree: {path}")
+        survivor = folded.get(_path_fold(path))
+        if survivor is not None:
+            raise CorpusError(
+                "removed path is still present in the tree under a spelling "
+                "that aliases it on a case- or normalization-insensitive "
+                f"filesystem: {path} ({_quoted(survivor)})"
+            )
+
+
+def _attested_entries_from_snapshot(
+    snapshot: TreeSnapshot, attested: Mapping[str, FileBinding]
+) -> dict[str, GitEntry]:
+    """Resolve every attested path exactly and require a regular blob."""
+
+    result: dict[str, GitEntry] = {}
+    for path in sorted(attested):
+        try:
+            entry = snapshot.entry(path)
+        except SnapshotError as exc:
+            raise CorpusError(
+                f"bound file is missing or not a regular file: {path}"
+            ) from exc
+        if entry.mode not in _REGULAR_BLOB_MODES or entry.object_type != "blob":
+            raise CorpusError(f"bound file is not a regular file: {path}")
+        result[path] = entry
+    return result
+
+
+def _verify_binding_digests(
+    snapshot: TreeSnapshot,
+    content: Mapping[str, FileBinding],
+    content_entries: Mapping[str, GitEntry],
+    attested: Mapping[str, FileBinding],
+    attested_entries: Mapping[str, GitEntry],
+) -> None:
+    """Stream every authenticated bound blob once, in retained pass order."""
+
+    ordered = [content_entries[path] for path in sorted(content)]
+    ordered.extend(attested_entries[path] for path in sorted(attested))
+    try:
+        digests = snapshot.digests(
+            ordered,
+            per_blob=MAX_CONTENT_BLOB_BYTES,
+            total=MAX_CONTENT_BYTES_TOTAL,
+        )
+        for entry, digest in digests:
+            if entry.path in content:
+                expected = content[entry.path].sha256
+                if digest != expected:
+                    raise CorpusError(
+                        f"content file {_quoted(entry.path)} does not match its "
+                        f"witnessed digest: tree has {digest}, journal binds "
+                        f"{expected}"
+                    )
+            else:
+                expected = attested[entry.path].sha256
+                if digest != expected:
+                    raise CorpusError(
+                        f"attested file {_quoted(entry.path)} does not match its "
+                        f"witnessed digest: tree has {digest}, journal binds "
+                        f"{expected}"
+                    )
+    except SnapshotError as exc:
+        raise CorpusError(str(exc)) from exc
 
 
 def _tree_content_paths(
@@ -3698,7 +3940,7 @@ def verify_declarations(
     return verification.gates
 
 
-def verify_corpus_binding(
+def _verify_corpus_binding_worktree(
     root: pathlib.Path,
     journal_bytes: bytes,
     *,
@@ -4001,4 +4243,86 @@ def verify_corpus_binding(
         attested=tuple(attested[path] for path in sorted(attested)),
         gates=gates,
         removed_paths=removed,
+        name_repertoire=spec.name_repertoire,
+    )
+
+
+def verify_corpus_binding(
+    snapshot: TreeSnapshot,
+    journal_bytes: bytes,
+    *,
+    spec: CorpusSpec,
+) -> CorpusVerification:
+    """Prove the journal describes the immutable tree selected by ``snapshot``.
+
+    ``journal_bytes`` are the bytes already authenticated by the custody pass.
+    The tree is listed once as an immutable object; membership, tombstones,
+    exact attested lookups, and streamed digests are all derived from that
+    object. Checkout fidelity is outside this binding claim.
+    """
+
+    if not isinstance(snapshot, TreeSnapshot):
+        raise CorpusError(
+            "verify_corpus_binding requires a TreeSnapshot; select one with "
+            "TreeSnapshot.select"
+        )
+
+    content, attested, gates, removed = parse_journal(journal_bytes, spec=spec)
+
+    prefix_work = _PathPrefixWork()
+    _reject_aliasing_paths(list(content) + list(attested), work=prefix_work)
+
+    try:
+        listing = snapshot.entries("")
+    except SnapshotError as exc:
+        raise CorpusError(str(exc)) from exc
+    _screen_tree_listing(listing, repertoire=spec.name_repertoire)
+    try:
+        entries = listing.as_dict(include_trees=True)
+    except SnapshotError as exc:
+        raise CorpusError(str(exc)) from exc
+
+    by_directory = _entries_by_directory(entries)
+    _assert_content_root_spellings(entries, by_directory, spec)
+    tree = _content_entries_from_listing(entries, spec)
+
+    journal_paths = set(content)
+    tree_paths = set(tree)
+    unlisted = sorted(tree_paths - journal_paths)
+    if unlisted:
+        raise CorpusError(
+            f"{len(unlisted)} content file(s) in the tree are not bound by the "
+            f"witnessed journal, starting with {_quoted(unlisted[0])}"
+        )
+    absent = sorted(journal_paths - tree_paths)
+    if absent:
+        raise CorpusError(
+            f"{len(absent)} content file(s) bound by the journal are missing "
+            f"from the tree, starting with {_quoted(absent[0])}"
+        )
+
+    _assert_tombstones_absent_from_listing(entries, removed)
+
+    missing_required = sorted(spec.required_attested_paths - set(attested))
+    if missing_required:
+        raise CorpusError(
+            "the witnessed journal does not attest a path the pinned spec "
+            f"requires: {_quoted(missing_required[0])}"
+        )
+    attested_entries = _attested_entries_from_snapshot(snapshot, attested)
+
+    _verify_binding_digests(
+        snapshot,
+        content,
+        tree,
+        attested,
+        attested_entries,
+    )
+
+    return CorpusVerification(
+        content=tuple(content[path] for path in sorted(content)),
+        attested=tuple(attested[path] for path in sorted(attested)),
+        gates=gates,
+        removed_paths=removed,
+        name_repertoire=spec.name_repertoire,
     )
