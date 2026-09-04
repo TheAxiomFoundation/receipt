@@ -5911,7 +5911,7 @@ def test_the_redirecting_refusal_names_the_first_variable_set(
 # nothing was ever accepted that should not have been; a library caller got an
 # exception from outside this module's vocabulary, with the OS's message and
 # no mention of the root it was asked about.
-MISSING_ROOT_REFUSAL = "candidate repository is missing or not a git repository: "
+MISSING_ROOT_REFUSAL = "candidate root is missing or not a directory: "
 
 
 @pytest.mark.parametrize("with_base", [False, True], ids=["push", "base-ref"])

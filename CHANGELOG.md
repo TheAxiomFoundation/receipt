@@ -303,8 +303,8 @@ the OS's message rather than the root, where every other refusal in the module
 is an `AppendError` naming what it refused. The CLI's fail-closed boundary
 caught it and reported a FAIL, so nothing was ever accepted that should not
 have been; a library caller got an exception from outside the module's
-vocabulary. Both refuse as `candidate repository is missing or not a git
-repository: <root>` now, from the open itself rather than from a check placed
+vocabulary. Both refuse as `candidate root is missing or not a directory: <root>` now —
+the words state what the open tested, and no more — from the open itself rather than from a check placed
 ahead of it, before any git command is run.
 
 Both verifier entries refuse a git environment that would redirect their reads

@@ -571,8 +571,8 @@ not the root, where every other refusal in this module is an ``AppendError``
 naming what it refused. A CLI boundary that catches everything reported that
 as a failure, so the fail-closed property was never in question; a library
 caller got an exception from outside this module's vocabulary. ``_set_root``
-now answers both in one sentence — ``candidate repository is missing or not a
-git repository`` — from the open itself rather than from a check placed ahead
+now answers both in one sentence — ``candidate root is missing or not a
+directory`` — from the open itself rather than from a check placed ahead
 of it, which would be a statement about a path this open may not reach (#46).
 
 All of it carries its own tests in tests/test_append_gate.py.
@@ -798,7 +798,7 @@ def _set_root(root: pathlib.Path, spec: AppendGateSpec) -> _CandidateTree:
         # race, not a missing tree, and it is not this refusal's fact.
         if exc.errno in {errno.ENOENT, errno.ENOTDIR}:
             raise AppendError(
-                "candidate repository is missing or not a git repository: "
+                "candidate root is missing or not a directory: "
                 f"{root}"
             ) from exc
         raise
