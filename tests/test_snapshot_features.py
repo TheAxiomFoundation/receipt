@@ -18,13 +18,13 @@ from receipt.snapshot import Materialization, SnapshotError, TreeSnapshot
 
 
 CHRONICLE_ATTRIBUTES = b"""\
+# Files whose exact Git and working-tree bytes are hashed by the release chain.
 ledger/official_observations.jsonl text eol=lf
 ledger/immutable_prefix.json text eol=lf
-ledger/series_catalog.json text eol=lf
-ledger/series_uuid_registry.jsonl text eol=lf
-ledger/seeds/thesis_docket_series.json text eol=lf
 releases/manifests/*.json text eol=lf
 releases/anchors/*.pem text eol=lf
+
+# RFC 3161 timestamp responses are DER binary.
 releases/manifests/*.tsr binary
 """
 
@@ -161,9 +161,6 @@ def test_exact_chronicle_eight_line_attributes_fixture_is_accepted(
     paths = (
         "ledger/official_observations.jsonl",
         "ledger/immutable_prefix.json",
-        "ledger/series_catalog.json",
-        "ledger/series_uuid_registry.jsonl",
-        "ledger/seeds/thesis_docket_series.json",
         "releases/manifests/release.json",
         "releases/anchors/root.pem",
         "releases/manifests/release.tsr",
@@ -173,9 +170,13 @@ def test_exact_chronicle_eight_line_attributes_fixture_is_accepted(
 
     with selected:
         selected.refuse_transforming_attributes(paths)
-        assert selected.work.attribute_rules == 8
+        assert selected.work.attribute_rules == 5
         assert selected.work.attribute_bytes == len(CHRONICLE_ATTRIBUTES)
-        assert selected.work.attribute_match_work < snapshot_module.MAX_ATTRIBUTE_MATCH_WORK
+        assert (
+            selected.work.attribute_match_work
+            == 435
+            < snapshot_module.MAX_ATTRIBUTE_MATCH_WORK
+        )
 
 
 def test_attribute_parser_accepts_leading_comments_and_a_blank_line(
@@ -312,6 +313,31 @@ def test_git_info_attributes_cannot_change_the_snapshot_answer(
         selected.refuse_transforming_attributes(("protected.txt",))
 
 
+def test_symlink_gitattributes_entry_refuses_as_unsupported(
+    git_repo: pathlib.Path,
+) -> None:
+    attribute_target = _hash_object(git_repo, "blob", b"elsewhere")
+    protected_blob = _hash_object(git_repo, "blob", b"protected bytes\n")
+    tree = _tree_object(
+        git_repo,
+        (
+            (b"120000", b".gitattributes", attribute_target),
+            (b"100644", b"protected.txt", protected_blob),
+        ),
+    )
+    commit = _commit_object(git_repo, tree)
+
+    with TreeSnapshot.select(git_repo, commit) as selected:
+        with pytest.raises(
+            SnapshotError,
+            match=(
+                r"^unsupported \.gitattributes entry at \.gitattributes: "
+                r"mode 120000$"
+            ),
+        ):
+            selected.refuse_transforming_attributes(("protected.txt",))
+
+
 @pytest.mark.parametrize(
     ("pattern", "protected_path"),
     [
@@ -319,6 +345,8 @@ def test_git_info_attributes_cannot_change_the_snapshot_answer(
         ("*.json", "deep/value.txt"),
         ("/root.txt", "root.txt"),
         ("/root.txt", "deep/root.txt"),
+        ("/**", "root.txt"),
+        ("/**", "deep/root.txt"),
         ("**/manifests/*.json", "a/b/manifests/release.json"),
         ("releases/**", "releases/a/b/receipt.json"),
         ("releases/**", "releases"),
@@ -353,6 +381,7 @@ def test_accepted_attribute_patterns_match_hermetic_git_oracle(
         stderr=subprocess.PIPE,
         check=False,
     )
+    assert system.returncode == 0, system.stderr.decode(errors="replace")
     system_path = system.stdout.decode(errors="surrogateescape").strip()
     if system_path and pathlib.Path(system_path).exists():
         pytest.skip(f"Git system attributes file exists: {system_path}")

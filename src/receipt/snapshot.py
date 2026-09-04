@@ -708,13 +708,12 @@ def _canonical_commit(
     separator = payload.find(b"\n\n")
     if separator < 0:
         raise SnapshotError(f"commit {oid} is not a canonical commit object")
-    header_block = payload[: separator + 1]
-    physical = header_block.splitlines(keepends=True)
+    # Commit framing names LF exactly. ``bytes.splitlines`` also treats CR,
+    # VT, FF, and several other bytes as separators, which would interpret an
+    # opaque future header value instead of carrying it unchanged.
+    physical = payload[:separator].split(b"\n")
     headers: list[tuple[bytes, bytes]] = []
     for line in physical:
-        if not line.endswith(b"\n"):
-            raise SnapshotError(f"commit {oid} is not a canonical commit object")
-        line = line[:-1]
         if line.startswith(b" "):
             if not headers:
                 raise SnapshotError(f"commit {oid} is not a canonical commit object")
@@ -765,7 +764,7 @@ def _unsupported_attribute(path: str, line: int, construct: str) -> SnapshotErro
 
 def _attribute_pattern(
     token: bytes, *, path: str, line: int
-) -> tuple[bytes, bool]:
+) -> tuple[bytes, tuple[bytes, ...], bool]:
     try:
         shown = token.decode("ascii", errors="strict")
     except UnicodeDecodeError as exc:
@@ -797,9 +796,9 @@ def _attribute_pattern(
     for segment in segments:
         if b"**" in segment and segment != b"**":
             raise _unsupported_attribute(path, line, "misplaced **")
-    if len(segments) == 1 and segments[0] == b"**":
+    if token == b"**":
         raise _unsupported_attribute(path, line, "misplaced **")
-    return anchored, token.startswith(b"/") or b"/" in anchored
+    return anchored, tuple(segments), token.startswith(b"/") or b"/" in anchored
 
 
 def _parse_attribute_file(path: str, payload: bytes) -> tuple[_AttributeRule, ...]:
@@ -815,7 +814,7 @@ def _parse_attribute_file(path: str, payload: bytes) -> tuple[_AttributeRule, ..
             raise _unsupported_attribute(path, line_number, "line has no attribute state")
         if fields[0].startswith(b"[attr]"):
             raise _unsupported_attribute(path, line_number, "attribute macro definition")
-        pattern, has_slash = _attribute_pattern(
+        pattern, segments, has_slash = _attribute_pattern(
             fields[0], path=path, line=line_number
         )
         states: list[tuple[str, str]] = []
@@ -843,7 +842,27 @@ def _parse_attribute_file(path: str, payload: bytes) -> tuple[_AttributeRule, ..
             if re.fullmatch(r"[A-Za-z0-9_.-]+", name) is None:
                 raise _unsupported_attribute(path, line_number, f"state {state!r}")
             states.append((name, disposition))
-        rules.append(_AttributeRule(pattern, has_slash, tuple(states)))
+        trailing_globstars = 0
+        for segment in reversed(segments):
+            if segment != b"**":
+                break
+            trailing_globstars += 1
+        trailing_descendants = bool(
+            trailing_globstars and trailing_globstars < len(segments)
+        )
+        match_segments = (
+            segments[:-trailing_globstars] if trailing_descendants else segments
+        )
+        rules.append(
+            _AttributeRule(
+                pattern,
+                segments,
+                match_segments,
+                has_slash,
+                trailing_descendants,
+                tuple(states),
+            )
+        )
     return tuple(rules)
 
 
@@ -881,22 +900,13 @@ def _segment_matches(
 def _attribute_matches(
     rule: _AttributeRule, relative: tuple[bytes, ...], step: Callable[[], None]
 ) -> bool:
-    segments = rule.pattern.split(b"/")
-    trailing_globstars = 0
-    for segment in reversed(segments):
-        if segment != b"**":
-            break
-        trailing_globstars += 1
-    match_segments = (
-        segments[:-trailing_globstars]
-        if trailing_globstars and trailing_globstars < len(segments)
-        else segments
-    )
     if not rule.has_slash:
-        return bool(relative) and _segment_matches(segments[0], relative[-1], step)
+        return bool(relative) and _segment_matches(
+            rule.segments[0], relative[-1], step
+        )
     previous = [False] * (len(relative) + 1)
     previous[0] = True
-    for pattern_segment in match_segments:
+    for pattern_segment in rule.match_segments:
         current = [False] * (len(relative) + 1)
         if pattern_segment == b"**":
             for index in range(len(relative) + 1):
@@ -911,7 +921,7 @@ def _attribute_matches(
                     pattern_segment, relative[index - 1], step
                 )
         previous = current
-    if match_segments is not segments:
+    if rule.trailing_descendants:
         # Git's trailing ``/**`` means descendants, not the directory itself.
         # One or several trailing globstars must therefore consume at least
         # one component.  An all-globstar pattern has no literal directory
@@ -1232,7 +1242,10 @@ class _TreeNode:
 @dataclass(frozen=True)
 class _AttributeRule:
     pattern: bytes
+    segments: tuple[bytes, ...]
+    match_segments: tuple[bytes, ...]
     has_slash: bool
+    trailing_descendants: bool
     states: tuple[tuple[str, str], ...]
 
 

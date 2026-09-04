@@ -4,9 +4,10 @@
 
 The immutable reader and name-policy modules are implemented. The reader's
 process lifecycle, entry provenance, repository-control re-audits, bounded
-fsck heads, and byte accounting have received a second hardening pass. Feature,
-budget, hostile-environment, object-corruption, and name-boundary coverage are
-complete. A fresh read-only audit and the final interpreter matrix remain.
+fsck heads, and byte accounting have received a second hardening pass. The
+final read-only audit is in progress; it has corrected LF-only commit framing,
+globstar matching, cleanup coverage, and the exact frozen Chronicle attribute
+fixture. The interpreter matrix and delivery remain.
 
 The brief contains incompatible instructions about this file: the standing
 order requires it to be committed from the start, while a later ground rule
@@ -48,17 +49,25 @@ in the module and will be listed in the final report.
   fixture flips a byte inside an object after the first packed object.
 - Tightened ancestry to accept an entered base `TreeSnapshot` only, so the
   candidate and base necessarily share the cumulative verification budgets.
+- Corrected the canonical commit parser to treat LF as its only physical-line
+  delimiter and precomputed accepted globstar shapes without relying on tuple
+  identity.
+- Completed all six named cleanup cases, including a mid-frame digest failure
+  and an OpenSSL-shaped exception nested inside both context managers.
+- Replaced the approximate Chronicle attribute fixture with the frozen eight
+  physical lines (two comments, one blank, five rules); its matcher work is
+  435 steps against the 67,108,864-step ceiling.
 - Added exact-byte `posix-bytes` lookup coverage and the full portable alphabet,
   Win32-device, UTF-8 quote/fold, host-materialization, and raw-name matrices.
 - Passed the generated 20,000-entry, exactly 128 MiB acceptance fixture. Its
   principal counters are 60,000 tree entries (20,000 maximum in one walk),
   860,185 tree bytes, 600,000 path bytes, and 134,217,728 bytes each streamed
   and materialized, all below their ceilings.
-- Passed all 328 snapshot tests and 951 existing offline tests (94 equivalence
+- Passed all 336 snapshot tests and 951 existing offline tests (94 equivalence
   tests deselected) on the worktree's default interpreter.
 
 ## Next
 
-- Resolve any finding from the final read-only audit.
+- Resolve the remaining findings from the final read-only audit.
 - Run the permitted focused, offline, and equivalence selections on Python
   3.11 and the worktree's default interpreter, then push and open a draft PR.

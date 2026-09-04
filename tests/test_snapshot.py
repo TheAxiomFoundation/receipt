@@ -259,6 +259,76 @@ def test_context_reaps_batch_and_removes_temporary_directory_on_exception(
     assert temporary is not None and not temporary.exists()
 
 
+def test_git_absent_at_select_leaves_no_private_directory(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repository"
+    root.mkdir()
+    temporary_root = tmp_path / "temporary"
+    temporary_root.mkdir()
+    monkeypatch.setattr(snapshot_module.tempfile, "tempdir", os.fspath(temporary_root))
+
+    def missing_git(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise FileNotFoundError("injected missing git")
+
+    monkeypatch.setattr(snapshot_module.subprocess, "Popen", missing_git)
+    with pytest.raises(
+        SnapshotError,
+        match="^git is required to read an immutable tree snapshot$",
+    ):
+        TreeSnapshot.select(root)
+
+    assert tuple(temporary_root.iterdir()) == ()
+
+
+def test_early_reader_refusal_reaps_child_pipes_and_private_directory(
+    git_repo: pathlib.Path,
+) -> None:
+    selected = TreeSnapshot.select(git_repo)
+
+    with pytest.raises(SnapshotError, match="^tree entry does not exist: missing$"):
+        with selected:
+            process = selected._state.batch.process
+            temporary = selected.temporary_directory
+            selected.entry("missing")
+
+    assert process.poll() is not None
+    assert process.stdin is not None and process.stdin.closed
+    assert process.stdout is not None and process.stdout.closed
+    assert process.stderr is not None and process.stderr.closed
+    assert temporary is not None and not temporary.exists()
+
+
+def test_openssl_subprocess_failure_cleans_nested_materialization_and_snapshot(
+    git_repo: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    destination = tmp_path / "materializations"
+    destination.mkdir()
+    selected = TreeSnapshot.select(git_repo)
+
+    with pytest.raises(subprocess.CalledProcessError) as caught:
+        with selected:
+            process = selected._state.batch.process
+            temporary = selected.temporary_directory
+            with selected.materialize(
+                ("tracked.txt",), destination, repertoire="portable"
+            ) as materialized:
+                materialized_path = materialized.path
+                raise subprocess.CalledProcessError(
+                    1, ("openssl", "verify", "receipt.pem")
+                )
+
+    assert caught.value.cmd[0] == "openssl"
+    assert process.poll() is not None
+    assert process.stdin is not None and process.stdin.closed
+    assert process.stdout is not None and process.stdout.closed
+    assert process.stderr is not None and process.stderr.closed
+    assert temporary is not None and not temporary.exists()
+    assert not materialized_path.exists()
+    assert tuple(destination.iterdir()) == ()
+
+
 def test_selection_failure_reaps_its_short_lived_batch(
     git_repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -635,6 +705,17 @@ def test_canonical_commit_parses_merge_signed_header_and_ignores_message() -> No
     assert parsed.parents == (ZERO_OID, TWO_OID)
 
 
+def test_canonical_commit_uses_only_lf_as_a_header_line_delimiter() -> None:
+    payload = _valid_commit_payload(
+        extra_headers=b"future-header opaque\rvalue\vvalue\fvalue\n"
+    )
+
+    parsed = _canonical_commit("f" * 40, payload, object_format="sha1")
+
+    assert parsed.tree == ONE_OID
+    assert parsed.parents == ()
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -822,6 +903,59 @@ def test_abandoned_digest_iterator_blocks_later_requests_but_is_reaped(
             selected.header(entries[1].object_id)
 
     assert process.poll() is not None
+    assert temporary is not None and not temporary.exists()
+
+
+def test_digest_interrupted_mid_frame_abandons_and_reaps_the_batch_child(
+    git_repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = b"x" * (1024 * 1024 + 1)
+    (git_repo / "large.bin").write_bytes(payload)
+    _commit_worktree(git_repo, "large blob")
+    selected = TreeSnapshot.select(git_repo)
+
+    with selected:
+        process = selected._state.batch.process
+        temporary = selected.temporary_directory
+        entry = selected.entry("large.bin")
+        batch = selected._state.batch
+        original_consume = batch.consume
+        consumed_chunks: list[int] = []
+
+        def interrupted_consume(
+            oid: str,
+            *,
+            role: str,
+            limit: int,
+            consumer: object = None,
+            hold: bool = False,
+        ) -> bytes | None:
+            def stop_mid_frame(chunk: bytes) -> None:
+                consumed_chunks.append(len(chunk))
+                if callable(consumer):
+                    consumer(chunk)
+                raise RuntimeError("injected mid-frame interruption")
+
+            return original_consume(
+                oid,
+                role=role,
+                limit=limit,
+                consumer=stop_mid_frame,
+                hold=hold,
+            )
+
+        monkeypatch.setattr(batch, "consume", interrupted_consume)
+        digests = selected.digests((entry,), per_blob=len(payload), total=len(payload))
+        with pytest.raises(RuntimeError, match="injected mid-frame interruption"):
+            next(digests)
+        assert 0 < sum(consumed_chunks) < len(payload)
+        with pytest.raises(SnapshotError, match="^snapshot stream was abandoned$"):
+            selected.header(entry.object_id)
+
+    assert process.poll() is not None
+    assert process.stdin is not None and process.stdin.closed
+    assert process.stdout is not None and process.stdout.closed
+    assert process.stderr is not None and process.stderr.closed
     assert temporary is not None and not temporary.exists()
 
 
