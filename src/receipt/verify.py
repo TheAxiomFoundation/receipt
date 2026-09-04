@@ -489,12 +489,22 @@ def run_verification(
     spec_anchor_pin = verification_spec.anchor_set_sha256
     if expect_anchor_set is not None and not spec.pinned:
         raise ValueError("an anchor pin requires a pinned spec")
+    if expect_anchor_set is not None and (
+        type(expect_anchor_set) is not str
+        or len(expect_anchor_set) != 64
+        or any(character not in "0123456789abcdef" for character in expect_anchor_set)
+    ):
+        raise ValueError(
+            "expected anchor-set SHA-256 must be a lowercase 64-character hex digest"
+        )
     anchor_pin_conflict = (
         expect_anchor_set is not None
         and spec_anchor_pin is not None
         and expect_anchor_set != spec_anchor_pin
     )
-    anchor_pin = (expect_anchor_set or spec_anchor_pin) if spec.pinned else None
+    anchor_pin = (
+        expect_anchor_set if expect_anchor_set is not None else spec_anchor_pin
+    ) if spec.pinned else None
 
     root = root.resolve()
     passes: list[PassResult] = []

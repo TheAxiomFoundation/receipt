@@ -656,6 +656,32 @@ def test_run_verification_requirement_rules_are_entry_refusals(
     assert str(repertoire_caught.value) == "spec declares two name repertoires"
 
 
+@pytest.mark.parametrize(
+    "invalid",
+    ["", "0" * 63, "A" * 64, 0],
+    ids=["empty", "short", "uppercase", "non-string"],
+)
+def test_direct_anchor_pin_must_be_an_exact_lowercase_sha256(
+    tmp_path: pathlib.Path,
+    invalid: object,
+) -> None:
+    source = SPEC_SOURCE
+    loaded = load_spec(
+        _spec_file(tmp_path, source),
+        expect_sha256=hashlib.sha256(source).hexdigest(),
+    )
+
+    with pytest.raises(ValueError) as caught:
+        run_verification(
+            tmp_path,
+            loaded,
+            expect_anchor_set=invalid,  # type: ignore[arg-type]
+        )
+    assert str(caught.value) == (
+        "expected anchor-set SHA-256 must be a lowercase 64-character hex digest"
+    )
+
+
 def test_redirecting_environment_keeps_custody_failure_shape(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
