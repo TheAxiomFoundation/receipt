@@ -11,10 +11,20 @@ passed, that the encoded rules read the law correctly — is stated just as
 plainly, because a verdict that lets a reader infer more than was checked is
 worse than no verdict.
 
-With ``--json``, every exit path after argument parsing prints exactly one
+With ``--json``, every exit path after argument parsing prints *at most* one
 JSON object bearing a ``verdict`` key — a refused spec, an unusable root, an
 aborted run, and a result that cannot be rendered all included. A machine
 consumer that keys on ``verdict`` therefore fails closed with the command.
+
+At most, rather than exactly, because a stream is not obliged to take bytes.
+A stdout the emission guard refuses gets nothing at all: :func:`_refuse`
+re-emits to the same stream and swallows the second failure, so the exit code
+is the whole of the verdict. And a write that completes over a flush that
+then fails leaves a complete object on stdout followed by the refusal object
+the render boundary emits, which is two. Both are fail-closed — the exit code
+is EXIT_FAIL either way — and a consumer that reads the exit code before
+parsing is told the truth in both (peer review, Sol round 8). What the
+command never does is print a *partial* object and exit passing.
 
 The text renderer is the verdict's last boundary, so every string it takes
 from the result goes through :func:`_rendered` — escaped and bounded in one
@@ -1546,10 +1556,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command != "verify":  # pragma: no cover - argparse enforces this
         parser.error(f"unknown command {args.command!r}")
 
-    # From here down the contract is: with --json, exactly one JSON object
+    # From here down the contract is: with --json, at most one JSON object
     # bearing a "verdict" key is printed on every path — spec refusals, root
-    # refusals, an aborted run, even a result that cannot be rendered. The
-    # only exits without one are argparse's own, before --json is knowable.
+    # refusals, an aborted run, even a result that cannot be rendered — and
+    # the exit code carries the verdict wherever the stream will not take
+    # bytes. Zero objects where the emission guard refuses stdout, and two
+    # where a write completes and the flush after it fails; the module
+    # docstring says what each of those looks like. argparse's own exits,
+    # before --json is knowable, carry none either.
     as_json = bool(args.json)
 
     try:

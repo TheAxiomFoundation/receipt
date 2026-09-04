@@ -185,6 +185,51 @@ NOT_ON_THE_ALLOW_LIST = (
 )
 
 
+def test_the_json_contract_is_at_most_one_object_not_exactly_one(
+    repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Binds S8-F9: "exactly one JSON object" is wrong in both directions.
+
+    Zero is already asserted a few tests below, where the emission guard
+    refuses stdout and ``_refuse`` re-emits to the same stream and swallows
+    the second failure. Two is what this pins: the write completes, the flush
+    after it fails, and the render boundary emits its own refusal object
+    behind the complete one the run had already written. A consumer reading
+    the stream as a single JSON document gets a parse error from the second
+    object rather than from a truncated first.
+
+    The behaviour is deliberate and unchanged — the exit code is EXIT_FAIL in
+    both cases, so a consumer keying on it is told the truth — and what the
+    command never does is print a *partial* object and exit passing. The
+    contract sentence now says "at most one" and names the exit code as the
+    carrier; this is the case that made "exactly" false.
+    """
+
+    class _FlushFailingStdout(io.StringIO):
+        """A stream that takes every byte and then cannot flush them."""
+
+        def flush(self) -> None:
+            raise OSError("cannot flush the verdict stream")
+
+    stream = _FlushFailingStdout()
+    monkeypatch.setattr(sys, "stdout", stream)
+    assert run(repo, "--json") == EXIT_FAIL
+
+    written = stream.getvalue()
+    decoder = json.JSONDecoder()
+    first, index = decoder.raw_decode(written)
+    second, _ = decoder.raw_decode(written[index:].lstrip())
+    assert first["verdict"] == "PASS"
+    assert second["verdict"] == "FAIL"
+    assert second["stage"] == "render"
+    # Two objects, so the stream is not one JSON document.
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(written)
+    assert "verdict could not be rendered" in capsys.readouterr().err
+
+
 def test_a_codecs_stream_writer_is_not_mistaken_for_a_unicode_sink(
     repo: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
