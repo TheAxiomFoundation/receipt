@@ -47,7 +47,6 @@ from receipt.release_chain import (
     _observe_anchor_bytes,
     _parse_receipt_text,
     _receipt_bytes,
-    assert_index_carries_no_protected_alias,
     verify_base_release_chain,
     verify_receipt,
     verify_release_chain,
@@ -1843,10 +1842,9 @@ def test_a_symlinked_interior_manifest_component_is_refused(
     repo: pathlib.Path, tmp_path: pathlib.Path
 ) -> None:
     """Binds S5-R2-F3. The release tree's confinement walk —
-    ``assert_no_symlinked_release_root``, which since round 12 walks all three
-    configured paths whole — was added for the append gate and was reached
-    only from there, through ``hold_release_root``. The public verifier ran
-    none of it, so a spec whose manifest directory sits below an interior
+    ``assert_no_symlinked_release_root``, which walks all three configured
+    paths whole — now belongs directly to the public directory verifier. A
+    spec whose manifest directory sits below an interior
     component (``releases/journal/manifests``) had that component resolved
     like any other name: an untracked symlink at ``releases/journal`` pointing
     outside the tree made the chain in *that* directory the one this function
@@ -1931,168 +1929,3 @@ def test_a_folded_manifest_leaf_is_refused_by_the_public_verifier(
         "path component releases/manifests is not spelled by its directory: "
         "releases/manifests"
     )
-
-
-def a_repository_holding(tmp_path: pathlib.Path, *listed: str) -> pathlib.Path:
-    """A git repository whose index records exactly ``listed``.
-
-    Ambient user configuration is isolated the way ``tests/test_append_gate``'s
-    own fixture git isolates it, so the entries are this test's and nothing
-    else's.
-    """
-
-    root = tmp_path / "index-repo"
-    root.mkdir()
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "GIT_CONFIG_GLOBAL": "/dev/null",
-            "GIT_CONFIG_SYSTEM": "/dev/null",
-            "GIT_CONFIG_NOSYSTEM": "1",
-        }
-    )
-    subprocess.run(
-        ["git", "-C", str(root), "init", "--quiet"], check=True, env=environment
-    )
-    for name in listed:
-        path = root / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("x\n", encoding="utf-8")
-    subprocess.run(
-        ["git", "-C", str(root), "add", "-A"], check=True, env=environment
-    )
-    return root
-
-
-def test_the_alias_scan_covers_the_manifest_and_anchor_directories(
-    repo: pathlib.Path, tmp_path: pathlib.Path
-) -> None:
-    """Opus peer review, round one on gate g: the scan's own protected set
-    named the release root and the two state paths, but not the manifest and
-    anchor directories this module also reads for itself. An index entry
-    spelled ``releases/Manifests/…`` beside the spec's ``releases/manifests``
-    folds onto a directory this module reads for itself, and with no surfaces
-    named nothing in this scan asked about it; the release root's own index
-    scan answers only where it runs, which the append gate's push path is and
-    a direct caller of this function is not. Both directories are protected on
-    their own now, so the alias is refused with no ``surfaces`` argument at
-    all."""
-
-    spec = load_spec(repo / "verification/spec.py").verification
-    for alias, protected in (
-        ("releases/Manifests/0000-alias.json", "releases/manifests"),
-        ("releases/Anchors/root.pem", "releases/anchors"),
-    ):
-        scratch = tmp_path / alias.split("/")[1]
-        scratch.mkdir()
-        root = a_repository_holding(scratch, alias)
-        with pytest.raises(ReleaseChainError) as refusal:
-            assert_index_carries_no_protected_alias(root, spec.chain)
-        assert str(refusal.value) == (
-            f"index carries an alias of a protected path: {alias} "
-            f"(for {protected} at {protected})"
-        )
-
-
-def test_the_alias_scan_protects_only_what_its_caller_names(
-    repo: pathlib.Path, tmp_path: pathlib.Path
-) -> None:
-    """Binds S5-G1-F2 where the widening is decided: the package's own scan.
-
-    ``assert_index_carries_no_protected_alias`` compared every index entry
-    against three of the five paths a ``ChainSpec`` carries (the manifest and
-    anchor directories joined them later in this round), the paths this
-    module reads for itself. A caller that also classifies proposals by
-    surface patterns protects more than that, and every surface match is by
-    exact spelling, so an entry folding onto one of them was invisible on both
-    sides — which is the finding, bound end to end in
-    tests/test_append_gate.py, where the same tree is accepted as
-    ``thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs
-    base`` without the fix.
-
-    Widening it stays the caller's decision, and the default is what pins
-    that. ``append_gate`` is this function's only caller in the package —
-    ``verify_release_chain`` and ``receipt verify`` never reach it, so the
-    public verifier's own confinement is the release tree's component walk
-    and the release root's index scan rather than this — which is why the
-    widening travels no further than the argument, and why a later change
-    giving ``surfaces`` a non-empty default would silently change what every
-    direct caller of this function is refused for. Same index, same spec,
-    refused when the surface is named and untouched when it is not. Without
-    the ``surfaces`` argument the second call is the first, and neither
-    refuses."""
-
-    spec, _ = load_spec(repo / "verification/spec.py")
-    root = a_repository_holding(tmp_path, "Tools/helper.py")
-
-    assert_index_carries_no_protected_alias(root, spec.chain)
-
-    with pytest.raises(ReleaseChainError) as refusal:
-        assert_index_carries_no_protected_alias(
-            root, spec.chain, surfaces=frozenset({"tools/**"})
-        )
-    assert str(refusal.value) == (
-        "index carries an alias of a protected path: Tools/helper.py "
-        "(for tools at tools)"
-    )
-
-
-# #45, the cheap half, at the public verifier rather than at the gate. Five
-# variables can each decide which repository, working tree, index or object
-# store some git read this package makes — the base resolution, an index read
-# behind the state and release checks, the release-root scan — resolves in,
-# rather than the checkout named as ``root`` (not every read moves under every
-# variable; the refusal's docstring says which), while the verdict is still
-# phrased about the checkout named. They are refused at the entry rather
-# than dropped for the child processes: a drop would leave the verifier's own
-# environment redirected while its children's was not, and this module reads
-# the candidate tree directly as well as through git. The full pin — GIT_DIR
-# stated explicitly for every read — is 0.6.
-def redirecting_refusal(name: str) -> str:
-    return f"{name} is set in the environment and would redirect git reads; unset it"
-
-
-def test_the_ordinary_environment_still_reaches_a_custody_verdict(
-    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The refusal's negative side: only those five names refuse.
-
-    The environment carries the four pathspec-mode variables these reads
-    already drop, git's configuration isolation, and a name that merely begins
-    with ``GIT_DIR`` — the prefix, not the variable — and the chain verifies
-    exactly as it does with none of them set.
-    """
-
-    spec, _ = load_spec(repo / "verification/spec.py")
-    for name in release_chain.PATHSPEC_ENVIRONMENT:
-        monkeypatch.setenv(name, "1")
-    monkeypatch.setenv("GIT_DIR_FIXTURE_MARKER", "not the variable")
-    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
-    for name in release_chain.REDIRECTING_GIT_ENVIRONMENT:
-        monkeypatch.delenv(name, raising=False)
-
-    assert verify_release_chain(repo, spec=spec.chain).releases
-
-
-def test_the_git_environment_still_carries_the_redirecting_names_through(
-    monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``_git_environment`` is unchanged, and the docstring says why.
-
-    Dropping the five here would sanitize the child processes while leaving
-    the verifier's own environment redirected, and both this module and the
-    append gate read the candidate tree directly as well as through git — so
-    the two halves of one verdict would be about two trees. The entries refuse
-    instead, which is why a run that reaches this function has already been
-    told none of the five is set.
-    """
-
-    for name in release_chain.REDIRECTING_GIT_ENVIRONMENT:
-        monkeypatch.setenv(name, "carried through")
-
-    environment = release_chain._git_environment()
-
-    for name in release_chain.REDIRECTING_GIT_ENVIRONMENT:
-        assert environment[name] == "carried through"
-    assert environment["GIT_NO_REPLACE_OBJECTS"] == "1"
-    assert not set(environment) & set(release_chain.PATHSPEC_ENVIRONMENT)

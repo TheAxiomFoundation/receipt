@@ -15,6 +15,7 @@ In progress on `feat/0.6-lane-c`, based at `145f3db93d745ddc43aeb47f6b7bd8b30aa3
 - Replaced release-history inspection with a comparison of two entered `TreeSnapshot`s, re-exported `snapshot.GitEntry`, and made base-chain verification materialize its entered base. The three existing immutability messages remain exact and candidate links retain the live-directory refusal. `tests/test_release_chain.py` is green (67 passed).
 - Deleted the descriptor-holding and cross-run root/state race helpers. Their working-tree race subject no longer exists for commit-addressed callers; their private support functions' callers are deleted. The directory verifier retains its one bounded `O_NOFOLLOW` read.
 - Added frozen, loader-constructed `LoadedSpec`; `load_spec` now hashes its single source read and enforces an optional expected digest before `compile` or `exec`. Existing callers consume the record explicitly, and focused tests pass (4 passed).
+- Deleted the complete obsolete Git/index/history helper closure (`WORKING_TREE_SCAN_OPTIONS`, index guards, base-ref resolution, `git_tree_entries`, file/blob reads, and their private support). Its checkout/index subject no longer exists or its caller is deleted; `TreeSnapshot` now owns the object reads. The retained live-directory release tests are green (63 passed).
 
 ## Decisions
 
@@ -27,9 +28,10 @@ In progress on `feat/0.6-lane-c`, based at `145f3db93d745ddc43aeb47f6b7bd8b30aa3
 
 - `tsa._require_supported_openssl()` was already present and cached on the starting head; Lane C only needs to wire it into `verify_release_chain` and map its refusal into `ReleaseChainError`.
 - Integration dependency: the 0.5.2 `append_gate.py` imports most release-chain guards section 3.5 requires Lane C to delete. The standalone Lane C tree cannot both remove them and collect the append-gate suite until Lane B replaces those callers; keep this visible rather than silently retaining dead compatibility code.
+- Snapshot diagnostic surface: `TreeSnapshot.select` reports an unresolvable base as `cannot resolve commit ...` without the old Git stderr, and `assert_ancestor` names an explicit candidate OID rather than `HEAD`. The ledger differential wrapper uses narrow message adapters so the pre-existing moved-case outputs stay pinned; `snapshot.py` remains unchanged.
 - The brief assigns the exact append-only deliberate-divergence refusal (`change rewrites existing line ...`) to `tests/test_ledger_equivalence.py`, while that module's baseline is the release-chain script and the phrase belongs to the append-gate oracle. Re-check the harness composition before implementing; if the requested case truly cannot be expressed there, preserve the scope conflict in the final record rather than changing either oracle.
 
 ## Next
 
-- Delete obsolete release-history Git/index plumbing in one explicit group.
-- Add `LoadedSpec`, commit-addressed `run_verification`, CLI pins/output, and harness re-pin extras in coherent commits.
+- Merge Lane D's completed snapshot corpus API when its branch is ready, then implement commit-addressed `run_verification` and CLI pins/output.
+- Finish and commit the ledger harness re-pin extras and census record.
