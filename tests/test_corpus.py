@@ -3888,15 +3888,17 @@ def test_a_directory_that_became_a_file_verifies_and_keeps_verifying(
     perfectly still. Verifying twice is the point: the failure was not a
     race, and a second identical run reproduced it exactly.
 
-    Both halves of the fix are bound here, because either one alone hides
-    the other. The search no longer descends into a non-directory, so the
-    recorder is never offered ``rules/README.md`` at all — asserted over
-    every name ``record`` is handed — and a stamp the recorder never took is
-    no longer read as movement.
+    The first half of the fix is what this binds: the search no longer
+    descends into a non-directory, so the recorder is never offered
+    ``rules/README.md`` at all, which is asserted over every name ``record``
+    is handed. Restoring the recursion stamps it and that assertion fails.
 
-    Without the first half ``rules/README.md`` is stamped and the recorded
-    names assertion fails; without the second the first call raises the
-    refusal.
+    The second half is bound by
+    ``test_a_stamp_the_recorder_never_took_is_not_a_mutation`` alone, and
+    this test used to claim it too (S8-F8). With the ``continue`` in place no
+    ``None`` stamp is ever taken for that file, so restoring
+    ``if generation is None or ...`` to ``assert_unchanged`` leaves this test
+    green — measured — and only the sibling fails.
     """
 
     import receipt.corpus as corpus_module

@@ -148,6 +148,33 @@ def test_refusal_writes_to_a_redirected_stringio_stderr(
     )
 
 
+def _a_non_ascii_character_this_page_spells(name: str) -> str | None:
+    """A character above 0x7F this code page encodes, from its own table.
+
+    The allow-list's shift-state check needs a probe the member under test
+    actually encodes; a fixed tuple of five characters does not have one for
+    nine of the sixty-one, and an encoder that refused every probe was then
+    asked whether ``A`` still encodes to ``b"A"`` in a state nothing had
+    entered (S8-F8). Reading the page's own decode table gives a probe for
+    every member that has one, and ``None`` only for ``ascii``, which spells
+    no such character at all.
+    """
+
+    for value in range(0x80, 0x100):
+        try:
+            character = bytes([value]).decode(name)
+        except UnicodeDecodeError:
+            continue
+        if ord(character) < 0x80:
+            continue
+        try:
+            character.encode(name)
+        except (UnicodeEncodeError, UnicodeError):
+            continue
+        return character
+    return None
+
+
 #: What a codec outside ``_ASCII_TRANSPARENT_CODECS`` is refused with. Spelled
 #: once here, with the size written out rather than read off the module, so a
 #: change to the allow-list fails the table test rather than silently rewording
@@ -2785,8 +2812,15 @@ def test_every_ascii_transparent_codec_is_a_stateless_single_byte_page() -> None
     literal under the probe, no byte that combines with an adjacent ASCII
     byte to become part of another character, no character it spells in more
     than one byte, and no shift state that a previous write could leave it
-    in. All five are checked here for every name, so the list cannot acquire
-    a member on assertion alone.
+    in. All five are checked here for every name — which used to be true of
+    four of them: the shift-state probe came from a fixed five-character
+    tuple that nine members spell none of, so for ``ascii``, ``cp1006``,
+    ``cp737``, ``cp869``, ``cp874``, ``iso8859-6``, ``iso8859-7``,
+    ``iso8859-11`` and ``tis-620`` the encoder was asked whether ``A``
+    survives a state nothing had entered (S8-F8). The probe is read off each
+    page's own decode table now, ``ascii`` is skipped by name because it
+    spells nothing above 0x7F, and the count of members really probed is
+    asserted. So the list cannot acquire a member on assertion alone.
 
     The last two are what exclude by property rather than by omission, and
     they exclude different families. The shift check excludes ``iso2022_*``:
@@ -2807,6 +2841,7 @@ def test_every_ascii_transparent_codec_is_a_stateless_single_byte_page() -> None
     from receipt.cli import _ASCII_TRANSPARENT_CODECS, _ascii_is_literal
 
     assert len(_ASCII_TRANSPARENT_CODECS) == 61
+    probed: list[str] = []
     for name in sorted(_ASCII_TRANSPARENT_CODECS):
         assert codecs.lookup(name).name == name, name
         assert _ascii_is_literal(name), name
@@ -2822,14 +2857,29 @@ def test_every_ascii_transparent_codec_is_a_stateless_single_byte_page() -> None
             except (UnicodeEncodeError, UnicodeError):
                 continue
             assert len(spelled) == 1, (name, outside)
-        encoder = codecs.lookup(name).incrementalencoder()
-        for probe in ("\u00e9", "\u0430", "\u3042", "\u00b5", "\u0416"):
-            try:
-                encoder.encode(probe)
-            except UnicodeEncodeError:
-                continue
-            break
-        assert encoder.encode("A") == b"A", name
+        # The shift-state check, over a probe taken from this page's own
+        # table rather than from a fixed tuple. The tuple fell through for
+        # nine members — ascii, cp1006, cp737, cp869, cp874, iso8859-6,
+        # iso8859-7, iso8859-11 and tis-620 — none of which spells é, а, あ,
+        # µ or Ж, so ``encoder.encode("A")`` was asserted on a fresh encoder
+        # and the property went unchecked while the docstring said all five
+        # were (S8-F8).
+        probe = _a_non_ascii_character_this_page_spells(name)
+        if probe is None:
+            # ``ascii`` alone spells nothing above 0x7F, so it has no state
+            # to leave behind and nothing to probe with. Skipped by name, not
+            # by falling through.
+            assert name == "ascii", name
+        else:
+            encoder = codecs.lookup(name).incrementalencoder()
+            assert encoder.encode(probe) != b"", (name, probe)
+            assert encoder.encode("A") == b"A", name
+            probed.append(name)
+
+    # Every member but ``ascii`` was really probed, which is what the fixed
+    # tuple could not say (S8-F8).
+    assert len(probed) == 60
+    assert "ascii" not in probed
 
     # The excluded families, named in the constant, are excluded in fact.
     for name in (
