@@ -104,7 +104,7 @@ from test_ledger_equivalence import (
     _git,
     assert_copied_surface,
     commit_candidate,
-    committed_fixture_filesystem as _committed_fixture_filesystem,
+    committed_fixture_filesystem,  # noqa: F401 - registered pytest fixture
     detached_oracle_checkout,
 )
 from receipt.append_gate import (
@@ -509,11 +509,11 @@ CLEAN_APPEND_SUMMARY = (
 )
 
 
+@pytest.mark.usefixtures("committed_fixture_filesystem")
 def test_clean_valid_append_verdicts_match(
     append_pinned_tree: pathlib.Path,
     tmp_path: pathlib.Path,
     capfd: pytest.CaptureFixture[str],
-    _committed_fixture_filesystem: None,
 ) -> None:
     root, base = replay_release_two(append_pinned_tree, tmp_path)
     candidate = commit_candidate(root, "clean_valid_append")
@@ -541,11 +541,11 @@ def test_clean_valid_append_verdicts_match(
     assert message == CLEAN_APPEND_SUMMARY
 
 
+@pytest.mark.usefixtures("committed_fixture_filesystem")
 def test_candidate_base_anchor_bytes_do_not_replace_trusted_anchors(
     append_pinned_tree: pathlib.Path,
     tmp_path: pathlib.Path,
     capfd: pytest.CaptureFixture[str],
-    _committed_fixture_filesystem: None,
 ) -> None:
     anchor_relative = (
         LEDGER_SPEC.anchor_relative / LEDGER_SPEC.anchors["freetsa"].filename
@@ -597,11 +597,11 @@ GATE_ONLY_SUMMARY = (
 )
 
 
+@pytest.mark.usefixtures("committed_fixture_filesystem")
 def test_gate_only_acceptance_verdicts_match(
     append_pinned_tree: pathlib.Path,
     tmp_path: pathlib.Path,
     capfd: pytest.CaptureFixture[str],
-    _committed_fixture_filesystem: None,
 ) -> None:
     root, base = gate_only_candidate(append_pinned_tree, tmp_path)
     # The gate-only file was untracked before this commit and is tracked after
@@ -856,12 +856,12 @@ MUTATIONS: dict[str, Callable[[pathlib.Path, str], str]] = {
 }
 
 
+@pytest.mark.usefixtures("committed_fixture_filesystem")
 @pytest.mark.parametrize("mutation", sorted(MUTATIONS))
 def test_mutation_refused_identically(
     append_pinned_tree: pathlib.Path,
     tmp_path: pathlib.Path,
     capfd: pytest.CaptureFixture[str],
-    _committed_fixture_filesystem: None,
     mutation: str,
 ) -> None:
     root, base = replay_release_two(append_pinned_tree, tmp_path)
