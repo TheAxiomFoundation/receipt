@@ -406,6 +406,38 @@ def test_refuses_unsupported_committed_tree_shapes_under_each_repertoire(
     assert str(caught.value) == message
 
 
+@pytest.mark.parametrize("mode", ["120000", "160000"])
+def test_refuses_a_non_blob_at_an_attested_path(
+    tmp_path: pathlib.Path, mode: str
+) -> None:
+    """An exact attested path must select a regular blob in the tree."""
+
+    write_tree(tmp_path)
+    base_oid = _commit_worktree(tmp_path)
+    if mode == "120000":
+        object_id = _hash_blob(
+            tmp_path,
+            ATTESTED[".axiom/toolchain.toml"].encode("utf-8"),
+        )
+    else:
+        object_id = base_oid
+    oid = _commit_index_updates(
+        tmp_path,
+        [(mode, object_id, b".axiom/toolchain.toml")],
+    )
+
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(
+            tmp_path,
+            oid,
+            render_journal(journal_rows()),
+            spec=corpus_spec(),
+        )
+    assert str(caught.value) == (
+        "bound file is not a regular file: .axiom/toolchain.toml"
+    )
+
+
 def test_binding_is_invariant_to_every_worktree_mutation_class(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -535,6 +567,26 @@ def test_refuses_a_content_file_edited_after_witnessing(tmp_path: pathlib.Path) 
         verify_corpus_binding(
             tmp_path, render_journal(journal_rows()), spec=corpus_spec()
         )
+
+
+def test_refuses_an_attested_file_edited_after_witnessing(
+    tmp_path: pathlib.Path,
+) -> None:
+    write_tree(tmp_path)
+    path = ".axiom/toolchain.toml"
+    tampered = '[toolchain]\ncorpus_release = "tampered"\n'
+    (tmp_path / path).write_text(tampered)
+
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path,
+            render_journal(journal_rows()),
+            spec=corpus_spec(),
+        )
+    assert str(caught.value) == (
+        f"attested file {path!r} does not match its witnessed digest: tree has "
+        f"{sha256_text(tampered)}, journal binds {sha256_text(ATTESTED[path])}"
+    )
 
 
 def test_refuses_an_unlisted_content_file(tmp_path: pathlib.Path) -> None:
