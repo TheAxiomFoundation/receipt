@@ -475,18 +475,17 @@ def producer_signature_path_for_manifest(path: pathlib.Path) -> pathlib.Path:
 def assert_manifest_directory_regular(root: pathlib.Path, spec: ChainSpec) -> None:
     """Decide what the manifest path *is*, for a caller about to ask if it has one.
 
-    ``_enumerate_manifest_files`` below answers this for itself, but only once
-    something has decided to enumerate. A caller that decides whether a chain
-    exists by asking the filesystem — ``append_gate``'s push path, whose
-    ``initialized`` is ``manifest_directory.is_dir() and any(iterdir())`` —
-    gets ``False`` for every way the path can be something other than a
-    directory: a tracked 100644 blob standing where the manifest directory
-    was, an empty untracked symlink there, a dangling one. Each of those is
-    then "this tree has no chain", which is an acceptance, and the enumeration
-    that would have said otherwise never runs. Nothing else on that path says
-    it either: the release root's walk stops one component short of this leaf,
-    and the root's index scan reconciles a tracked blob here with the walk that
-    finds a regular file, which is exactly what it is.
+    ``verify_release_chain`` calls this guard itself before enumeration, after
+    the configured path walk has bound the manifest leaf's spelling but
+    deliberately left its type to this check. The append gate's push path also
+    calls it before asking whether a chain is initialized. Without that guard,
+    ``manifest_directory.is_dir() and any(iterdir())`` gets ``False`` for every
+    way the path can be something other than a directory: a 100644 blob
+    standing where the manifest directory was, an empty symlink there, or a
+    dangling one. Each would become "this tree has no chain", and the
+    enumeration that says otherwise would never run. The release-root walk
+    stops one component short of this leaf and deliberately leaves that answer
+    to this check.
 
     So the type is decided first, in the enumeration's own words and for the
     same three shapes — an ``lstat``, so a symlink is not a directory here
@@ -498,13 +497,13 @@ def assert_manifest_directory_regular(root: pathlib.Path, spec: ChainSpec) -> No
     Absence is the only thing that returns, and it is asked component by
     component so that it can be told apart from the two facts that used to be
     folded into it. One ``lstat`` of the whole path answers ``ENOTDIR`` when an
-    *ancestor* is a regular file — a release root that is an untracked blob,
+    *ancestor* is a regular file — a release root that is a blob,
     or any component of a multi-component manifest path — and ``EACCES`` when
     an ancestor is unsearchable, and catching ``OSError`` turned both into "no
     manifest directory here". On the push path that is an acceptance with no
-    chain: ``initialized`` is false, nothing is enumerated, the index scan has
-    no entry under an untracked root to object to, and ``verify_release_chain``
-    is never called, while the commit under review may carry the whole chain.
+    chain: ``initialized`` is false, nothing is enumerated, and
+    ``verify_release_chain`` is never called, while the commit under review may
+    carry the whole chain.
 
     So the components are walked. ``FileNotFoundError`` at any of them is
     absence — nothing stands there, so nothing stands at the leaf either, and
@@ -1343,8 +1342,8 @@ def _assert_component_spelled(
     normalisation-insensitive filesystem answers about a directory this
     package never named. ``releases`` resolves to a ``Releases`` on disk, every
     check that follows reads that directory, and the verdict is about a
-    release tree whose name is not the one the spec pins or the one the index
-    records. The directory's own listing is the question that does not go
+    release tree whose name is not the exact one the spec pins. The directory's
+    own listing is the question that does not go
     through resolution: a directory holds the spelling it holds, and a
     component that resolves but is not in the listing is a component this
     verifier reached by a name the filesystem folded onto another.
