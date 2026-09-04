@@ -11,9 +11,11 @@ that says not to commit it.
 ## State
 
 Implementation and final local verification are complete. The two harness
-commits are clean and every required suite is green. Push and draft PR are
-next; the plan-mandated named-model reviews were attempted but are unavailable
-in this sandbox (details under Findings).
+commits are clean and every required suite is green. Remote delivery is
+blocked: this sandbox cannot resolve `github.com`, and the installed `gh`
+credential is invalid, so the branch remains local and no draft PR exists.
+The plan-mandated named-model reviews are also unavailable here (details under
+Findings).
 
 ## Done
 
@@ -32,6 +34,8 @@ in this sandbox (details under Findings).
   in the ledger harness (see "Findings", item 2).
 - Recovered and independently audited the interrupted diff against every §3.8
   requirement before retaining it; no correctness blocker was found.
+- **d84269d** — committed the recovered verification record as required by the
+  continuation's top-level standing order.
 
 ## Runs
 
@@ -115,13 +119,21 @@ a leg two that runs but asserts nothing.
    setup then hit the sandboxed network. The exact 94-case command was rerun
    with both authenticated local tree overrides and passed; the discarded run
    is not an implementation finding.
+6. **Remote delivery is unavailable.** `git push -u origin
+   feat/0.6-lane-e-fixture-commits` failed with `Could not resolve host:
+   github.com`. A read-only `gh auth status` also reports that the active
+   `MaxGhenis` token is invalid. Without a pushed head, the required draft PR
+   cannot be created from this environment.
 
 ## Next
 
-1. `git push -u origin feat/0.6-lane-e-fixture-commits`.
-2. Draft PR "Commit the differential harness fixtures (0.6 Lane E)".
-3. Record the PR URL and final head, push that progress-only checkpoint, and
-   write the final report to the task runner's output target.
+1. Restore DNS/network access and authenticate `gh` outside this sandbox.
+2. Run `git push -u origin feat/0.6-lane-e-fixture-commits`.
+3. Open the draft PR titled "Commit the differential harness fixtures (0.6
+   Lane E)" with the contract, two legs, census, before/after totals, and
+   required Claude Code footer from the brief.
+4. Record the PR URL in this file, commit that progress-only checkpoint, and
+   push it so the remote record is current.
 
 ## Note on method
 
