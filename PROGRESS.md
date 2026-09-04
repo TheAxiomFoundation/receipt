@@ -4,7 +4,7 @@
 
 - Branch: `feat/0.6-lane-b`
 - Recorded starting OID: `e3af1950ff39f1eaa5ff3aad60e89b18e73a943c`
-- Phase: full suite green; final contract audit and handoff
+- Phase: latest target integrated; final verification and handoff
 - Network status: sandbox-disabled; GitHub API access fails immediately
 
 ## Done
@@ -88,13 +88,10 @@
   the explicitly selected candidate OID as PLAN 3.3 requires. Added
   exact-message unit coverage for both paths and removed the invalid-ref
   test's obsolete checkout-guard setup and name.
-- Tightened the Lane C base-chain workaround so the base verifier always uses
-  the caller-owned trusted anchor directory and respects custom-anchor pin
-  policy. It no longer compares candidate/base anchor bytes to choose the
-  trust source; the required release-root materialization still rehashes and
-  writes descendant anchor blobs. Added a post-genesis chain test where
-  committed anchor bytes equal the custom trusted directory but production
-  pins differ.
+- Tightened the initial base-chain integration so it always used the
+  caller-owned trusted anchor directory and respected custom-anchor pin
+  policy. Added a post-genesis chain test where committed anchor bytes equal
+  the custom trusted directory but production pins differ.
 - Kept `release path is a symlink` / `release path is not regular` for
   non-regular release leaves. A release root or interior manifest ancestor is
   instead a mandated section 3.3 reader-shape refusal, while the exact manifest
@@ -130,31 +127,27 @@
   links, and trees; `posix-bytes` retains the exact-byte policy. Restored a
   direct exact-message test for release-history deletion. The append unit
   module is now 109/109 green.
+- Merged target tip `4a4f86062f6b5e3773a67fb749f35266b61e2eb2`,
+  which includes Lane C's completed trusted-anchor parameters and base
+  transforming-attribute screen. Replaced Lane B's temporary local base
+  materialization with the required `verify_base_release_chain` call.
 
 ## Next
 
-- Integrate the target branch's post-start Lane C/D fixes, replace the local
-  base-chain workaround with Lane C's now-complete helper, and re-run all
-  verification on the integrated head.
+- Re-run all verification on the integrated head and record fresh totals.
 - Finish the obsolete-narrative and exact-contract audit for the PR handoff.
 - Prepare the complete no-network PR handoff; pushing and opening the draft PR
   will require a networked environment unless connectivity becomes available.
 
 ## Findings
 
-- Lane C's `verify_base_release_chain(spec, *, base)` materializes and trusts
-  the base tree's anchor prefix. That conflicts with the append-gate contract
-  that anchors always come from `trusted_code_root`. A helper-level
-  reproduction using the pinned tree with `releases/anchors/freetsa-root.pem`
-  poisoned in the committed base returns
-  `ReleaseChainError: production TSA anchor bytes are not code-pinned for freetsa: a8c8894a3e09c5504651b9d2092e477fb041e53c96b84d391f3bf8267d37853f`;
-  the retained append harness case
-  `test_candidate_base_anchor_bytes_do_not_replace_trusted_anchors` requires
-  both legs to accept with `thesis-facts append check OK: 147 rows, immutable
-  prefix 128, +2 appended vs base, release 2`. The append gate works around
-  this out-of-scope helper defect by materializing the entered base
-  itself and supplying the trusted anchor directory; `release_chain.py` will
-  not be changed.
+- The starting Lane C helper `verify_base_release_chain(spec, *, base)` had no
+  trusted-anchor or pin-policy parameters, so Lane B initially reproduced and
+  worked around candidate/base anchor substitution locally. The target branch
+  later fixed that out-of-scope helper at `31f51cd`/`1872709`; after integrating
+  it, Lane B removed its workaround and calls the helper with the caller-owned
+  `anchor_dir` and selected pin policy. The regression remains in place to
+  bind the cross-lane contract.
 - The brief simultaneously requires keeping
   `assert_no_redirecting_git_environment` at public entry and invariance under
   foreign `GIT_DIR`/`GIT_INDEX_FILE`. The retained helper necessarily refuses

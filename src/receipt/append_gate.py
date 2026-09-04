@@ -35,6 +35,7 @@ from receipt.release_chain import (
     MANIFEST_RE,
     ReleaseChainError,
     assert_no_redirecting_git_environment,
+    verify_base_release_chain,
     verify_release_chain,
     verify_release_history_immutable,
 )
@@ -967,35 +968,6 @@ def _verify_candidate_release_chain(
             )
 
 
-def _verify_base_chain(
-    base: _BaseCommit,
-    *,
-    candidate: _CandidateTree,
-    anchor_dir: pathlib.Path,
-    enforce_production_pins: bool,
-) -> ChainVerification:
-    """Verify the selected base, preserving the gate's trusted-anchor split."""
-
-    # Integration workaround: verify_base_release_chain currently has no
-    # trusted-anchor override and always enables production-pin enforcement.
-    # Materialize the same selected base objects but retain both the append
-    # gate's caller-owned anchor directory and its selected pin policy.
-    with tempfile.TemporaryDirectory(prefix="receipt-append-base-") as directory:
-        with base.tree.materialize(
-            _materialization_prefixes(candidate),
-            pathlib.Path(directory),
-            repertoire=candidate.spec.chain.name_repertoire,
-        ) as materialized:
-            return verify_release_chain(
-                materialized.path,
-                spec=candidate.spec.chain,
-                anchor_dir=anchor_dir,
-                require_chain=True,
-                verify_state=True,
-                enforce_production_pins=enforce_production_pins,
-            )
-
-
 def check_release_proposal(
     base: _BaseCommit,
     *,
@@ -1066,9 +1038,9 @@ def check_release_proposal(
         return 0
 
     try:
-        base_verification = _verify_base_chain(
-            base,
-            candidate=candidate,
+        base_verification = verify_base_release_chain(
+            candidate.spec.chain,
+            base=base.tree,
             anchor_dir=anchor_dir,
             enforce_production_pins=enforce_production_pins,
         )
