@@ -22,6 +22,7 @@ In progress on `feat/0.6-lane-c`, based at `145f3db93d745ddc43aeb47f6b7bd8b30aa3
 - Corrected the OpenSSL preflight cache so an unsupported-version refusal, as well as an acceptance, executes `openssl version` only once per process; the focused 11-case version-gate slice passes.
 - Extended that cache to retain the missing/failing-command refusal as well; repeated unsupported and missing-binary preflights each execute the version command once (2 focused cases pass).
 - Adapted the release-tree test commit helper to Lane D's now-committed corpus fixture; the six history/base materialization tests pass without manufacturing an empty commit.
+- Added an exact-filename fast path so `run_verification` can hand the same normalized `ChainSpec` object to materialization and the directory verifier without a second normalization; stateful direct-caller filenames still normalize once (4 focused cases pass).
 
 ## Decisions
 

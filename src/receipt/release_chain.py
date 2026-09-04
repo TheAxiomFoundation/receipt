@@ -1225,7 +1225,9 @@ def verify_release_receipts(
         raise ReleaseChainError(
             f"release must have exactly {' and '.join(spec.anchors)} receipt paths"
         )
-    if anchor_observer is not None:
+    if anchor_observer is not None and not _anchor_filenames_are_exact(
+        spec, include_producer=False
+    ):
         # Shared stateful filename objects across roles must yield one
         # pathname; the memoized rewrite asks each object exactly once.
         # Producer excluded: this function consumes only TSA anchors.
@@ -1828,6 +1830,19 @@ def _normalized_spec(spec: ChainSpec, *, include_producer: bool = True) -> Chain
     return normalized
 
 
+def _anchor_filenames_are_exact(
+    spec: ChainSpec, *, include_producer: bool = True
+) -> bool:
+    """Whether normalization would preserve every configured filename."""
+
+    return (
+        not include_producer
+        or type(spec.producer_public_key_filename) is str
+    ) and all(
+        type(anchor.filename) is str for anchor in spec.anchors.values()
+    )
+
+
 def _observe_anchor_bytes(
     observer: dict[str, str] | None, filename: str, payload: bytes
 ) -> None:
@@ -1983,7 +1998,7 @@ def verify_release_chain(
             raise ReleaseChainError("release chain is absent; genesis is required")
         return ChainVerification(())
 
-    if anchor_observer is not None:
+    if anchor_observer is not None and not _anchor_filenames_are_exact(spec):
         # Observing only, and only once a chain exists: every configured
         # filename is normalized exactly once for the whole run — each
         # PathLike gets one __fspath__ call (memoized by object identity, so

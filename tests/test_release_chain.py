@@ -1122,6 +1122,28 @@ def test_a_filename_object_shared_across_roles_is_asked_once(
     assert names == {"shared.pem"}
 
 
+def test_an_already_normalized_chain_spec_keeps_its_identity(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A composing caller can share one normalized spec with its digest."""
+
+    spec = load_spec(repo / "verification/spec.py").verification.chain
+    normalized = release_chain._normalized_spec(spec)
+
+    def normalized_twice(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        pytest.fail("verify_release_chain normalized an exact-string spec again")
+
+    monkeypatch.setattr(release_chain, "_normalized_spec", normalized_twice)
+    verification = verify_release_chain(
+        repo,
+        spec=normalized,
+        compute_anchor_set_digest=True,
+    )
+
+    assert verification.anchor_set_sha256 is not None
+
+
 def test_a_caller_supplied_anchor_directory_still_gets_a_digest(
     repo: pathlib.Path, tmp_path: pathlib.Path
 ) -> None:
