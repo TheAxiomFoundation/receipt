@@ -378,6 +378,8 @@ class CorpusSpec:
     accepted_gate_tiers: frozenset[str]
     required_gates: frozenset[str]
     journal_row_capacity: int = MAX_JOURNAL_ROWS
+    # Repertoire selects admissible spellings; both choices use _path_fold's
+    # component-wise ASCII fold, never Unicode normalization or casefolding.
     name_repertoire: Literal["portable", "posix-bytes"] = "portable"
 
     def __post_init__(self) -> None:
@@ -1340,7 +1342,12 @@ def _under(directory: str, name: str) -> str:
 
 
 def _path_fold(relative: str) -> str:
-    """Fold ASCII letters component-wise and preserve every other code point."""
+    """Fold ASCII letters per component and preserve every other code point.
+
+    This deliberately narrows 0.5.x's ``NFC(casefold)`` key: neither Unicode
+    normalization nor Unicode casefolding participates under either name
+    repertoire.
+    """
 
     try:
         return "/".join(ascii_fold_text(component) for component in relative.split("/"))
