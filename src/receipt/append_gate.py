@@ -544,6 +544,43 @@ gate's rather than ``ChainSpec``'s deliberately: a spec is the consumer's
 committed code and validating one is #41's subject, while this is the one
 consumer that cannot answer for it.
 
+There is a fourth of the same kind, and it is asked before all three, because
+it is a fact about the process this verdict is produced in rather than about
+the tree or the configuration it is produced for. ``GIT_DIR``,
+``GIT_WORK_TREE``, ``GIT_INDEX_FILE``, ``GIT_OBJECT_DIRECTORY`` and
+``GIT_ALTERNATE_OBJECT_DIRECTORIES`` can each decide which repository, working
+tree, index or object store some git read this gate makes — the base resolution, an index
+read, the release-root scan, the intent-to-add detection — resolves in, rather
+than the checkout ``root`` names; and
+this gate reads the candidate tree directly as well as through git, so under
+any of them the two halves of one verdict are about two trees. With any of the
+five set, ``verify_append_gate`` refuses before it opens the root, in
+``release_chain``'s words, and ``verify_release_chain`` refuses the same way,
+so ``receipt verify``'s custody pass answers identically. They are refused
+rather than dropped for the child processes, because a drop leaves the
+verifier's own environment redirected; the full pin — ``GIT_DIR`` stated
+explicitly for every read — is 0.6 work (#45), and
+``release_chain.assert_no_redirecting_git_environment`` says so.
+
+Beside those, and unlike them, is one about the candidate tree: that
+there is none. A ``root`` naming nothing, or naming a regular file, or reached
+through a component that is one, is not a tree this gate can answer about,
+and it used to escape as the ``OSError`` the root's own open raised — a bare
+``FileNotFoundError`` or ``NotADirectoryError`` carrying the OS's message and
+not the root, where every other refusal in this module is an ``AppendError``
+naming what it refused; a root spelled through a symlink loop escaped the
+same way as a bare ``OSError`` (``ELOOP``) or, on CPython 3.11 and 3.12, as
+``pathlib``'s own ``RuntimeError`` from ``resolve``. This package's command
+never reaches this code — ``receipt verify`` refuses a non-directory root in
+its own words first — and the consumer command that does reach it catches
+``AppendError`` alone, so the bare exception ended that run non-zero with a
+traceback: fail-closed, and in nobody's vocabulary. ``_set_root`` now
+answers all of them in one sentence — ``candidate root is missing or not a
+directory`` — from the open itself for the absent and regular-file shapes,
+rather than from a check placed ahead of it, which would be a statement
+about a path this open may not reach, and at the resolve for a loop where
+``pathlib`` reports it there (#46).
+
 All of it carries its own tests in tests/test_append_gate.py.
 """
 
@@ -570,6 +607,7 @@ from receipt.release_chain import (
     WORKING_TREE_SCAN_OPTIONS,
     assert_file_modes_authoritative,
     assert_index_agrees_with_tree,
+    assert_no_redirecting_git_environment,
     assert_index_carries_no_protected_alias,
     assert_index_hides_no_working_tree_change,
     assert_index_content_bound,
@@ -697,9 +735,31 @@ def _set_root(root: pathlib.Path, spec: AppendGateSpec) -> _CandidateTree:
     commit, while ``--root`` points at the checked-out PR merge tree. Imports
     and production anchors therefore remain rooted at immutable ``CODE_ROOT``;
     only candidate data paths and git comparisons use ``ROOT``.
+
+    A root that is not there to be opened — absent, or a regular file, or
+    reached through one, or spelled through a symlink loop — is refused here
+    as an ``AppendError`` naming the root the caller supplied, before any git
+    command is run (#46). For the first three it is the open that answers,
+    not an ``lstat`` before it; a loop is answered wherever ``pathlib``
+    reports it, at the resolve on CPython 3.11 and 3.12 and at the open after.
     """
 
-    candidate_root = root.resolve()
+    try:
+        candidate_root = root.resolve()
+    except RuntimeError as exc:
+        # ``pathlib`` on CPython 3.11 and 3.12 answers a symlink loop from
+        # ``resolve`` itself, as ``RuntimeError("Symlink loop from ...")`` with
+        # the ``ELOOP`` ``OSError`` as its context, on every platform; from
+        # 3.13 ``resolve`` hands the loop back unchanged and the open below
+        # answers ``ELOOP``.
+        # Both are the same fact about the root the caller named, refused in
+        # the same words (#46); anything else ``resolve`` raises is left as
+        # it stands.
+        if not str(exc).startswith("Symlink loop"):
+            raise
+        raise AppendError(
+            f"candidate root is missing or not a directory: {root}"
+        ) from exc
     # Opened once, here, because this is the only moment in the run at which
     # the root has not yet been used for anything: every later read descends
     # from it, and a root exchanged after this is a different tree answering
@@ -745,6 +805,34 @@ def _set_root(root: pathlib.Path, spec: AppendGateSpec) -> _CandidateTree:
                         candidate_root, spec.chain.state_relative
                     )
                 )
+            ) from exc
+        # And the two answers this open gives for "there is no candidate tree
+        # here at all" (#46). A ``--root`` naming nothing is ``ENOENT``; one
+        # naming a regular file, or reached through a component that is one,
+        # is ``ENOTDIR`` — ``O_DIRECTORY`` is what makes the second an error
+        # rather than an open. Both escaped as the OS's own ``OSError``, with
+        # the OS's message and no mention of the root, where every other
+        # refusal in this module is an ``AppendError`` naming what it refused.
+        # It is answered here, at the one open, rather than by an ``lstat``
+        # before it: a check ahead of the open is a check on a path this open
+        # may not reach, and this module refuses check-then-open everywhere
+        # else it reads. ``ELOOP`` is the third: from CPython 3.13 ``Path.resolve`` hands a
+        # symlink loop back unchanged, so a root spelled through one reaches
+        # this open as a static input, and it too answered with the OS's own
+        # message (peer review of the 0.5.2 release PR); on 3.11 and 3.12
+        # ``resolve`` itself raises for the loop, and that is converted above.
+        # On those two interpreters this branch is therefore reached only when
+        # the root becomes a link between the resolve and the open — a writer
+        # during the run, outside the 0.5.x contract — and it is then refused
+        # in these same words, which name the static fact rather than the
+        # race. A link standing at the root itself is refused by
+        # ``O_NOFOLLOW``, and where the platform spells that as one of these
+        # three errnos it lands in the same refusal. Every other errno still
+        # raises as it stands.
+        if exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+            raise AppendError(
+                "candidate root is missing or not a directory: "
+                f"{root}"
             ) from exc
         raise
     recorded = os.fstat(descriptor)
@@ -2641,8 +2729,25 @@ def verify_append_gate(
     The candidate root is selected and opened here and held open until the
     verdict is finished, which is what every comparison against its recorded
     identity relies on; see ``_set_root``.
+
+    Before any of that: an environment that would redirect git's reads away
+    from this candidate tree is refused rather than answered under. See
+    ``release_chain.assert_no_redirecting_git_environment``; the full pin is
+    0.6 (#45).
     """
 
+    # First, ahead of the platform and spec refusals below and ahead of the
+    # root's own open, because it is a fact about the process this verdict is
+    # produced in rather than about the tree or the configuration it is
+    # produced for: with any of the five set, some git read here — the base
+    # resolution, an index read, the release-root scan — resolves in another
+    # repository, working tree, index or object store, and this gate reads the candidate
+    # tree directly as well, so
+    # the two halves of one verdict would be about two trees.
+    try:
+        assert_no_redirecting_git_environment()
+    except ReleaseChainError as exc:
+        raise AppendError(str(exc)) from exc
     candidate = _set_root(root, spec)
     try:
         return _verify_selected_tree(

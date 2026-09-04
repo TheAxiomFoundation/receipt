@@ -57,6 +57,7 @@ from receipt.release_chain import (
     ChainSpec,
     ChainVerification,
     ReleaseChainError,
+    assert_no_redirecting_git_environment,
     verify_release_chain,
     verify_release_history_immutable,
 )
@@ -429,6 +430,23 @@ def run_verification(
         if isinstance(exc, expected):
             return str(exc)
         return f"{type(exc).__name__}: {exc}"
+
+    # Before any pass runs git: an environment that would redirect git's reads
+    # is refused here rather than met by the custody pass after the optional
+    # history pass has already resolved a base and printed an OID from
+    # whichever repository the environment pointed at (peer review of the
+    # 0.5.2 release PR). It is reported as the custody pass's refusal, in that
+    # pass's own words, so the verdict reads the same with or without
+    # ``--base-ref``.
+    try:
+        assert_no_redirecting_git_environment()
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException as exc:  # noqa: BLE001 - any raise is a FAIL verdict
+        passes.append(
+            PassResult("custody", False, "", failed("custody", exc, ReleaseChainError))
+        )
+        return result(incomplete="binding")
 
     # Pass 0 (optional): the published history is immutable relative to a base
     # git ref. Needs git and a repository; requested explicitly, never implied.

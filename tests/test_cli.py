@@ -148,6 +148,68 @@ def test_refusal_writes_to_a_redirected_stringio_stderr(
     )
 
 
+def test_a_redirecting_git_variable_refuses_the_command_as_a_verdict(
+    repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#45's cheap half as the auditor meets it: one fail-closed verdict.
+
+    The custody pass is ``verify_release_chain``, which refuses at its entry
+    when any of the five redirecting variables is set, so the command that
+    passes over this corpus reports FAIL with the refusal quoted rather than
+    a PASS about a repository it was never pointed at. The same tree passes
+    with the variable unset, so the environment alone is what changed.
+    """
+
+    assert run(repo) == EXIT_OK
+    assert "VERDICT: PASS" in capsys.readouterr().out
+
+    monkeypatch.setenv("GIT_DIR", str(repo.parent / "elsewhere.git"))
+    assert run(repo) == EXIT_FAIL
+    # A refused verdict is written to stderr, a passing one to stdout.
+    error = capsys.readouterr().err
+    assert "VERDICT: FAIL — custody" in error
+    assert (
+        "GIT_DIR is set in the environment and would redirect git reads; "
+        "unset it"
+    ) in error
+
+
+def test_a_regular_file_named_as_the_root_refuses_in_the_same_words(
+    repo: pathlib.Path,
+) -> None:
+    """The command's other half of #46: a ``--root`` that is not a directory.
+
+    ``receipt verify`` already answered both cases here — ``root.is_dir()`` is
+    false for an absent path and for a file alike — so this is coverage of a
+    refusal the command already made, not a new one. It is pinned because #46
+    is about the same two inputs one layer down, in ``append_gate._set_root``,
+    where they escaped as the OS's own ``OSError``; the two now refuse in
+    their own layer's words rather than one of them borrowing the platform's.
+    """
+
+    file_root = repo / "not-a-tree"
+    file_root.write_text("this is a file, not a checkout\n", encoding="utf-8")
+    captured = io.StringIO()
+    with contextlib.redirect_stderr(captured):
+        code = main(
+            [
+                "verify",
+                "--spec",
+                str(repo / "verification/spec.py"),
+                "--root",
+                str(file_root),
+            ]
+        )
+
+    assert code == EXIT_USAGE
+    assert captured.getvalue() == (
+        f"receipt verify: root is not a directory: {file_root}\n"
+        "receipt verify: FAIL\n"
+    )
+
+
 def _a_non_ascii_character_this_page_spells(name: str) -> str | None:
     """A character above 0x7F this code page encodes, from its own table.
 
@@ -4116,3 +4178,105 @@ def test_the_guarded_writer_survives_a_detached_buffer(
     monkeypatch.setattr(sys, "stdout", _Detached())
     assert run(repo) == EXIT_OK
     assert "VERDICT: PASS" in "".join(written)
+
+
+def test_a_refusal_that_cannot_print_still_returns_its_exit_code(
+    repo: pathlib.Path, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_refuse``'s two emission boundaries catch ``BaseException``.
+
+    The streams are whatever the executed spec left in ``sys.stderr`` and
+    ``sys.stdout``, so asking one for its encoding can raise ``SystemExit``.
+    Before the fix the two guards caught ``Exception`` alone, and a refusal
+    exited 0 with nothing printed — a refusal read as a PASS by anything that
+    keys on the exit status (peer review of the 0.5.2 release PR). The root
+    here is a regular file, so the refusal is the command's own, reached with
+    no verification run at all.
+    """
+
+    class Exiting:
+        @property
+        def encoding(self) -> str:
+            raise SystemExit(0)
+
+        def write(self, text: str) -> int:
+            raise SystemExit(0)
+
+        def flush(self) -> None:
+            raise SystemExit(0)
+
+    not_a_tree = tmp_path / "not-a-tree"
+    not_a_tree.write_text("a file\n", encoding="utf-8")
+    spec = str(repo / "verification/spec.py")
+    monkeypatch.setattr(sys, "stderr", Exiting())
+    monkeypatch.setattr(sys, "stdout", Exiting())
+
+    assert main(["verify", "--spec", spec, "--root", str(not_a_tree)]) == EXIT_USAGE
+    assert (
+        main(["verify", "--spec", spec, "--root", str(not_a_tree), "--json"])
+        == EXIT_USAGE
+    )
+
+
+def test_a_redirecting_git_variable_refuses_before_the_history_pass(
+    committed_repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#45 under ``--base-ref``: refused before any base is resolved.
+
+    The history pass runs before custody, and it resolved the base ref and
+    printed its OID from whichever repository the environment pointed at
+    before the custody pass refused (peer review of the 0.5.2 release PR).
+    ``run_verification`` asks first now, so no history line is printed at all.
+    """
+
+    assert run(committed_repo, "--base-ref", "HEAD") == EXIT_OK
+    capsys.readouterr()
+
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "elsewhere.git"))
+    assert run(committed_repo, "--base-ref", "HEAD") == EXIT_FAIL
+    captured = capsys.readouterr()
+    text = captured.out + captured.err
+    assert (
+        "GIT_DIR is set in the environment and would redirect git reads; "
+        "unset it"
+    ) in text
+    assert "VERDICT: FAIL — custody" in text
+    assert "history" not in captured.out
+    assert "byte- and mode-identical" not in text
+
+
+def test_a_refusal_still_lets_the_operator_interrupt_through(
+    repo: pathlib.Path, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``BaseException`` guards in ``_refuse`` re-raise ``KeyboardInterrupt``.
+
+    At the base ``except Exception`` could not catch an interrupt by language
+    rule; now that the guards catch ``BaseException``, the carve-out is a
+    hand-written clause, and this pins it (peer review of the 0.5.2 release
+    PR, round 2).
+    """
+
+    class Interrupting:
+        @property
+        def encoding(self) -> str:
+            raise KeyboardInterrupt
+
+        def write(self, text: str) -> int:
+            raise KeyboardInterrupt
+
+        def flush(self) -> None:
+            raise KeyboardInterrupt
+
+    not_a_tree = tmp_path / "not-a-tree"
+    not_a_tree.write_text("a file\n", encoding="utf-8")
+    spec = str(repo / "verification/spec.py")
+    monkeypatch.setattr(sys, "stderr", Interrupting())
+    monkeypatch.setattr(sys, "stdout", Interrupting())
+
+    with pytest.raises(KeyboardInterrupt):
+        main(["verify", "--spec", spec, "--root", str(not_a_tree)])
+    with pytest.raises(KeyboardInterrupt):
+        main(["verify", "--spec", spec, "--root", str(not_a_tree), "--json"])

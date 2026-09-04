@@ -112,9 +112,13 @@ extension in use when ``core.untrackedCache`` is unset, which is its
 documented default, so a cache written by any earlier command was in use in a
 checkout the refusal called clean — and a checkout that names a monitor is not
 thereby a proposal this package has any quarrel with. An option on a command
-line says the same thing about the read itself, on every checkout, and none of
-these reads writes the candidate's index, so an extension already in it is
-left as found. Each
+line says the same thing about the read itself, on every checkout. A read
+that refreshes the index — ``git diff`` against a base does, when the stat
+data it caches has gone stale — rewrites it under ``core.untrackedCache=false``
+and drops an untracked-cache extension it finds there (measured on git
+2.53.0, peer review of the 0.5.2 release PR); the refresh changes no entry's
+stage, mode, object id or flag word, which is all the reads here compare, and
+no verdict depends on the extension. Each
 also reads the entry's own flag word, because mode and object id do not say
 whether an entry records content: an intent-to-add entry (``git add -N``) is
 stage 0 at the working tree's mode with the empty blob's object id, which is
@@ -152,7 +156,18 @@ files can hold one verdict to one read of each; omitted, both files are read
 exactly as before. Every git subprocess here runs with ``refs/replace``
 disabled (``_git_environment``); those additions are its only callers, and a
 replacement object would otherwise change what a base commit, tree, or blob
-reads as behind the OID a verdict names.
+reads as behind the OID a verdict names. And ``verify_release_chain`` refuses
+outright, before it resolves the root it was given, when any of ``GIT_DIR``,
+``GIT_WORK_TREE``, ``GIT_INDEX_FILE``, ``GIT_OBJECT_DIRECTORY`` or
+``GIT_ALTERNATE_OBJECT_DIRECTORIES`` is set in the process environment: each
+can decide which repository, working tree, index or object store some git
+read below resolves in, while the verdict still speaks of the checkout named.
+Refused rather than dropped, because dropping them for the child processes
+would leave the verifier's own environment redirected while its children's was
+not, and this module reads the candidate tree directly as well as through git;
+``assert_no_redirecting_git_environment`` says so, and says that pinning
+``GIT_DIR`` to ``<root>/.git`` for every read — the full answer to #45 — is
+0.6 work rather than this.
 """
 
 from __future__ import annotations
@@ -2497,8 +2512,17 @@ def verify_release_chain(
     replacement could show the caller's checks one file and the release
     history another. Omitted (the default, and every pre-existing caller),
     both files are read here exactly as before.
+
+    Before any of that: an environment that would redirect git's reads away
+    from ``root`` is refused rather than answered under. See
+    ``assert_no_redirecting_git_environment``; the full pin is 0.6 (#45).
     """
 
+    # Before the root is even resolved: an ambient GIT_DIR, GIT_WORK_TREE,
+    # GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY or GIT_ALTERNATE_OBJECT_DIRECTORIES
+    # redirects every git read below away from the checkout this argument
+    # names, while the verdict is still phrased about that checkout.
+    assert_no_redirecting_git_environment()
     root = root.resolve()
     default_anchor_dir = root / spec.anchor_relative
     if anchor_dir is None:
@@ -2703,6 +2727,88 @@ PATHSPEC_ENVIRONMENT = (
 )
 
 
+# The five variables that decide which repository, working tree, index and
+# object store a git command answers about, whatever directory it is run in
+# and whatever path is named on its command line. See
+# ``assert_no_redirecting_git_environment``; they are refused rather than
+# dropped, and the order here is the order a refusal reports them in.
+REDIRECTING_GIT_ENVIRONMENT = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+)
+
+
+def assert_no_redirecting_git_environment() -> None:
+    """Refuse a verdict asked for under an environment that redirects git.
+
+    Each of the five can decide which repository, working tree, index or
+    object store some read this package makes resolves in: ``GIT_DIR`` and
+    ``GIT_INDEX_FILE`` move the index reads behind
+    ``assert_state_path_tracked``, ``assert_index_agrees_with_tree`` and
+    ``assert_release_file_still_indexed``, and ``GIT_DIR`` the base
+    resolution with them; ``GIT_WORK_TREE`` moves the working-tree listings
+    the gate classifies from; ``GIT_OBJECT_DIRECTORY`` moves the object reads
+    the base resolution and every tree read depend on; and
+    ``GIT_ALTERNATE_OBJECT_DIRECTORIES`` adds an object store beside the
+    repository's own, so an object the checkout never held can resolve. Not
+    every read is moved by every variable — measured on git 2.53.0,
+    ``ls-files -s`` is unchanged under ``GIT_WORK_TREE`` and under
+    ``GIT_OBJECT_DIRECTORY`` (peer review of the 0.5.2 release PR) — and
+    none needs to be: one read answering about something other than the
+    checkout named as ``root`` is enough for a verdict to be about two trees.
+    git sets some of these variables in its own hook environments (measured
+    on git 2.53.0: ``pre-commit``, ``prepare-commit-msg``, ``commit-msg`` and
+    ``post-commit`` run with ``GIT_INDEX_FILE``; a server-side ``pre-receive``
+    with ``GIT_DIR``, ``GIT_OBJECT_DIRECTORY`` and
+    ``GIT_ALTERNATE_OBJECT_DIRECTORIES``; ``pre-push`` and ``post-checkout``
+    with none of the five), so an entry wired into one of the former is
+    refused there; the invocation both are written for is a CI job over a
+    checkout, and the refusal names the variable so a hook author sees why.
+    A verifier run
+    under such an environment answers about a tree it was not asked about,
+    and it answers in the words of a verdict about the tree it *was* asked
+    about, which is the part that makes it worth refusing rather than
+    reporting (#45).
+
+    This is a refusal, not a sanitisation. ``_git_environment`` still carries
+    the ambient environment through — dropping these five for the child
+    processes would leave the verifier's own environment redirected, and
+    ``append_gate`` and this module both read the candidate tree directly as
+    well as through git, so the two halves of a verdict would then disagree
+    about which tree they were about. The 0.5.x contract is that the process
+    a verdict is produced in is not redirected either; the fail-closed answer
+    is to decline.
+
+    It is asked at the public verifier entries before any of them touches the
+    tree: ``verify_release_chain`` (and so ``receipt verify``'s custody pass),
+    ``verify_release_history_immutable`` (and so ``receipt verify
+    --base-ref``, whose ``run_verification`` also asks it before its first
+    pass, so the history pass never prints a base commit resolved in another
+    repository), and ``append_gate.verify_append_gate``. It is
+    not asked by every helper in this module that runs a git command, and the
+    variables are not pinned: the full pin, ``GIT_DIR`` set explicitly to
+    ``<root>/.git`` with every other redirecting variable dropped for the
+    read, so that a command's target is stated rather than merely not
+    overridden, is 0.6 work alongside #43 and #44. What ships here is the
+    cheap half: an environment that would redirect a read is refused before a
+    read is made.
+
+    The refusal names one variable, the first of the five that is set in the
+    order above, because the instruction it gives is the same for each and a
+    caller that has one set fixes it and asks again.
+    """
+
+    for name in REDIRECTING_GIT_ENVIRONMENT:
+        if name in os.environ:
+            raise ReleaseChainError(
+                f"{name} is set in the environment and would redirect git "
+                "reads; unset it"
+            )
+
+
 # Every git read in this package spells these five settings out on its own
 # command line, so that no read of it consults a stat cache, an untracked
 # cache, or a file-system monitor whatever the checkout's configuration, its
@@ -2777,15 +2883,25 @@ def _git_environment() -> dict[str, str]:
     means here what it says.
 
     Everything else in the ambient environment is carried through, and this
-    function is not a sanitizer: it turns off the two mechanisms named above
-    and nothing else. Other variables git reads can still decide what these
+    function is still not a sanitizer: it turns off the two mechanisms named
+    above and nothing else. Other variables git reads can decide what these
     commands answer about — ``GIT_DIR`` and ``GIT_INDEX_FILE`` were each
     checked and each make ``ls-files`` report another repository's entry for
-    the path asked about, from this repository's working directory — so a
-    caller that does not control the environment it invokes this package in
-    has a problem larger than this function's scope. That is stated rather
-    than fixed here; narrowing the environment to an allowlist is a change to
-    what every consumer's git reads see, not a check added to one of them.
+    the path asked about, from this repository's working directory. Those five
+    (with ``GIT_WORK_TREE``, ``GIT_OBJECT_DIRECTORY`` and
+    ``GIT_ALTERNATE_OBJECT_DIRECTORIES``) are now refused at the public
+    verifier entries rather than dropped here: see
+    ``assert_no_redirecting_git_environment`` for why the refusal is not a
+    drop — a drop would leave the verifier's own environment redirected while
+    its children's was not, and both this module and ``append_gate`` read the
+    candidate tree directly as well as through git. So a run that reaches this
+    function through ``verify_release_chain``,
+    ``verify_release_history_immutable`` or ``verify_append_gate`` has
+    already been told none of the five is set. A caller reaching another of
+    this module's helpers directly has not, and pinning ``GIT_DIR`` to
+    ``<root>/.git`` for every read — which is what would make a command's
+    target stated rather than merely not overridden, and is a change to what
+    every consumer's git reads see — remains 0.6 work.
     """
 
     environment = {**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"}
@@ -3931,8 +4047,15 @@ def assert_release_root_index_regular(root: pathlib.Path, spec: ChainSpec) -> No
 def verify_release_history_immutable(
     root: pathlib.Path, base_ref: str, spec: ChainSpec
 ) -> tuple[str, set[str], dict[str, GitEntry]]:
-    """Compare every base ``releases/`` file byte and mode to the candidate."""
+    """Compare every base ``releases/`` file byte and mode to the candidate.
 
+    Asked first, before the root is resolved: an environment that would
+    redirect the base resolution or the tree reads below is refused, so a
+    direct caller gets the same answer ``run_verification`` gives before its
+    history pass (#45, the checkable half).
+    """
+
+    assert_no_redirecting_git_environment()
     root = root.resolve()
     # The base ref is resolved first so a checkout the guard would refuse
     # cannot mask a base that names nothing; the guard then runs ahead of
