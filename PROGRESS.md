@@ -34,6 +34,24 @@
 
 ## Findings
 
-- No defect has yet been found in the Lane A/C/D modules that are out of scope.
+- Lane C's `verify_base_release_chain(spec, *, base)` materializes and trusts
+  the base tree's anchor prefix. That conflicts with the append-gate contract
+  that anchors always come from `trusted_code_root`. A helper-level
+  reproduction using the pinned tree with `releases/anchors/freetsa-root.pem`
+  poisoned in the committed base returns
+  `ReleaseChainError: production TSA anchor bytes are not code-pinned for freetsa: a8c8894a3e09c5504651b9d2092e477fb041e53c96b84d391f3bf8267d37853f`;
+  the retained append harness case
+  `test_candidate_base_anchor_bytes_do_not_replace_trusted_anchors` requires
+  both legs to accept with `thesis-facts append check OK: 147 rows, immutable
+  prefix 128, +2 appended vs base, release 2`. The append gate will work
+  around this out-of-scope helper defect by materializing the entered base
+  itself and supplying the trusted anchor directory; `release_chain.py` will
+  not be changed.
+- The brief simultaneously requires keeping
+  `assert_no_redirecting_git_environment` at public entry and invariance under
+  foreign `GIT_DIR`/`GIT_INDEX_FILE`. The retained helper necessarily refuses
+  either variable. This lane interprets invariance as an invariant, early
+  refusal independent of the foreign target, preserving the explicitly bound
+  0.5.2 call and message.
 - The local GitNexus analysis completed, but its global-registry write is
   sandbox-blocked; a task-local registry was used to query the fresh index.
