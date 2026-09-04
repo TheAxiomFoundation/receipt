@@ -446,12 +446,21 @@ no portable count is offered in its place.  The floor was 1.1.1 until a
 review observed that ``-no-CAstore`` made the documented minimum a version
 which passed the check and then refused every valid witness.
 
-``tests/test_tsa.py`` binds all of these.  Two of them can no longer fire
-from within this module, and both texts are kept as defence in depth.
+``tests/test_tsa.py`` binds all of these.  Three of them can no longer fire
+from within this module, and every text is kept as defence in depth.
 ``_select_anchor``'s own identity refusal is one: every bundle anchor is
 identity-checked at load, so the selection never finds a disagreement, and
-its text is kept verbatim as ported.  The duplicate-timestamp refusal is the
-other, and what closed it is the pending-authority rules above: two outcomes
+its text is kept verbatim as ported.  The load-time refusal of an anchor
+whose referenced root material carries an SPKI other than its identity's is
+another, and it is unreachable for the reason the check beside it exists: the
+anchor's declared ``rootCertificate.spkiSha256`` has already been required to
+equal the identity's, and ``_root_material`` returns only after requiring the
+SPKI it computed from the bytes it read to equal that same declared value --
+one mapping, out of the one parse of the bundle, never re-read between the
+two.  What it protects is the case where one of those two comparisons is
+lost, and it is the one that would name the material rather than the
+declaration (peer review, first Opus round).  The duplicate-timestamp refusal
+is the third, and what closed it is the pending-authority rules above: two outcomes
 rest on one authority's signature only if two anchors both pin the
 certificate that response was signed with, and no pairing of anchors that
 could reaches two outcomes -- inside one bundle a current shared signer is
@@ -1545,6 +1554,16 @@ def _check_bundle_anchors(
                 f"TSA anchor {anchor_id} in bundle {bundle_id} references root "
                 f"material that fails validation: {exc}"
             ) from exc
+        # Defence in depth, and unreachable by construction: the declared
+        # ``rootCertificate.spkiSha256`` has just been required to equal
+        # ``identity.root_spki_sha256`` above, and ``_root_material`` returns
+        # only after requiring the SPKI it computed from the bytes it read to
+        # equal that same declared value -- the same mapping, out of the one
+        # parse of the bundle, never re-read between the two -- so the
+        # comparison below is always false.  It is kept because it is what
+        # stands if either of those two comparisons is ever lost, and because
+        # it is the one that names the material rather than the declaration
+        # (peer review, first Opus round).
         if material.identity["spkiSha256"] != identity.root_spki_sha256:
             raise TsaError(
                 f"TSA anchor {anchor_id} in bundle {bundle_id} references a root "
@@ -3380,30 +3399,6 @@ def _build_authority_history(
     return history, tuple(active_occurrences), tuple(pending_batches)
 
 
-def _active_anchor_identities(
-    records: Path,
-    trusted_bundles: Mapping[str, dict[str, Any]],
-    *,
-    spec: TsaSpec,
-) -> tuple[set[tuple[str, str]], dict[tuple[str, str], set[str]]]:
-    """What the active bundles already stand for: authorities, and whose keys.
-
-    This is the active-only view of the same persistent component graph used
-    for pending classification.  The mapping deliberately returns the union
-    of every historical signer in each active class: flattening all classes
-    together would permit splits and merges, while forgetting an older era
-    would make a rename followed by a rotation cease to be transitive.
-    """
-
-    history, active_occurrences, _pending = _build_authority_history(
-        records, trusted_bundles, [], spec=spec
-    )
-    active = {occurrence.authority for occurrence in active_occurrences}
-    return active, {
-        authority: history.class_signers(authority) for authority in active
-    }
-
-
 def _supplemental_candidates(
     records: Path,
     trusted_bundles: Mapping[str, dict[str, Any]],
@@ -3461,10 +3456,13 @@ def _supplemental_candidates(
     be reachable (fifth gate round three).  A split and a merge are claims
     about who is who, and nothing here can take a producer's word for one.
 
-    So the classes are kept.  ``_active_anchor_identities`` reports, for each
-    active authority, the signer set of the *class* it belongs to -- the
-    connected component of the active anchors joined by a shared
-    ``(id, root SPKI)`` or a shared signing key.  A pending anchor whose
+    So the classes are kept.  ``_build_authority_history`` returns the graph
+    those classes are the components of -- active and pending anchors joined
+    wherever two carry one ``(id, root SPKI)`` or share a signing key -- and
+    the classification runs in its batch loop, which is the one place any of
+    this is decided.  For each active authority the graph gives the signer set
+    of the *class* it belongs to and the keys that class allows today.  A
+    pending anchor whose
     signers touch no class is a candidate; one whose signers are exactly the
     class of every active anchor it touches is that authority renamed and is
     skipped; and anything else -- a piece of one class, several classes

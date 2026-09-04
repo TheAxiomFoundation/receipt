@@ -5440,14 +5440,21 @@ def test_a_rename_and_a_rotation_leave_one_class_a_further_rename_may_carry(
 
     # And the class itself: two active authorities, one class, whose set is
     # neither of their own -- which is what "transitive" means here.
-    authorities, class_of = tsa_module._active_anchor_identities(
-        tree.records, active, spec=spec
+    history, active_occurrences, _pending = tsa_module._build_authority_history(
+        tree.records, active, [], spec=spec
     )
     first = (alpha.anchor_id, alpha.root_pins["spkiSha256"])
     second = (renamed.anchor_id, alpha.root_pins["spkiSha256"])
-    assert authorities == {first, second}
-    assert class_of[first] == class_of[second] == keys[3]
-    assert class_of[first] != keys[1]
+    assert {
+        occurrence.authority for occurrence in active_occurrences
+    } == {first, second}
+    assert history.find(first) == history.find(second)
+    assert history.class_signers(first) == history.class_signers(second)
+    assert history.class_signers(first) == keys[3]
+    assert history.class_signers(first) != keys[1]
+    # And the live era, which is what a rename is measured against: the
+    # newest active version's keys, not the union of every version's.
+    assert history.current_signers(first) == keys[3]
 
     def candidates_for(pending: dict[str, Any]) -> set[tuple[str, str]]:
         return set(
