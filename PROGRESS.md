@@ -4,7 +4,7 @@
 
 - Branch: `feat/0.6-lane-b`
 - Recorded starting OID: `e3af1950ff39f1eaa5ff3aad60e89b18e73a943c`
-- Phase: append-gate and test inventory before implementation
+- Phase: selected-tree gate implemented; pruning and porting tests
 - Network status: sandbox-disabled; GitHub API access fails immediately
 
 ## Done
@@ -23,11 +23,21 @@
 - Refreshed the local GitNexus index at this lane's starting commit. Its
   upstream impact scan finds five direct append-gate callers and 148 affected
   test symbols, confirming the rewrite's high test-surface risk.
+- Rebuilt `append_gate.py` around nested entered `TreeSnapshot` objects. The
+  public string API now delegates to `verify_append_gate_verdict`, state and
+  base reads use authenticated blobs, surface classification uses tree diffs,
+  release verification uses private materializations, and the old checkout,
+  index, root-descriptor, re-read, and writer-race machinery is deleted.
+- Kept the retained semantic-check order and exact success rendering, added
+  the full-candidate-OID contract for base comparisons, and preserved the
+  push-path release-mode refusal wording before materialization.
+- Verified the new module with `py_compile`, Ruff, and `git diff --check`.
 
 ## Next
 
-- Complete the append-gate caller/test and equivalence-harness inventories.
-- Implement the selected-tree gate in coherent deletion and feature commits.
+- Prune tests whose working-tree/index/writer subject no longer exists, then
+  adapt retained tests and add the new immutable-snapshot cases.
+- Thread the committed candidate OID through the append equivalence harness.
 - Run the focused, equivalence, and full offline suites; perform the pinned production-tree differential.
 - Prepare the complete no-network PR handoff; pushing and opening the draft PR
   will require a networked environment unless connectivity becomes available.
@@ -50,8 +60,16 @@
 - The brief simultaneously requires keeping
   `assert_no_redirecting_git_environment` at public entry and invariance under
   foreign `GIT_DIR`/`GIT_INDEX_FILE`. The retained helper necessarily refuses
-  either variable. This lane interprets invariance as an invariant, early
-  refusal independent of the foreign target, preserving the explicitly bound
-  0.5.2 call and message.
+  variables present at entry. The new invariance tests will inject them only
+  after that guard runs, proving the snapshot's Git children remain bound to
+  the selected repository without weakening the retained entry refusal.
+- The required candidate materialization prefix set includes
+  `release_root_relative`; Chronicle's anchors are descendants of that root,
+  so `TreeSnapshot.materialize` deduplicates the nested prefixes and
+  necessarily writes and name-screens those anchor blobs. This contradicts
+  the plan's claim that candidate anchors are not written or screened. They
+  are still never used cryptographically because every chain call receives
+  the caller-owned `anchor_dir`; excluding a descendant would require an
+  out-of-scope snapshot API change.
 - The local GitNexus analysis completed, but its global-registry write is
   sandbox-blocked; a task-local registry was used to query the fresh index.
