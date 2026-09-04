@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import pathlib
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -78,6 +79,10 @@ class LocalTsa:
     signer_certificate_sha256: str
     signer_spki_sha256: str
 
+    @property
+    def signer_pem(self) -> pathlib.Path:
+        return self.directory / "signer.pem"
+
     def stamp(self, digest: str, out: pathlib.Path) -> None:
         query = self.directory / f"{out.stem}.tsq"
         _openssl(
@@ -115,6 +120,158 @@ def _openssl(arguments: list[str], cwd: pathlib.Path | None = None) -> bytes:
     return completed.stdout
 
 
+def certificate_pins(pem: pathlib.Path) -> dict[str, str]:
+    """The exact identity dict the verifiers derive from a certificate.
+
+    A trust bundle's ``allowedSigners`` entry is compared for equality against
+    this dict, so a fixture that assembled it any other way would pin nothing:
+    a stray key or a differently formatted subject fails the comparison even
+    when the certificate is the right one, and the test would then prove only
+    that the verifier refuses its own fixture.
+    """
+
+    certificate_der = _openssl(["x509", "-in", str(pem), "-outform", "DER"])
+    with tempfile.TemporaryDirectory(prefix="receipt-fixture-") as temporary:
+        public_key_pem = pathlib.Path(temporary) / "public.pem"
+        public_key_pem.write_bytes(
+            _openssl(["x509", "-in", str(pem), "-pubkey", "-noout"])
+        )
+        spki_der = _openssl(
+            ["pkey", "-pubin", "-in", str(public_key_pem), "-outform", "DER"]
+        )
+    description = _openssl(
+        ["x509", "-in", str(pem), "-noout", "-serial", "-subject", "-nameopt", "RFC2253"]
+    ).decode("utf-8")
+    fields: dict[str, str] = {}
+    for line in description.splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            fields[key] = value
+    return {
+        "certificateSha256": sha256_bytes(certificate_der),
+        "spkiSha256": sha256_bytes(spki_der),
+        "serial": fields.get("serial", "").upper(),
+        "subject": fields.get("subject", ""),
+    }
+
+
+SIGNER_EXTENSIONS = (
+    "[ tsa_ext ]\n"
+    "basicConstraints = critical,CA:FALSE\n"
+    "keyUsage = critical,digitalSignature\n"
+    "extendedKeyUsage = critical,timeStamping\n"
+    "subjectKeyIdentifier = hash\n"
+)
+
+
+def _tsa_config(root_name: str, policy_oid: str, *, tsa_name: bool = True) -> str:
+    return (
+        "[ tsa_config ]\n"
+        "serial = ./tsa_serial\n"
+        "crypto_device = builtin\n"
+        "signer_cert = ./signer.pem\n"
+        "signer_key = ./signer.key\n"
+        "signer_digest = sha256\n"
+        f"certs = ./{root_name}\n"
+        f"default_policy = {policy_oid}\n"
+        "digests = sha256, sha512\n"
+        "accuracy = secs:1\n"
+        "ordering = yes\n"
+        f"tsa_name = {'yes' if tsa_name else 'no'}\n"
+        "ess_cert_id_chain = no\n"
+        "ess_cert_id_alg = sha256\n"
+    )
+
+
+def stamp_anonymously(
+    tsa: LocalTsa,
+    digest: str,
+    out: pathlib.Path,
+    *,
+    policy_oid: str,
+    serial: str,
+) -> None:
+    """Stamp ``digest`` with everything optional about the authority left out.
+
+    A ``TSTInfo`` names the authority that signed it in two ways RFC 3161
+    leaves optional: the ``tsa`` general name, and a serial number the
+    standard requires to be unique only within one TSA. Turn the name off,
+    fix the policy and the serial, and ask for no nonce, and two independent
+    authorities stamping one digest in one second sign byte-identical
+    ``TSTInfo``s -- two legitimate responses that a rule counting the signed
+    timestamp alone reads as one.
+
+    Nothing here is forged. Each response is ``openssl ts -reply``'s own work
+    under its own signing key, from the authority's own configuration with
+    two settings changed; what a caller has to arrange is the second, which
+    is why callers retry.
+
+    ``serial`` is written into the authority's counter, which the reply then
+    advances, so pass one above anything the fixture's ordinary stamping
+    reaches and no two tokens in a session share a serial by accident.
+    """
+
+    query = tsa.directory / f"{out.stem}.tsq"
+    _openssl(
+        [
+            "ts", "-query", "-digest", digest, "-sha256", "-cert", "-no_nonce",
+            "-out", str(query),
+        ]
+    )
+    config = tsa.directory / "anonymous.cnf"
+    config.write_text(_tsa_config(tsa.root_pem.name, policy_oid, tsa_name=False))
+    (tsa.directory / "tsa_serial").write_text(f"{serial}\n")
+    _openssl(
+        [
+            "ts", "-reply", "-config", str(config), "-section", "tsa_config",
+            "-queryfile", str(query), "-out", str(out),
+        ],
+        cwd=tsa.directory,
+    )
+
+
+def _issue_signer(
+    directory: pathlib.Path,
+    *,
+    subject: str,
+    root_pem: pathlib.Path,
+    ca_key: pathlib.Path,
+) -> None:
+    """Issue a timestamping certificate under ``root_pem`` into ``directory``."""
+
+    extensions = directory / "signer-ext.cnf"
+    extensions.write_text(SIGNER_EXTENSIONS)
+    _openssl(
+        [
+            "req", "-newkey", "rsa:2048", "-nodes",
+            "-keyout", str(directory / "signer.key"),
+            "-out", str(directory / "signer.csr"),
+            "-subj", subject,
+        ]
+    )
+    _openssl(
+        [
+            "x509", "-req", "-in", str(directory / "signer.csr"),
+            "-CA", str(root_pem), "-CAkey", str(ca_key),
+            "-CAcreateserial", "-out", str(directory / "signer.pem"),
+            "-days", "3650",
+            "-extfile", str(extensions), "-extensions", "tsa_ext",
+        ]
+    )
+
+
+def _signer_pins(directory: pathlib.Path) -> tuple[str, str]:
+    certificate_der = _openssl(
+        ["x509", "-in", str(directory / "signer.pem"), "-outform", "DER"]
+    )
+    public_key_pem = directory / "signer-public.pem"
+    public_key_pem.write_bytes(
+        _openssl(["x509", "-in", str(directory / "signer.pem"), "-pubkey", "-noout"])
+    )
+    spki_der = _openssl(["pkey", "-pubin", "-in", str(public_key_pem), "-outform", "DER"])
+    return sha256_bytes(certificate_der), sha256_bytes(spki_der)
+
+
 def build_local_tsa(directory: pathlib.Path, name: str, policy_oid: str) -> LocalTsa:
     directory.mkdir(parents=True, exist_ok=True)
     root_pem = directory / f"{name}-root.pem"
@@ -127,63 +284,54 @@ def build_local_tsa(directory: pathlib.Path, name: str, policy_oid: str) -> Loca
             "-subj", f"/CN=receipt test {name} root",
         ]
     )
-    extensions = directory / "signer-ext.cnf"
-    extensions.write_text(
-        "[ tsa_ext ]\n"
-        "basicConstraints = critical,CA:FALSE\n"
-        "keyUsage = critical,digitalSignature\n"
-        "extendedKeyUsage = critical,timeStamping\n"
-        "subjectKeyIdentifier = hash\n"
-    )
-    _openssl(
-        [
-            "req", "-newkey", "rsa:2048", "-nodes",
-            "-keyout", str(directory / "signer.key"),
-            "-out", str(directory / "signer.csr"),
-            "-subj", f"/CN=receipt test {name} signer",
-        ]
-    )
-    _openssl(
-        [
-            "x509", "-req", "-in", str(directory / "signer.csr"),
-            "-CA", str(root_pem), "-CAkey", str(directory / "ca.key"),
-            "-CAcreateserial", "-out", str(directory / "signer.pem"),
-            "-days", "3650",
-            "-extfile", str(extensions), "-extensions", "tsa_ext",
-        ]
+    _issue_signer(
+        directory,
+        subject=f"/CN=receipt test {name} signer",
+        root_pem=root_pem,
+        ca_key=directory / "ca.key",
     )
     (directory / "tsa_serial").write_text("01\n")
-    (directory / "tsa.cnf").write_text(
-        "[ tsa_config ]\n"
-        "serial = ./tsa_serial\n"
-        "crypto_device = builtin\n"
-        "signer_cert = ./signer.pem\n"
-        "signer_key = ./signer.key\n"
-        "signer_digest = sha256\n"
-        f"certs = ./{root_pem.name}\n"
-        f"default_policy = {policy_oid}\n"
-        "digests = sha256, sha512\n"
-        "accuracy = secs:1\n"
-        "ordering = yes\n"
-        "tsa_name = yes\n"
-        "ess_cert_id_chain = no\n"
-        "ess_cert_id_alg = sha256\n"
-    )
-    certificate_der = _openssl(
-        ["x509", "-in", str(directory / "signer.pem"), "-outform", "DER"]
-    )
-    public_key_pem = directory / "signer-public.pem"
-    public_key_pem.write_bytes(
-        _openssl(["x509", "-in", str(directory / "signer.pem"), "-pubkey", "-noout"])
-    )
-    spki_der = _openssl(["pkey", "-pubin", "-in", str(public_key_pem), "-outform", "DER"])
+    (directory / "tsa.cnf").write_text(_tsa_config(root_pem.name, policy_oid))
+    certificate_sha256, spki_sha256 = _signer_pins(directory)
     return LocalTsa(
         name=name,
         directory=directory,
         root_pem=root_pem,
         policy_oid=policy_oid,
-        signer_certificate_sha256=sha256_bytes(certificate_der),
-        signer_spki_sha256=sha256_bytes(spki_der),
+        signer_certificate_sha256=certificate_sha256,
+        signer_spki_sha256=spki_sha256,
+    )
+
+
+def rotate_tsa_signer(source: LocalTsa, directory: pathlib.Path) -> LocalTsa:
+    """Issue a second signing certificate under an existing authority's root.
+
+    A timestamp authority rotates its signing key without disturbing the root
+    a consumer pinned, so the rotated tokens must still chain to that root:
+    reissuing from ``source``'s own CA key is what makes them do so. Generating
+    a fresh root instead would model a different authority, not a rotation, and
+    would prove nothing about how a spec spans one.
+    """
+
+    directory.mkdir(parents=True, exist_ok=True)
+    root_pem = directory / source.root_pem.name
+    root_pem.write_bytes(source.root_pem.read_bytes())
+    _issue_signer(
+        directory,
+        subject=f"/CN=receipt test {source.name} signer rotated",
+        root_pem=source.root_pem,
+        ca_key=source.directory / "ca.key",
+    )
+    (directory / "tsa_serial").write_text("01\n")
+    (directory / "tsa.cnf").write_text(_tsa_config(root_pem.name, source.policy_oid))
+    certificate_sha256, spki_sha256 = _signer_pins(directory)
+    return LocalTsa(
+        name=f"{source.name}-rotated",
+        directory=directory,
+        root_pem=root_pem,
+        policy_oid=source.policy_oid,
+        signer_certificate_sha256=certificate_sha256,
+        signer_spki_sha256=spki_sha256,
     )
 
 

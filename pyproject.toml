@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "receipt"
-version = "0.5.1"
+version = "0.5.2"
 description = "Verifiable custody of agent-produced records: chained manifests, RFC 3161 witnesses, pinned Ed25519 signatures, workflow attestation, closed-world corpus binding — one offline verification command"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -39,3 +39,11 @@ Repository = "https://github.com/TheAxiomFoundation/receipt"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Pin the import path to this checkout's own `src` (#42). A shared venv holds
+# one editable pointer, which `uv run` rewrites to whichever project directory
+# ran last, so `import receipt` under pytest resolved through that pointer and
+# a run started from one worktree could be testing another worktree's source.
+# With this, pytest prepends the rootdir's `src` before collection and the
+# pointer no longer decides which source is under test. CI is unaffected: a
+# fresh venv per job has nothing else to resolve to.
+pythonpath = ["src"]

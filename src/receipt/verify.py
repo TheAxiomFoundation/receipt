@@ -27,7 +27,10 @@ The three passes, in the order a skeptic should want them:
 A verdict is fail-closed in the strict sense: it is ``PASS`` only if passes 1
 and 2 both completed without raising and pass 3 found every required
 declaration. Anything else — including an exception this module did not
-anticipate — is ``FAIL``.
+anticipate, and including ``SystemExit``, which is not an ``Exception`` and
+once unwound straight out of the interpreter from inside a consumer's spec —
+is ``FAIL``. Only ``KeyboardInterrupt`` passes through: the operator
+interrupted the run, and that is not a verdict about the corpus.
 """
 
 from __future__ import annotations
@@ -54,6 +57,7 @@ from receipt.release_chain import (
     ChainSpec,
     ChainVerification,
     ReleaseChainError,
+    assert_no_redirecting_git_environment,
     verify_release_chain,
     verify_release_history_immutable,
 )
@@ -71,6 +75,26 @@ TIER_MEANING = {
 class VerifySpecError(ValueError):
     """The consumer's committed spec is missing, malformed, or not a spec."""
 
+
+def _exception_detail(exc: BaseException) -> str:
+    """Quote a failure, naming anything that is not an ordinary exception.
+
+    ``str(SystemExit(0))`` is the bare string ``"0"``, which inside a refusal
+    reads as a stray token rather than as a spec that tried to exit the
+    interpreter. Ordinary exceptions already carry their own message and are
+    quoted unchanged.
+    """
+
+    if isinstance(exc, Exception):
+        return str(exc)
+    return f"{type(exc).__name__}: {exc}"
+
+
+#: The passes a PASS verdict is made of. A verdict is a claim about custody,
+#: binding, and declaration; a result missing any of them has no verdict to
+#: report, whatever else it recorded. Named here so ``ok`` states the
+#: requirement rather than inferring it from whatever happened to run.
+REQUIRED_PASSES = ("custody", "binding", "declaration")
 
 #: What each completed pass establishes, in the verdict's own words. Keyed by
 #: pass name so the JSON scope block can be built from actual results.
@@ -133,10 +157,28 @@ class VerifyResult:
     passes: tuple[PassResult, ...]
     chain: ChainVerification | None
     corpus: CorpusVerification | None
+    #: The full object id ``--base-ref`` resolved to, or None when no base ref
+    #: was supplied. A ref spelling is not evidence: "HEAD", a branch name, or
+    #: a tag names whatever it points at when the command runs, and the same
+    #: verdict text is reproducible at a later commit. The commit is.
+    base_commit: str | None = None
 
     @property
     def ok(self) -> bool:
-        return all(item.ok for item in self.passes)
+        """Every recorded pass succeeded, and the three that make a verdict ran.
+
+        ``all()`` on its own is vacuously true. A result carrying no passes —
+        a run that fell over before reaching the first one, or a result built
+        by a caller composing this library — reported PASS, and the command
+        printed "ESTABLISHED OFFLINE, FROM THIS CLONE ALONE" and exited 0 over
+        an empty list of passes. Absence of a failure is not the same as
+        presence of a verdict, so the required passes are named and checked.
+        """
+
+        completed = {item.name for item in self.passes if item.ok}
+        return all(item.ok for item in self.passes) and completed.issuperset(
+            REQUIRED_PASSES
+        )
 
     @property
     def head_name(self) -> str | None:
@@ -195,6 +237,16 @@ def load_spec(spec_path: pathlib.Path) -> tuple[VerificationSpec, str]:
     a future inert, schema-validated spec format would remove even the need to
     execute it, and is tracked as follow-up work.
 
+    The path's final component is required to be a regular file, not a
+    symlink to one, checked as supplied rather than after resolution: a link
+    can be repointed at other bytes without the path the auditor pinned
+    changing at all. Parent components are not walked. An absolute path
+    legitimately crosses ambient links (``/tmp`` on macOS), and the
+    component walk the anchor check does runs under a resolved root, which a
+    spec path does not have; a symlinked parent of the spec is therefore not
+    caught here, and the same final-component rule governs every other read
+    in the package.
+
     The source is read once and compiled from those exact bytes, deliberately
     bypassing the import system. Going through ``importlib`` would consult
     ``__pycache__``, whose staleness check is (source mtime, source size) at
@@ -207,6 +259,19 @@ def load_spec(spec_path: pathlib.Path) -> tuple[VerificationSpec, str]:
 
     import types
 
+    # Before resolving, deliberately. Every other read in this package refuses
+    # a symlink in the final component — manifests, receipts, anchors, the
+    # witnessed journal — and the
+    # spec is the trust configuration itself, so it gets the same treatment.
+    # The check ran after ``resolve()``, which follows every link on the way,
+    # so nothing was ever left for it to catch. A symlink also breaks the one
+    # thing an auditor pins: they read the spec out of band and record its
+    # digest against a path, and the link can be repointed at other bytes
+    # afterwards without that path changing at all.
+    if spec_path.is_symlink():
+        raise VerifySpecError(
+            f"spec is a symlink; supply the regular file's path: {spec_path}"
+        )
     spec_path = spec_path.resolve()
     if spec_path.is_symlink() or not spec_path.is_file():
         raise VerifySpecError(f"spec is missing or not a regular file: {spec_path}")
@@ -218,8 +283,19 @@ def load_spec(spec_path: pathlib.Path) -> tuple[VerificationSpec, str]:
     try:
         code = compile(source, str(spec_path), "exec")
         exec(code, module.__dict__)  # noqa: S102 - the audited repo's own pins
-    except Exception as exc:  # noqa: BLE001 - any failure here is fail-closed
-        raise VerifySpecError(f"spec module raised on load: {spec_path}: {exc}") from exc
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException as exc:  # noqa: BLE001 - any failure here is fail-closed
+        # BaseException deliberately, not Exception. A spec containing
+        # ``raise SystemExit(0)`` unwound straight through an Exception-only
+        # boundary, past every pass below, and out of the interpreter with
+        # status 0 and no verdict printed at all — the producer's own spec
+        # choosing the command's exit code. SystemExit and GeneratorExit are
+        # load failures like any other; only the operator's interrupt is
+        # allowed through, because it is not the spec's to report.
+        raise VerifySpecError(
+            f"spec module raised on load: {spec_path}: {_exception_detail(exc)}"
+        ) from exc
 
     candidate = getattr(module, "SPEC", None)
     if candidate is None:
@@ -234,17 +310,41 @@ def load_spec(spec_path: pathlib.Path) -> tuple[VerificationSpec, str]:
     return candidate, digest
 
 
+def _witness_time(value: datetime) -> str:
+    """Render a witnessed genTime without discarding what the token signed.
+
+    An RFC 3161 authority may sign a fractional genTime, and whole-second
+    formatting printed a token witnessed at ``…:59.750000Z`` as ``…:59Z`` —
+    an instant strictly earlier than the one the receipt carries, quoted in a
+    verdict as though it were exact. Microseconds are printed whenever there
+    are any; when there are none they are omitted, so the ordinary case reads
+    as the authority wrote it.
+    """
+
+    if value.microsecond:
+        return value.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _custody_detail(verification: ChainVerification, spec: VerificationSpec) -> str:
     head = verification.head
     assert head is not None
     witnesses = " · ".join(
-        f"{anchor} {value.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        f"{anchor} {_witness_time(value)}"
         for anchor, value in sorted(head.receipt_times.items())
     )
     anchor_set = verification.anchor_set_sha256
     assert anchor_set is not None
     return (
         f"{len(verification.releases)} release(s), HEAD {head.path.name}; "
+        # The filename carries only the first 16 hex of the head manifest's
+        # digest, and that digest is exactly the value an auditor compares out
+        # of band — freshness and uniqueness are the two things this command
+        # states it cannot establish from one clone, and comparing head
+        # digests is the remedy it names for both. A prefix is not quotable
+        # evidence for that comparison, so the full digest gets its own
+        # segment beside the filename an auditor can find on disk.
+        f"head {head.sha256}; "
         f"producer SPKI {spec.chain.producer_spki_sha256[:16]}…; "
         # Full digest, deliberately: the anchor-set digest exists so an
         # assessment can quote it from the verdict alone, and unlike the
@@ -294,6 +394,7 @@ def run_verification(
     passes: list[PassResult] = []
     chain: ChainVerification | None = None
     corpus: CorpusVerification | None = None
+    base_commit: str | None = None
 
     def result(*, incomplete: str | None = None) -> VerifyResult:
         items = list(passes)
@@ -309,31 +410,64 @@ def run_verification(
             passes=tuple(items),
             chain=chain,
             corpus=corpus,
+            base_commit=base_commit,
         )
 
     # Every pass — the verification call AND the detail builder that reports
-    # it — runs inside a boundary that converts *any* exception, expected or
-    # not, into a failed pass. The documented contract is that a verification
+    # it — runs inside a boundary that converts *any* raise, expected or not,
+    # into a failed pass. The documented contract is that a verification
     # failure is the return value and never an escaping exception (so a --json
     # consumer always receives a {"verdict": "FAIL"} object); an unforeseen
     # exception here would otherwise leave the CLI to exit 1 with no verdict at
-    # all. Expected domain errors carry their own message; anything else names
-    # its type so the surprise is legible.
+    # all. The boundaries below catch BaseException rather than Exception,
+    # because SystemExit is neither: raised anywhere under a pass it unwound
+    # past an Exception-only boundary and out of the interpreter, choosing the
+    # command's exit status with no verdict printed. KeyboardInterrupt alone is
+    # re-raised — it is the operator's, not the verification's, to report.
+    # Expected domain errors carry their own message; anything else names its
+    # type so the surprise is legible.
     def failed(name: str, exc: BaseException, expected: type[Exception]) -> str:
         if isinstance(exc, expected):
             return str(exc)
         return f"{type(exc).__name__}: {exc}"
 
+    # Before any pass runs git: an environment that would redirect git's reads
+    # is refused here rather than met by the custody pass after the optional
+    # history pass has already resolved a base and printed an OID from
+    # whichever repository the environment pointed at (peer review of the
+    # 0.5.2 release PR). It is reported as the custody pass's refusal, in that
+    # pass's own words, so the verdict reads the same with or without
+    # ``--base-ref``.
+    try:
+        assert_no_redirecting_git_environment()
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException as exc:  # noqa: BLE001 - any raise is a FAIL verdict
+        passes.append(
+            PassResult("custody", False, "", failed("custody", exc, ReleaseChainError))
+        )
+        return result(incomplete="binding")
+
     # Pass 0 (optional): the published history is immutable relative to a base
     # git ref. Needs git and a repository; requested explicitly, never implied.
     if base_ref is not None:
         try:
-            verify_release_history_immutable(root, base_ref, spec=spec.chain)
-            history_detail = (
-                f"every release object present at {base_ref} is byte- and "
-                "mode-identical in this tree"
+            # The commit the ref resolved to, from the one resolution the
+            # comparison itself used. Quoting only the spelling left the
+            # verdict unfalsifiable: "HEAD", a branch, or a tag names whatever
+            # it pointed at while the command ran, so the same sentence is
+            # reproducible at a different base later, and a reader cannot tell
+            # which snapshot was compared. The object id is the evidence.
+            base_commit, _, _ = verify_release_history_immutable(
+                root, base_ref, spec=spec.chain
             )
-        except Exception as exc:  # noqa: BLE001 - any failure is a FAIL verdict
+            history_detail = (
+                f"every release object present at {base_ref} ({base_commit}) "
+                "is byte- and mode-identical in this tree"
+            )
+        except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+            raise
+        except BaseException as exc:  # noqa: BLE001 - any raise is a FAIL verdict
             passes.append(
                 PassResult(
                     "history",
@@ -363,7 +497,9 @@ def run_verification(
             compute_anchor_set_digest=True,
         )
         custody_detail = _custody_detail(chain, spec)
-    except Exception as exc:  # noqa: BLE001 - any failure is a FAIL verdict
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException as exc:  # noqa: BLE001 - any raise is a FAIL verdict
         passes.append(
             PassResult("custody", False, "", failed("custody", exc, ReleaseChainError))
         )
@@ -394,7 +530,9 @@ def run_verification(
             )
         corpus = verify_corpus_binding(root, journal_bytes, spec=spec.corpus)
         binding_detail = _binding_detail(corpus)
-    except Exception as exc:  # noqa: BLE001 - any failure is a FAIL verdict
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException as exc:  # noqa: BLE001 - any raise is a FAIL verdict
         passes.append(
             PassResult("binding", False, "", failed("binding", exc, CorpusError))
         )
@@ -408,7 +546,9 @@ def run_verification(
     try:
         verify_declarations(corpus, spec=spec.corpus)
         declaration_detail = _declaration_detail(corpus)
-    except Exception as exc:  # noqa: BLE001 - any failure is a FAIL verdict
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException as exc:  # noqa: BLE001 - any raise is a FAIL verdict
         passes.append(
             PassResult("declaration", False, "", failed("declaration", exc, CorpusError))
         )
@@ -463,6 +603,11 @@ def result_to_dict(result: VerifyResult) -> dict[str, Any]:
             ],
         },
     }
+    if result.base_commit is not None:
+        # The object id the comparison actually ran against. The ref spelling
+        # stays in the history pass detail beside it; only one of the two is
+        # evidence a reader can re-check.
+        payload["history"] = {"baseCommit": result.base_commit}
     if result.chain is not None and result.chain.head is not None:
         payload["chain"] = {
             "releases": len(result.chain.releases),
@@ -475,7 +620,7 @@ def result_to_dict(result: VerifyResult) -> dict[str, Any]:
             "anchorSetSha256": result.chain.anchor_set_sha256,
             "anchorFiles": dict(result.chain.anchor_file_sha256s),
             "witnesses": {
-                anchor: value.strftime("%Y-%m-%dT%H:%M:%SZ")
+                anchor: _witness_time(value)
                 for anchor, value in sorted(result.chain.head.receipt_times.items())
             },
         }

@@ -31,4 +31,4 @@ depends on it. Its gate is the refusal battery in tests/test_evidence.py.
 Pending extraction: waiver ratchet and chronology tiers.
 """
 
-__version__ = "0.5.1"
+__version__ = "0.5.2"
