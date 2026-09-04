@@ -1180,14 +1180,17 @@ def _supported_openssl_version(line: str) -> bool:
 
 
 @functools.cache
-def _openssl_version_requirement() -> tuple[bool, str]:
-    """Return the cached version verdict, including an unsupported one."""
+def _openssl_version_requirement() -> tuple[bool, str, str | None]:
+    """Return the cached version verdict, including a command refusal."""
 
-    banner = _run_openssl(["version"])
+    try:
+        banner = _run_openssl(["version"])
+    except TsaError as exc:
+        return False, "", str(exc)
     assert isinstance(banner, str)
     lines = banner.splitlines()
     line = lines[0].strip() if lines else ""
-    return _supported_openssl_version(line), line
+    return _supported_openssl_version(line), line, None
 
 
 @functools.cache
@@ -1229,7 +1232,9 @@ def _require_supported_openssl() -> None:
     image at the time of writing) and not a substituted banner.
     """
 
-    supported, line = _openssl_version_requirement()
+    supported, line, command_refusal = _openssl_version_requirement()
+    if command_refusal is not None:
+        raise TsaError(command_refusal)
     if not supported:
         raise TsaError(
             "receipt requires OpenSSL 3.0 or newer as `openssl` on the path; "
