@@ -109,15 +109,20 @@
   subtree remains pre-genesis. A non-tree exact manifest leaf remains truthy
   and reaches its established directory-verifier refusal.
 - Re-ran the complete append unit module after the audit fixes: 91/91 passed.
-- Completed the reader-preflight audit. State entry shapes, release entry
-  modes, every protected ancestor, whole-tree folded aliases, and transforming
-  attributes now run before surface classification without fetching state or
-  release payloads. Release history still precedes candidate materialization.
+- Completed the reader-preflight audit. State entry shapes, every protected
+  ancestor, whole-tree folded aliases, and transforming attributes now run
+  before surface classification without fetching state or release payloads.
+  Base release modes remain in release history; push release-leaf modes remain
+  after row and manifest decisions. Release history still precedes candidate
+  materialization.
 - Added regressions for gate-only transforming attributes, state paths omitted
   from declared surfaces, a folded gate alias, a blob at a gate-path ancestor,
   state-shape ordering, and an invalid UTF-8 tree name translated into the
   append gate's exception vocabulary. The focused append module is now 99/99
   green.
+- Corrected the committed re-pin receipt to identify the current Lane B
+  worktree and the project virtual-environment interpreter for the standalone
+  append harness command.
 
 ## Next
 

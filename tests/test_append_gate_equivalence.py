@@ -613,10 +613,9 @@ def test_gate_only_acceptance_verdicts_match(
     capfd: pytest.CaptureFixture[str],
 ) -> None:
     root, base = gate_only_candidate(append_pinned_tree, tmp_path)
-    # The gate-only file was untracked before this commit and is tracked after
-    # it, which moves it from ``git ls-files --others`` into ``git diff`` in
-    # both verifiers' surface classification. The union both read is the same
-    # set, and the verdict is the same sentence.
+    # This commit records only the gate path. The oracle derives that change
+    # from its clean checkout; the port derives it from the two selected trees.
+    # Both classify the same set and must return the same sentence.
     candidate = commit_candidate(root, "gate_only_acceptance")
 
     message = _assert_accepts_identically(

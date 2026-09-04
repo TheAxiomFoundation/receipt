@@ -88,7 +88,7 @@ reader diagnostic passes through unchanged and still fails byte comparison.
 
 ## Verification
 
-Run from the Lane C worktree with the authenticated local extraction at
+Run from the current Lane B worktree with the authenticated local extraction at
 `9dafe8174f42a06c00817fe596d5a8e686cb17b7`:
 
 ```console
@@ -101,7 +101,7 @@ Collection is 43 with zero skips: all prior 36 cases plus all 7 additions.
 Lane B's append harness alone, with the same authenticated Ledger extraction:
 
 ```console
-RECEIPT_LEDGER_TREE=/Users/maxghenis/TheAxiomFoundation/receipt/.extraction/ledger-9dafe81 /Users/maxghenis/.cache/uv/archive-v0/vhPc6nCe-q_o1Hm80PZHy/bin/python -m pytest -q tests/test_append_gate_equivalence.py
+RECEIPT_LEDGER_TREE=/Users/maxghenis/TheAxiomFoundation/receipt/.extraction/ledger-9dafe81 /Users/maxghenis/TheAxiomFoundation/receipt/.venv/bin/python -m pytest -q tests/test_append_gate_equivalence.py
 28 passed in 24.03s
 ```
 
