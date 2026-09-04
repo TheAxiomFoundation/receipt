@@ -626,15 +626,34 @@ def test_corpus_fixture_commit_controls_return_the_selected_oid(
 
     uncommitted_root = tmp_path / "uncommitted"
     uncommitted_root.mkdir()
+    uncommitted_workspace = tmp_path / "uncommitted-tsa"
     assert (
         build_corpus(
             uncommitted_root,
-            tmp_path / "uncommitted-tsa",
+            uncommitted_workspace,
             commit=False,
         )
         is None
     )
     assert not (uncommitted_root / ".git").exists()
+    journal_before = (uncommitted_root / "receipt/corpus-journal.jsonl").read_bytes()
+    manifests_before = tuple((uncommitted_root / "releases/manifests").iterdir())
+
+    with pytest.raises(ValueError) as caught:
+        append_release(
+            uncommitted_root,
+            uncommitted_workspace,
+            content=CONTENT,
+        )
+    assert str(caught.value) == (
+        "append_release(commit=True) cannot follow build_corpus(commit=False)"
+    )
+    assert (uncommitted_root / "receipt/corpus-journal.jsonl").read_bytes() == (
+        journal_before
+    )
+    assert tuple((uncommitted_root / "releases/manifests").iterdir()) == (
+        manifests_before
+    )
 
 
 def test_commit_helpers_override_hostile_global_git_config(

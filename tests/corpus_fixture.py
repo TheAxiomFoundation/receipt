@@ -594,6 +594,11 @@ def append_release(
     OID, or ``None`` when ``commit`` is false.
     """
 
+    if commit and not (root / ".git").exists():
+        raise ValueError(
+            "append_release(commit=True) cannot follow build_corpus(commit=False)"
+        )
+
     attested = ATTESTED if attested is None else attested
     for relative, text in {**content, **attested}.items():
         path = root / relative
