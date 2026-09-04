@@ -92,18 +92,17 @@ never-activated authority renamed and rotated at once in a later bundle of
 the same transition was refused for splitting or merging active authorities
 when no active authority is anywhere in its class (peer review, first Opus
 round) -- one class, since an anchor carrying two pending-only classes merges
-them and stays refused; asked now
-of every pending anchor, including one whose ``(ID, root SPKI)`` is already
-active, which used to be exempt from this question and so could commit the
-very merge the clause claims to refuse: such an anchor is a rotation, but
-being a rotation settles what it has to prove and not whose keys it may
-hold, and while its signer edges entered the graph either way, with the
-adopted authority's own slot dropped from the same bundle no rule looked at
-the result -- an anchor already active may rotate within its own class and
-may take a key that is nobody's, and adopting another class's key is now
-refused in a verdict naming this anchor's own authority and every class whose
-key it took, all of them identities the history can already give (peer
-review, sixth gate round three); a pending
+them and stays refused; asked now of every pending anchor, including one
+whose ``(ID, root SPKI)`` is already active, which used to be exempt from this
+question and so could commit the very merge the clause claims to refuse: such
+an anchor is a rotation, but being a rotation settles what it has to prove and
+not whose keys it may hold, and while its signer edges entered the graph
+either way, with the adopted authority's own slot dropped from the same bundle
+no rule looked at the result -- an anchor already active may rotate within its
+own class and may take a key that is nobody's, and adopting another class's
+key is now refused in a verdict naming this anchor's own authority and every
+class whose key it took, all of them identities the history can already give
+(peer review, sixth gate round three); a pending
 bundle that presents two anchors from
 one of those historical classes, which would make one authority current twice
 under disjoint signer sets that the bundle-local check cannot connect -- the
@@ -216,10 +215,9 @@ both times: what a rename is measured against is the class's live era rather
 than its whole history, and the question is asked only of an anchor touching
 a class the chain already trusts.  Narrowing what a place refuses does not
 move a count of places, so twenty plus three minus one plus one is
-twenty-three.  The
-withdrawal is
-the only one in the port's history, so it is stated rather than absorbed.
-What it withdrew was the refusal of two pending bundles introducing one
+twenty-three.  The withdrawal is the only one in the port's history, so it is
+stated rather than absorbed.  What it withdrew was the refusal of two pending
+bundles introducing one
 authority under two anchors, sharing a signer.  Pending history was a rolling
 set of current candidates, so a skipped rename or rotation contributed no
 edge, succession deleted the predecessor's signer ownership, and reversing an
@@ -249,10 +247,9 @@ decided it.
 The pinned root behind the two counting refusals is read once per validation
 of it, and every check of that validation runs on those bytes: the PEM hash
 over the bytes themselves, the count and the certificate identity by running
-OpenSSL
-on a private byte-for-byte copy of them, and the two ``-CAfile``
-verifications on that same copy rather than on the path.  Once per
-validation and not once per verification: every anchor of every bundle a
+OpenSSL on a private byte-for-byte copy of them, and the two ``-CAfile``
+verifications on that same copy rather than on the path.  Once per validation
+and not once per verification: every anchor of every bundle a
 verification loads is validated at load, and each anchor an outcome selects
 is validated again, so one ``verify_witness`` over a two-anchor witness reads
 each pinned root seven times -- five from bundle loads, one from the
@@ -489,28 +486,27 @@ which passed the check and then refused every valid witness.
 
 ``tests/test_tsa.py`` binds all of these.  Three places can no longer fire
 from within this module, five refusal texts between them, and every one of
-the five is kept as defence in depth.
-``_select_anchor``'s own identity refusals are the first place and three of
-those texts:
-the identity that is not independently pinned in verifier code, the root SPKI
-that differs from the verifier code pin, and the signer SPKIs that differ
-from the verifier code pins.  Every bundle anchor is identity-checked at
-load and every call site takes its anchor from ``_load_trust_bundle``, so the
-selection never finds a disagreement of any of the three, and all three texts
-are kept verbatim as ported (peer review, first Opus round).  The load-time
-refusal of an anchor
-whose referenced root material carries an SPKI other than its identity's is
-the second, and it is unreachable for the reason the check beside it exists: the
-anchor's declared ``rootCertificate.spkiSha256`` has already been required to
+the five is kept as defence in depth.  ``_select_anchor``'s own identity
+refusals are the first place and three of
+those texts: the identity that is not independently pinned in verifier code,
+the root SPKI that differs from the verifier code pin, and the signer SPKIs
+that differ from the verifier code pins.  Every bundle anchor is
+identity-checked at load and every call site takes its anchor from
+``_load_trust_bundle``, so the selection never finds a disagreement of any of
+the three, and all three texts are kept verbatim as ported (peer review,
+first Opus round).  The load-time refusal of an anchor whose referenced root
+material carries an SPKI other than its identity's is the second, and it is
+unreachable for the reason the check beside it exists: the anchor's declared
+``rootCertificate.spkiSha256`` has already been required to
 equal the identity's, and ``_root_material`` returns only after requiring the
 SPKI it computed from the bytes it read to equal that same declared value --
 one mapping, out of the one parse of the bundle, never re-read between the
 two.  What it protects is the case where one of those two comparisons is
 lost, and it is the one that would name the material rather than the
 declaration (peer review, first Opus round).  The duplicate-timestamp refusal
-is the third place, and what closed it is the pending-authority rules above: two outcomes
-rest on one authority's signature only if two anchors both pin the
-certificate that response was signed with, and no pairing of anchors that
+is the third place, and what closed it is the pending-authority rules above:
+two outcomes rest on one authority's signature only if two anchors both pin
+the certificate that response was signed with, and no pairing of anchors that
 could reaches two outcomes -- inside one bundle a current shared signer is
 refused at load, and inside a pending bundle the historical-class guard
 refuses disjoint current signers that still belong to one class;
@@ -974,9 +970,8 @@ def _components_below(
     the records tree has no components below it, and the caller above refuses
     it in the same words it refuses a ``..`` in, both being the one claim that
     this path is not in the tree.  Every path the module walks but the record
-    under witness is
-    built by ``physical_path`` as ``root`` joined with a relative spelling, so
-    for those the first comparison always succeeds.
+    under witness is built by ``physical_path`` as ``root`` joined with a
+    relative spelling, so for those the first comparison always succeeds.
     """
 
     chain: list[Path] = []
@@ -2107,9 +2102,8 @@ def _read_witnessed_record(
     ``witnessed record path is not below the records root`` before any
     descriptor is opened, the walk being lexical and ``lstat`` unable to see
     a component that is the root under another name (same round).  The check
-    above
-    answers for the final component and ``O_NOFOLLOW`` for the object opened;
-    the components between the root and it are what
+    above answers for the final component and ``O_NOFOLLOW`` for the object
+    opened; the components between the root and it are what
     ``_refuse_a_linked_component`` first checks (sixth gate round one), and
     the same tuple is then opened relative to held directory descriptors so a
     replacement after that check cannot redirect this read (sixth gate round
