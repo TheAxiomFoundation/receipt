@@ -552,6 +552,68 @@ def test_a_tree_alias_of_the_gate_path_refuses_before_classification(
     )
 
 
+@pytest.mark.parametrize("name", ["smuggled.sigx", "smuggled.tsrx"])
+@pytest.mark.parametrize("shape", ["blob", "symlink", "tree"])
+def test_portable_release_names_screen_short_aliases_for_every_entry_kind(
+    tmp_path: pathlib.Path,
+    name: str,
+    shape: str,
+) -> None:
+    candidate = base_repository(tmp_path)
+    path = candidate.root / CHAIN_SPEC.release_root_relative / name
+    if shape == "blob":
+        path.write_text("not release evidence\n", encoding="utf-8")
+    elif shape == "symlink":
+        path.symlink_to(tmp_path / "outside-release-tree")
+    else:
+        path.mkdir()
+        (path / "entry").write_text("keeps the tree entry\n", encoding="utf-8")
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate)
+
+    assert str(refusal.value) == (
+        "release root contains an entry whose short-name alias would carry "
+        f"a pinned suffix: releases/{name}"
+    )
+
+
+def test_portable_release_short_aliases_are_screened_with_a_base(
+    tmp_path: pathlib.Path,
+) -> None:
+    candidate = base_repository(tmp_path)
+    relative = "releases/smuggled.sigx"
+    (candidate.root / relative).write_text("not release evidence\n", encoding="utf-8")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+
+    assert str(refusal.value) == (
+        "release root contains an entry whose short-name alias would carry "
+        f"a pinned suffix: {relative}"
+    )
+
+
+@pytest.mark.parametrize("name", ["smuggled.sigx", "smuggled.tsrx"])
+def test_posix_bytes_allows_release_names_with_short_aliases(
+    tmp_path: pathlib.Path,
+    name: str,
+) -> None:
+    candidate = base_repository(tmp_path)
+    (candidate.root / CHAIN_SPEC.release_root_relative / name).write_text(
+        "ordinary posix name\n",
+        encoding="utf-8",
+    )
+    spec = replace(
+        GATE_SPEC,
+        chain=replace(CHAIN_SPEC, name_repertoire="posix-bytes"),
+    )
+
+    assert run_push_gate(candidate, spec=spec) == (
+        "thesis-facts append check OK: 2 rows, immutable prefix 1"
+    )
+
+
 def test_an_unfoldable_tree_name_is_an_append_refusal(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -1064,6 +1126,22 @@ def test_dropping_a_release_files_owner_execute_bit_is_refused(
     assert str(refusal.value) == (
         f"existing release file mode changed relative to {executable_base.base}: "
         "releases/README.md (100755 -> 100644)"
+    )
+
+
+def test_deleting_a_release_file_keeps_the_history_refusal(
+    tmp_path: pathlib.Path,
+) -> None:
+    candidate = base_repository(tmp_path)
+    readme = candidate.root / CHAIN_SPEC.release_root_relative / "README.md"
+    readme.unlink()
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+
+    assert str(refusal.value) == (
+        f"existing release file was deleted relative to {candidate.base}: "
+        "releases/README.md"
     )
 
 

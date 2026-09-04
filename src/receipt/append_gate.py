@@ -22,7 +22,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from receipt._names import NamePolicyError, ascii_fold_text
+from receipt._names import (
+    NamePolicyError,
+    ascii_fold_text,
+    short_name_carries_pinned_suffix,
+)
 from receipt.canonical import canonical_sha256
 from receipt.corpus import MAX_JOURNAL_BYTES
 from receipt.release_chain import (
@@ -38,6 +42,7 @@ from receipt.snapshot import GitEntry, SnapshotError, TreeSnapshot
 
 
 CODE_ROOT = pathlib.Path(__file__).resolve().parents[2]
+_RELEASE_PINNED_SUFFIXES = (".json", ".sig", ".tsr")
 
 
 @dataclass(frozen=True)
@@ -856,6 +861,25 @@ def _screen_candidate_tree_aliases(
                 raise AppendError(
                     f"index carries an alias of a protected path: {listed} "
                     f"(for {path} at {prefix})"
+                )
+
+    if candidate.spec.chain.name_repertoire == "portable":
+        release_root = candidate.spec.chain.release_root_relative.as_posix()
+        release_prefix = f"{release_root}/"
+        for relative in sorted(entries):
+            if not relative.startswith(release_prefix):
+                continue
+            name = relative.rpartition("/")[2]
+            folded_name = ascii_fold_text(name)
+            if not any(
+                folded_name.endswith(suffix) for suffix in _RELEASE_PINNED_SUFFIXES
+            ) and short_name_carries_pinned_suffix(
+                name,
+                _RELEASE_PINNED_SUFFIXES,
+            ):
+                raise AppendError(
+                    "release root contains an entry whose short-name alias "
+                    f"would carry a pinned suffix: {relative}"
                 )
     return entries
 

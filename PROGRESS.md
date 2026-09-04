@@ -124,9 +124,18 @@
 - Corrected the committed re-pin receipt to identify the current Lane B
   worktree and the project virtual-environment interpreter for the standalone
   append harness command.
+- Completed the portable release-root name screen using Lane D's shared 8.3
+  suffix predicate. Under `portable`, non-content names whose generated short
+  aliases would end `.sig` or `.tsr` refuse before entry modes for blobs,
+  links, and trees; `posix-bytes` retains the exact-byte policy. Restored a
+  direct exact-message test for release-history deletion. The append unit
+  module is now 109/109 green.
 
 ## Next
 
+- Integrate the target branch's post-start Lane C/D fixes, replace the local
+  base-chain workaround with Lane C's now-complete helper, and re-run all
+  verification on the integrated head.
 - Finish the obsolete-narrative and exact-contract audit for the PR handoff.
 - Prepare the complete no-network PR handoff; pushing and opening the draft PR
   will require a networked environment unless connectivity becomes available.
