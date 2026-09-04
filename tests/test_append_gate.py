@@ -558,6 +558,7 @@ def proposal_with_tree_names(
     names: tuple[str, ...],
     *,
     gate_only: bool,
+    names_in_base: bool = False,
 ) -> tuple[Candidate, str]:
     """Put exact names in objects even when the fixture host folds siblings."""
 
@@ -575,7 +576,7 @@ def proposal_with_tree_names(
     base = git(
         candidate.root, "commit-tree", tree, "-p", candidate.base, "-m", "tree names"
     )
-    if not gate_only or directory == "ledger":
+    if names_in_base or not gate_only or directory == "ledger":
         candidate = replace(candidate, base=base)
     if gate_only:
         add_gate_file(candidate)
@@ -692,6 +693,121 @@ def test_portable_protected_prefix_components_are_screened(
         "'.', '_' and '-', not ending in '.', not a Win32 device name): "
         f"{component!r}"
     )
+
+
+@pytest.mark.parametrize("manifest_relative", ["manifest?", "bad?/manifests"])
+@pytest.mark.parametrize("gate_only", [True, False], ids=["gate-only", "data"])
+def test_disjoint_manifest_components_refuse_before_gate_only_success(
+    tmp_path: pathlib.Path, manifest_relative: str, gate_only: bool
+) -> None:
+    candidate = base_repository(tmp_path)
+    manifests = candidate.root / manifest_relative
+    manifests.mkdir(parents=True)
+    (manifests / "policy.txt").write_text("policy\n", encoding="utf-8")
+    candidate = replace(candidate, base=commit_candidate(candidate, "manifest policy"))
+    spec = replace(
+        GATE_SPEC,
+        chain=replace(
+            CHAIN_SPEC, manifest_relative=pathlib.PurePosixPath(manifest_relative)
+        ),
+        release_manifest_prefix=f"{manifest_relative}/",
+        data_surface=frozenset({"ledger/**", f"{manifest_relative}/**"}),
+    )
+    if gate_only:
+        add_gate_file(candidate)
+        changed_path = GATE_FILE
+    else:
+        append_one_row(candidate)
+        changed_path = CHAIN_SPEC.state_relative.as_posix()
+    oid = commit_candidate(candidate)
+    assert git(candidate.root, "status", "--porcelain") == ""
+    assert (
+        git(candidate.root, "diff", "--name-only", candidate.base, oid) == changed_path
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate, spec=spec, commit=oid)
+
+    component = manifest_relative.split("/")[0]
+    assert str(refusal.value) == (
+        f"tree entry {component!r} is not a portable name (ASCII letters, digits, "
+        "'.', '_' and '-', not ending in '.', not a Win32 device name): "
+        f"{component!r}"
+    )
+    assert git(candidate.root, "status", "--porcelain") == ""
+
+
+@pytest.mark.parametrize("repertoire", ["portable", "posix-bytes"])
+@pytest.mark.parametrize("gate_only", [True, False], ids=["gate-only", "data"])
+@pytest.mark.parametrize("directory", ["manifests", "journal/manifests/nested"])
+def test_disjoint_manifest_siblings_refuse_before_gate_only_success(
+    tmp_path: pathlib.Path, repertoire: str, gate_only: bool, directory: str
+) -> None:
+    candidate, oid = proposal_with_tree_names(
+        tmp_path,
+        directory,
+        ("Foo.txt", "foo.txt"),
+        gate_only=gate_only,
+        names_in_base=True,
+    )
+    manifest_relative = directory.removesuffix("/nested")
+    spec = replace(
+        GATE_SPEC,
+        chain=replace(
+            CHAIN_SPEC,
+            manifest_relative=pathlib.PurePosixPath(manifest_relative),
+            name_repertoire=repertoire,
+        ),
+        release_manifest_prefix=f"{manifest_relative}/",
+        data_surface=frozenset({"ledger/**", f"{manifest_relative}/**"}),
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate, spec=spec, commit=oid)
+
+    assert str(refusal.value) == (
+        f"tree directory '{directory}' contains names that merge under ASCII "
+        "case folding: 'Foo.txt' and 'foo.txt'"
+    )
+
+
+@pytest.mark.parametrize(
+    "name", ["bad?.txt", "NUL.txt", "smuggled.sigx", "smuggled.tsrx"]
+)
+@pytest.mark.parametrize("repertoire", ["portable", "posix-bytes"])
+def test_disjoint_manifest_listing_applies_the_declared_repertoire(
+    tmp_path: pathlib.Path, name: str, repertoire: str
+) -> None:
+    candidate, oid = proposal_with_tree_names(
+        tmp_path, "manifests", (name,), gate_only=True, names_in_base=True
+    )
+    spec = replace(
+        GATE_SPEC,
+        chain=replace(
+            CHAIN_SPEC,
+            manifest_relative=pathlib.PurePosixPath("manifests"),
+            name_repertoire=repertoire,
+        ),
+        release_manifest_prefix="manifests/",
+        data_surface=frozenset({"ledger/**", "manifests/**"}),
+    )
+
+    if repertoire == "posix-bytes":
+        assert "gate-only proposal" in run_gate(candidate, spec=spec, commit=oid)
+    else:
+        with pytest.raises(AppendError) as refusal:
+            run_gate(candidate, spec=spec, commit=oid)
+        if name in {"bad?.txt", "NUL.txt"}:
+            assert str(refusal.value) == (
+                f"tree entry 'manifests/{name}' is not a portable name "
+                "(ASCII letters, digits, '.', '_' and '-', not ending in '.', "
+                f"not a Win32 device name): {name!r}"
+            )
+        else:
+            assert str(refusal.value) == (
+                "release root contains an entry whose short-name alias would carry "
+                f"a pinned suffix: manifests/{name}"
+            )
 
 
 @pytest.mark.parametrize("name", ["smuggled.sigx", "smuggled.tsrx"])

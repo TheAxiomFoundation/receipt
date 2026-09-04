@@ -867,11 +867,15 @@ def _screen_candidate_tree_aliases(
                     f"(for {path} at {prefix})"
                 )
 
-    # Screen the release subtree and each state file's directory even when a
-    # gate-only proposal will return before materialization. Derive immediate
+    # Screen the release and manifest subtrees and each state file's directory
+    # even when a gate-only proposal will return before materialization. Derive
     # sibling sets from the already authenticated listing, never the checkout.
     chain = candidate.spec.chain
-    release_root = chain.release_root_relative.as_posix()
+    release_directories = {
+        chain.release_root_relative.as_posix(),
+        chain.manifest_relative.as_posix(),
+    }
+    release_prefixes = tuple(f"{directory}/" for directory in release_directories)
     state_directories = {
         relative.parent.as_posix() if relative.parent.parts else ""
         for relative in (chain.state_relative, chain.prefix_relative)
@@ -880,6 +884,7 @@ def _screen_candidate_tree_aliases(
         "/".join(relative.parts[:depth])
         for relative in (
             chain.release_root_relative,
+            chain.manifest_relative,
             chain.state_relative,
             chain.prefix_relative,
         )
@@ -892,8 +897,8 @@ def _screen_candidate_tree_aliases(
             if not (
                 relative in protected_components
                 or directory in state_directories
-                or directory == release_root
-                or directory.startswith(f"{release_root}/")
+                or directory in release_directories
+                or directory.startswith(release_prefixes)
             ):
                 continue
             ascii_fold_text(name)
@@ -916,9 +921,8 @@ def _screen_candidate_tree_aliases(
         raise AppendError(str(exc)) from exc
 
     if chain.name_repertoire == "portable":
-        release_prefix = f"{release_root}/"
         for relative in sorted(entries):
-            if not relative.startswith(release_prefix):
+            if not relative.startswith(release_prefixes):
                 continue
             name = relative.rpartition("/")[2]
             folded_name = ascii_fold_text(name)
