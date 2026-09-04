@@ -29,6 +29,7 @@ In progress on `feat/0.6-lane-c`, based at `145f3db93d745ddc43aeb47f6b7bd8b30aa3
 - Closed runner peer-review gaps: redirecting Git environment keeps priority over a simultaneous pin conflict; the post-crypto anchor equality, commit-before-tree expectation ladder, object-store failure/report state, and repertoire mismatch now have focused coverage; trust/declaration docstrings no longer call an unpinned producer policy auditor-pinned. `tests/test_verify.py` passes all 20 cases.
 - Implemented the complete CLI flag surface, pre-load parser dependency rules, top-level root/default walk, LoadedSpec forwarding, selected/base/name/object text lines, new JSON identity/store fields, and trust-sensitive PASS prose. The re-pinned tree-addressed CLI battery now has 158 passing cases, including real object-store reporting, requested-failure wording, exact expectation refusals, root shape, output fields, checkout/index invariance, and a real coordinated anchors/signed-content/spec substitution ladder.
 - Merged Lane D through `40fa646`: all retained corpus tests now target committed trees, checkout independence and the complete name/mode matrix are covered, portable short-name screening applies to every entry kind, and fixture commit-return semantics are final.
+- Final merged corpus suite: 227 passed. Final authenticated ledger harness: 43 passed in 19.56 seconds with zero skips.
 
 ## Decisions
 
@@ -108,5 +109,5 @@ In progress on `feat/0.6-lane-c`, based at `145f3db93d745ddc43aeb47f6b7bd8b30aa3
 
 ## Next
 
-- Run the merged ledger harness, complete equivalence census, and offline suite.
+- Run the complete equivalence census and offline suite.
 - Resolve only in-scope failures, then prepare the draft PR body and final report.
