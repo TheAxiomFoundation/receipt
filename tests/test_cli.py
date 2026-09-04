@@ -1113,6 +1113,25 @@ def test_pass_verdict_derives_the_witness_clause(
     assert "newest release" in out  # staleness is named, not implied away
 
 
+def test_default_verdict_keeps_the_witness_sentence_whole_before_custody(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The default first-contact paragraph keeps its principal sentence whole."""
+
+    assert run(repo) == EXIT_OK
+    lines = capsys.readouterr().out.split("VERDICT: PASS", 1)[1].splitlines()
+    anchor_set, _ = anchor_set_recomputed(repo)
+
+    assert lines[:6] == [
+        " — custody and corpus binding",
+        "  This proves the published rule files are exactly the bytes the loaded",
+        "  spec's producer key signed,",
+        "  and the 2 RFC 3161 authorities configured by that spec (alpha, beta)",
+        "  witnessed that each recorded prefix existed no later than those times.",
+        f"  Custody is under the anchor set {anchor_set} the verified tree carries.",
+    ]
+
+
 def test_a_verdict_with_no_witnesses_states_no_timing_claim(
     repo: pathlib.Path,
     capsys: pytest.CaptureFixture[str],

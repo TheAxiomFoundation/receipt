@@ -778,10 +778,11 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
             # closes on what the signature alone proves, and the absence is
             # said out loud rather than rendered as a count of zero.
             timing = "  This verdict makes no witnessed timing claim"
+        anchor_set_sentence: str | None = None
         if not result._anchor_set_pinned:
             anchor_set = result.anchor_set_sha256
             if anchor_set is not None:
-                lines.append(
+                anchor_set_sentence = (
                     "  Custody is under the anchor set "
                     f"{rendered(anchor_set)} the verified tree carries."
                 )
@@ -795,9 +796,14 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
                 "  and every release object present at the supplied base "
                 "reference is"
             )
-            lines.append("  byte- and mode-identical in this tree. It does")
+            lines.append("  byte- and mode-identical in this tree.")
         else:
             lines.append(f"{timing}.")
+        if anchor_set_sentence is not None:
+            lines.append(anchor_set_sentence)
+        if history is not None:
+            lines.append("  It does")
+        else:
             lines.append(
                 "  It does NOT prove the history was never rewritten — a "
                 "producer holding"
