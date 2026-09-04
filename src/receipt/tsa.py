@@ -409,10 +409,19 @@ two callers with nothing further to ask.  ``sha256_file`` stays as the public
 ported helper, called from nowhere in here.
 
 What the component walk does not cover is these three, deliberately.  Each
-refuses a link at its own final component, the sidecar's other components are
-the record's and are walked with it, and genesis sits directly under the
-records root -- so the one component this module reads through that no walk
-looks at is ``records/trust``.  A bundle's bytes are pinned entire by its
+refuses a link at its own final component; the sidecar's other components are
+the record's, ``lstat``-ed during the record's own read and not at the
+sidecar's open, which resolves them by whole pathname; and genesis sits
+directly under the records root -- so the one component this module reads
+through that no walk looks at is ``records/trust``.  Stated that way because
+the guarantee is about what was true a moment earlier and not about what the
+sidecar's own open finds: a writer who exchanges one of those directories
+between the record's read and the sidecar's is a writer to the working tree
+during the run, which is outside the 0.5.x contract, and what such a writer
+gains at the sidecar is what they already have -- a sidecar has no byte pin,
+so aliasing its directory grants nothing over editing the file it names.  The
+record's own read is where the walk matters and it holds descriptors through
+it (peer review, first Opus round).  A bundle's bytes are pinned entire by its
 :class:`TrustBundleSpec`, hash, size and canonical digest together, so
 whatever a link there leads to is either the pinned bytes or a commitment
 mismatch, which is why the walk stops where it does rather than growing a
@@ -2226,6 +2235,18 @@ def _load_json_once(path: Path, *, label: str) -> dict[str, Any]:
     check and the read to say one thing.  ``O_NOFOLLOW`` comes with the
     discipline too, so a symlink at the final component is refused where
     ``read_text`` would have followed it.
+
+    What does not come with it is the anchored descent the record, the
+    response and the pinned root get: each of these three opens by whole
+    pathname, so their interior components are resolved at the open.  For the
+    sidecar those components are the record's, and they were ``lstat``-ed
+    during the record's read a moment earlier rather than held open through
+    this one -- a fact about the instant before, not a guarantee about this
+    open.  Acceptable for the reason the module docstring gives: a sidecar
+    carries no byte pin, so a writer who could alias its directory could edit
+    the sidecar itself, and exchanging a directory between the two opens
+    needs a writer to the working tree during the run (peer review, first
+    Opus round).
     """
 
     payload, _data = _read_json_once(path, label=label)
