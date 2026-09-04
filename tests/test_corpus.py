@@ -40,6 +40,7 @@ from corpus_fixture import (
     ATTESTED,
     CONTENT,
     JOURNAL_SCHEMA,
+    _commit_fixture,
     append_release,
     build_corpus,
     corpus_spec,
@@ -86,6 +87,8 @@ def _commit_worktree(root: pathlib.Path) -> str:
         _git(root, "init", "-q")
         _git(root, "config", "user.name", "Receipt Tests")
         _git(root, "config", "user.email", "receipt-tests@example.invalid")
+        _git(root, "config", "commit.gpgSign", "false")
+        _git(root, "config", "core.autocrlf", "false")
     _git(root, "add", "-A")
     _git(root, "commit", "-q", "--allow-empty", "-m", "corpus fixture")
     return _git(root, "rev-parse", "HEAD").decode("ascii").strip()
@@ -632,6 +635,36 @@ def test_corpus_fixture_commit_controls_return_the_selected_oid(
         is None
     )
     assert not (uncommitted_root / ".git").exists()
+
+
+def test_commit_helpers_override_hostile_global_git_config(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fixture commits neither sign nor rewrite bytes under hostile globals."""
+
+    global_config = tmp_path / "global.gitconfig"
+    global_config.write_text(
+        "[commit]\n\tgpgSign = true\n[core]\n\tautocrlf = true\n"
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+    payload = b"alpha\r\nbeta\r\n"
+
+    worktree_root = tmp_path / "worktree-helper"
+    worktree_root.mkdir()
+    (worktree_root / "payload.txt").write_bytes(payload)
+    worktree_oid = _commit_worktree(worktree_root)
+    assert _git(worktree_root, "show", f"{worktree_oid}:payload.txt") == payload
+
+    fixture_root = tmp_path / "fixture-helper"
+    fixture_root.mkdir()
+    (fixture_root / "payload.txt").write_bytes(payload)
+    fixture_oid = _commit_fixture(
+        fixture_root,
+        "hostile config fixture",
+        initialize=True,
+    )
+    assert _git(fixture_root, "show", f"{fixture_oid}:payload.txt") == payload
 
 
 def test_refuses_a_content_file_edited_after_witnessing(tmp_path: pathlib.Path) -> None:

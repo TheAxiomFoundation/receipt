@@ -77,6 +77,7 @@ def _commit_fixture(root: pathlib.Path, message: str, *, initialize: bool) -> st
         _git(root, "config", "user.name", "Receipt Corpus Fixture")
         _git(root, "config", "user.email", "receipt-corpus@example.invalid")
         _git(root, "config", "commit.gpgSign", "false")
+        _git(root, "config", "core.autocrlf", "false")
     _git(root, "add", "-A")
     _git(root, "commit", "--quiet", "-m", message)
     oid = _git(root, "rev-parse", "--verify", "HEAD")
