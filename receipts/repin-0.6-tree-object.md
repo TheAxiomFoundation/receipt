@@ -30,25 +30,21 @@ weakened, and neither authenticated oracle was edited.
 
 ## Deliberate divergence
 
-After `commit_candidate`, an unstaged edit to an existing release manifest
-makes the directory-based ledger baseline refuse:
+After `commit_candidate`, an unstaged edit to existing ledger line 129 makes
+the separately authenticated append-only baseline refuse:
 
 ```text
-existing release file bytes changed relative to <base>: <release-path>
+change rewrites existing line 129 (statcan.cpi.all_items_annual_rate.canada.may_2026.first_print); the ledger is append-only — supersede instead
 ```
 
 The object-backed port, explicitly given the candidate OID, accepts because
 the selected commit did not change. This is the intended directory-versus-tree
 input-class divergence.
 
-The plan's requested text `change rewrites existing line ...` cannot be
-produced by `tests/test_ledger_equivalence.py`: that sentence belongs to
-Chronicle's append-only oracle (`scripts/check_thesis_facts_append.py`), while
-this module authenticates and invokes the release-chain oracle
-(`scripts/verify_release_chain.py`). Manufacturing the sentence here would
-require altering an oracle or ceasing to compare its real output. Lane C
-therefore records and tests the ledger oracle's genuine equivalent above; Lane
-B owns the exact append-only wording in `tests/test_append_gate_equivalence.py`.
+The ledger harness authenticates `scripts/check_thesis_facts_append.py` at its
+pinned SHA-256 for this one deliberate divergence and invokes it unchanged.
+All ordinary differential cases remain comparisons with the authenticated
+release-chain oracle, and Lane B retains ownership of the append-gate harness.
 
 ## Port-only invariants
 

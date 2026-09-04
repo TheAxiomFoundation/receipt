@@ -77,11 +77,12 @@ Port-only extras state what the differential cases cannot: the selected
 commit is invariant under later working-tree and index mutations, foreign
 ``GIT_DIR`` and ``GIT_INDEX_FILE`` values, and ``refs/replace``; corrupting a
 reachable loose object refuses under whole-object-store verification. One
-deliberate-divergence case also leaves an unstaged release edit after
-``commit_candidate``: this ledger oracle refuses with its release-history
-message while the port accepts the selected commit. The append-only wording
-``change rewrites existing line ...`` belongs to the separate append-gate
-oracle and cannot be produced by this module's authenticated baseline.
+deliberate-divergence case also leaves an unstaged ledger edit after
+``commit_candidate``: the separately authenticated append oracle refuses with
+``change rewrites existing line ...`` while the port accepts the selected
+commit. The ordinary differential cases continue to use only the release-chain
+oracle; this one input-class divergence deliberately calls the append oracle
+whose exact refusal the contract names.
 
 The fixtures copy only ``ledger/`` and ``releases/``, and carry no
 ``.gitattributes``; ``mutable_copy`` asserts both, because a checkout filter
@@ -142,6 +143,9 @@ BASELINE_SCRIPT_SHA256 = (
 # pass authentication and vouch for the port (Sol re-review P1).
 BASELINE_CANONICAL_SHA256 = (
     "562bf267b7686bce8cb71f3c13f34825c21cd4ef0aba1c0c46aff16962a6cadd"
+)
+APPEND_BASELINE_SHA256 = (
+    "46727ab22186b8f150fc7dbee8222cee729a6ddb4ba8e8cbe4a3dda702cbc427"
 )
 BASELINE_AUTHENTICATED_FILES = {
     "scripts/verify_release_chain.py": BASELINE_SCRIPT_SHA256,
@@ -279,6 +283,34 @@ def run_baseline_base_ref(
         [
             sys.executable,
             str(tree / "scripts" / "verify_release_chain.py"),
+            "--base-ref",
+            base_ref,
+            "--root",
+            str(root),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return completed.returncode, completed.stdout.strip(), completed.stderr.strip()
+
+
+def run_append_baseline(
+    tree: pathlib.Path, root: pathlib.Path, base_ref: str
+) -> tuple[int, str, str]:
+    """Run the separately authenticated append oracle for one divergence."""
+
+    script = tree / "scripts" / "check_thesis_facts_append.py"
+    actual = hashlib.sha256(script.read_bytes()).hexdigest()
+    assert actual == APPEND_BASELINE_SHA256, (
+        f"baseline source digest mismatch for {script}: expected "
+        f"{APPEND_BASELINE_SHA256}, got {actual}; the baseline must not "
+        "silently vouch for the port."
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(script),
             "--base-ref",
             base_ref,
             "--root",
@@ -1371,34 +1403,31 @@ def _assert_selected_commit_accepts(
     return message
 
 
-def test_deliberate_divergence_dirty_checkout_affects_only_ledger_baseline(
+def test_deliberate_divergence_dirty_checkout_affects_only_append_baseline(
     pinned_tree: pathlib.Path,
     tmp_path: pathlib.Path,
     capfd: pytest.CaptureFixture[str],
     committed_fixture_filesystem: None,
 ) -> None:
-    """An unstaged post-commit edit changes only the directory-based oracle.
-
-    The authenticated oracle in this module is the ledger release verifier,
-    so its real branch is ``existing release file bytes changed ...``. The
-    requested ``change rewrites existing line ...`` text is emitted only by
-    the separate append-gate oracle; this test does not alter either oracle to
-    manufacture wording outside its vocabulary.
-    """
+    """An unstaged post-commit edit changes only the directory-based oracle."""
 
     root, base, candidate = _committed_clean_candidate(
         pinned_tree, tmp_path, "deliberate_divergence"
     )
-    flip_byte(root / BASE_MANIFEST_RELATIVE)
+    ledger = root / LEDGER_SPEC.state_relative
+    rows = ledger.read_bytes().splitlines(keepends=True)
+    rows[128] = b" " + rows[128]
+    ledger.write_bytes(b"".join(rows))
 
-    baseline_code, baseline_out, baseline_err = run_baseline_base_ref(
+    baseline_code, baseline_out, baseline_err = run_append_baseline(
         pinned_tree, root, base
     )
     assert baseline_code == 1
     assert baseline_out == ""
     assert baseline_err == (
-        "release chain verification failed: existing release file bytes changed "
-        f"relative to {base}: {BASE_MANIFEST_RELATIVE}"
+        "thesis-facts append check failed: change rewrites existing line 129 "
+        "(statcan.cpi.all_items_annual_rate.canada.may_2026.first_print); "
+        "the ledger is append-only — supersede instead"
     )
 
     _assert_selected_commit_accepts(root, candidate, base, capfd)
