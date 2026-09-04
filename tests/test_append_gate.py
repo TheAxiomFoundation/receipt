@@ -1033,21 +1033,50 @@ def test_the_push_path_accepts_an_ordinary_tree(tmp_path: pathlib.Path) -> None:
     )
 
 
-CLASSIFICATION_READS = ("diff", "ls-files", "diff-index")
-
-
-def test_an_invalid_base_ref_is_refused_before_the_checkout_guard(
+def test_an_invalid_base_ref_keeps_its_legacy_refusal(
     tmp_path: pathlib.Path,
 ) -> None:
-    """An unresolvable base is reported by immutable snapshot selection."""
+    """The snapshot selection keeps the append gate's public diagnostic."""
 
     candidate = base_repository(tmp_path)
     append_one_row(candidate)
-    git(candidate.root, "config", "core.fileMode", "false")
 
     with pytest.raises(AppendError) as refusal:
         run_gate(candidate, base_ref="refs/heads/does-not-exist")
-    assert str(refusal.value) == ("cannot resolve commit 'refs/heads/does-not-exist'")
+    assert str(refusal.value) == (
+        "git rev-parse --verify --end-of-options "
+        "refs/heads/does-not-exist^{commit} failed: "
+        "fatal: Needed a single revision"
+    )
+
+
+def test_a_non_ancestor_base_names_the_explicit_candidate(
+    tmp_path: pathlib.Path,
+) -> None:
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    candidate_oid = commit_candidate(candidate)
+    tree_oid = git(candidate.root, "rev-parse", f"{candidate.base}^{{tree}}")
+    disconnected = git(
+        candidate.root,
+        "commit-tree",
+        tree_oid,
+        "-m",
+        "disconnected base",
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        verify_append_gate(
+            candidate.root,
+            spec=GATE_SPEC,
+            base_ref=disconnected,
+            commit=candidate_oid,
+        )
+
+    assert str(refusal.value) == (
+        f"base commit {disconnected} is not an ancestor of "
+        f"candidate commit {candidate_oid}"
+    )
 
 
 def test_the_push_path_hands_the_release_verification_its_snapshots(
@@ -1834,6 +1863,23 @@ def test_the_push_path_decides_the_manifest_paths_type_before_its_chain(
     )
 
 
+def test_a_base_ref_blob_at_the_manifest_path_keeps_the_legacy_refusal(
+    tmp_path: pathlib.Path,
+) -> None:
+    candidate = base_repository(tmp_path)
+    manifest_path = candidate.root / CHAIN_SPEC.manifest_relative
+    manifest_path.write_text("not a manifest directory\n", encoding="utf-8")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+
+    assert str(refusal.value) == (
+        "legacy pre-genesis proposal must not change releases/; add a complete "
+        "genesis manifest, producer signature, and both receipts or no release "
+        "files at all (changed=['releases/manifests'])"
+    )
+
+
 def test_a_manifest_path_that_is_absent_is_still_no_chain(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -2014,6 +2060,20 @@ def test_a_dangling_release_root_link_is_named_as_a_link(
     assert str(refusal.value) == "release path is a symlink: releases"
 
 
+def test_a_release_root_symlink_keeps_its_release_refusal_on_push(
+    tmp_path: pathlib.Path,
+) -> None:
+    candidate = base_repository(tmp_path)
+    releases = candidate.root / CHAIN_SPEC.release_root_relative
+    shutil.rmtree(releases)
+    releases.symlink_to(tmp_path / "outside-release-tree")
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate)
+
+    assert str(refusal.value) == "release path is a symlink: releases"
+
+
 @dataclass(frozen=True)
 class Witnesses:
     """One generated producer key and two locally generated timestamp authorities.
@@ -2178,6 +2238,31 @@ def test_a_valid_genesis_proposal_is_accepted(
     stage(candidate)
 
     assert run_gate_with_anchors(candidate, anchors) == (
+        "thesis-facts append check OK: 2 rows, immutable prefix 1, "
+        "+0 appended vs base, release 0"
+    )
+
+
+def test_a_custom_anchor_directory_remains_the_post_genesis_trust_source(
+    tmp_path: pathlib.Path, witnesses: Witnesses
+) -> None:
+    """Matching committed anchors never replace the caller-owned directory.
+
+    The generated witnesses deliberately differ from the production pins in
+    ``CHAIN_SPEC``. A base helper that silently switches to its committed
+    anchor copies therefore refuses this otherwise valid settled chain.
+    """
+
+    candidate, anchors, _stem = genesis_proposal(tmp_path, witnesses)
+    shutil.copytree(anchors, candidate.root / CHAIN_SPEC.anchor_relative)
+    genesis_oid = commit_candidate(candidate, "settled genesis chain")
+    settled = Candidate(root=candidate.root, base=genesis_oid)
+
+    assert run_gate_with_anchors(
+        settled,
+        anchors,
+        commit=genesis_oid,
+    ) == (
         "thesis-facts append check OK: 2 rows, immutable prefix 1, "
         "+0 appended vs base, release 0"
     )

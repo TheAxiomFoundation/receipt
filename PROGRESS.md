@@ -4,7 +4,7 @@
 
 - Branch: `feat/0.6-lane-b`
 - Recorded starting OID: `e3af1950ff39f1eaa5ff3aad60e89b18e73a943c`
-- Phase: append unit and differential suites green; running integration census
+- Phase: full suite green; final contract audit and handoff
 - Network status: sandbox-disabled; GitHub API access fails immediately
 
 ## Done
@@ -82,11 +82,34 @@
 - Ran `ruff check .`, bytecode compilation over `src` and `tests`, and
   `git diff --check`; all passed. The three Lane B Python files are also clean
   under `ruff format --check`.
+- Reconciled the base-ref diagnostics at the reader boundary: invalid base
+  selection has a narrow adapter to the append gate's old `rev-parse`
+  diagnostic without running Git again, while a failed ancestry walk names
+  the explicitly selected candidate OID as PLAN 3.3 requires. Added
+  exact-message unit coverage for both paths and removed the invalid-ref
+  test's obsolete checkout-guard setup and name.
+- Tightened the Lane C base-chain workaround so the base verifier always uses
+  the caller-owned trusted anchor directory and respects custom-anchor pin
+  policy. It no longer reads candidate/base anchor blobs merely to decide
+  whether to switch trust sources, so a corrupt unrelated anchor cannot mask
+  its original snapshot error. Added a post-genesis chain test where committed
+  anchor bytes equal the custom trusted directory but production pins differ.
+- Restored the push path's established `release path is a symlink` (and
+  gitlink `release path is not regular`) vocabulary when the release root
+  itself is a Git-only entry. The manifest leaf still reaches its own
+  `_enumerate_manifest_files` wording, while an ordinary blob ancestor keeps
+  the reader's distinct non-directory refusal. Added the missing push
+  regression for a committed release-root symlink.
+- Kept the base-ref path's pre-genesis chain predicate distinct from the new
+  push predicate: only a direct `*.json` child marks the candidate chain as
+  initialized. A committed blob at the manifest path therefore retains the
+  legacy `legacy pre-genesis proposal must not change releases/` refusal;
+  added an exact-message regression.
+- Re-ran the complete append unit module after the audit fixes: 91/91 passed.
 
 ## Next
 
-- Audit retained refusal strings and obsolete-private-helper references for the
-  PR handoff.
+- Finish the obsolete-narrative and exact-contract audit for the PR handoff.
 - Prepare the complete no-network PR handoff; pushing and opening the draft PR
   will require a networked environment unless connectivity becomes available.
 

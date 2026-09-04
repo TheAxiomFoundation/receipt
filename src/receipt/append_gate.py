@@ -30,7 +30,6 @@ from receipt.release_chain import (
     MANIFEST_RE,
     ReleaseChainError,
     assert_no_redirecting_git_environment,
-    verify_base_release_chain,
     verify_release_chain,
     verify_release_history_immutable,
 )
@@ -871,37 +870,6 @@ def _verify_candidate_release_chain(
             )
 
 
-def _base_anchors_match_trusted(
-    base: _BaseCommit,
-    *,
-    spec: ChainSpec,
-    anchor_dir: pathlib.Path,
-) -> bool:
-    """Whether Lane C's base helper would consume the caller's trusted bytes.
-
-    Lane C's helper has no anchor-directory parameter and therefore verifies
-    the base with its committed anchor copies. Use it only when those bytes
-    equal the caller-owned anchors; otherwise the local fallback below keeps
-    the append gate's pre-existing trust boundary.
-    """
-
-    filenames = (
-        spec.producer_public_key_filename,
-        *(anchor.filename for anchor in spec.anchors.values()),
-    )
-    for filename in filenames:
-        relative = (spec.anchor_relative / pathlib.PurePosixPath(filename)).as_posix()
-        try:
-            entry = base.tree.entry(relative)
-            committed = base.tree.blob(entry, limit=MAX_JOURNAL_BYTES)
-            trusted = (anchor_dir / filename).read_bytes()
-        except (OSError, SnapshotError, TypeError, ValueError):
-            return False
-        if committed != trusted:
-            return False
-    return True
-
-
 def _verify_base_chain(
     base: _BaseCommit,
     *,
@@ -911,16 +879,10 @@ def _verify_base_chain(
 ) -> ChainVerification:
     """Verify the selected base, preserving the gate's trusted-anchor split."""
 
-    if _base_anchors_match_trusted(
-        base,
-        spec=candidate.spec.chain,
-        anchor_dir=anchor_dir,
-    ):
-        return verify_base_release_chain(candidate.spec.chain, base=base.tree)
-
     # Integration workaround: verify_base_release_chain currently has no
-    # trusted-anchor override. Materialize the same selected base objects but
-    # retain the append gate's caller-owned anchor directory.
+    # trusted-anchor override and always enables production-pin enforcement.
+    # Materialize the same selected base objects but retain both the append
+    # gate's caller-owned anchor directory and its selected pin policy.
     with tempfile.TemporaryDirectory(prefix="receipt-append-base-") as directory:
         with base.tree.materialize(
             _materialization_prefixes(candidate),
@@ -961,8 +923,10 @@ def check_release_proposal(
         relative.startswith(candidate.spec.release_manifest_prefix)
         for relative in base_release_entries
     )
-    candidate_has_chain = bool(
-        candidate.snapshot.entries(candidate.spec.chain.manifest_relative.as_posix())
+    manifest_relative = candidate.spec.chain.manifest_relative.as_posix()
+    candidate_has_chain = any(
+        name.endswith(".json")
+        for name in candidate.snapshot.entries(manifest_relative).children
     )
     base_bytes = _base_ledger_bytes(base, candidate)
     appended_bytes = _check_exact_byte_append(base_bytes, ledger_bytes)
@@ -1051,13 +1015,30 @@ def check_release_chain_without_base(
 ) -> int | None:
     """Verify an initialized chain from the selected pushed commit."""
 
-    initialized = bool(
-        candidate.snapshot.entries(candidate.spec.chain.manifest_relative.as_posix())
-    )
+    manifest_relative = candidate.spec.chain.manifest_relative.as_posix()
+    release_root = candidate.spec.chain.release_root_relative.as_posix()
+    try:
+        initialized = bool(candidate.snapshot.entries(manifest_relative))
+    except SnapshotError as exc:
+        # ``entries(manifest)`` encounters a non-tree release root as an
+        # ancestor. Preserve the release enumeration's established leaf-mode
+        # wording for the two Git-only entry kinds; ordinary blobs keep the
+        # reader's distinct non-directory-ancestor refusal.
+        if str(exc) in {
+            f"state path has a symlinked component: {release_root}",
+            f"tree path ancestor is not a directory: {release_root}",
+        }:
+            root_entry = candidate.snapshot.entry(release_root)
+            if root_entry.mode == "120000":
+                raise AppendError(f"release path is a symlink: {release_root}") from exc
+            if root_entry.mode == "160000":
+                raise AppendError(
+                    f"release path is not regular: {release_root}"
+                ) from exc
+        raise
     if not initialized:
         _screen_candidate_materialization(candidate)
         return None
-    manifest_relative = candidate.spec.chain.manifest_relative.as_posix()
     manifest_entry = candidate.snapshot.entry(manifest_relative)
     if manifest_entry.mode != "040000":
         raise AppendError(
@@ -1223,7 +1204,15 @@ def verify_append_gate_verdict(
                     name_repertoire=spec.chain.name_repertoire,
                 )
 
-            selected_base = TreeSnapshot.select(root, base_ref)
+            try:
+                selected_base = TreeSnapshot.select(root, base_ref)
+            except SnapshotError as exc:
+                if str(exc) == f"cannot resolve commit {base_ref!r}":
+                    raise AppendError(
+                        "git rev-parse --verify --end-of-options "
+                        f"{base_ref}^{{commit}} failed: fatal: Needed a single revision"
+                    ) from exc
+                raise
             with selected_base as base_snapshot:
                 snapshot.assert_ancestor(base_snapshot)
                 base = _BaseCommit(
