@@ -1180,6 +1180,17 @@ def _supported_openssl_version(line: str) -> bool:
 
 
 @functools.cache
+def _openssl_version_requirement() -> tuple[bool, str]:
+    """Return the cached version verdict, including an unsupported one."""
+
+    banner = _run_openssl(["version"])
+    assert isinstance(banner, str)
+    lines = banner.splitlines()
+    line = lines[0].strip() if lines else ""
+    return _supported_openssl_version(line), line
+
+
+@functools.cache
 def _require_supported_openssl() -> None:
     """Refuse, once per process, an ``openssl`` this module cannot rely on.
 
@@ -1218,15 +1229,26 @@ def _require_supported_openssl() -> None:
     image at the time of writing) and not a substituted banner.
     """
 
-    banner = _run_openssl(["version"])
-    assert isinstance(banner, str)
-    lines = banner.splitlines()
-    line = lines[0].strip() if lines else ""
-    if not _supported_openssl_version(line):
+    supported, line = _openssl_version_requirement()
+    if not supported:
         raise TsaError(
             "receipt requires OpenSSL 3.0 or newer as `openssl` on the path; "
             f"found: {line}"
         )
+
+
+# Existing tests and callers clear the public preflight cache when substituting
+# a version banner. Clear the successful-result cache and the cached refusal
+# together, so that hook retains its original meaning.
+_require_supported_openssl_cache_clear = _require_supported_openssl.cache_clear
+
+
+def _clear_supported_openssl_cache() -> None:
+    _require_supported_openssl_cache_clear()
+    _openssl_version_requirement.cache_clear()
+
+
+_require_supported_openssl.cache_clear = _clear_supported_openssl_cache
 
 
 def _certificate_identity(path: Path) -> dict[str, str]:

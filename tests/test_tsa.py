@@ -8554,6 +8554,30 @@ def test_the_openssl_version_gate_reads_the_banner(banner: str, supported: bool)
     assert tsa_module._supported_openssl_version(banner) is supported
 
 
+def test_an_unsupported_openssl_is_probed_only_once_per_process(
+    monkeypatch: pytest.MonkeyPatch,
+    openssl_preflight_uncached: Any,
+) -> None:
+    """A cached refusal must not turn the preflight into one probe per call."""
+
+    calls: list[list[str]] = []
+
+    def unsupported(arguments: list[str], **keywords: Any) -> str:
+        del keywords
+        calls.append(arguments)
+        return "LibreSSL 3.3.6\n"
+
+    monkeypatch.setattr(tsa_module, "_run_openssl", unsupported)
+    for _ in range(2):
+        with pytest.raises(
+            TsaError,
+            match="receipt requires OpenSSL 3.0 or newer",
+        ):
+            tsa_module._require_supported_openssl()
+
+    assert calls == [["version"]]
+
+
 def test_refuses_an_openssl_that_is_not_openssl_before_reading_a_bundle(
     tmp_path: pathlib.Path,
     local_anchors: tuple[LocalAnchor, ...],
