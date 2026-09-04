@@ -142,7 +142,19 @@ outcome read, and the timestamp rule two genuine issuances (peer review,
 sixth gate round one).  Four blind rules is a statement about where the rule
 belongs rather than about which of them to strengthen, and the answer is
 upstream of all of them: no component of a path this module reads may be a
-link, which is the refusal counted above.  The first implementation checked
+link, which is the refusal counted above.  No component *below the records
+root*, that is.  The root is where the tree begins rather than something
+inside it, the caller named it, and it is routinely a link -- ``/tmp`` on
+macOS, a checkout under a linked home directory, a container mount.  Reading
+the rule as covering the boundary as well made the walk run off the top of
+the tree and return no components at all, and the anchored read then refused
+every record under such a tree as missing: a false refusal of a real,
+readable, non-link regular file, and a regression against the release, which
+hashed the whole pathname and read it without complaint.  So the boundary is
+recognised by the spelling the caller used as well as by its resolution, the
+root's own descriptor opens without ``O_NOFOLLOW``, and both public entry
+points resolve the root before the walk (peer review, first Opus round).
+The first implementation checked
 each name and then opened the whole path, recreating the race it meant to
 close.  The read now holds the records root open, opens each checked interior
 component relative to the descriptor above it with ``O_DIRECTORY`` and
@@ -360,9 +372,11 @@ fourth refusal for a file whose every byte is already committed.
 All six of those reads open without waiting.  Three of them -- the record,
 the response and the pinned root -- first ``lstat`` every component from the
 records root down for the established cheap refusal, then descend that exact
-list from an open records-root descriptor.  Every interior open is relative
-to the directory descriptor actually reached and requires a non-link
-directory; the leaf open is relative to the last one, non-following and
+list from an open records-root descriptor.  That first descriptor is the one
+open here that requires a directory without requiring a non-link: it is the
+boundary the caller named and may be a link to the tree.  Every interior open
+is relative to the directory descriptor actually reached and requires a
+non-link directory; the leaf open is relative to the last one, non-following and
 non-blocking, and its ``fstat`` decides the regular-file rule.  A writer
 replacing a checked directory before descent therefore changes the
 descriptor open into a refusal, not the object eventually read.  A writer
@@ -840,7 +854,9 @@ def _path_fold(path: Path) -> tuple[str, ...]:
     )
 
 
-def _components_below(root: Path, path: Path) -> tuple[Path, ...]:
+def _components_below(
+    root: Path, path: Path, *, named_root: Path | None = None
+) -> tuple[Path, ...]:
     """Every component of ``path`` strictly below ``root``, outermost first.
 
     Walked upwards from ``path`` rather than downwards from ``root``, because
@@ -852,9 +868,22 @@ def _components_below(root: Path, path: Path) -> tuple[Path, ...]:
     after: a parent that *is* ``root`` under either reading ends the walk.
 
     A parent that is itself a symlink never ends it, whatever it resolves to.
-    Otherwise a link placed at the root -- ``records/alias`` pointing at
+    Otherwise a link placed *inside* the tree -- ``records/alias`` pointing at
     ``records`` -- would resolve to the boundary, stop the walk one component
     early, and hide the very component the walk exists to refuse.
+
+    ``named_root`` is the records root as the caller spelled it, and ends the
+    walk lexically too.  The root is the trust boundary the caller named and
+    may itself be a link; the rule is about the components *below* it.  With
+    only the resolved spelling to compare against, a records root reached
+    through a link -- ``records`` pointing at ``real/records``, which is
+    ``/tmp`` on macOS, a checkout under a linked home, or a container mount --
+    met the symlink rule at the boundary itself, ran off the top of the tree,
+    and returned nothing; the read then refused every record under it as
+    missing, which is both false and a regression against the release, whose
+    hash of the whole pathname read it without complaint (peer review, first
+    Opus round).  Naming the boundary the caller named is what tells the two
+    links apart: one is where the tree begins and the other is inside it.
 
     An empty result means the walk never met ``root`` at all: a path outside
     the records tree has no components below it, and this refuses nothing
@@ -870,8 +899,10 @@ def _components_below(root: Path, path: Path) -> tuple[Path, ...]:
         parent = probe.parent
         if parent == probe:
             return ()
-        if parent == root or (
-            not parent.is_symlink() and parent.resolve() == root
+        if (
+            parent == root
+            or parent == named_root
+            or (not parent.is_symlink() and parent.resolve() == root)
         ):
             chain.reverse()
             return tuple(chain)
@@ -879,7 +910,7 @@ def _components_below(root: Path, path: Path) -> tuple[Path, ...]:
 
 
 def _refuse_a_linked_component(
-    root: Path, path: Path, *, subject: str
+    root: Path, path: Path, *, subject: str, named_root: Path | None = None
 ) -> tuple[Path, ...]:
     """Refuse a path this module is about to read through a symlinked component.
 
@@ -912,7 +943,7 @@ def _refuse_a_linked_component(
     answer remain true at use time (peer review, sixth gate round two).
     """
 
-    components = _components_below(root, path)
+    components = _components_below(root, path, named_root=named_root)
     for component in components:
         if component.is_symlink():
             raise TsaError(
@@ -1718,6 +1749,19 @@ _DIRECTORY_READ_FLAGS = (
     | getattr(os, "O_CLOEXEC", 0)
 )
 
+#: The records root itself, which is the one directory the link rule does not
+#: police.  Every flag above but ``O_NOFOLLOW``: the root is the trust
+#: boundary the caller named and may be a link -- ``records`` pointing at
+#: ``real/records`` is ``/tmp`` on macOS, a checkout under a linked home, or a
+#: container mount -- and opening it non-following refused every record in the
+#: tree as missing (peer review, first Opus round).  What the rule is about is
+#: the components *below* the boundary, and each of those still opens with
+#: ``O_NOFOLLOW``.  Both public entry points resolve the root before the walk
+#: as well, so what this flag set answers for is a root that reaches this
+#: through one of the module's own bundle helpers, which take the root as the
+#: consumer spells it.
+_ROOT_READ_FLAGS = _DIRECTORY_READ_FLAGS & ~getattr(os, "O_NOFOLLOW", 0)
+
 #: Captured before tests or callers can wrap ``os.open``.  On Windows CPython
 #: does not expose descriptor-relative ``os.open``; falling back there would
 #: silently restore the check-then-whole-path-open race this walk closes.
@@ -1849,7 +1893,7 @@ def _read_file_once(
                 )
             if not checked_components or checked_components[-1] != path:
                 raise TsaError(missing)
-            parent = os.open(root, _DIRECTORY_READ_FLAGS)
+            parent = os.open(root, _ROOT_READ_FLAGS)
             descriptors.append(parent)
             root_stat = os.fstat(parent)
             if not stat.S_ISDIR(root_stat.st_mode):
@@ -1903,7 +1947,9 @@ def _read_file_once(
     return b"".join(chunks), (judged.st_dev, judged.st_ino)
 
 
-def _read_witnessed_record(records: Path, path: Path) -> bytes:
+def _read_witnessed_record(
+    records: Path, path: Path, *, named_root: Path | None = None
+) -> bytes:
     """Read the record under witness once, and return what the token is about.
 
     The witnessed record was consumed through four separate opens of one
@@ -1924,7 +1970,10 @@ def _read_witnessed_record(records: Path, path: Path) -> bytes:
     out of the hash, and the pinned tree presents no such record because the
     chain walk enumerates the files it then verifies.
 
-    ``records`` is the root the component walk is bounded at.  The check above
+    ``records`` is the root the component walk is bounded at, and
+    ``named_root`` is that root as the caller spelled it, which ends the walk
+    as well: the root may itself be a link and the rule is about the
+    components below it (peer review, first Opus round).  The check above
     answers for the final component and ``O_NOFOLLOW`` for the object opened;
     the components between the root and it are what
     ``_refuse_a_linked_component`` first checks (sixth gate round one), and
@@ -1937,7 +1986,7 @@ def _read_witnessed_record(records: Path, path: Path) -> bytes:
     if not path.is_file() or path.is_symlink():
         raise TsaError(missing)
     components = _refuse_a_linked_component(
-        records, path, subject="witnessed record path"
+        records, path, subject="witnessed record path", named_root=named_root
     )
     record, _identity = _read_file_once(
         path,
@@ -2315,6 +2364,8 @@ def verify_timestamp_token(
     maintenance release (peer review, fifth gate round one).
     """
 
+    named_records = records
+    records = records.resolve()
     evidence, _identity = _verify_timestamp_token(
         path,
         token_claim,
@@ -2322,7 +2373,7 @@ def verify_timestamp_token(
         spec=spec,
         records=records,
         now=now,
-        record=_read_witnessed_record(records, path),
+        record=_read_witnessed_record(records, path, named_root=named_records),
     )
     return evidence
 
@@ -3997,14 +4048,15 @@ def _verify_witness_with_updates(
         raise TypeError(
             "supply transition_bundle_updates or prior_pending_updates, not both"
         )
-    records = (records or path.parents[1]).resolve()
+    named_records = records or path.parents[1]
+    records = named_records.resolve()
     # One read of the record, and every question about it is asked of these
     # bytes: the digest the sidecar has to match, the trust-bundle updates it
     # carries, the creation claims the token's genTime is measured against,
     # and the imprint `openssl ts -verify -data` recomputes.  Reading the
     # pathname once per question described four instants of a mutable file
     # (peer review, fourth gate round four).
-    record = _read_witnessed_record(records, path)
+    record = _read_witnessed_record(records, path, named_root=named_records)
     digest_sha = hashlib.sha256(record).hexdigest()
     witness_path = path.with_suffix(".witness.json")
     # The ported refusal, in its ported words and its ported place; what is

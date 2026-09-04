@@ -45,8 +45,10 @@ from receipt.tsa import (
     TsaSpec,
     WitnessEvidence,
     activate_trust_bundles,
+    bootstrap_trust_bundles,
     logical_path,
     preferred_active_trust_bundle,
+    trust_bundle_updates,
     trust_bundle_updates_for_snapshot,
     validate_token_time,
     verify_timestamp_token,
@@ -4371,9 +4373,9 @@ def replace_a_parent_after_its_component_check(
     swapped: list[str] = []
 
     def checking(
-        root: pathlib.Path, path: pathlib.Path, *, subject: str
+        root: pathlib.Path, path: pathlib.Path, *, subject: str, **keywords: Any
     ) -> tuple[pathlib.Path, ...]:
-        components = original(root, path, subject=subject)
+        components = original(root, path, subject=subject, **keywords)
         if subject == expected_subject and not swapped:
             moved = parent.with_name(f"{parent.name}.checked")
             parent.rename(moved)
@@ -4649,6 +4651,116 @@ def test_no_read_this_module_makes_traverses_a_symlinked_component(
     with pytest.raises(TsaError) as caught:
         verify_tree(tree)
     assert str(caught.value) == expected
+
+
+def test_a_records_root_reached_through_a_symlink_is_still_readable(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """S6-OP1-F2: the root the caller names is the boundary, not a component.
+
+    The walk's rule is that no component of a path this module reads may be a
+    link, and it deliberately refuses to end at a symlinked parent so that a
+    link *inside* the tree cannot hide the component behind it. The records
+    root is not inside the tree; it is where the tree begins, and the caller
+    named it. ``records`` pointing at ``real/records`` is ``/tmp`` on macOS, a
+    checkout under a linked home directory, and a container mount, and with
+    the boundary recognised only by its resolved spelling the walk met the
+    link at the root, ran off the top of the tree and returned no components
+    at all -- after which the anchored read turned the empty tuple into
+    "witnessed record is missing or not a regular file" for a real, readable,
+    non-link regular file. The release hashed the whole pathname and read it
+    without complaint, so every record under such a tree went from verifiable
+    to unverifiable.
+
+    Two mechanisms produced it and both are bound here. The walk is one: the
+    root as the caller spelled it now ends it too. The other is the root's own
+    open, which took ``O_NOFOLLOW`` along with ``O_DIRECTORY`` and so could not
+    open a linked root at all -- reached by the bundle helpers below, which
+    take the root as the consumer spells it and never resolve it.
+
+    Without the fix every assertion after the link is created fails: the three
+    verification entry points with the missing-record refusal, and the two
+    bundle helpers with "pinned TSA root is missing or not a regular file".
+    A symlinked component *below* the root keeps its refusal, which is the
+    last assertion here.
+    """
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    control = verify_tree(tree)
+    assert control.status == "available"
+    genesis = json.loads((tree.records / "CHAIN_GENESIS.json").read_text())
+
+    # The tree, moved wholesale and reached through a link at its own name --
+    # every path the caller holds still spells `records`, and every one of
+    # them now passes through a symlink to get there.
+    real = tmp_path / "real"
+    real.mkdir()
+    tree.records.rename(real / "records")
+    tree.records.symlink_to(real / "records", target_is_directory=True)
+
+    # The premises: the root is a link, the record is not, and the file the
+    # caller's spelling reaches is the same file.
+    assert tree.records.is_symlink() and tree.records.is_dir()
+    assert tree.record.is_file() and not tree.record.is_symlink()
+    assert tree.record.resolve() == (real / "records" / RECORD_DAY / RECORD_NAME)
+
+    # verify_witness, verify_witness_step and verify_timestamp_token, each on
+    # the caller's own spelling, each answering exactly as before the move.
+    through_the_link = verify_tree(tree)
+    assert through_the_link == control
+    assert (
+        verify_step(tree.record, spec=tree.spec, records=tree.records) == control
+    )
+    assert (
+        verify_timestamp_token(
+            tree.record,
+            token_claim(tree, alpha),
+            tree.reference,
+            spec=tree.spec,
+            records=tree.records,
+        )
+        == control.tokens[0]
+    )
+    # And the same call with the root and the record spelled through opposite
+    # sides of the link, which is what a caller resolving one of the two
+    # arguments and not the other hands it: the public entry point resolves
+    # the root itself, where before it was the one that did not.
+    assert (
+        verify_timestamp_token(
+            real / "records" / RECORD_DAY / RECORD_NAME,
+            token_claim(tree, alpha),
+            tree.reference,
+            spec=tree.spec,
+            records=tree.records,
+        )
+        == control.tokens[0]
+    )
+
+    # And the bundle helpers, which never resolve the root: these reach the
+    # pinned root's read with the root exactly as the consumer spelled it.
+    assert bootstrap_trust_bundles(
+        tree.records, genesis, spec=tree.spec, required=True
+    ) == {BUNDLE_LOGICAL: tree.reference}
+    assert trust_bundle_updates(
+        tree.records,
+        {"trustBundleUpdates": [tree.reference]},
+        spec=tree.spec,
+    ) == [tree.reference]
+
+    # A link below the boundary is still a link below the boundary.
+    aliased = tree.records / "alias"
+    aliased.symlink_to(real / "records", target_is_directory=True)
+    with pytest.raises(TsaError) as caught:
+        verify_witness(
+            aliased / RECORD_DAY / RECORD_NAME,
+            spec=tree.spec,
+            records=tree.records,
+        )
+    assert str(caught.value) == (
+        f"witnessed record path traverses a symlink at {aliased}: "
+        f"{aliased / RECORD_DAY / RECORD_NAME}"
+    )
 
 
 def pending_authority(
