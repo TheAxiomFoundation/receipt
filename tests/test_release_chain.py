@@ -47,6 +47,7 @@ from receipt.release_chain import (
     _observe_anchor_bytes,
     _parse_receipt_text,
     _receipt_bytes,
+    _regular_file_bytes,
     verify_base_release_chain,
     verify_receipt,
     verify_release_chain,
@@ -2325,3 +2326,99 @@ def test_a_folded_manifest_leaf_is_refused_by_the_public_verifier(
         "path component releases/manifests is not spelled by its directory: "
         "releases/manifests"
     )
+
+
+@pytest.fixture()
+def state_relative() -> pathlib.PurePosixPath:
+    """The original append fixture path used by the direct-reader cases."""
+
+    return pathlib.PurePosixPath("ledger/official_observations.jsonl")
+
+
+def test_the_state_reader_refuses_a_symlinked_parent(
+    tmp_path: pathlib.Path, state_relative: pathlib.PurePosixPath
+) -> None:
+    """The same walk in the release-chain reader, which _verify_state_history
+    uses for both the ledger and the immutable prefix."""
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "official_observations.jsonl").write_text("{}\n", encoding="utf-8")
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "ledger").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ReleaseChainError) as refusal:
+        _regular_file_bytes(root, state_relative)
+    assert str(refusal.value) == (
+        "state path traverses a symlink at 'ledger': "
+        "ledger/official_observations.jsonl"
+    )
+
+
+def test_the_state_reader_keeps_its_message_for_a_symlinked_state_file(
+    tmp_path: pathlib.Path, state_relative: pathlib.PurePosixPath
+) -> None:
+    """The final-component refusal predates the walk and is differential-gated:
+    a linked state file must still refuse with exactly its own message."""
+
+    root = tmp_path / "repo"
+    (root / "ledger").mkdir(parents=True)
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text("{}\n", encoding="utf-8")
+    linked = root / state_relative
+    linked.symlink_to(outside)
+
+    with pytest.raises(ReleaseChainError) as refusal:
+        _regular_file_bytes(root, state_relative)
+    assert str(refusal.value) == (
+        f"required state file is missing or non-regular: {linked}"
+    )
+
+
+def test_the_state_reader_accepts_an_ordinary_regular_file(
+    tmp_path: pathlib.Path, state_relative: pathlib.PurePosixPath
+) -> None:
+    """The walk costs the ordinary tree nothing."""
+
+    root = tmp_path / "repo"
+    (root / "ledger").mkdir(parents=True)
+    (root / state_relative).write_text("{}\n", encoding="utf-8")
+
+    assert _regular_file_bytes(root, state_relative) == b"{}\n"
+
+
+@pytest.mark.skipif(
+    os.getuid() == 0, reason="root searches a directory it has no rights on"
+)
+def test_a_manifest_path_this_verifier_cannot_stat_is_not_no_chain(
+    repo: pathlib.Path,
+) -> None:
+    """S5-R2-F2's third fact, which the bare ``except OSError`` folded into
+    absence along with the type answer: a manifest path under an unsearchable
+    ancestor cannot be ``lstat``-ed at all, and "I could not ask" is not "there
+    is nothing there". Measured at this round's head with the single ``lstat``
+    and bare ``except OSError`` put back, on this exact directory: the call
+    returns ``None`` — the acceptance the push path reads as no chain.
+
+    Driven directly rather than through the gate, because the gate cannot
+    reach it: a release root at mode 0o444 is readable, so
+    ``_assert_component_spelled`` binds every spelling and the walk passes,
+    and then ``hold_release_root``'s ``os.open`` of that root with search
+    rights fails first — measured on this tree as a bare ``PermissionError:
+    [Errno 13] Permission denied: 'releases'``, which is that open's own
+    answer and not this decision's to give. What is bound here is that the
+    type decision no longer reports an unaskable question as an answer."""
+
+    chain = load_spec(repo / "verification/spec.py").verification.chain
+    releases = repo / chain.release_root_relative
+    releases.chmod(0o444)
+    try:
+        with pytest.raises(ReleaseChainError) as refusal:
+            release_chain.assert_manifest_directory_regular(repo, chain)
+        assert str(refusal.value) == (
+            "cannot stat release manifest path: releases/manifests "
+            "(Permission denied)"
+        )
+    finally:
+        releases.chmod(0o755)
