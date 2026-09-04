@@ -11,9 +11,10 @@ The three passes, in the order a skeptic should want them:
 
 1. **Custody** (:mod:`receipt.release_chain`) — the release manifests are
    contiguous from genesis, canonically serialized, hash-linked, signed by the
-   Ed25519 key whose SPKI is pinned in the consumer's committed spec, and
-   witnessed by the consumer's configured RFC 3161 anchor set. The journal's
-   historical byte prefixes match every manifest that ever described them.
+   Ed25519 key selected by the loaded spec, and witnessed by the anchor set the
+   verified tree carries. Those become auditor-owned pins only when the spec's
+   source digest was itself pinned. The journal's historical byte prefixes
+   match every manifest that ever described them.
 
 2. **Binding** (:mod:`receipt.corpus`) — the journal the chain just proved
    custody of describes *this* tree, closed-world: every content file bound,
@@ -78,7 +79,7 @@ TIER_MEANING = {
 
 
 class VerifySpecError(ValueError):
-    """The consumer's committed spec is missing, malformed, or not a spec."""
+    """The loaded verification spec is missing, malformed, or not a spec."""
 
 
 def _exception_detail(exc: BaseException) -> str:
@@ -114,12 +115,12 @@ _PASS_CLAIMS = {
 
 @dataclass(frozen=True)
 class VerificationSpec:
-    """Everything the consumer's committed code pins, in one object.
+    """Everything one loaded verification policy binds, in one object.
 
-    A repository publishes exactly one of these, in a short module of
-    constants, and an auditor reads it before trusting a verdict produced with
-    it. It is the whole trust configuration: there is nowhere else for an
-    anchor to hide.
+    A repository publishes exactly one of these in a short module of constants.
+    It is the whole configured trust surface: there is nowhere else for an
+    anchor to hide. An auditor makes it trusted by reviewing and pinning the
+    module's source digest before execution.
     """
 
     name: str
@@ -205,6 +206,9 @@ class VerifyResult:
     name_repertoire: str = "portable"
     object_store: ObjectStoreReport | None = None
     _spec_pinned: bool = field(default=False, repr=False)
+    #: Whether the caller asked for whole-store verification. A missing report
+    #: on a failed run must not be rendered as "not requested".
+    _object_store_requested: bool = field(default=False, repr=False)
     #: Whether custody's anchor-set digest was compared with an auditor-owned
     #: pin. Private because it qualifies a claim rather than adding another
     #: public datum to the result contract.
@@ -240,8 +244,8 @@ class VerifyResult:
         Captured at the read sites signature and receipt verification used
         (OpenSSL is fed a snapshot of those exact bytes), under this
         command's unconditional production pins. Pin semantics differ by
-        role: TSA anchor bytes are code-pinned exactly, while producer
-        identity is pinned by SPKI — a byte-different serialization of the
+        role: TSA anchor bytes are spec-bound exactly, while producer identity
+        is bound by SPKI — a byte-different serialization of the
         same producer key verifies and is recorded at its own digest here.
         None unless custody completed successfully.
         """
@@ -444,7 +448,7 @@ def _declaration_detail(verification: CorpusVerification) -> str:
             counts.append(f"{len(gates)} {tier}")
     return (
         f"{len(verification.gates)} gate declaration(s) well formed and complete "
-        f"against the pinned spec ({', '.join(counts)}); none re-run here"
+        f"against the loaded spec ({', '.join(counts)}); none re-run here"
     )
 
 
@@ -461,10 +465,10 @@ def run_verification(
 ) -> VerifyResult:
     """Verify one authenticated commit, stopping at the first failed pass.
 
-    Verification failures are returned, never raised. The two caller-contract
-    violations are different: comparing history without pinning the candidate
-    commit, or presenting an anchor pin without first pinning the executable
-    spec, raises :class:`ValueError` for the CLI to render as a usage error.
+    Verification failures are returned, never raised. Entry-contract
+    violations are different: comparing history without pinning the candidate,
+    presenting an anchor pin without first pinning the executable spec, or
+    declaring two name repertoires raises :class:`ValueError`.
     """
 
     if not isinstance(spec, LoadedSpec):
@@ -525,6 +529,7 @@ def run_verification(
             name_repertoire=chain_repertoire,
             object_store=object_store,
             _spec_pinned=spec.pinned,
+            _object_store_requested=verify_objects,
             _anchor_set_pinned=anchor_pin is not None,
         )
 
@@ -551,18 +556,6 @@ def run_verification(
             return str(exc)
         return f"{type(exc).__name__}: {exc}"
 
-    if anchor_pin_conflict:
-        passes.append(
-            PassResult(
-                "custody",
-                False,
-                "",
-                "anchor pins disagree: "
-                f"command expects {expect_anchor_set}, spec expects {spec_anchor_pin}",
-            )
-        )
-        return result(incomplete="binding")
-
     # Before any pass runs git: an environment that would redirect git's reads
     # is refused here rather than met by the custody pass after the optional
     # history pass has already resolved a base and printed an OID from
@@ -577,6 +570,18 @@ def run_verification(
     except BaseException as exc:  # noqa: BLE001 - any raise is a FAIL verdict
         passes.append(
             PassResult("custody", False, "", failed("custody", exc, ReleaseChainError))
+        )
+        return result(incomplete="binding")
+
+    if anchor_pin_conflict:
+        passes.append(
+            PassResult(
+                "custody",
+                False,
+                "",
+                "anchor pins disagree: "
+                f"command expects {expect_anchor_set}, spec expects {spec_anchor_pin}",
+            )
         )
         return result(incomplete="binding")
 

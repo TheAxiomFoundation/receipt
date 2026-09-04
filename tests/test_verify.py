@@ -13,7 +13,7 @@ import pytest
 import receipt.verify as verify_module
 from receipt.corpus import CorpusVerification
 from receipt.release_chain import ChainVerification, ReleaseChainError, ReleaseRecord
-from receipt.snapshot import ObjectStoreReport
+from receipt.snapshot import ObjectStoreReport, SnapshotError
 from receipt.verify import (
     LoadedSpec,
     VerifySpecError,
@@ -195,6 +195,7 @@ def _install_verification_pipeline(
     *,
     materialized_anchor: str = ANCHOR_DIGEST,
     verified_anchor: str | None = None,
+    object_failure: str | None = None,
 ) -> dict[str, Any]:
     """Install a recording snapshot around the spanning composition.
 
@@ -252,6 +253,19 @@ def _install_verification_pipeline(
             **kwargs: object,
         ) -> FakeSnapshot:
             calls["select"].append((root, revision, kwargs))
+            if revision != "base-ref":
+                expected_commit = kwargs.get("expect_commit")
+                expected_tree = kwargs.get("expect_tree")
+                if expected_commit not in {None, CANDIDATE_COMMIT}:
+                    raise SnapshotError(
+                        f"commit {CANDIDATE_COMMIT} is not the expected commit "
+                        f"{expected_commit}"
+                    )
+                if expected_tree not in {None, CANDIDATE_TREE}:
+                    raise SnapshotError(
+                        f"tree {CANDIDATE_TREE} is not the expected tree "
+                        f"{expected_tree}"
+                    )
             return cls(revision)
 
         def __enter__(self) -> FakeSnapshot:
@@ -268,6 +282,8 @@ def _install_verification_pipeline(
             self, heads: tuple[str, ...]
         ) -> ObjectStoreReport:
             calls["objects"].append(heads)
+            if object_failure is not None:
+                raise SnapshotError(object_failure)
             return ObjectStoreReport(objects=17, store_kib=23, seconds=0.25)
 
         def entry(self, path: str) -> types.SimpleNamespace:
@@ -371,6 +387,7 @@ def test_run_verification_composes_one_normalized_tree_subject(
     assert result.name_repertoire == "portable"
     assert result.object_store == ObjectStoreReport(17, 23, 0.25)
     assert result._spec_pinned is True
+    assert result._object_store_requested is True
     assert result._anchor_set_pinned is True
     assert [item.name for item in result.passes] == [
         "history",
@@ -472,6 +489,76 @@ def test_anchor_mismatch_refuses_before_release_crypto(
     )
 
 
+def test_post_crypto_anchor_digest_must_equal_the_materialized_digest(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verified = "8" * 64
+    calls = _install_verification_pipeline(
+        monkeypatch,
+        verified_anchor=verified,
+    )
+
+    result = run_verification(tmp_path, load_spec(_spec_file(tmp_path)))
+
+    assert not result.ok
+    assert len(calls["release"]) == 1
+    assert result.passes[0].failure == (
+        f"verified anchor set {verified} is not the materialized anchor set "
+        f"{ANCHOR_DIGEST}"
+    )
+
+
+def test_candidate_expectations_refuse_commit_before_tree(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_verification_pipeline(monkeypatch)
+    loaded = load_spec(_spec_file(tmp_path))
+    wrong_commit = "1" * 40
+    wrong_tree = "2" * 40
+
+    commit_result = run_verification(
+        tmp_path,
+        loaded,
+        expect_commit=wrong_commit,
+        expect_tree=wrong_tree,
+    )
+    assert commit_result.passes[0].failure == (
+        f"commit {CANDIDATE_COMMIT} is not the expected commit {wrong_commit}"
+    )
+
+    tree_result = run_verification(
+        tmp_path,
+        loaded,
+        expect_commit=CANDIDATE_COMMIT,
+        expect_tree=wrong_tree,
+    )
+    assert tree_result.passes[0].failure == (
+        f"tree {CANDIDATE_TREE} is not the expected tree {wrong_tree}"
+    )
+
+
+def test_object_store_refusal_keeps_the_requested_failure_shape(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    message = "object database failed git's own verification: corrupt object"
+    calls = _install_verification_pipeline(
+        monkeypatch,
+        object_failure=message,
+    )
+
+    result = run_verification(
+        tmp_path,
+        load_spec(_spec_file(tmp_path)),
+        verify_objects=True,
+    )
+
+    assert not result.ok
+    assert calls["objects"] == [(CANDIDATE_COMMIT,)]
+    assert result.object_store is None
+    assert result._object_store_requested is True
+    assert result.passes[0].failure == message
+
+
 def test_unpinned_spec_anchor_field_is_a_producer_proposal(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -558,6 +645,16 @@ def test_run_verification_requirement_rules_are_entry_refusals(
         )
     assert str(anchor_caught.value) == "an anchor pin requires a pinned spec"
 
+    mismatched_source = SPEC_SOURCE.replace(
+        b'        producer_public_key_filename="producer.pub",',
+        b'        name_repertoire="posix-bytes",\n'
+        b'        producer_public_key_filename="producer.pub",',
+    )
+    mismatched = load_spec(_spec_file(tmp_path, mismatched_source))
+    with pytest.raises(ValueError) as repertoire_caught:
+        run_verification(tmp_path, mismatched)
+    assert str(repertoire_caught.value) == "spec declares two name repertoires"
+
 
 def test_redirecting_environment_keeps_custody_failure_shape(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
@@ -590,3 +687,16 @@ def test_redirecting_environment_keeps_custody_failure_shape(
         ),
         ("binding", False, "not reached"),
     ]
+
+    declared = "6" * 64
+    source = _source_with_anchor_pin(declared)
+    pinned = load_spec(
+        _spec_file(tmp_path, source),
+        expect_sha256=hashlib.sha256(source).hexdigest(),
+    )
+    conflict = run_verification(
+        tmp_path,
+        pinned,
+        expect_anchor_set="7" * 64,
+    )
+    assert conflict.passes[0].failure == result.passes[0].failure
