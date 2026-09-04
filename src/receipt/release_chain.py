@@ -487,9 +487,9 @@ def assert_manifest_directory_regular(root: pathlib.Path, spec: ChainSpec) -> No
     way the path can be something other than a directory: a 100644 blob
     standing where the manifest directory was, an empty symlink there, or a
     dangling one. Each would become "this tree has no chain", and the
-    enumeration that says otherwise would never run. The release-root walk
-    stops one component short of this leaf and deliberately leaves that answer
-    to this check.
+    enumeration that says otherwise would never run. The configured path walk
+    reaches this leaf to bind its spelling but deliberately leaves its type to
+    this check.
 
     So the type is decided first, in the enumeration's own words and for the
     same three shapes — an ``lstat``, so a symlink is not a directory here
