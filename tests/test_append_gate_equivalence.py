@@ -25,6 +25,57 @@ Comparison contract, matching tests/test_ledger_equivalence.py:
 Each mutation returns a marker for the exact refusal branch it is intended to
 bind. Full message equality is asserted before that marker, so a mutation that
 starts failing earlier cannot silently masquerade as equivalent coverage.
+
+What the fixtures hand the two verifiers
+
+A committed tree, not a mutated working tree. Each case builds its repository
+from a copy of the custody surface, commits the base, applies its mutation and
+then calls ``commit_candidate``: ``git add -A``, and ``git commit`` when the
+index differs from HEAD (no case here leaves them equal, but the rule is the
+one the ledger harness states, and it holds for both). Three things are then
+asserted, in the fixture and not in either verifier: ``git status --porcelain
+--ignore-submodules=none`` is empty; ``git ls-files --others --ignored
+--exclude-standard`` is empty, so no ignored file was left outside the commit;
+and ``git write-tree`` — the index, which the empty status has just bound to
+the checkout — equals ``HEAD^{tree}``. The subject is therefore a commit's
+tree, and the fixture says so rather than assuming it.
+
+Two legs per case. Leg one gives the oracle and the port the same main
+worktree, which is now a clean checkout of that commit. Leg two is the shape
+the consumer's CI has, an independent detached checkout of the named commit
+(at the pin its workflow makes one with ``git clone --no-checkout`` and
+``git checkout --detach``); ``git worktree add --detach`` is how this
+harness, and the coming 0.5.2 shim, make one. The oracle reads that one and
+the port reads the main worktree; the checkout is removed afterwards with ``git
+worktree remove --force`` on that worktree alone — never ``git worktree
+prune``, which deregisters every prunable worktree of the repository. At this
+release the port is still a working-tree verifier reading an equal checkout,
+so both legs must agree; when it becomes commit-addressed, leg two is what
+measures that it needs no checkout at all.
+
+Which cases moved: the three acceptances and the fifteen mutations, eighteen
+in all. The three oracle-authentication cases did not, because they build no
+repository and run no verifier —
+``test_each_oracle_source_is_authenticated`` is about this harness's own trust
+check on the pinned scripts.
+
+The fixtures copy only ``ledger/`` and ``releases/``, and carry no
+``.gitattributes`` (``assert_copied_surface``, shared with the ledger
+harness): a checkout filter or an ignore rule inside the copied surface would
+leave the committed tree and the directory on disk holding different bytes
+while every assertion above still passed. Anything else a case adds — the
+gate-only proposal's ``scripts/check_thesis_facts_append.py``, the release
+quartet the replay restores — is added after that assertion and goes into the
+candidate commit like the rest of the mutation. ``core.fileMode`` and
+``core.symlinks`` are asserted once per session by
+``committed_fixture_filesystem`` on the filesystem the fixtures are built on;
+where either is false these cases skip with that reason rather than failing,
+because the port refuses such a checkout in words of its own
+(``release_chain.assert_file_modes_authoritative``, which
+``verify_append_gate`` calls once for both paths, after it resolves the base
+ref and before it reads any state file) that the oracle never prints. A run
+of these harnesses counts only at zero skips: the skip names the filesystem,
+and a skipped moved case is a case not measured.
 """
 
 from __future__ import annotations
@@ -41,7 +92,21 @@ from collections.abc import Callable
 
 import pytest
 
-from test_ledger_equivalence import LEDGER_SPEC
+# ``committed_fixture_filesystem`` is a session-scoped fixture; importing it
+# here registers it for this module's tests. The probe behind it is memoized
+# in that module, so it runs once per session however many modules request
+# the fixture. ``assert_copied_surface``, ``commit_candidate``,
+# ``detached_oracle_checkout`` and ``_git`` itself are the one definition of
+# the committed-fixture contract and the one git environment it runs under,
+# shared so the two harnesses cannot drift apart (peer review, rounds 1 and 2).
+from test_ledger_equivalence import (
+    LEDGER_SPEC,
+    _git,
+    assert_copied_surface,
+    commit_candidate,
+    committed_fixture_filesystem,
+    detached_oracle_checkout,
+)
 from receipt.append_gate import (
     AppendError,
     AppendGateSpec,
@@ -234,26 +299,6 @@ def _assert_port_silent(capfd: pytest.CaptureFixture[str]) -> None:
     )
 
 
-def _git(root: pathlib.Path, *arguments: str) -> str:
-    """Run fixture git commands with ambient user configuration isolated."""
-
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "GIT_CONFIG_GLOBAL": "/dev/null",
-            "GIT_CONFIG_SYSTEM": "/dev/null",
-            "GIT_CONFIG_NOSYSTEM": "1",
-        }
-    )
-    completed = subprocess.run(
-        ["git", "-C", str(root), *arguments],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
-    return completed.stdout.strip()
-
 
 def commit_tree(root: pathlib.Path, message: str) -> str:
     _git(root, "init", "--quiet")
@@ -274,11 +319,17 @@ def replay_release_two(
     *,
     mutate_base: Callable[[pathlib.Path], None] | None = None,
 ) -> tuple[pathlib.Path, str]:
-    """Construct base release 1, then restore the authentic release-2 append."""
+    """Construct base release 1, then restore the authentic release-2 append.
+
+    Returns the root and the base commit; the caller applies whatever mutation
+    its case is about and then calls ``commit_candidate``, so the proposal the
+    two verifiers judge is a commit's tree rather than an unstaged diff.
+    """
 
     root = destination / "root"
     for relative in ("ledger", "releases"):
         shutil.copytree(tree / relative, root / relative)
+    assert_copied_surface(root)
 
     ledger = root / LEDGER_SPEC.state_relative
     full_ledger = ledger.read_bytes()
@@ -306,11 +357,16 @@ def gate_only_candidate(
     tree: pathlib.Path,
     destination: pathlib.Path,
 ) -> tuple[pathlib.Path, str]:
-    """Commit the full pinned data tree, then add one gate-only file."""
+    """Commit the full pinned data tree, then add one gate-only file.
+
+    The gate-only file is left for ``commit_candidate`` to carry into the
+    candidate commit, like every other proposal in this module.
+    """
 
     root = destination / "root"
     for relative in ("ledger", "releases"):
         shutil.copytree(tree / relative, root / relative)
+    assert_copied_surface(root)
     base = commit_tree(root, "full pinned tree")
     script = root / "scripts" / "check_thesis_facts_append.py"
     script.parent.mkdir(parents=True)
@@ -351,39 +407,59 @@ def _flip_middle_byte(path: pathlib.Path) -> None:
     path.write_bytes(bytes(payload))
 
 
+# The two legs every case runs. Leg one hands the oracle and the port the same
+# main worktree, now a clean checkout of the candidate commit; leg two hands
+# the oracle an independent detached checkout of that same commit and leaves
+# the port on the main worktree. At this release the port is still a
+# working-tree verifier, so the legs must agree; when it becomes
+# commit-addressed, leg two is what measures that it needs no checkout.
+LEG_ONE = "leg one (oracle and port on the main worktree)"
+LEG_TWO = "leg two (oracle on a detached checkout, port on the main worktree)"
+
+
 def _assert_accepts_identically(
     tree: pathlib.Path,
     root: pathlib.Path,
+    oracle_root: pathlib.Path,
     base_ref: str,
+    leg: str,
     capfd: pytest.CaptureFixture[str],
 ) -> str:
     baseline_code, baseline_out, baseline_err = run_baseline(
         tree,
-        root,
+        oracle_root,
         base_ref,
     )
     capfd.readouterr()
     port_code, port_message = run_port(tree, root, base_ref)
     _assert_port_silent(capfd)
 
-    assert baseline_code == 0, baseline_err
-    assert baseline_err == "", "baseline must print no stderr on acceptance"
+    assert baseline_code == 0, f"{leg}: {baseline_err}"
+    assert baseline_err == "", (
+        f"baseline must print no stderr on acceptance, {leg}"
+    )
     assert port_code == 0, port_message
-    assert port_message.strip() == baseline_out
+    assert port_message.strip() == baseline_out, (
+        f"divergent acceptance on {leg}:\n"
+        f"  baseline: {baseline_out}\n"
+        f"  port:     {port_message}"
+    )
     return port_message
 
 
 def _assert_refuses_identically(
     tree: pathlib.Path,
     root: pathlib.Path,
+    oracle_root: pathlib.Path,
     base_ref: str,
     marker: str,
     mutation: str,
+    leg: str,
     capfd: pytest.CaptureFixture[str],
 ) -> str:
     baseline_code, baseline_out, baseline_err = run_baseline(
         tree,
-        root,
+        oracle_root,
         base_ref,
     )
     capfd.readouterr()
@@ -391,51 +467,73 @@ def _assert_refuses_identically(
     _assert_port_silent(capfd)
 
     assert baseline_code == 1, (
-        f"baseline ACCEPTED mutation {mutation}: fail-closed property broken"
+        f"baseline ACCEPTED mutation {mutation} on {leg}: "
+        "fail-closed property broken"
     )
     assert baseline_out == "", (
-        f"baseline printed to stdout while refusing {mutation}: {baseline_out!r}"
+        f"baseline printed to stdout while refusing {mutation} on {leg}: "
+        f"{baseline_out!r}"
     )
     assert port_code == 1, (
-        f"port ACCEPTED mutation {mutation}: fail-closed property broken"
+        f"port ACCEPTED mutation {mutation} on {leg}: "
+        "fail-closed property broken"
     )
     normalized_baseline = _normalize_openssl_ids(baseline_err)
     normalized_port = _normalize_openssl_ids(port_message)
     assert normalized_port == normalized_baseline, (
-        f"divergent refusal for {mutation}:\n"
+        f"divergent refusal for {mutation} on {leg}:\n"
         f"  baseline: {baseline_err}\n"
         f"  port:     {port_message}"
     )
     assert marker in normalized_port, (
-        f"mutation {mutation} no longer binds its declared branch:\n"
+        f"mutation {mutation} no longer binds its declared branch on {leg}:\n"
         f"  expected: {marker}\n"
         f"  refusal: {port_message}"
     )
     return port_message
 
 
+CLEAN_APPEND_SUMMARY = (
+    "thesis-facts append check OK: 147 rows, immutable prefix 128, "
+    "+2 appended vs base, release 2"
+)
+
+
 def test_clean_valid_append_verdicts_match(
     append_pinned_tree: pathlib.Path,
     tmp_path: pathlib.Path,
     capfd: pytest.CaptureFixture[str],
+    committed_fixture_filesystem: None,
 ) -> None:
     root, base = replay_release_two(append_pinned_tree, tmp_path)
+    candidate = commit_candidate(root, "clean_valid_append")
+
     message = _assert_accepts_identically(
         append_pinned_tree,
         root,
+        root,
         base,
+        LEG_ONE,
         capfd,
     )
-    assert message == (
-        "thesis-facts append check OK: 147 rows, immutable prefix 128, "
-        "+2 appended vs base, release 2"
-    )
+    assert message == CLEAN_APPEND_SUMMARY
+    with detached_oracle_checkout(root, candidate, tmp_path / "oracle") as checkout:
+        message = _assert_accepts_identically(
+            append_pinned_tree,
+            root,
+            checkout,
+            base,
+            LEG_TWO,
+            capfd,
+        )
+    assert message == CLEAN_APPEND_SUMMARY
 
 
 def test_candidate_base_anchor_bytes_do_not_replace_trusted_anchors(
     append_pinned_tree: pathlib.Path,
     tmp_path: pathlib.Path,
     capfd: pytest.CaptureFixture[str],
+    committed_fixture_filesystem: None,
 ) -> None:
     anchor_relative = (
         LEDGER_SPEC.anchor_relative
@@ -453,37 +551,71 @@ def test_candidate_base_anchor_bytes_do_not_replace_trusted_anchors(
     assert (root / anchor_relative).read_bytes() != (
         append_pinned_tree / anchor_relative
     ).read_bytes()
+    # Unchanged in substance by the committed-fixture contract: the poisoned
+    # anchor is already in the base commit, so committing the candidate carries
+    # it forward exactly as the unstaged fixture left it in the working tree.
+    candidate = commit_candidate(root, "candidate_base_anchor_bytes")
 
     message = _assert_accepts_identically(
         append_pinned_tree,
         root,
+        root,
         base,
+        LEG_ONE,
         capfd,
     )
-    marker = (
-        "thesis-facts append check OK: 147 rows, immutable prefix 128, "
-        "+2 appended vs base, release 2"
-    )
-    assert message == marker
+    assert message == CLEAN_APPEND_SUMMARY
+    with detached_oracle_checkout(root, candidate, tmp_path / "oracle") as checkout:
+        message = _assert_accepts_identically(
+            append_pinned_tree,
+            root,
+            checkout,
+            base,
+            LEG_TWO,
+            capfd,
+        )
+    assert message == CLEAN_APPEND_SUMMARY
+
+
+GATE_ONLY_SUMMARY = (
+    "thesis-facts append check OK: gate-only proposal; DATA_SURFACE "
+    "unchanged; GATE_SURFACE changes="
+    "['scripts/check_thesis_facts_append.py']"
+)
 
 
 def test_gate_only_acceptance_verdicts_match(
     append_pinned_tree: pathlib.Path,
     tmp_path: pathlib.Path,
     capfd: pytest.CaptureFixture[str],
+    committed_fixture_filesystem: None,
 ) -> None:
     root, base = gate_only_candidate(append_pinned_tree, tmp_path)
+    # The gate-only file was untracked before this commit and is tracked after
+    # it, which moves it from ``git ls-files --others`` into ``git diff`` in
+    # both verifiers' surface classification. The union both read is the same
+    # set, and the verdict is the same sentence.
+    candidate = commit_candidate(root, "gate_only_acceptance")
+
     message = _assert_accepts_identically(
         append_pinned_tree,
         root,
+        root,
         base,
+        LEG_ONE,
         capfd,
     )
-    assert message == (
-        "thesis-facts append check OK: gate-only proposal; DATA_SURFACE "
-        "unchanged; GATE_SURFACE changes="
-        "['scripts/check_thesis_facts_append.py']"
-    )
+    assert message == GATE_ONLY_SUMMARY
+    with detached_oracle_checkout(root, candidate, tmp_path / "oracle") as checkout:
+        message = _assert_accepts_identically(
+            append_pinned_tree,
+            root,
+            checkout,
+            base,
+            LEG_TWO,
+            capfd,
+        )
+    assert message == GATE_ONLY_SUMMARY
 
 
 @pytest.mark.parametrize("relative", sorted(BASELINE_AUTHENTICATED_FILES))
@@ -714,15 +846,31 @@ def test_mutation_refused_identically(
     append_pinned_tree: pathlib.Path,
     tmp_path: pathlib.Path,
     capfd: pytest.CaptureFixture[str],
+    committed_fixture_filesystem: None,
     mutation: str,
 ) -> None:
     root, base = replay_release_two(append_pinned_tree, tmp_path)
     marker = MUTATIONS[mutation](root, base)
+    candidate = commit_candidate(root, mutation)
+
     _assert_refuses_identically(
         append_pinned_tree,
+        root,
         root,
         base,
         marker,
         mutation,
+        LEG_ONE,
         capfd,
     )
+    with detached_oracle_checkout(root, candidate, tmp_path / "oracle") as checkout:
+        _assert_refuses_identically(
+            append_pinned_tree,
+            root,
+            checkout,
+            base,
+            marker,
+            mutation,
+            LEG_TWO,
+            capfd,
+        )

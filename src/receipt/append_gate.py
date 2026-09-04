@@ -485,15 +485,18 @@ every base release file is still an entry in the candidate index,
 ``release_chain.assert_index_content_bound`` after both of those, and the
 release root's index scan all run after the comparisons they qualify, so a
 comparison that passed while the working tree was not carrying what git
-recorded is caught afterwards and nothing pre-existing is pre-empted; the
-differential harness pins the upstream's mode-change refusal for an unstaged
-chmod, which is both. Each order is pinned by a test. That ordering is per
-path, as the loops making it are: a refusal about one release path can still
-be reached before a pre-existing refusal about a later one, because the loop
-answers each path in turn. Sorting the loop differently would only move which
-path is named first, and the harness cannot produce the case — its fixtures
-mutate the working tree without touching the index. Classifying the index's
-changed set alongside the working tree's takes nothing away either: the union
+recorded is caught afterwards and nothing pre-existing is pre-empted; an
+unstaged chmod is both, and the unit test holding this order supplies it,
+since the differential harness commits its fixtures and pins the upstream's
+mode-change refusal for a committed chmod. Each order is pinned by a test.
+That ordering is per path, as the loops making it are: a refusal about one
+release path can still be reached before a pre-existing refusal about a
+later one, because the loop answers each path in turn. Sorting the loop
+differently would only move which path is named first. The differential
+harness cannot produce an index/worktree disagreement at all, since its
+fixtures are committed trees; the unit test above is where that case is
+held. Classifying the index's changed set alongside the working tree's
+takes nothing away either: the union
 is held to the rule the working-tree set already met, so a proposal the index
 shows to touch both surfaces is refused as mixed, in the words that refusal
 has always used, and one it shows to be data goes to the data path, where more
