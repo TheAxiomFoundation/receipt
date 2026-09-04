@@ -307,7 +307,19 @@ upstream integration this is a port of walks its chain that way, and on the
 pinned tree the two agree entry for entry: that walk clears its accumulator
 at every available witness, and the one record carrying an update has an
 available witness, so the list it supplies is exactly the derived set at
-every step and the new refusal is unreachable there.  The two shapes are
+every step and the new refusal is unreachable there.  Off that tree the two
+part company at one chain shape, and it is the shape where an accumulator
+survives a record: a record whose witness is *unavailable* and which carries
+a bundle update, followed by a record answering for the authority that update
+leaves pending.  The later record's snapshot does not carry the earlier
+record's update, so the accumulated list is refused as a stale extra and
+leaving it out refuses the supplemental outcome as one no pending transition
+introduces; ``verify_witness_step`` is where that chain is walked.
+``verify_witness``'s own docstring went on stating the pre-fix contract for a
+round -- that a walker accumulates and cannot be asked to leave the earlier
+updates out, so the argument is a list of both kinds -- which is the one call
+the second half of the comparison refuses, and it now states what the
+argument accepts (peer review, first Opus round).  The two shapes are
 mutually exclusive at the private entry point they share; supplying both is
 a ``TypeError`` rather than a refusal, because no call means "these are the
 earlier records' updates" and "these are the earlier records' updates and
@@ -3964,11 +3976,23 @@ def verify_witness(
     """Verify one record's RFC 3161 witness against a consumer-pinned spec.
 
     ``transition_bundle_updates`` is the trust transition in flight when this
-    record was written: the pending bundle updates of the records before it,
-    plus this record's own.  A caller walking a chain accumulates the first
-    kind and cannot be asked to leave them out, so the argument stays a list
-    of both -- but this record's own are derived here, from the bytes this
-    call read and hashed, and never taken from the caller's word for them.
+    record was written, and what it may hold is exactly this record's own
+    bundle updates: the ones this call derives from the bytes it read and
+    hashed, and never takes from the caller's word for them.  The argument is
+    compared with the derived set in both directions and then contributes
+    nothing of its own -- omitting it, or passing the empty list, is right for
+    every record that carries no update, and passing the record's own updates
+    is right for one that does.  A chain walker holding the pending updates of
+    *earlier* records has the other shape, and the entry point for it is
+    :func:`verify_witness_step`.
+
+    That is a narrowing of what this argument accepted, and this paragraph
+    used to say the opposite: that a caller walking a chain accumulates the
+    earlier records' pending updates and cannot be asked to leave them out, so
+    the argument stayed a list of both kinds.  The second half of the
+    comparison below is exactly what stopped accepting a list of both, so a
+    consumer reading the old paragraph wrote the one call this now refuses
+    (peer review, first Opus round).
 
     Deriving them and comparing is the whole of the fix.  A supplied list was
     trusted entire, so the token evidence covered the snapshot this call read
@@ -4007,6 +4031,18 @@ def verify_witness(
     way; this signature is 0.5.1's and stays for the integration this module
     is a port of, whose walk supplies exactly the derived set at every step of
     the pinned tree.
+
+    Whose walk does, because it clears its accumulator at every available
+    witness and the one record carrying an update has one.  The chain shape
+    that separates the two entry points is therefore the shape where the
+    accumulator survives a record: a record whose witness is *unavailable* and
+    which carries a bundle update, followed by a record answering for the
+    authority that update leaves pending.  At that later record the pending
+    list holds an update its own snapshot does not carry, and no argument to
+    this function serves that: the accumulated list is refused as a stale
+    extra, named, and leaving it out refuses the supplemental outcome as one
+    no pending transition introduces.  ``verify_witness_step``
+    is where that chain is walked.
     """
 
     evidence, _updates = _verify_witness_with_updates(
