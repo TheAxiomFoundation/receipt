@@ -52,7 +52,6 @@ from receipt._names import (
     SHORT_NAME_PUNCTUATION,
     WIN32_RESERVED_DEVICE_NAMES,
     NamePolicyError,
-    _win32_device_basename,
     ascii_fold_text,
     assert_no_merging_entries as assert_no_merging_tree_names,
     assert_portable_name,
@@ -68,7 +67,6 @@ from receipt.snapshot import (
     MAX_CONTENT_BYTES_TOTAL,
     GitEntry,
     SnapshotError,
-    TreeListing,
     TreeSnapshot,
 )
 
@@ -445,13 +443,14 @@ class CorpusSpec:
         for root in self.content_roots:
             if not isinstance(root, pathlib.PurePosixPath):
                 raise CorpusError("CorpusSpec content_roots must be PurePosixPath")
-            # The spec's own name input is screened here, before the path
-            # rules, so a refusal names the committed spec that carries the
-            # fault rather than a path. A root also reaches
-            # _validate_relative_path below, which screens it again.
+            if selected_repertoire == "portable":
+                # Preserve the spec-specific portable-name diagnostic before
+                # the general relative-path screen.
+                for component in root.as_posix().split("/"):
+                    _assert_portable_name(component, "CorpusSpec content root")
             _validate_relative_path(
                 root.as_posix(),
-                "CorpusSpec content root",
+                "content root",
                 repertoire=selected_repertoire,
             )
         if type(self.content_suffixes) is not tuple or not self.content_suffixes:
@@ -1549,18 +1548,28 @@ _TREE_MODE = "040000"
 
 
 def _screen_tree_listing(
-    listing: TreeListing,
+    entries: Mapping[str, GitEntry],
+    by_directory: Mapping[str, Mapping[str, GitEntry]],
     *,
     repertoire: str,
-    directory: str = "",
 ) -> None:
-    """Validate every component and every sibling set before classification."""
+    """Validate every component and every tree directory's sibling set.
 
-    children = listing.children
-    names = tuple(sorted(children))
-    for name in names:
-        relative = _under(directory, name)
+    ``TreeListing.as_dict`` has already materialized each authenticated full
+    path exactly once.  Deriving local names from that flat view avoids a
+    second charged path traversal through ``TreeListing.children``.
+    """
+
+    for relative in sorted(entries):
+        name = relative.rpartition("/")[2]
         if repertoire == "portable":
+            # The portable operation supplies the retained corpus diagnostic.
+            # Ask the strict fold first so undecodable surrogateescaped tree
+            # bytes are still refused as undecodable under both repertoires.
+            try:
+                ascii_fold_text(name)
+            except NamePolicyError as exc:
+                raise CorpusError(str(exc)) from exc
             _assert_portable_name(name, f"tree entry {_quoted(relative)}")
         else:
             try:
@@ -1576,37 +1585,35 @@ def _screen_tree_listing(
             except NamePolicyError as exc:
                 raise CorpusError(str(exc)) from exc
 
-    # Keep the established corpus refusal text. The shared helper still runs
-    # for every directory; this pre-check only supplies the retained path-rich
-    # diagnostic when the sibling pair itself is the fault.
-    seen: dict[str, str] = {}
-    for name in names:
-        folded = _path_fold(name)
-        previous = seen.get(folded)
-        if previous is not None:
-            raise CorpusError(
-                "directory holds two entries a case-insensitive filesystem "
-                f"would merge: {_quoted(_under(directory, previous))} and "
-                f"{_quoted(_under(directory, name))}"
-            )
-        seen[folded] = name
-    try:
-        assert_no_merging_tree_names(
-            names,
-            repertoire=repertoire,
-            label=f"tree directory {_quoted(directory or '.')}",
-        )
-    except NamePolicyError as exc:
-        raise CorpusError(str(exc)) from exc
+    directories = {""}
+    directories.update(
+        path for path, entry in entries.items() if entry.mode == _TREE_MODE
+    )
+    for directory in sorted(directories):
+        names = tuple(sorted(by_directory.get(directory, {})))
 
-    for name in names:
-        child = children[name]
-        if isinstance(child, TreeListing):
-            _screen_tree_listing(
-                child,
+        # Keep the established corpus refusal text. The shared helper still
+        # runs for every directory; this pre-check only supplies the retained
+        # path-rich diagnostic when the sibling pair itself is the fault.
+        seen: dict[str, str] = {}
+        for name in names:
+            folded = _path_fold(name)
+            previous = seen.get(folded)
+            if previous is not None:
+                raise CorpusError(
+                    "directory holds two entries a case-insensitive filesystem "
+                    f"would merge: {_quoted(_under(directory, previous))} and "
+                    f"{_quoted(_under(directory, name))}"
+                )
+            seen[folded] = name
+        try:
+            assert_no_merging_tree_names(
+                names,
                 repertoire=repertoire,
-                directory=_under(directory, name),
+                label=f"tree directory {_quoted(directory or '.')}",
             )
+        except NamePolicyError as exc:
+            raise CorpusError(str(exc)) from exc
 
 
 def _entries_by_directory(
@@ -1832,13 +1839,17 @@ def verify_corpus_binding(
         listing = snapshot.entries("")
     except SnapshotError as exc:
         raise CorpusError(str(exc)) from exc
-    _screen_tree_listing(listing, repertoire=spec.name_repertoire)
     try:
         entries = listing.as_dict(include_trees=True)
     except SnapshotError as exc:
         raise CorpusError(str(exc)) from exc
 
     by_directory = _entries_by_directory(entries)
+    _screen_tree_listing(
+        entries,
+        by_directory,
+        repertoire=spec.name_repertoire,
+    )
     _assert_content_root_spellings(entries, by_directory, spec)
     tree = _content_entries_from_listing(entries, spec)
 

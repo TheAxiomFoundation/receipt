@@ -3,7 +3,7 @@
 ## State
 
 - Branch: `feat/0.6-lane-d` at baseline `145f3db93d745ddc43aeb47f6b7bd8b30aa331a3`.
-- Phase: obsolete filesystem implementation removed; corpus test migration is next.
+- Phase: fixture commits landed; corpus test migration and replacement cases are in progress.
 - Scope: immutable-tree corpus verification, shared name-policy additions, corpus fixture commit helpers, and focused tests.
 - Network is sandbox-disabled; local work, tests, commits, and a complete draft PR body remain possible. Push/PR creation will be attempted only after all gates pass.
 
@@ -25,15 +25,21 @@
 - Deleted the private worktree verifier and all subjectless filesystem machinery: directory listing/generations, sweep/spelling/tombstone work indexes, symlink component walks, file identity/digest reads, closing re-sweep/re-checks, the POSIX ctime precondition, and their three superseded tree-work constants.
 - Replaced the 485-line filesystem/pass-order module narrative with the immutable-tree claim and checkout-fidelity boundary.
 - Production source now has no worktree read, stat call, per-blob process, or second tree pass; 75 targeted corpus/name cases pass after the deletion.
+- Added default-on commits to `build_corpus` and `append_release`, with bounded Git setup, validated returned OIDs, and an explicit `commit=False` opt-out. `BuiltCorpus.commit_oid` adds the build OID without moving its existing spec/path positions.
+- Corrected the immutable listing screen to flatten the authenticated `TreeListing` exactly once before validating entry names and directory sibling sets. This avoids charging every full path twice against the reader's shared path-byte budget and keeps snapshot failures translated to `CorpusError`.
+- Restored the pre-existing `CorpusSpec content root` portable-name diagnostic while allowing `posix-bytes` roots through the general repertoire-aware path screen.
+- Production review smoke: five focused binding/spec cases pass after the single-flattening correction.
 
 ## Next
 
-1. Delete the 57 subjectless host/race/budget tests and convert retained tests to committed snapshots.
-2. Add repertoire/tree-shape/property coverage and update fixture commit helpers.
+1. Finish deleting the 57 subjectless host/race/budget tests and convert retained tests to committed snapshots.
+2. Add repertoire/tree-shape/property coverage.
 3. Run focused, offline, and equivalence gates; prepare the required PR body and final report with exact totals and OIDs.
 
 ## Findings
 
 - No defect found in `snapshot.py`; it remains out of scope and unchanged.
 - `src/receipt/verify.py` still passes a `Path` to the intentionally breaking API. Lane C owns and is concurrently changing that caller; this branch's full offline suite will retain that expected integration failure until Lane C is merged or its change is available.
+- `tests/test_cli.py` has one `committed_repo` fixture that initializes and commits a second time; default fixture commits make that second commit empty. The CLI file belongs to Lane C, so this lane records the integration point and does not edit it.
+- Section 3.6's final `verify_declarations` step remains the separate pass that `run_verification` already performs after binding. Calling it inside `verify_corpus_binding` would collapse the public binding/declaration pass boundary and make Lane C's unchanged call duplicate the check.
 - Baseline census: 199 corpus test functions / 206 collected cases. Exactly 57 current functions have vanished filesystem/race/index subjects (43 host/race, 14 obsolete budget/index); replacement tree-shape/property cases will restore the required coverage, not those subjects.
