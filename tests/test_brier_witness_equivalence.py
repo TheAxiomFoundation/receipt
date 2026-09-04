@@ -126,26 +126,54 @@ Deliberately outside the mutation contract:
   runs and no case here can move on it; on Windows it is what keeps a ``\r\n``
   or a ``0x1A`` in a record, a response or a root PEM from being translated
   between the disk and the digest;
+- the component walk in front of those same three reads answered about
+  pathnames and the read then opened the whole path again, which recreated the
+  race the walk closed; the port now holds the records root open and opens
+  each checked interior component relative to the descriptor above it with
+  ``O_DIRECTORY | O_NOFOLLOW``, the leaf relative to the last of them, closing
+  every descriptor in a ``finally`` (sixth gate round two).  A component
+  exchanged for a link between the check and the descent keeps the walk's own
+  traversal words; one exchanged for a regular file is named by a message of
+  its own, ``{subject} component is not a directory at {component}: {path}``.
+  Nothing rewrites this tree under a running verification, so every descent
+  here reaches the object the walk checked and neither message fires.  The
+  records root itself is the boundary the caller named and may be a link, so
+  its own descriptor is the one open here without ``O_NOFOLLOW``, and the walk
+  ends at the root under the caller's spelling as well as under its resolution
+  (first Opus round); the harness resolves the records root before it starts,
+  and no case here spells one path through two sides of a link;
 - the baseline reads the trust-bundle updates a record carries out of a
   fresh open of that record whenever the chain walk hands them in; the port
   derives them from the one read it hashed and verified, and requires a
-  supplied list to contain every one of them, refusing otherwise (peer
-  review, fifth gate round two).  ``verify_candidate`` below supplies
-  ``[*pending, *current_updates]`` -- the accumulated pending updates of
-  earlier records plus this record's own, parsed from the same payload the
-  walk verified -- so the supplied list is always a superset of what the port
-  derives and no case here reaches the refusal.  The derivation itself now
+  supplied list to be *exactly* that derived set.  The rule was one-way when
+  it arrived -- every derived update had to appear in the supplied list, and
+  the list could hold more (peer review, fifth gate round two) -- and both
+  directions are checked now: an entry the call did not derive is refused by
+  name rather than evaluated, because a superset is precisely what made a
+  stale extra indistinguishable from an honest one (sixth gate round two).
+  ``verify_candidate`` below supplies ``[*pending, *current_updates]``, the
+  accumulated pending updates of earlier records plus this record's own,
+  parsed from the same payload the walk verified.  What makes that equal the
+  derived set at every step is not that it is a superset -- a superset is now
+  what is refused -- but that the walk clears ``pending`` at every available
+  witness, and the one record in this tree carrying a ``trustBundleUpdates``
+  entry has an available witness: ``pending`` is therefore empty at every one
+  of the 53 calls and the supplied list is this record's own updates and
+  nothing else.  A tree whose update arrived on a record with an *unavailable*
+  witness would reach the refusal here, by design, and the shape for it is the
+  step API below.  The derivation itself now
   runs on every call rather than only when no list is supplied, so the ported
   ``trustBundleUpdates`` refusals could in principle fire inside
   ``verify_witness`` where they did not before; the walk runs
   ``trust_bundle_updates`` on the same payload before the call, so any such
   refusal still arrives from there first, in the same words.  The port also
-  offers a second shape at the module level,
-  ``_verify_witness_with_updates(prior_pending_updates=...)``, which takes the
-  pending updates of *earlier* records only and combines them with the
-  snapshot's own itself, so that no entry in the transition is one the
+  offers a second public entry point, ``verify_witness_step``, which takes the
+  pending updates of *earlier* records as ``prior_pending_updates``, combines
+  them with the snapshot's own itself, and returns the snapshot-derived list
+  beside the evidence, so that no entry in the transition is one the
   verification did not either derive or attribute to an earlier record (fifth
-  gate round three).  ``verify_candidate`` keeps the supplied-list shape,
+  gate round three, made public in the sixth gate's round two).
+  ``verify_candidate`` keeps the supplied-list shape,
   because that shape is the upstream's and this file mirrors the upstream; on
   this tree the two evaluate the same transition, since the walk parses
   ``current_updates`` from the payload it verified and the port derives the
@@ -177,7 +205,8 @@ Deliberately outside the mutation contract:
   is that a bundle replaced mid-load can no longer make the anchors and their
   commitments describe two different instants.  The component walk does not
   cover these three: each refuses a link at its own final component, the
-  sidecars' other components are the records' and are walked with them, and
+  sidecars' other components are the records' and are ``lstat``-ed during the
+  records' own reads rather than at the sidecars' opens, and
   genesis sits directly under the records root, which leaves ``records/trust``
   -- not a link here -- read through no walk, and a bundle's bytes are pinned
   entire in any case;
@@ -276,13 +305,22 @@ Deliberately outside the mutation contract:
   be witnessed at all (sixth gate round one).  The grouping only ever turns a
   refusal into a skip -- a component is connected through shared keys, so
   where every touched anchor's own set equalled the pending signers the class
-  does too.  Each candidate the walk admits also joins the sets the
-  next is measured against, so two pending bundles introducing one authority
-  under two anchors -- one new authority demanding two supplemental outcomes
-  -- are refused too (round two); except that a later pending bundle's anchor
-  carrying an admitted anchor's ``(ID, root SPKI)`` succeeds it in the
-  candidate set rather than colliding with it, which is a catch-up spanning
-  two bundle versions and not two names for one authority (round three).
+  does too.  The refusal of two pending bundles introducing one authority
+  under two anchors, which this list stated in the present tense for a round
+  after it was gone, is withdrawn: it is the port's only withdrawal.  Pending
+  history was a rolling set of current candidates, so a skipped rename or
+  rotation contributed no edge and reversing an anchor array could change the
+  verdict; one persistent component graph is built instead, from every active
+  and pending anchor the verification sees, and each pending-only class
+  contributes exactly one candidate -- its newest occurrence -- however many
+  names it has been filed under.  What stopped one new authority being counted
+  twice was the count and not the refusal (round two).  The comparison a
+  rename is measured against is the class's *live era* -- the union over its
+  active occurrences in its newest active era -- and not the union over its
+  whole history, which refused an honest rename written after an activated
+  rotation; and the rule is asked only of an anchor whose owned keys resolve
+  to a class that holds an active anchor, since a pending-only class has one
+  candidate whichever of its names is elected (first Opus round).
   ``tsa-anchors-v2`` reuses ``freetsa-root-2016`` under the same root SPKI as
   ``tsa-anchors-v1`` (``52c54ba3...``) and the same allowed signer
   (``fa02bd55...``), so the ``(ID, root SPKI)`` half skips it before the
@@ -291,10 +329,44 @@ Deliberately outside the mutation contract:
   (``7abda95e...``) no active anchor allows, so neither half skips it and its
   signer set touches no active authority's.  The pinned chain carries one
   pending bundle at a time -- exactly one of its 53 records carries a
-  ``trustBundleUpdates`` entry at all -- so no two pending anchors are ever
-  walked together here, and neither succession nor the alias rule can fire.
+  ``trustBundleUpdates`` entry at all -- so no two pending anchors of one
+  class are ever walked together here, and neither succession nor the alias
+  rule can fire.
   The candidate set at the pinned transition is therefore identical under
   every keying this branch has had, and no refusal here changes;
+- three further refusals guard the same pending-anchor machinery, and none of
+  them is reachable in this tree.  A pending bundle may present at most one
+  anchor per historical class: two aliases can rotate to disjoint current
+  signers and pass the bundle-local shared-signer rule while still naming one
+  authority twice, so the completed graph is asked of every pending batch and
+  refuses two anchors resolving to one class, naming both slots and the class
+  (sixth gate round two).  An anchor whose ``(ID, root SPKI)`` the history
+  already holds is a rotation and is asked for no supplemental outcome, but it
+  is asked whose keys it may hold: adopting a second class's signer is refused
+  in a verdict naming its own authority and every class whose key it took
+  (round three).  And a pending anchor's verdict is raised at the bundle it
+  belongs to, after that bundle's own class question and before the next
+  bundle is walked, so a later bundle honestly carrying both authorities an
+  earlier one merged is not convicted of the earlier one's merge (round
+  three).  ``tsa-anchors-v2`` presents two anchors of two distinct classes,
+  neither of which the history already holds, so no case here reaches any of
+  the three;
+- the port refuses a bundle anchor whose ``allowedSigners`` holds an entry
+  that is not an object carrying a 64-character lowercase hexadecimal
+  ``spkiSha256``, asked of each entry in the bundle's own order and before any
+  set is built, and names the entry's index (sixth gate round two).  The
+  comparison just above it hashed those values into a set first, so an
+  unhashable one raised ``TypeError`` out of the set rather than a refusal.
+  Every ``allowedSigners`` entry in both pinned bundles is such an object, and
+  a mutation that changes one changes the bundle bytes and trips the
+  commitment mismatch first, so no case here reaches it;
+- the port refuses an anchored TSA read on a platform whose ``os.open`` lacks
+  ``dir_fd`` support, with the package's POSIX-platform sentence, rather than
+  falling back to a whole-path open that would restore the race the descent
+  closes (sixth gate round two).  CPython offers descriptor-relative
+  ``os.open`` on every POSIX platform this harness runs on, and both sides of
+  every comparison here run under the same interpreter, so no case can differ
+  on it;
 - the baseline ignores bundle-claim fields on an unavailable v1 witness;
   the port resolves and counts a named bundle.  The genesis witness names
   none;
