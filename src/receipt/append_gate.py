@@ -1907,7 +1907,6 @@ def check_append_only(
             # Folded into the message below instead, bounded so a
             # pathological diagnostic cannot push the reason out of sight.
             stderr=subprocess.PIPE,
-
         )
     except subprocess.CalledProcessError as exc:
         diagnostic = (exc.stderr or "").strip()[-1000:] or "no git diagnostic"
@@ -1940,7 +1939,6 @@ def _manifest_at_ref(
             text=True,
             env=_git_environment(),
             stderr=subprocess.PIPE,  # as in check_append_only, and for the same reason
-
         )
     except subprocess.CalledProcessError as exc:
         diagnostic = (exc.stderr or "").strip()[-1000:] or "no git diagnostic"
