@@ -777,6 +777,54 @@ def test_refuses_substituted_key_behind_symlinked_anchor_parent(
     assert "symlink or reparse point" in capsys.readouterr().err
 
 
+def test_refuses_a_chain_reached_through_a_symlinked_manifest_component(
+    repo: pathlib.Path, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Binds S5-R2-F3 where it matters most: this command is the one an
+    outside auditor runs over a clone, and its custody pass is
+    ``verify_release_chain``. The release tree's confinement walk was added
+    for the append gate and reached only from there, so a spec whose manifest
+    directory sits below an interior component — ``releases/journal/manifests``
+    — had that component resolved like any other name, and an untracked
+    symlink at ``releases/journal`` pointing outside the clone made the chain
+    in *that* directory the one this command certified.
+
+    Measured at this round's head with ``assert_no_symlinked_release_root``
+    removed from ``verify_release_chain``, on this exact arrangement: exit 0,
+    ``[ok  ] custody``, and ``VERDICT: PASS — custody and corpus binding`` —
+    a pass over a release history no part of which is in the tree handed to
+    the auditor. The walk runs at the top of the custody pass now, and the
+    traversal it refuses is named in the verdict.
+
+    The spec module is rewritten here rather than the corpus rebuilt around a
+    nested layout: the custody pass is pass 1 and runs before the binding pass
+    that would notice anything about the spec file, and what is under test is
+    the path the spec configures rather than how the corpus was produced."""
+
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    shutil.move(str(repo / "releases" / "manifests"), str(outside / "manifests"))
+    (repo / "releases" / "journal").symlink_to(outside)
+    spec_path = repo / "verification" / "spec.py"
+    rewritten = spec_path.read_text().replace(
+        "manifest_relative=pathlib.PurePosixPath('releases/manifests')",
+        "manifest_relative=pathlib.PurePosixPath('releases/journal/manifests')",
+    )
+    assert "releases/journal/manifests" in rewritten, "the spec pin moved"
+    spec_path.write_text(rewritten)
+    # The link really does deliver the chain, so this is a confinement
+    # refusal rather than a refusal about manifests that cannot be read.
+    assert (repo / "releases/journal/manifests").is_dir()
+
+    assert run(repo) == EXIT_FAIL
+    rendered = capsys.readouterr().err
+    assert "VERDICT: FAIL — custody" in rendered
+    assert (
+        "release root path traverses a symlink at 'releases/journal': "
+        "releases/journal/manifests"
+    ) in rendered
+
+
 def test_refuses_a_deleted_release_chain(repo: pathlib.Path) -> None:
     shutil.rmtree(repo / "releases/manifests")
     assert run(repo) == EXIT_FAIL

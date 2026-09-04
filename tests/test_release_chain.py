@@ -5,25 +5,49 @@ the verification read sites themselves (OpenSSL is fed a snapshot of the
 digested bytes), the computation is opt-in so pre-existing callers keep
 byte-identical behavior, and the combined digest is receipt-canonical JSON —
 an injective encoding for any accepted filename strings.
+
+Two tests at the end are labelled S4-F6 and belong to a fourth review gate's
+first round on the append-gate branch: the ``dir_fd`` requirement was
+documented as the append gate's, and this is where it is shown to be the
+package's — ``verify_release_chain`` and ``receipt verify``'s custody pass
+refuse on the same platforms, in the same words, with no append gate in the
+picture.
+
+Two more are labelled S5-R2-F3 and belong to that branch's fifth gate, second
+round, for the same reason: the release tree's confinement walk was added for
+the append gate and reached only from there, so the public verifier had none
+of it.
+
+One at the end is labelled S5-G1-F2 and belongs to a fresh gate's first round:
+the whole-index alias scan compared each entry against the three paths a
+``ChainSpec`` carries and against nothing else, and a caller with configured
+surfaces of its own protects more than that. It is the package-level half —
+that the widening is the caller's to ask for and changes nothing for a caller
+that does not.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
 import shutil
 import subprocess
+from dataclasses import replace
 
 import pytest
 
+from receipt import release_chain
 from receipt.canonical import canonical_sha256
 from receipt.release_chain import (
     ReleaseChainError,
     _combined_anchor_digest,
     _observe_anchor_bytes,
+    assert_index_carries_no_protected_alias,
     verify_release_chain,
 )
+from receipt.cli import EXIT_FAIL, main
 from receipt.verify import load_spec, run_verification
 
 from corpus_fixture import CONTENT, append_release, build_corpus
@@ -1145,3 +1169,344 @@ def test_pin_inference_follows_resolution_not_spelling(
             anchor_dir=spelled,
             compute_anchor_set_digest=True,
         )
+
+
+def state_paths(
+    repo: pathlib.Path,
+) -> tuple[pathlib.Path, pathlib.Path, dict[str, bytes]]:
+    """The two state files of a built chain, and their bytes keyed as supplied."""
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    ledger = repo / spec.chain.state_relative
+    prefix = repo / spec.chain.prefix_relative
+    return ledger, prefix, {
+        spec.chain.state_relative.as_posix(): ledger.read_bytes(),
+        spec.chain.prefix_relative.as_posix(): prefix.read_bytes(),
+    }
+
+
+def test_supplied_state_bytes_are_used_instead_of_reading_the_state_paths(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds round five's first finding: the verdict's one read of each file.
+
+    ``append_gate`` reads the ledger and the frozen prefix once, records what
+    it read, and feeds every consumer it owns from that snapshot. This
+    verifier was not one of them — it opened both paths again by name — so a
+    candidate could show the row checks one ledger and the release history
+    another inside a single verdict, then restore the first before the
+    closing re-read. Given the bytes, the paths are not opened here at all:
+    the reader is replaced with one that fails if it is called, and a decoy
+    is left on disk for anything that resolves the name anyway.
+    """
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    ledger, prefix, supplied = state_paths(repo)
+    ledger.write_bytes(b'{"decoy":true}\n')
+    prefix.write_bytes(b"{}\n")
+
+    def refuse(root: pathlib.Path, relative: pathlib.PurePosixPath) -> bytes:
+        raise AssertionError(f"state path was read by name: {relative}")
+
+    monkeypatch.setattr(release_chain, "_regular_file_bytes", refuse)
+
+    verification = verify_release_chain(repo, spec=spec.chain, state_bytes=supplied)
+    assert len(verification.releases) == 1
+
+
+def test_without_supplied_bytes_the_state_paths_are_read_exactly_as_before(
+    repo: pathlib.Path
+) -> None:
+    """The control the same finding requires: omitting the parameter changes
+    nothing. The identical decoy is refused, because the reader that predates
+    the parameter is the one that ran, on the same paths, in the same place."""
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    ledger, _prefix, _supplied = state_paths(repo)
+    ledger.write_bytes(b'{"decoy":true}\n')
+
+    with pytest.raises(ReleaseChainError) as refusal:
+        verify_release_chain(repo, spec=spec.chain)
+    assert "lineCount" in str(refusal.value)
+
+
+def test_state_bytes_must_map_exact_strings_to_exact_bytes(
+    repo: pathlib.Path
+) -> None:
+    """The parameter is trusted in place of a read, so it is checked the way
+    this module checks everything else it is handed: a str subclass could
+    compare equal to a state path while rendering as something else, and a
+    bytes-like view could change under the digests taken from it."""
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    _ledger, _prefix, supplied = state_paths(repo)
+
+    with pytest.raises(ReleaseChainError) as not_a_mapping:
+        verify_release_chain(repo, spec=spec.chain, state_bytes=[("a", b"b")])
+    assert str(not_a_mapping.value) == (
+        "state_bytes must be a mapping of state path to bytes"
+    )
+
+    key = next(iter(supplied))
+    with pytest.raises(ReleaseChainError) as not_exact:
+        verify_release_chain(
+            repo,
+            spec=spec.chain,
+            state_bytes={**supplied, key: bytearray(supplied[key])},
+        )
+    assert str(not_exact.value) == (
+        "state_bytes must map exact str state paths to exact bytes"
+    )
+
+
+PLATFORM_REFUSAL = (
+    "state files cannot be read with secure descent on this platform "
+    "(os.open lacks dir_fd support); receipt requires a POSIX platform"
+)
+
+
+def without_dir_fd(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Present a platform whose ``os.open`` takes no ``dir_fd``, as Windows is."""
+
+    monkeypatch.setattr(
+        os, "supports_dir_fd", frozenset(os.supports_dir_fd) - {os.open}
+    )
+
+
+def test_the_custody_state_read_refuses_a_platform_without_dir_fd(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S4-F6: the ``dir_fd`` requirement was documented as the append
+    gate's, but ``_regular_file_bytes`` is where it lives and this verifier is
+    that function's other caller — so ``verify_release_chain`` stops on the
+    same refusal, on the public path, with no append gate anywhere in the
+    picture. The restriction is the package's, and the refusal now says so.
+    Without that sentence the message names only ``os.open`` and a reader is
+    left to infer how far it reaches."""
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    without_dir_fd(monkeypatch)
+
+    with pytest.raises(ReleaseChainError) as refusal:
+        verify_release_chain(repo, spec=spec.chain)
+    assert str(refusal.value) == PLATFORM_REFUSAL
+
+
+def test_receipt_verify_reports_the_platform_refusal_as_the_custody_failure(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """S4-F6 end to end. ``receipt verify`` is the outside auditor's command
+    and its first pass is custody, which reads both state files through the
+    same descent — so on Windows the default verification stops there too,
+    not only the append gate. The verdict names the pass and carries the
+    refusal verbatim, so an auditor is told what the platform costs rather
+    than left with a failure they cannot place."""
+
+    without_dir_fd(monkeypatch)
+
+    assert main(
+        ["verify", "--spec", str(repo / "verification/spec.py"), "--root", str(repo)]
+    ) == EXIT_FAIL
+    # A failing verdict is rendered on stderr; the text is the same either way.
+    rendered = capsys.readouterr().err
+    assert "VERDICT: FAIL — custody" in rendered
+    assert PLATFORM_REFUSAL in rendered
+
+
+def test_a_symlinked_interior_manifest_component_is_refused(
+    repo: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """Binds S5-R2-F3. The release tree's confinement walk —
+    ``assert_no_symlinked_release_root``, which since round 12 walks all three
+    configured paths whole — was added for the append gate and was reached
+    only from there, through ``hold_release_root``. The public verifier ran
+    none of it, so a spec whose manifest directory sits below an interior
+    component (``releases/journal/manifests``) had that component resolved
+    like any other name: an untracked symlink at ``releases/journal`` pointing
+    outside the tree made the chain in *that* directory the one this function
+    verified, and the verdict spoke for a release history no part of which is
+    in the tree the auditor was handed.
+
+    Measured at this round's head with ``assert_no_symlinked_release_root``
+    removed from ``verify_release_chain``, on this exact arrangement: the call
+    returns a verification whose head manifest is the one stored outside the
+    root, ``0000-<digest>.json``, and returns it as a pass. Nothing else here
+    would have said otherwise — the index reconciliation that catches a linked
+    component in the append gate is not on this path at all, and there is no
+    base to compare against.
+
+    The walk runs at the top now, after the arguments are validated and the
+    anchor probe has had its say and before the enumeration, so both the gate
+    and ``receipt verify`` reach it."""
+
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    shutil.move(str(repo / "releases" / "manifests"), str(outside / "manifests"))
+    (repo / "releases" / "journal").symlink_to(outside)
+    spec, _ = load_spec(repo / "verification/spec.py")
+    nested = replace(
+        spec.chain,
+        manifest_relative=pathlib.PurePosixPath("releases/journal/manifests"),
+    )
+    # The link really does deliver the chain: this is a confinement question,
+    # not a question about whether the manifests are valid.
+    assert (repo / "releases/journal/manifests").is_dir()
+
+    with pytest.raises(ReleaseChainError) as refusal:
+        verify_release_chain(repo, spec=nested)
+    assert str(refusal.value) == (
+        "release root path traverses a symlink at 'releases/journal': "
+        "releases/journal/manifests"
+    )
+
+
+def test_a_folded_manifest_leaf_is_refused_by_the_public_verifier(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S5-R2-F3's other half, and the reason the walk binds spellings as well
+    as types. Round 12 bound the configured leaf's spelling, so a spec naming
+    ``releases/manifests`` over a ``releases/Manifests`` on disk is refused
+    rather than verified out of a directory the spec never named — but only
+    where the walk ran, which was the append gate alone. ``receipt verify``,
+    whose custody pass is this function, verified it.
+
+    Simulated the way round 12's own spelling cases are, because a
+    name-folding filesystem produces one pair of facts and only one of them
+    can be arranged everywhere: the ``lstat`` of the requested spelling
+    succeeds (real here — the directory is spelled exactly as the spec pins
+    it), and the holding directory's listing does not contain that spelling
+    (simulated, by answering the one ``os.listdir`` of the release root with a
+    folded name and delegating every other listing, which is the whole of what
+    ``_assert_component_spelled`` reads).
+
+    Measured at this round's head with ``assert_no_symlinked_release_root``
+    removed from ``verify_release_chain``, under the same simulated listing:
+    the chain verifies and the head manifest is returned as a pass."""
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    release_root = (repo / "releases").resolve()
+    real_listdir = os.listdir
+
+    def a_listing_that_folds(where: object) -> list[str]:
+        listed = real_listdir(where)  # type: ignore[arg-type]
+        if pathlib.Path(os.fspath(where)).resolve() == release_root:
+            return [
+                "Manifests" if name == "manifests" else name for name in listed
+            ]
+        return listed
+
+    monkeypatch.setattr(os, "listdir", a_listing_that_folds)
+    # The other half of the pair is real: the pinned spelling still resolves.
+    assert (release_root / "manifests").is_dir()
+
+    with pytest.raises(ReleaseChainError) as refusal:
+        verify_release_chain(repo, spec=spec.chain)
+    assert str(refusal.value) == (
+        "path component releases/manifests is not spelled by its directory: "
+        "releases/manifests"
+    )
+
+
+def a_repository_holding(tmp_path: pathlib.Path, *listed: str) -> pathlib.Path:
+    """A git repository whose index records exactly ``listed``.
+
+    Ambient user configuration is isolated the way ``tests/test_append_gate``'s
+    own fixture git isolates it, so the entries are this test's and nothing
+    else's.
+    """
+
+    root = tmp_path / "index-repo"
+    root.mkdir()
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "init", "--quiet"], check=True, env=environment
+    )
+    for name in listed:
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(root), "add", "-A"], check=True, env=environment
+    )
+    return root
+
+
+def test_the_alias_scan_covers_the_manifest_and_anchor_directories(
+    repo: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """Opus peer review, round one on gate g: the scan's own protected set
+    named the release root and the two state paths, but not the manifest and
+    anchor directories this module also reads for itself. An index entry
+    spelled ``releases/Manifests/…`` beside the spec's ``releases/manifests``
+    folds onto a directory this module reads for itself, and with no surfaces
+    named nothing in this scan asked about it; the release root's own index
+    scan answers only where it runs, which the append gate's push path is and
+    a direct caller of this function is not. Both directories are protected on
+    their own now, so the alias is refused with no ``surfaces`` argument at
+    all."""
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    for alias, protected in (
+        ("releases/Manifests/0000-alias.json", "releases/manifests"),
+        ("releases/Anchors/root.pem", "releases/anchors"),
+    ):
+        scratch = tmp_path / alias.split("/")[1]
+        scratch.mkdir()
+        root = a_repository_holding(scratch, alias)
+        with pytest.raises(ReleaseChainError) as refusal:
+            assert_index_carries_no_protected_alias(root, spec.chain)
+        assert str(refusal.value) == (
+            f"index carries an alias of a protected path: {alias} "
+            f"(for {protected} at {protected})"
+        )
+
+
+def test_the_alias_scan_protects_only_what_its_caller_names(
+    repo: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """Binds S5-G1-F2 where the widening is decided: the package's own scan.
+
+    ``assert_index_carries_no_protected_alias`` compared every index entry
+    against three of the five paths a ``ChainSpec`` carries (the manifest and
+    anchor directories joined them later in this round), the paths this
+    module reads for itself. A caller that also classifies proposals by
+    surface patterns protects more than that, and every surface match is by
+    exact spelling, so an entry folding onto one of them was invisible on both
+    sides — which is the finding, bound end to end in
+    tests/test_append_gate.py, where the same tree is accepted as
+    ``thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs
+    base`` without the fix.
+
+    Widening it stays the caller's decision, and the default is what pins
+    that. ``append_gate`` is this function's only caller in the package —
+    ``verify_release_chain`` and ``receipt verify`` never reach it, so the
+    public verifier's own confinement is the release tree's component walk
+    and the release root's index scan rather than this — which is why the
+    widening travels no further than the argument, and why a later change
+    giving ``surfaces`` a non-empty default would silently change what every
+    direct caller of this function is refused for. Same index, same spec,
+    refused when the surface is named and untouched when it is not. Without
+    the ``surfaces`` argument the second call is the first, and neither
+    refuses."""
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    root = a_repository_holding(tmp_path, "Tools/helper.py")
+
+    assert_index_carries_no_protected_alias(root, spec.chain)
+
+    with pytest.raises(ReleaseChainError) as refusal:
+        assert_index_carries_no_protected_alias(
+            root, spec.chain, surfaces=frozenset({"tools/**"})
+        )
+    assert str(refusal.value) == (
+        "index carries an alias of a protected path: Tools/helper.py "
+        "(for tools at tools)"
+    )
