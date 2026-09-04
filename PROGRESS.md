@@ -76,10 +76,15 @@
   zero skips. Recorded the fixture shape, deliberate divergence, 26 re-pinned
   + 68 unchanged + 14 additions = 108 census, commands, and outcomes in
   `receipts/repin-0.6-tree-object.md`.
+- Ran the complete offline repository suite in the project venv with both
+  authenticated extraction paths: 1,359/1,359 passed with zero skips in
+  487.99 seconds.
+- Ran `ruff check .`, bytecode compilation over `src` and `tests`, and
+  `git diff --check`; all passed. The three Lane B Python files are also clean
+  under `ruff format --check`.
 
 ## Next
 
-- Run the full offline suite and repository-wide static checks.
 - Audit retained refusal strings and obsolete-private-helper references for the
   PR handoff.
 - Prepare the complete no-network PR handoff; pushing and opening the draft PR
@@ -116,3 +121,7 @@
   out-of-scope snapshot API change.
 - The local GitNexus analysis completed, but its global-registry write is
   sandbox-blocked; a task-local registry was used to query the fresh index.
+- Repository-wide `ruff format --check .` reports 29 pre-existing files from
+  the Lane C/D base that it would reformat. Lane B did not mechanically rewrite
+  those unrelated modules; `ruff check .` is clean and every Lane B Python file
+  passes the formatter check individually.
