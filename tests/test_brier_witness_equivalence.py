@@ -141,7 +141,16 @@ Deliberately outside the mutation contract:
   its own descriptor is the one open here without ``O_NOFOLLOW``, and the walk
   ends at the root under the caller's spelling as well as under its resolution
   (first Opus round); the harness resolves the records root before it starts,
-  and no case here spells one path through two sides of a link;
+  and no case here spells one path through two sides of a link.  The bound
+  the walk is asked about is enforced rather than assumed in the same round: a
+  record path a consumer spells with a ``..`` that leaves the tree, or one the
+  walk never meets the root on at all, is refused with ``witnessed record path
+  is not below the records root`` in front of every open, the walk being
+  lexical and ``lstat`` blind to a component that is the root under another
+  name.  Every record path here comes from ``snapshot_paths``'s glob under the
+  resolved records root, or through ``physical_path``, which refuses ``..``
+  itself, so all 53 of them are below the root and no case reaches the
+  refusal;
 - the baseline reads the trust-bundle updates a record carries out of a
   fresh open of that record whenever the chain walk hands them in; the port
   derives them from the one read it hashed and verified, and requires a

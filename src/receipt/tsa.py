@@ -9,7 +9,7 @@ through a frozen :class:`TsaSpec` supplied by consumer code.  This module
 ships no repository-specific trust defaults and performs no chain walk or
 producer signature verification.
 
-The port is stricter than the baseline in twenty-two places, each refusing an
+The port is stricter than the baseline in twenty-three places, each refusing an
 input the pinned tree never presents and so each outside the differential
 contract: a record under witness that is not a readable regular file, which
 the baseline let raise out of the hash; a path this module resolves out of
@@ -21,7 +21,15 @@ pathname walk now keeps its established answer, then the read descends those
 same components through descriptors anchored at the records root, so a
 checked directory exchanged before the leaf open is refused rather than
 followed, and one exchanged for a regular file is named as not a directory
-(peer review, sixth gate round two); a legacy
+(peer review, sixth gate round two); a record path a consumer spells for
+``verify_witness`` itself whose components are not all below the records root
+-- a ``..`` that leaves the tree, or a path the walk never meets the root on
+at all -- the walk being lexical, so it names such a component below the root
+and the descent then opens it, and ``lstat`` being blind to it, because
+``Path.is_symlink`` asks the kernel about a resolved pathname and ``..``
+resolves to an ordinary directory; refused in front of every open, since what
+the record path is measured against is the one bound the whole descent rests
+on (peer review, first Opus round); a legacy
 witness over a bundle
 configuring more than one anchor; a bundle configuring an anchor the spec
 carries no identity for, or one whose declared root SPKI or allowed signers
@@ -202,10 +210,13 @@ clause before that one calls that authority under a new name and skips; it is
 a merge for the identity it is filed under and not for the signers it
 declares, and what claims it is the sub-clause this round added.  One place
 carries both, which is why the count does not move.  The first Opus round
-added none and withdrew none either, and changed the reach of that same
-place a second time, narrowing it: what a rename is measured against is the
-class's live era rather than its whole history, which is a strictly smaller
-set of inputs refused and so leaves the count where it stands.  The
+withdrew none and added one -- the record path not below the records root --
+and changed the reach of the split-or-merge place twice more, narrowing it
+both times: what a rename is measured against is the class's live era rather
+than its whole history, and the question is asked only of an anchor touching
+a class the chain already trusts.  Narrowing what a place refuses does not
+move a count of places, so twenty plus three minus one plus one is
+twenty-three.  The
 withdrawal is
 the only one in the port's history, so it is stated rather than absorbed.
 What it withdrew was the refusal of two pending bundles introducing one
@@ -235,11 +246,25 @@ refusal for a supplemental outcome no pending transition introduces, which
 names the anchor slot that lost the election rather than the collision that
 decided it.
 
-The pinned root behind the two counting refusals is read from the repository
-exactly once, and every check runs on those bytes: the PEM hash over the
-bytes themselves, the count and the certificate identity by running OpenSSL
+The pinned root behind the two counting refusals is read once per validation
+of it, and every check of that validation runs on those bytes: the PEM hash
+over the bytes themselves, the count and the certificate identity by running
+OpenSSL
 on a private byte-for-byte copy of them, and the two ``-CAfile``
-verifications on that same copy rather than on the path.  So a writer who
+verifications on that same copy rather than on the path.  Once per
+validation and not once per verification: every anchor of every bundle a
+verification loads is validated at load, and each anchor an outcome selects
+is validated again, so one ``verify_witness`` over a two-anchor witness reads
+each pinned root seven times -- five from bundle loads, one from the
+per-outcome anchor selection whose material is then discarded, and one from
+the selection inside the token verifier.  What holds is not that the file is
+read once but that no read is ever trusted without being judged: each one is
+compared against the anchor's declared PEM hash, certificate hash and SPKI
+before anything is done with it, and the PEM hash is over the whole file, so
+bytes that pass it are the pinned bytes and a substitution that survives is
+byte-identical to what it replaced.  Caching one read across the seven would
+be a different guarantee and is not what is implemented (peer review, first
+Opus round).  So a writer who
 substitutes another file between validation and use -- the plain form of a
 ``TRUSTED CERTIFICATE`` that rejects the timestamping purpose, or a second
 authority appended after the count -- changes what is on disk and not what is
@@ -410,7 +435,11 @@ and nothing after it.
 Descriptor-relative ``os.open`` is a POSIX requirement.  CPython does not
 offer it on Windows, and falling back to a whole-path open there would quietly
 restore the race, so an anchored TSA read refuses with the package's POSIX-
-platform sentence when ``os.open`` lacks ``dir_fd`` support.  The lexical
+platform sentence when ``os.open`` lacks ``dir_fd`` support.  The support is
+asked once, at import, before a caller can wrap ``os.open`` -- which is also
+what makes the refusal bindable on a platform that has it: a test flips the
+captured answer and the whole tree becomes unreadable in those words (peer
+review, first Opus round).  The lexical
 name in every verdict remains the path :func:`physical_path` returned.
 
 The record, the response and the pinned root open in binary too, and so does
@@ -446,13 +475,20 @@ no portable count is offered in its place.  The floor was 1.1.1 until a
 review observed that ``-no-CAstore`` made the documented minimum a version
 which passed the check and then refused every valid witness.
 
-``tests/test_tsa.py`` binds all of these.  Three of them can no longer fire
-from within this module, and every text is kept as defence in depth.
-``_select_anchor``'s own identity refusal is one: every bundle anchor is
-identity-checked at load, so the selection never finds a disagreement, and
-its text is kept verbatim as ported.  The load-time refusal of an anchor
+``tests/test_tsa.py`` binds all of these.  Three places can no longer fire
+from within this module, five refusal texts between them, and every one of
+the five is kept as defence in depth.
+``_select_anchor``'s own identity refusals are the first place and three of
+those texts:
+the identity that is not independently pinned in verifier code, the root SPKI
+that differs from the verifier code pin, and the signer SPKIs that differ
+from the verifier code pins.  Every bundle anchor is identity-checked at
+load and every call site takes its anchor from ``_load_trust_bundle``, so the
+selection never finds a disagreement of any of the three, and all three texts
+are kept verbatim as ported (peer review, first Opus round).  The load-time
+refusal of an anchor
 whose referenced root material carries an SPKI other than its identity's is
-another, and it is unreachable for the reason the check beside it exists: the
+the second, and it is unreachable for the reason the check beside it exists: the
 anchor's declared ``rootCertificate.spkiSha256`` has already been required to
 equal the identity's, and ``_root_material`` returns only after requiring the
 SPKI it computed from the bytes it read to equal that same declared value --
@@ -460,7 +496,7 @@ one mapping, out of the one parse of the bundle, never re-read between the
 two.  What it protects is the case where one of those two comparisons is
 lost, and it is the one that would name the material rather than the
 declaration (peer review, first Opus round).  The duplicate-timestamp refusal
-is the third, and what closed it is the pending-authority rules above: two outcomes
+is the third place, and what closed it is the pending-authority rules above: two outcomes
 rest on one authority's signature only if two anchors both pin the
 certificate that response was signed with, and no pairing of anchors that
 could reaches two outcomes -- inside one bundle a current shared signer is
@@ -888,7 +924,13 @@ def _path_fold(path: Path) -> tuple[str, ...]:
 def _components_below(
     root: Path, path: Path, *, named_root: Path | None = None
 ) -> tuple[Path, ...]:
-    """Every component of ``path`` strictly below ``root``, outermost first.
+    """Every component of ``path`` named below ``root``, outermost first.
+
+    Named below, not proved below: the walk is lexical, so a ``..`` in the
+    spelling produces a component named under the root that is the root or
+    above it.  ``_refuse_a_linked_component`` refuses those before any of
+    them is opened, which is what makes "below" true of what it returns
+    (peer review, first Opus round).
 
     Walked upwards from ``path`` rather than downwards from ``root``, because
     ``root`` is resolved and ``path`` is not always spelled the way the
@@ -917,8 +959,10 @@ def _components_below(
     links apart: one is where the tree begins and the other is inside it.
 
     An empty result means the walk never met ``root`` at all: a path outside
-    the records tree has no components below it, and this refuses nothing
-    about one.  Every path the module walks but the record under witness is
+    the records tree has no components below it, and the caller above refuses
+    it in the same words it refuses a ``..`` in, both being the one claim that
+    this path is not in the tree.  Every path the module walks but the record
+    under witness is
     built by ``physical_path`` as ``root`` joined with a relative spelling, so
     for those the first comparison always succeeds.
     """
@@ -975,6 +1019,22 @@ def _refuse_a_linked_component(
     """
 
     components = _components_below(root, path, named_root=named_root)
+    # The walk is lexical, so a caller-supplied ``..`` produces components
+    # that are named below the root and are not below it: ``<root>/day/..``
+    # is the root and ``<root>/day/../..`` is above it.  ``lstat`` cannot see
+    # that -- ``Path.is_symlink`` asks the kernel about a resolved pathname --
+    # and the descent then opens each component's ``name`` relative to the
+    # parent it holds, where ``..`` opens the parent directory and walks back
+    # out of the records root.  Every path this module derives goes through
+    # ``physical_path``, which refuses ``..`` already, so what this reaches is
+    # the one path a caller spells itself: the record under witness.  Refused
+    # here, in front of every open, together with a path the walk never met
+    # the root on at all -- which is the same claim about the same bound, and
+    # was reported as a file that is missing (peer review, first Opus round).
+    if not components or any(
+        component.name in {"", ".", ".."} for component in components
+    ):
+        raise TsaError(f"{subject} is not below the records root: {path}")
     for component in components:
         if component.is_symlink():
             raise TsaError(
@@ -1883,8 +1943,23 @@ def _read_file_once(
     it held at two separate instants and no more.
 
     ``missing`` is the caller's own refusal for a path that is not a readable
-    regular file, so this adds no message of its own and no caller's wording
-    moves.  The descriptor is opened with ``O_NOFOLLOW`` where the platform
+    regular file, and it is the whole of what the unanchored branch raises:
+    no caller's wording moves.  The anchored branch has words of its own --
+    four texts at five sites, every one about the descent rather than about
+    the file the caller asked for.  The POSIX-platform refusal, when
+    ``os.open`` has no ``dir_fd`` support.  A ``TypeError`` rather than a
+    refusal for an anchored call that omits ``checked_components`` or
+    ``subject``, which is a caller's bug and not an input's.  The established
+    ``{subject} traverses a symlink at {component}: {path}`` for a component
+    the descent finds to be a link, which is the preflight's own wording kept
+    so that a component racing between the two answers do not read
+    differently.  And ``{subject} component is not a directory at
+    {component}: {path}``, at two sites: where the open reports ``ENOTDIR``
+    and where the ``fstat`` of a descriptor that opened says it is not a
+    directory.  The last two are described in the ``root`` paragraph below;
+    they are listed here because the sentence this replaces said the function
+    added no message of its own (peer review, first Opus round).
+    The descriptor is opened with ``O_NOFOLLOW`` where the platform
     defines it and ``fstat``ed rather than ``stat``ed, so the regular-file rule
     is decided about the same object the bytes come from; each caller keeps its
     path-level check in front, which means a race can change which of the two
@@ -2014,7 +2089,13 @@ def _read_witnessed_record(
     ``records`` is the root the component walk is bounded at, and
     ``named_root`` is that root as the caller spelled it, which ends the walk
     as well: the root may itself be a link and the rule is about the
-    components below it (peer review, first Opus round).  The check above
+    components below it (peer review, first Opus round).  The bound is
+    enforced and not assumed -- a caller spelling this record's path with a
+    ``..`` in it, or spelling it outside the tree altogether, is refused with
+    ``witnessed record path is not below the records root`` before any
+    descriptor is opened, the walk being lexical and ``lstat`` unable to see
+    a component that is the root under another name (same round).  The check
+    above
     answers for the final component and ``O_NOFOLLOW`` for the object opened;
     the components between the root and it are what
     ``_refuse_a_linked_component`` first checks (sixth gate round one), and
@@ -2059,8 +2140,14 @@ def _read_pinned_root(
     counted one-certificate file could become a two-certificate one, and the
     verifications trusted whatever was on disk at that instant (peer review,
     fourth gate round three).  One read closes the gap: the bytes returned
-    here are what gets hashed, counted, described and trusted, and nothing
-    re-reads the path.
+    here are what one validation hashes, counts, describes and trusts, and
+    nothing inside that validation re-reads the path.  Not one read per
+    verification -- ``_root_material`` is called once for every anchor of
+    every bundle loaded and once more for each anchor an outcome selects, and
+    each call comes back through here -- but every one of those reads is
+    judged against the anchor's own pins before it is used, the PEM hash being
+    over the whole file, so what a later read may differ in is nothing that
+    passes (peer review, first Opus round).
 
     The path-level and component checks in ``_root_material`` stay in front
     and keep their wording.  When it supplies ``records`` and the checked

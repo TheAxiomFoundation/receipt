@@ -4763,6 +4763,131 @@ def test_a_records_root_reached_through_a_symlink_is_still_readable(
     )
 
 
+def test_an_anchored_read_refuses_a_platform_without_dir_fd_support(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S6-OP1-F8: the POSIX-platform refusal, bound.
+
+    Descriptor-relative ``os.open`` is what makes the descent a descent, and
+    CPython does not offer it on Windows. Falling back to a whole-path open
+    there would quietly restore the check-then-open race the descent closes,
+    so an anchored read refuses instead -- and this was the one live refusal
+    in the module that no test reached, while the module docstring said
+    ``tests/test_tsa.py`` binds all of them.
+
+    ``_OPEN_SUPPORTS_DIR_FD`` is captured at import, before a caller can wrap
+    ``os.open``, which is why the platform is asked here and not per call;
+    flipping it is therefore the whole of what a non-POSIX platform changes.
+    Without the refusal -- replaced by the whole-path fallback the docstring
+    describes -- the tree below verifies and this test fails.
+    """
+
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    assert verify_tree(tree).status == "available"
+
+    monkeypatch.setattr(tsa_module, "_OPEN_SUPPORTS_DIR_FD", False)
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == (
+        "TSA files cannot be read with secure descent on this platform "
+        "(os.open lacks dir_fd support); receipt requires a POSIX platform"
+    )
+    # The generic one-read shape is unanchored and keeps working: what the
+    # platform refusal governs is the descent, not every read in the module.
+    assert tsa_module._read_file_once(tree.bundle, "unreachable")[0] == (
+        tree.bundle.read_bytes()
+    )
+
+
+def test_a_record_path_that_walks_out_of_the_records_root_is_refused(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """S6-OP1-F12: the component walk's bound is enforced, not assumed.
+
+    ``_components_below`` walks lexically and stops at the first parent that
+    *is* the root or resolves to it, so a spelling whose ``..`` is absorbed
+    before the boundary -- ``<root>/day/../day/record.json`` -- yields the
+    ordinary two components and is the same read as the plain spelling. A
+    spelling that leaves the tree is not absorbed: from
+    ``<root>/../outside/record.json`` the walk passes ``<root>/..``, which
+    resolves to the directory above the root and not to the root, and keeps
+    going until the lexical parent ``<root>`` ends it -- so the tuple it
+    returns opens with a component named ``..``.
+
+    ``lstat`` cannot see that: ``Path.is_symlink`` asks the kernel about a
+    resolved pathname, and ``<root>/..`` resolves to an ordinary directory.
+    The descent then opens each component's ``name`` relative to the parent it
+    holds, and ``..`` opens the parent directory, so the anchored read walked
+    back out of the records root and read a file outside the tree -- while the
+    walk's own first line claimed every component it returns is strictly below
+    the root. Not producer-reachable, since every path this module derives
+    goes through ``physical_path``, which refuses ``..``; reachable by a
+    consumer that spells the record path itself, which is the one path
+    ``verify_witness`` takes from its caller.
+
+    Refused now in front of every open, together with a path the walk never
+    met the root on at all -- one claim about one bound. Without the refusal
+    the first assertion below reads the outside file and fails on the witness
+    digest instead, and the second reports a file that exists as missing.
+    """
+
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    assert verify_tree(tree).status == "available"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / RECORD_NAME).write_bytes(tree.record.read_bytes())
+    (outside / "record-0001.witness.json").write_bytes(tree.witness.read_bytes())
+
+    # An absorbed `..` is the same read as the plain spelling: the walk ends
+    # at the boundary before the `..` can become a component of its own.
+    absorbed = tree.records / RECORD_DAY / ".." / RECORD_DAY / RECORD_NAME
+    assert [
+        component.name
+        for component in tsa_module._components_below(
+            tree.records.resolve(), absorbed
+        )
+    ] == [RECORD_DAY, RECORD_NAME]
+    assert (
+        verify_witness(absorbed, spec=tree.spec, records=tree.records).status
+        == "available"
+    )
+
+    # A `..` that leaves the tree is not absorbed, and every check downstream
+    # of the name is blind to it: the file is real, regular and not a link.
+    escaping = tree.records / ".." / "outside" / RECORD_NAME
+    assert [
+        component.name
+        for component in tsa_module._components_below(
+            tree.records.resolve(), escaping
+        )
+    ] == ["..", "outside", RECORD_NAME]
+    assert escaping.is_file() and not escaping.is_symlink()
+    assert not any(
+        component.is_symlink()
+        for component in tsa_module._components_below(
+            tree.records.resolve(), escaping
+        )
+    )
+    with pytest.raises(TsaError) as caught:
+        verify_witness(escaping, spec=tree.spec, records=tree.records)
+    assert str(caught.value) == (
+        f"witnessed record path is not below the records root: {escaping}"
+    )
+
+    # And a path the walk never meets the root on at all, which is the same
+    # claim about the same bound and used to be reported as a missing file.
+    with pytest.raises(TsaError) as outright:
+        verify_witness(
+            outside / RECORD_NAME, spec=tree.spec, records=tree.records
+        )
+    assert str(outright.value) == (
+        "witnessed record path is not below the records root: "
+        f"{outside / RECORD_NAME}"
+    )
+
+
 def pending_authority(
     tree: WitnessTree,
     anchor: LocalAnchor,
