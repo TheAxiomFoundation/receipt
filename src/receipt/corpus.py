@@ -387,11 +387,12 @@ the verifier is guessing at.
 
 What makes the guessing unnecessary is that the corpora this package is
 built for do not need those names, with one exception that is recorded here
-rather than modelled. The thirty-eight ``rulespec-*`` repositories mirrored
-beside this one were censused at their ``origin/main`` heads on 2026-09-03:
-thirty-seven carry no tracked path outside the ASCII letters, digits, ``.``,
-``_`` and ``-`` — ``rulespec-nz``, the reference consumer, among them — and
-``rulespec-us`` at d58cc0c (2026-08-22) carries 33 of 15,216 that fall
+rather than modelled. Of the fifty ``rulespec-*`` directories mirrored beside
+this one, thirteen are linked worktrees sharing another mirror's git
+directory, so the census is over thirty-seven distinct repositories at their
+``origin/main`` heads on 2026-09-03: thirty-six carry no tracked path outside
+the ASCII letters, digits, ``.``, ``_`` and ``-`` — ``rulespec-nz``, the
+reference consumer, among them — and ``rulespec-us`` at d58cc0c (2026-08-22) carries 33 of 15,216 that fall
 outside it, every one by character set. Eighteen spell a statute citation
 with a colon (Louisiana Title 47 and New Jersey 54A:
 ``us-la/statutes/47:294.yaml`` and their encoding manifests), twelve a New
@@ -399,7 +400,10 @@ Hampshire regulation directory with a space (``He-W 704``), and three a
 section with an en dash (``us/statutes/42/1437c–1.yaml``). A spec that pins
 those trees as content roots refuses the verification until the names are
 respelled, and whether they are respelled or the policy grows a spelling for
-them is that repository's decision rather than this module's guess. An
+them is that repository's decision rather than this module's guess. The four
+trees pinned under ``receipt/.extraction`` are extraction sources, not corpora
+this package verifies, and are outside the census (one of them carries
+Next.js ``[slug]`` route segments). An
 earlier revision of this paragraph said no consumer carried such a name; the
 census corrects it. So the module refuses the rest by name. Inside that
 repertoire :func:`_path_fold` is ASCII case-insensitivity
