@@ -265,12 +265,15 @@ def test_snapshot_exact_byte_lookup_retains_a_lossless_object_only_spelling(
 
     with TreeSnapshot.select(root, commit) as snapshot:
         entry = snapshot.entry(raw_name)
-        assert os.fsencode(entry.path) == raw_name
+        assert entry.path.encode("utf-8", errors="surrogateescape") == raw_name
         assert entry.object_id == blobs[raw_name]
         assert snapshot.blob(entry, limit=100) == raw_name + b"\n"
 
         listing = snapshot.entries("")
-        assert tuple(os.fsencode(name) for name in listing.children) == (raw_name,)
+        assert tuple(
+            name.encode("utf-8", errors="surrogateescape")
+            for name in listing.children
+        ) == (raw_name,)
 
 
 def test_materialization_refuses_invalid_utf8_before_creating_a_host_path(
@@ -286,7 +289,10 @@ def test_materialization_refuses_invalid_utf8_before_creating_a_host_path(
         pending = snapshot.materialize(
             (b"",), destination, repertoire="posix-bytes"
         )
-        with pytest.raises(SnapshotError, match="not valid UTF-8 for folding"):
+        with pytest.raises(
+            SnapshotError,
+            match="not valid UTF-8 under name repertoire 'posix-bytes'",
+        ):
             with pending:
                 raise AssertionError("materialization unexpectedly started")
     assert tuple(destination.iterdir()) == ()

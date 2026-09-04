@@ -17,11 +17,124 @@ import pytest
 import receipt.snapshot as snapshot_module
 from receipt.snapshot import (
     GIT_COMMANDS,
+    GIT_ENVIRONMENT_DROPPED,
     GIT_ENVIRONMENT_DROPPED_DOCUMENTED,
     GIT_ENVIRONMENT_DROPPED_UNDOCUMENTED,
     GIT_FSCK_NO_REFERENCES_MIN_VERSION,
     SnapshotError,
     TreeSnapshot,
+)
+
+
+EXPECTED_GIT_ENVIRONMENT_DROPPED = (
+    "GIT_ADVICE",
+    "GIT_ALLOW_PROTOCOL",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_ASKPASS",
+    "GIT_ATTR_SOURCE",
+    "GIT_AUTHOR_DATE",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_AUTHOR_NAME",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_COMMITTER_DATE",
+    "GIT_COMMITTER_EMAIL",
+    "GIT_COMMITTER_NAME",
+    "GIT_COMMIT_GRAPH_PARANOIA",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_DEFAULT_HASH",
+    "GIT_DEFAULT_REF_FORMAT",
+    "GIT_DIFF_OPTS",
+    "GIT_DIFF_PATH_COUNTER",
+    "GIT_DIFF_PATH_TOTAL",
+    "GIT_DIR",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_EDITOR",
+    "GIT_EXEC_PATH",
+    "GIT_EXTERNAL_DIFF",
+    "GIT_EXTERNAL_DIFF_TRUST_EXIT_CODE",
+    "GIT_FLUSH",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS",
+    "GIT_INDEX_FILE",
+    "GIT_INDEX_VERSION",
+    "GIT_LITERAL_PATHSPECS",
+    "GIT_MERGE_VERBOSITY",
+    "GIT_NAMESPACE",
+    "GIT_NOGLOB_PATHSPECS",
+    "GIT_NO_LAZY_FETCH",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_OPTIONAL_LOCKS",
+    "GIT_PAGER",
+    "GIT_PRINT_SHA1_ELLIPSIS",
+    "GIT_PROGRESS_DELAY",
+    "GIT_PROTOCOL",
+    "GIT_PROTOCOL_FROM_USER",
+    "GIT_REDIRECT_STDERR",
+    "GIT_REDIRECT_STDIN",
+    "GIT_REDIRECT_STDOUT",
+    "GIT_REFLOG_ACTION",
+    "GIT_REF_PARANOIA",
+    "GIT_SEQUENCE_EDITOR",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GIT_SSH_VARIANT",
+    "GIT_SSL_NO_VERIFY",
+    "GIT_TERMINAL_PROMPT",
+    "GIT_TRACE",
+    "GIT_TRACE2",
+    "GIT_TRACE2_EVENT",
+    "GIT_TRACE2_PERF",
+    "GIT_TRACE_CURL",
+    "GIT_TRACE_CURL_NO_DATA",
+    "GIT_TRACE_FSMONITOR",
+    "GIT_TRACE_PACKET",
+    "GIT_TRACE_PACKFILE",
+    "GIT_TRACE_PACK_ACCESS",
+    "GIT_TRACE_PERFORMANCE",
+    "GIT_TRACE_REDACT",
+    "GIT_TRACE_REFS",
+    "GIT_TRACE_SETUP",
+    "GIT_TRACE_SHALLOW",
+    "GIT_WORK_TREE",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_KEY_<n>",
+    "GIT_CONFIG_VALUE_<n>",
+)
+
+EXPECTED_GIT_COMMANDS = (
+    ("setup", "config", "-f", "<global>", "safe.directory", "<root>"),
+    ("discovery", "version"),
+    ("discovery", "version", "--build-options"),
+    (
+        "discovery",
+        "rev-parse",
+        "--show-toplevel",
+        "--absolute-git-dir",
+        "--git-common-dir",
+        "--show-object-format",
+    ),
+    ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
+    ("object", "rev-parse", "--verify", "--end-of-options", "<rev>^{commit}"),
+    ("object", "cat-file", "--batch-command"),
+    ("object", "count-objects", "-v"),
+    (
+        "object",
+        "-c",
+        "core.commitGraph=false",
+        "fsck",
+        "--full",
+        "--no-dangling",
+        "--no-reflogs",
+        "--no-references",
+        "--no-progress",
+        "<candidate>",
+        "[<base>]",
+    ),
 )
 
 
@@ -127,6 +240,12 @@ def _verify_objects_support() -> tuple[int, int, int]:
     if b"SHA-1: SHA1_DC" not in completed.stdout.splitlines():
         pytest.skip("Git was not built with SHA1_DC")
     return version
+
+
+def test_git_environment_and_command_allow_lists_are_frozen_independently() -> None:
+    assert GIT_ENVIRONMENT_DROPPED == EXPECTED_GIT_ENVIRONMENT_DROPPED
+    assert len(GIT_ENVIRONMENT_DROPPED_DOCUMENTED) == 73
+    assert GIT_COMMANDS == EXPECTED_GIT_COMMANDS
 
 
 @pytest.mark.parametrize(
@@ -308,6 +427,20 @@ def test_repository_control_refusals_follow_the_frozen_order(
     assert str(caught.value) == message
 
 
+def test_configuration_audit_precedes_candidate_resolution(
+    git_repo: pathlib.Path,
+) -> None:
+    _git(git_repo, "config", "core.hooksPath", "/hostile/hooks")
+
+    with pytest.raises(SnapshotError) as caught:
+        TreeSnapshot.select(git_repo, "missing-revision")
+
+    assert str(caught.value) == (
+        "repository configuration key 'core.hookspath' is not allowed for "
+        "immutable tree reads"
+    )
+
+
 def test_not_top_level_refuses_before_repository_control_files(
     git_repo: pathlib.Path,
 ) -> None:
@@ -394,9 +527,48 @@ def test_sha256_refuses_before_alternates_and_partial_clone_configuration(
     )
 
 
+@pytest.mark.parametrize(
+    ("kind", "message"),
+    (
+        ("grafts", "repository grafts are unsupported"),
+        ("shallow", "shallow repositories are unsupported"),
+    ),
+)
+def test_repository_history_sentinels_precede_sha256_refusal(
+    tmp_path: pathlib.Path, kind: str, message: str
+) -> None:
+    root = tmp_path / f"sha256-{kind}"
+    root.mkdir()
+    initialized = _git(root, "init", "-q", "--object-format=sha256", check=False)
+    if initialized.returncode:
+        pytest.skip("installed Git does not support SHA-256 repositories")
+    _write_control_file(_git_dir(root), kind)
+
+    with pytest.raises(SnapshotError) as caught:
+        TreeSnapshot.select(root)
+
+    assert str(caught.value) == message
+
+
 def test_select_refuses_an_existing_nonrepository(tmp_path: pathlib.Path) -> None:
     root = tmp_path / "not-a-repository"
     root.mkdir()
+
+    with pytest.raises(SnapshotError) as caught:
+        TreeSnapshot.select(root)
+
+    assert str(caught.value) == (
+        f"candidate repository is missing or not a git repository: {root}"
+    )
+
+
+@pytest.mark.parametrize("kind", ("missing", "file"))
+def test_select_refuses_a_root_that_is_not_a_directory(
+    tmp_path: pathlib.Path, kind: str
+) -> None:
+    root = tmp_path / kind
+    if kind == "file":
+        root.write_bytes(b"not a directory\n")
 
     with pytest.raises(SnapshotError) as caught:
         TreeSnapshot.select(root)
@@ -422,6 +594,51 @@ def test_select_refuses_a_bare_repository(tmp_path: pathlib.Path) -> None:
     assert str(caught.value) == (
         f"candidate repository is missing or not a git repository: {root}"
     )
+
+
+def test_private_global_config_serializes_a_hostile_root_spelling(
+    tmp_path: pathlib.Path,
+) -> None:
+    root = _new_repository(tmp_path, "space ' quote \\ repository")
+
+    selected = TreeSnapshot.select(root)
+
+    assert [
+        (key, value)
+        for scope, key, value in selected._state.config_records
+        if scope == "global"
+    ] == [("safe.directory", os.fspath(root))]
+    assert not any(
+        scope == "system" for scope, _key, _value in selected._state.config_records
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "message"),
+    (
+        ("grafts", "repository grafts are unsupported"),
+        ("shallow", "shallow repositories are unsupported"),
+        ("alternates", "alternate object databases are unsupported"),
+    ),
+)
+def test_repository_control_file_added_before_entry_refuses_without_leaking(
+    git_repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    message: str,
+) -> None:
+    selected = TreeSnapshot.select(git_repo)
+    temporary_root = tmp_path / "temporary"
+    temporary_root.mkdir()
+    monkeypatch.setattr(snapshot_module.tempfile, "tempdir", os.fspath(temporary_root))
+    _write_control_file(_git_dir(git_repo), kind)
+
+    with pytest.raises(SnapshotError, match=f"^{message}$"):
+        selected.__enter__()
+
+    assert selected.batch_pid is None
+    assert tuple(temporary_root.iterdir()) == ()
 
 
 def test_replace_refs_cannot_change_the_selected_commit_or_bytes(
@@ -467,6 +684,53 @@ def test_candidate_tree_is_rehashed_even_when_cat_file_serves_tampered_bytes(
     assert served.stdout == forged
     with pytest.raises(SnapshotError) as caught:
         TreeSnapshot.select(git_repo, candidate)
+    assert str(caught.value) == f"object {tree} does not hash to its name"
+
+
+def test_candidate_tree_rehash_precedes_parent_role_binding(
+    git_repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tree = _oid(git_repo, "HEAD^{tree}")
+    commit_payload = (
+        f"tree {tree}\nparent {tree}\n".encode("ascii")
+        + b"author Snapshot Test <snapshot@example.test> 0 +0000\n"
+        + b"committer Snapshot Test <snapshot@example.test> 0 +0000\n\n"
+        + b"crafted parent role mismatch\n"
+    )
+    commit = (
+        _git(
+            git_repo,
+            "hash-object",
+            "--literally",
+            "-t",
+            "commit",
+            "-w",
+            "--stdin",
+            input_bytes=commit_payload,
+        )
+        .stdout.decode("ascii")
+        .strip()
+    )
+    original = _git(git_repo, "cat-file", "tree", tree).stdout
+    forged = original.replace(b"tracked.txt", b"forged_.txt")
+    assert forged != original and len(forged) == len(original)
+    _rewrite_loose_object(git_repo, tree, "tree", forged)
+    original_git_run = snapshot_module._git_run
+
+    def preserve_crafted_candidate(
+        arguments: object, **kwargs: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        argv = tuple(arguments)  # type: ignore[arg-type]
+        if argv[-1:] == (f"{commit}^{{commit}}",):
+            return subprocess.CompletedProcess(
+                ["git", *argv], 0, f"{commit}\n".encode("ascii"), b""
+            )
+        return original_git_run(argv, **kwargs)
+
+    monkeypatch.setattr(snapshot_module, "_git_run", preserve_crafted_candidate)
+    with pytest.raises(SnapshotError) as caught:
+        TreeSnapshot.select(git_repo, commit)
+
     assert str(caught.value) == f"object {tree} does not hash to its name"
 
 

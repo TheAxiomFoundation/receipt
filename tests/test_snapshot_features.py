@@ -8,6 +8,7 @@ import pathlib
 import stat
 import subprocess
 from collections.abc import Iterable
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -174,7 +175,7 @@ def test_exact_chronicle_eight_line_attributes_fixture_is_accepted(
         assert selected.work.attribute_bytes == len(CHRONICLE_ATTRIBUTES)
         assert (
             selected.work.attribute_match_work
-            == 435
+            == 309
             < snapshot_module.MAX_ATTRIBUTE_MATCH_WORK
         )
 
@@ -184,7 +185,7 @@ def test_attribute_parser_accepts_leading_comments_and_a_blank_line(
 ) -> None:
     attributes = (
         b"# Committed attribute policy.\n"
-        b"   # An indented comment is ignored too.\n"
+        b"   # An indented comment is ignored too, including opaque \x00 bytes.\n"
         b"\n"
         b"protected.txt text eol=lf\n"
     )
@@ -206,10 +207,19 @@ def test_attribute_parser_accepts_leading_comments_and_a_blank_line(
         ("ident", "ident", True),
         ("ident", "ident=yes", True),
         ("ident", "-ident", False),
+        ("ident", "!ident", False),
+        ("working-tree-encoding", "working-tree-encoding", True),
         ("working-tree-encoding", "working-tree-encoding=UTF-16", True),
+        ("working-tree-encoding", "-working-tree-encoding", False),
         ("working-tree-encoding", "!working-tree-encoding", False),
         ("text", "text", False),
+        ("text", "text=auto", False),
+        ("text", "-text", False),
+        ("text", "!text", False),
+        ("eol", "eol", False),
         ("eol", "eol=crlf", False),
+        ("eol", "-eol", False),
+        ("eol", "!eol", False),
         ("binary", "binary", False),
     ],
 )
@@ -313,15 +323,24 @@ def test_git_info_attributes_cannot_change_the_snapshot_answer(
         selected.refuse_transforming_attributes(("protected.txt",))
 
 
-def test_symlink_gitattributes_entry_refuses_as_unsupported(
-    git_repo: pathlib.Path,
+@pytest.mark.parametrize(
+    ("mode", "display_mode"),
+    ((b"120000", "120000"), (b"160000", "160000"), (b"40000", "040000")),
+)
+def test_nonblob_gitattributes_entry_refuses_as_unsupported(
+    git_repo: pathlib.Path, mode: bytes, display_mode: str
 ) -> None:
-    attribute_target = _hash_object(git_repo, "blob", b"elsewhere")
+    if mode == b"40000":
+        attribute_target = _tree_object(git_repo, ())
+    elif mode == b"160000":
+        attribute_target = _commit_object(git_repo, _tree_object(git_repo, ()))
+    else:
+        attribute_target = _hash_object(git_repo, "blob", b"elsewhere")
     protected_blob = _hash_object(git_repo, "blob", b"protected bytes\n")
     tree = _tree_object(
         git_repo,
         (
-            (b"120000", b".gitattributes", attribute_target),
+            (mode, b".gitattributes", attribute_target),
             (b"100644", b"protected.txt", protected_blob),
         ),
     )
@@ -332,10 +351,29 @@ def test_symlink_gitattributes_entry_refuses_as_unsupported(
             SnapshotError,
             match=(
                 r"^unsupported \.gitattributes entry at \.gitattributes: "
-                r"mode 120000$"
+                rf"mode {display_mode}$"
             ),
         ):
             selected.refuse_transforming_attributes(("protected.txt",))
+
+
+def test_executable_gitattributes_entry_is_accepted(
+    git_repo: pathlib.Path,
+) -> None:
+    attribute_blob = _hash_object(
+        git_repo, "blob", b"protected.txt text eol=lf\n"
+    )
+    protected_blob = _hash_object(git_repo, "blob", b"protected bytes\n")
+    tree = _tree_object(
+        git_repo,
+        (
+            (b"100755", b".gitattributes", attribute_blob),
+            (b"100644", b"protected.txt", protected_blob),
+        ),
+    )
+
+    with TreeSnapshot.select(git_repo, _commit_object(git_repo, tree)) as selected:
+        selected.refuse_transforming_attributes(("protected.txt",))
 
 
 @pytest.mark.parametrize(
@@ -468,6 +506,63 @@ def test_materialization_selects_and_deduplicates_nested_prefixes(
             pending.__enter__()
 
 
+def test_materialization_accepts_chain_spec_pure_posix_prefixes(
+    git_repo: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    _write(git_repo, "releases/manifest.json", b"{}\n")
+    _commit(git_repo)
+    destination = tmp_path / "materializations"
+    destination.mkdir()
+
+    with TreeSnapshot.select(git_repo) as selected:
+        with selected.materialize(
+            (pathlib.PurePosixPath("releases"),),
+            destination,
+            repertoire="portable",
+        ) as materialized:
+            assert set(materialized.entries) == {"releases/manifest.json"}
+
+
+def test_materialization_prefix_deduplication_does_not_scan_all_parents(
+    git_repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_path_parts = TreeSnapshot._path_parts
+    slice_reads = 0
+
+    class CountingTuple(tuple[bytes, ...]):
+        def __getitem__(self, key: object) -> object:
+            nonlocal slice_reads
+            if isinstance(key, slice):
+                slice_reads += 1
+            return super().__getitem__(key)  # type: ignore[call-overload]
+
+    def counting_path_parts(
+        path: str | bytes, *, allow_empty: bool
+    ) -> tuple[bytes, ...]:
+        return CountingTuple(original_path_parts(path, allow_empty=allow_empty))
+
+    monkeypatch.setattr(
+        TreeSnapshot, "_path_parts", staticmethod(counting_path_parts)
+    )
+    _write(git_repo, "seed.txt", b"seed\n")
+    _commit(git_repo)
+    prefixes = tuple(f"missing-{index:04d}" for index in range(128))
+    destination = tmp_path / "materializations"
+    destination.mkdir()
+
+    with TreeSnapshot.select(git_repo) as selected:
+        pending = selected.materialize(
+            prefixes, destination, repertoire="portable"
+        )
+        assert pending._deduplicated_prefixes() == tuple(
+            (prefix.encode("ascii"),) for prefix in prefixes
+        )
+
+    assert slice_reads < 2 * len(prefixes)
+
+
 @pytest.mark.parametrize(
     ("names", "message"),
     [
@@ -498,8 +593,13 @@ def test_materialization_runs_name_screens_before_creating_a_directory(
             raise AssertionError("mkdtemp ran before the name screen")
 
         monkeypatch.setattr(snapshot_module.tempfile, "mkdtemp", forbidden_mkdtemp)
-        with pytest.raises(SnapshotError, match=message):
+        with pytest.raises(SnapshotError, match=message) as caught:
             pending.__enter__()
+        if names == (b"Case", b"case"):
+            assert str(caught.value) == (
+                "tree root contains names that merge under ASCII case folding: "
+                "'Case' and 'case'"
+            )
 
     assert list(destination.iterdir()) == []
 
@@ -536,26 +636,76 @@ def test_materialization_removes_partial_directory_when_a_write_fails(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _write(git_repo, "selected.txt", b"selected\n")
+    _write(git_repo, "first.txt", b"first\n")
+    _write(git_repo, "second.txt", b"second\n")
     commit = _commit(git_repo)
     destination = tmp_path / "materializations"
     destination.mkdir()
+    original_write = Materialization._write_chunk
+    writes = 0
 
     def fail_write(
         self: Materialization, handle: object, chunk: bytes
     ) -> None:
-        del self, handle, chunk
-        raise OSError("injected write failure")
+        nonlocal writes
+        writes += 1
+        if writes == 2:
+            raise OSError("injected write failure")
+        original_write(self, handle, chunk)  # type: ignore[arg-type]
 
     monkeypatch.setattr(Materialization, "_write_chunk", fail_write)
     with TreeSnapshot.select(git_repo, commit) as selected:
+        process = selected._state.batch.process
+        temporary = selected.temporary_directory
         pending = selected.materialize(
-            ("selected.txt",), destination, repertoire="portable"
+            (("first.txt", "second.txt")), destination, repertoire="portable"
         )
         with pytest.raises(OSError, match="injected write failure"):
             pending.__enter__()
 
+    assert writes == 2
+    assert selected.work.materialized_bytes == len(b"first\n")
+    assert process.poll() is not None
+    assert process.stdin is not None and process.stdin.closed
+    assert process.stdout is not None and process.stdout.closed
+    assert process.stderr is not None and process.stderr.closed
+    assert temporary is not None and not temporary.exists()
     assert list(destination.iterdir()) == []
+
+
+class _ShortWritingHandle:
+    def __init__(self, *, fail_after: int | None = None) -> None:
+        self.payload = bytearray()
+        self.fail_after = fail_after
+
+    def write(self, payload: memoryview) -> int:
+        if self.fail_after is not None and len(self.payload) >= self.fail_after:
+            raise OSError("injected short-write failure")
+        count = min(2, len(payload))
+        self.payload.extend(payload[:count])
+        return count
+
+
+def test_materialization_charges_each_successful_short_write(
+    git_repo: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    _write(git_repo, "tracked.txt", b"tracked\n")
+    _commit(git_repo)
+    destination = tmp_path / "materializations"
+    destination.mkdir()
+
+    with TreeSnapshot.select(git_repo) as selected:
+        pending = selected.materialize((), destination, repertoire="portable")
+        complete = _ShortWritingHandle()
+        pending._write_chunk(complete, b"abcdef")
+        assert bytes(complete.payload) == b"abcdef"
+        assert selected.work.materialized_bytes == 6
+
+        interrupted = _ShortWritingHandle(fail_after=2)
+        with pytest.raises(OSError, match="injected short-write failure"):
+            pending._write_chunk(interrupted, b"wxyz")
+        assert bytes(interrupted.payload) == b"wx"
+        assert selected.work.materialized_bytes == 8
 
 
 def test_materialization_removes_directory_after_downstream_exception(
@@ -642,6 +792,30 @@ def test_materialization_rejects_scalar_prefixes_and_forged_entries(
             first.blob(foreign_entry, limit=True)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("mode", "100755"),
+        ("object_type", "tree"),
+        ("object_id", "0" * 40),
+        ("path", "forged.txt"),
+    ),
+)
+def test_entry_binding_refuses_dataclass_replacements(
+    git_repo: pathlib.Path, field: str, value: str
+) -> None:
+    _write(git_repo, "selected.txt", b"selected\n")
+    commit = _commit(git_repo)
+
+    with TreeSnapshot.select(git_repo, commit) as selected:
+        entry = selected.entry("selected.txt")
+        altered = replace(entry, **{field: value})
+        with pytest.raises(
+            SnapshotError, match="GitEntry does not belong to this snapshot"
+        ):
+            selected.blob(altered, limit=100)
+
+
 def test_anchor_set_digest_is_canonical_over_configured_materialized_bytes(
     git_repo: pathlib.Path, tmp_path: pathlib.Path
 ) -> None:
@@ -673,6 +847,18 @@ def test_anchor_set_digest_is_canonical_over_configured_materialized_bytes(
         with pending as materialized:
             assert materialized.anchor_set_sha256(chain_spec) == expected
             assert "anchors/unconfigured.pem" in materialized.entries
+
+
+def test_anchor_filename_refuses_explicit_surrogate_pairs_but_accepts_astral_text() -> None:
+    astral = "\U00010000.pem"
+    explicit_pair = "\ud800\udc00.pem"
+
+    assert Materialization._exact_filename(astral) == astral
+    with pytest.raises(
+        SnapshotError,
+        match="spells an astral character as an explicit surrogate pair",
+    ):
+        Materialization._exact_filename(explicit_pair)
 
 
 @pytest.mark.parametrize(
@@ -842,6 +1028,24 @@ def test_attribute_rule_and_match_work_budgets(
         second.refuse_transforming_attributes(("protected.txt",))
 
 
+def test_attribute_parser_enforces_rule_budget_while_expanding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(snapshot_module, "MAX_ATTRIBUTE_RULES_TOTAL", 1)
+
+    with pytest.raises(
+        SnapshotError,
+        match=(
+            "^attribute rules exceed the snapshot budget of 1 rules$"
+        ),
+    ):
+        snapshot_module._parse_attribute_file(
+            ".gitattributes",
+            b"one -filter\ntwo -ident\n",
+            rule_limit=1,
+        )
+
+
 def test_digest_per_blob_and_cumulative_budgets(
     git_repo: pathlib.Path,
 ) -> None:
@@ -890,6 +1094,8 @@ def test_materialization_byte_budgets_remove_partial_output(
         pending = selected.materialize(("",), destination, repertoire="portable")
         with pytest.raises(SnapshotError, match=message):
             pending.__enter__()
+        expected_written = 0 if constant == "MAX_MATERIALIZED_BLOB_BYTES" else 3
+        assert selected.work.materialized_bytes == expected_written
     assert list(destination.iterdir()) == []
 
 
