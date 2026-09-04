@@ -613,6 +613,22 @@ def test_private_global_config_serializes_a_hostile_root_spelling(
     )
 
 
+def test_select_ignores_broken_repository_config_in_callers_cwd(
+    git_repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    caller = _new_repository(tmp_path, "caller")
+    (caller / ".git" / "config").write_bytes(b"broken config line\n")
+    monkeypatch.chdir(caller)
+
+    with TreeSnapshot.select(git_repo) as selected:
+        assert selected.root == git_repo.resolve()
+        assert selected.blob(selected.entry("tracked.txt"), limit=100) == (
+            b"original committed bytes\n"
+        )
+
+
 @pytest.mark.parametrize(
     ("kind", "message"),
     (
@@ -847,7 +863,9 @@ def _normalize_recorded_command(
     argv: tuple[str, ...], root: pathlib.Path, git_dir: pathlib.Path
 ) -> tuple[str, ...]:
     command = list(argv[1:])
-    if command[:2] == ["-C", os.fspath(root)]:
+    if command and command[0] == "version":
+        phase = "discovery"
+    elif command[:2] == ["-C", os.fspath(root)]:
         phase = "discovery"
         command = command[2:]
     elif command and command[0].startswith("--git-dir="):
@@ -913,7 +931,14 @@ def test_full_verify_objects_uses_exact_commands_heads_and_environment(
     }
     for argv, environment, cwd in calls:
         assert argv[0] == "git"
-        assert cwd is None
+        if argv[1:3] == ("config", "-f"):
+            assert isinstance(cwd, pathlib.Path)
+            assert cwd.name.startswith("receipt-snapshot-select-")
+        elif argv[1:2] == ("version",):
+            assert isinstance(cwd, pathlib.Path)
+            assert cwd.name.startswith("receipt-snapshot-discovery-")
+        else:
+            assert cwd is None
         assert environment["HOME"] == home
         assert {name for name in environment if name.startswith("GIT_")} == git_keys
         assert environment["GIT_NO_REPLACE_OBJECTS"] == "1"

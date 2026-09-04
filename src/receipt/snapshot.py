@@ -8,16 +8,18 @@ commit name, is never fetched, and need not exist locally. An unrelated blob
 which a caller never reads is name- and type-bound by a tree walk, but this
 module makes no claim about that blob's bytes.
 
-The working tree and index are never subjects of this reader. Discovery uses
-the worktree only to establish that ``root`` is the repository top level;
-every object operation thereafter carries an absolute ``--git-dir`` and
-``--no-replace-objects``. All inherited ``GIT_*`` variables are discarded,
-the three variables in :func:`_git_environment` are installed, and ``HOME``
-is deliberately preserved. Repository configuration is audited without
-includes at selection and again at close. A same-owner configuration writer
-is not excluded, but changed configuration or repository-control sentinel
-files are rechecked at child boundaries and refused. A writer racing between
-one check and the following system call remains a same-owner residual.
+The working tree and index are never subjects of this reader. The private
+configuration setup and Git version children are not repository-addressed and
+run from their own private temporary directories, never the caller's cwd.
+Discovery uses the worktree only to establish that ``root`` is the repository
+top level; every object operation thereafter carries an absolute ``--git-dir``
+and ``--no-replace-objects``. All inherited ``GIT_*`` variables are discarded,
+the three variables in :func:`_git_environment` are installed, and ``HOME`` is
+deliberately preserved. Repository configuration is audited without includes
+at selection and again at close. A same-owner configuration writer is not
+excluded, but changed configuration or repository-control sentinel files are
+rechecked at child boundaries and refused. A writer racing between one check
+and the following system call remains a same-owner residual.
 
 The configuration audit is scoped to the frozen :data:`GIT_COMMANDS`: private
 ``safe.directory`` setup; version, repository discovery, and configuration
@@ -739,14 +741,15 @@ def _audit_config(
 
 
 def _create_global_config(root: pathlib.Path) -> bytes:
-    """Have Git serialize the one safe.directory entry and return its bytes."""
+    """Serialize safe.directory from a private cwd with no ambient repository."""
 
     with tempfile.TemporaryDirectory(prefix="receipt-snapshot-select-") as directory:
-        path = pathlib.Path(directory, "global.gitconfig")
+        private_directory = pathlib.Path(directory)
+        path = private_directory / "global.gitconfig"
         environment = _git_environment(path)
         completed = _git_run(
             ["config", "-f", os.fspath(path), "safe.directory", os.fspath(root)],
-            cwd=None,
+            cwd=private_directory,
             environment=environment,
         )
         if completed.returncode != 0:
@@ -1812,8 +1815,9 @@ class TreeSnapshot:
         tree second, before an entered snapshot can run another pass.
 
         Selection uses one temporary private config and one short-lived batch
-        child under ``try/finally``. The long-lived child and its private
-        directory are acquired only by :meth:`__enter__`.
+        child under ``try/finally``. Non-repository setup and version children
+        run from the applicable private directory. The long-lived child and
+        its private directory are acquired only by :meth:`__enter__`.
         """
 
         if type(revision) is not str or not revision or "\0" in revision:
@@ -1829,15 +1833,18 @@ class TreeSnapshot:
 
         global_bytes = _create_global_config(selected_root)
         with tempfile.TemporaryDirectory(prefix="receipt-snapshot-discovery-") as directory:
-            global_path = pathlib.Path(directory, "global.gitconfig")
+            private_directory = pathlib.Path(directory)
+            global_path = private_directory / "global.gitconfig"
             global_path.write_bytes(global_bytes)
             environment = _git_environment(global_path)
 
-            version_arguments = ["-C", os.fspath(selected_root), "version"]
+            version_arguments = ["version"]
             if verify_objects:
                 version_arguments.append("--build-options")
             version_result = _git_run(
-                version_arguments, cwd=None, environment=environment
+                version_arguments,
+                cwd=private_directory,
+                environment=environment,
             )
             if version_result.returncode != 0:
                 try:

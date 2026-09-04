@@ -886,7 +886,14 @@ def test_every_git_child_receives_frozen_environment_and_allowed_command(
     assert calls
     for argv, environment, cwd in calls:
         assert argv[0] == "git"
-        assert cwd is None
+        if argv[1:3] == ("config", "-f"):
+            assert isinstance(cwd, pathlib.Path)
+            assert cwd.name.startswith("receipt-snapshot-select-")
+        elif argv[1:2] == ("version",):
+            assert isinstance(cwd, pathlib.Path)
+            assert cwd.name.startswith("receipt-snapshot-discovery-")
+        else:
+            assert cwd is None
         assert environment["HOME"] == home
         assert {name for name in environment if name.startswith("GIT_")} == {
             "GIT_NO_REPLACE_OBJECTS",
@@ -906,7 +913,9 @@ def test_every_git_child_receives_frozen_environment_and_allowed_command(
     commands: list[tuple[str, ...]] = []
     for argv, _environment, _cwd in calls:
         command = list(argv[1:])
-        if command[:2] == ["-C", os.fspath(git_repo)]:
+        if command and command[0] == "version":
+            phase = "discovery"
+        elif command[:2] == ["-C", os.fspath(git_repo)]:
             phase = "discovery"
             command = command[2:]
         elif command and command[0].startswith("--git-dir="):
