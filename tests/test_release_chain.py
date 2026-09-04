@@ -529,6 +529,26 @@ def test_release_chain_routes_every_input_file_through_the_regular_reader(
     )
 
 
+def test_component_spelling_uses_constant_time_listing_membership(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The per-component spelling check must not linearly scan its listing."""
+
+    class Listing(list[str]):
+        def __contains__(self, item: object) -> bool:
+            del item
+            raise AssertionError("list membership scanned the directory")
+
+    monkeypatch.setattr(os, "listdir", lambda _parent: Listing(["leaf"]))
+
+    release_chain._assert_component_spelled(
+        tmp_path,
+        "leaf",
+        ("leaf",),
+        pathlib.PurePosixPath("leaf"),
+    )
+
+
 def test_the_producer_openssl_fallback_uses_a_private_leaf(
     repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

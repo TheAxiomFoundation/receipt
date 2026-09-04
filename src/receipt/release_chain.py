@@ -1390,7 +1390,7 @@ def _assert_component_spelled(
     """
 
     try:
-        names = os.listdir(parent)
+        names = set(os.listdir(parent))
     except OSError as exc:
         if exc.errno in {errno.ENOENT, errno.ENOTDIR}:
             # There is no directory here to withhold a listing: the parent is
@@ -1565,6 +1565,7 @@ def _regular_file_bytes(
         current = root
         components = relative.parts
     missing = nonregular or f"required state file is missing or non-regular: {path}"
+    # Four non-state callers omit replaced=, so they report a state file here.
     changed = replaced or f"required state file was replaced while being read: {path}"
     approved: os.stat_result | None = None
     walked: tuple[str, ...] = ()
