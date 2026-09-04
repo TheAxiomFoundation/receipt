@@ -1391,6 +1391,11 @@ def _assert_component_spelled(
     ahead of the read they guard, so either refusal stands where a pre-existing
     refusal about the content behind that name would have; ``append_gate``'s
     module docstring states that with the cases measured.
+
+    Scaling: the parent listing is rebuilt for every file read, so a
+    manifest directory of N entries costs N listings, quadratic in N and
+    bounded by ``MAX_RELEASE_INDEX``; reusing one listing within an owned
+    materialization is a later optimization (GPT-6 Astra, round 2).
     """
 
     try:
