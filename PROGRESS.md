@@ -149,5 +149,6 @@ The 44 full-suite failures are 43 `tests/test_cli.py` cases and `tests/test_rele
 - A normal `uv run` cannot sync here because the inherited `UV_FROZEN=1` requires a missing `uv.lock`, and the default uv cache is outside the writable sandbox. The recorded combined command used `UV_NO_SYNC=1`, the existing project test environment, and a writable temporary cache while still invoking `uv run pytest -q`.
 - Network-disabled fixture resolution was closed by authenticated local extraction overrides, not by skipping equivalence cases.
 - The offline stop rule applies: all work and the draft body are committed locally, while GitHub DNS resolution is unavailable.
+- The requested host report path `/Users/maxghenis/chief-of-staff/state/receipt-052/lanes/build-06-lane-d/out.md` is outside the sandbox's writable roots; its write was rejected by policy. The final report is therefore mirrored to the permitted `/private/tmp/receipt-06-lane-d-out.md` fallback.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
