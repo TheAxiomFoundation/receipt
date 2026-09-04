@@ -8,6 +8,8 @@ non-authorization invariant that gives the record type its name.
 
 from __future__ import annotations
 
+import errno
+import fcntl
 import json
 import pathlib
 from dataclasses import FrozenInstanceError
@@ -29,6 +31,7 @@ from receipt.evidence import (
     validate_evidence_record_schema,
     verify_evidence_records,
 )
+from receipt.evidence import _enumerate_record_files
 from receipt.release_chain import (
     MANIFEST_RE,
     AnchorSpec,
@@ -50,6 +53,9 @@ BODY = {"event": "generation", "generation": 7, "populationRootSha256": "a" * 64
 BODY_SCHEMA = "example.org/generation-event/v1"
 PRODUCER = {"repo": "example/consumer", "branch": "main"}
 EMITTED = "2026-08-27T14:05:00Z"
+#: A well-formed producer pin for specs that are only ever constructed. Tests
+#: that verify a signature pin the real key through the `spec` fixture.
+PIN = "c" * 64
 #: ChainSpec requires a configured witness, and these tests build one only to
 #: hand it to the authorizing verifier, which never reaches the anchor.
 CHAIN_ANCHORS = {
@@ -160,7 +166,7 @@ def test_an_evidence_record_is_refused_by_the_authorizing_verifier(
             signature,
             public_pem,
             public_key_filename="producer.pem",
-            spki_sha256=None,
+            spki_sha256=spec.producer_spki_sha256,
             label="as-if-a-manifest",
         )
 
@@ -171,7 +177,7 @@ def test_an_evidence_record_is_refused_by_the_authorizing_verifier(
         signature,
         public_pem,
         public_key_filename="producer.pem",
-        spki_sha256=None,
+        spki_sha256=spec.producer_spki_sha256,
         label="evidence record",
     )
     assert verify_evidence_records(
@@ -801,15 +807,294 @@ def test_spki_pin_mismatch_is_refused(
         verify_evidence_records(tmp_path, spec=spec, anchor_dir=anchor_dir)
 
 
+def test_a_symlinked_path_component_cannot_serve_records_from_outside_the_tree(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    anchor_dir: pathlib.Path,
+    keys: tuple[bytes, bytes],
+) -> None:
+    """Only the final component was ever checked for a link.
+
+    With ``evidence/`` pointed at an ambient directory the records verified —
+    and the records written — are no part of the tree the spec names, while
+    every path in the refusal still reads as if they were.
+    """
+
+    private_pem, _ = keys
+    outside = tmp_path / "outside"
+    (outside / "records").mkdir(parents=True)
+    (tmp_path / "evidence").symlink_to(outside)
+
+    with pytest.raises(EvidenceRecordError) as refusal:
+        verify_evidence_records(tmp_path, spec=spec, anchor_dir=anchor_dir)
+    assert str(refusal.value) == (
+        "state path traverses a symlink at 'evidence': evidence/records"
+    )
+
+    with pytest.raises(EvidenceRecordError, match="traverses a symlink"):
+        emit_evidence_record(
+            tmp_path,
+            spec=spec,
+            private_key_pem=private_pem,
+            body=BODY,
+            body_schema=BODY_SCHEMA,
+            refs=[],
+            producer=PRODUCER,
+            emitted_at_utc=EMITTED,
+        )
+    assert list((outside / "records").iterdir()) == []
+
+
+def test_records_that_resolve_inside_the_release_root_are_refused(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    anchor_dir: pathlib.Path,
+    keys: tuple[bytes, bytes],
+) -> None:
+    """The construction-time rule is lexical, and the link can be on the other
+    side: ``releases/`` pointed at the evidence directory puts the records
+    inside the closed release directory while two PurePosixPaths still compare
+    as siblings. Only where the root is joined can the two be compared as the
+    filesystem answers them."""
+
+    private_pem, _ = keys
+    (tmp_path / "evidence" / "records").mkdir(parents=True)
+    (tmp_path / "releases").symlink_to(tmp_path / "evidence")
+
+    with pytest.raises(EvidenceRecordError, match="outside the release directory"):
+        verify_evidence_records(tmp_path, spec=spec, anchor_dir=anchor_dir)
+    with pytest.raises(EvidenceRecordError, match="outside the release directory"):
+        emit_evidence_record(
+            tmp_path,
+            spec=spec,
+            private_key_pem=private_pem,
+            body=BODY,
+            body_schema=BODY_SCHEMA,
+            refs=[],
+            producer=PRODUCER,
+            emitted_at_utc=EMITTED,
+        )
+    assert list((tmp_path / "evidence" / "records").iterdir()) == []
+
+
+# --------------------------------------------------------------------------
+# Emission: the pin the signer is checked against, one emitter at a time.
+# --------------------------------------------------------------------------
+
+
+def test_emission_with_an_unpinned_key_refuses_before_it_touches_disk(
+    tmp_path: pathlib.Path, spec: EvidenceSpec
+) -> None:
+    """Emission signed with whatever private key it was handed.
+
+    The pin is the consumer's committed statement of who may write these
+    records, and it was read only by the verifier — so a swapped key produced
+    a directory that verified as broken custody long after the bytes landed.
+    """
+
+    other_private, _ = generate_signing_keypair()
+    with pytest.raises(EvidenceRecordError, match="not code-pinned"):
+        emit_evidence_record(
+            tmp_path,
+            spec=spec,
+            private_key_pem=other_private,
+            body=BODY,
+            body_schema=BODY_SCHEMA,
+            refs=[],
+            producer=PRODUCER,
+            emitted_at_utc=EMITTED,
+        )
+    assert not (tmp_path / spec.records_relative).exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_competing_emitter_at_the_same_index_is_refused(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    anchor_dir: pathlib.Path,
+    keys: tuple[bytes, bytes],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Index was last-enumerated plus one, then three plain writes.
+
+    Two emitters that enumerate the same state both compute the same index.
+    An exclusive create of the record alone does not close that: the filename
+    carries the record's own digest, so two different payloads at one index
+    are two different filenames, both creates succeed, and the directory is
+    refused for a duplicate index with both emitters believing they wrote it.
+    The competitor is injected between enumeration and creation, which is
+    exactly where the window was.
+    """
+
+    private_pem, _ = keys
+    raced: list[str] = []
+
+    def enumerate_and_race(
+        root: pathlib.Path, spec_: EvidenceSpec
+    ) -> list[tuple[pathlib.Path, pathlib.Path, pathlib.Path]]:
+        result = _enumerate_record_files(root, spec_)
+        if not raced:
+            raced.append("attempted")
+            with pytest.raises(EvidenceRecordError, match="another emitter"):
+                emit_evidence_record(
+                    root,
+                    spec=spec_,
+                    private_key_pem=private_pem,
+                    body={
+                        "event": "generation",
+                        "generation": 8,
+                        "populationRootSha256": "b" * 64,
+                    },
+                    body_schema=BODY_SCHEMA,
+                    refs=[],
+                    producer=PRODUCER,
+                    emitted_at_utc=EMITTED,
+                )
+        return result
+
+    monkeypatch.setattr(
+        "receipt.evidence._enumerate_record_files", enumerate_and_race
+    )
+    emitted = emit_evidence_record(
+        tmp_path,
+        spec=spec,
+        private_key_pem=private_pem,
+        body=BODY,
+        body_schema=BODY_SCHEMA,
+        refs=[],
+        producer=PRODUCER,
+        emitted_at_utc=EMITTED,
+    )
+    monkeypatch.undo()
+
+    assert raced == ["attempted"]
+    assert emitted.name.startswith("0000-")
+    verification = verify_evidence_records(tmp_path, spec=spec, anchor_dir=anchor_dir)
+    assert [record.record_index for record in verification.records] == [0]
+
+
+def test_a_directory_that_cannot_be_locked_is_refused_in_its_own_words(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only EAGAIN means a second emitter.
+
+    A filesystem that does not implement advisory locks, or a descriptor the
+    kernel refuses, is a refusal too — but saying "another emitter holds it"
+    about one would put a fact in the message that nobody established. Both
+    fail closed; only the words differ.
+    """
+
+    private_pem, _ = keys
+
+    def unsupported(descriptor: int, operation: int) -> None:
+        raise OSError(errno.ENOTSUP, "Operation not supported")
+
+    monkeypatch.setattr(fcntl, "flock", unsupported)
+    with pytest.raises(EvidenceRecordError) as refusal:
+        emit_evidence_record(
+            tmp_path,
+            spec=spec,
+            private_key_pem=private_pem,
+            body=BODY,
+            body_schema=BODY_SCHEMA,
+            refs=[],
+            producer=PRODUCER,
+            emitted_at_utc=EMITTED,
+        )
+    assert "cannot hold the evidence-record directory" in str(refusal.value)
+    assert "another emitter" not in str(refusal.value)
+    assert list((tmp_path / spec.records_relative).iterdir()) == []
+
+
+def test_a_repeat_emission_of_the_same_record_does_not_overwrite_it(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    anchor_dir: pathlib.Path,
+    keys: tuple[bytes, bytes],
+) -> None:
+    """Byte-identical is the case a digest-named file hides.
+
+    Same index and same payload means the same three filenames, and three
+    plain writes land on top of the record already there without a word. An
+    enumeration that returns nothing — a wedged reader, a directory read
+    before a sibling's writes are visible — is all it takes to recompute an
+    index that is already taken.
+    """
+
+    private_pem, _ = keys
+    arguments = dict(
+        spec=spec,
+        private_key_pem=private_pem,
+        body=BODY,
+        body_schema=BODY_SCHEMA,
+        refs=[],
+        producer=PRODUCER,
+        emitted_at_utc=EMITTED,
+    )
+    first = emit_evidence_record(tmp_path, **arguments)  # type: ignore[arg-type]
+    before = first.read_bytes()
+
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(
+            "receipt.evidence._enumerate_record_files",
+            lambda root, spec_: [],
+        )
+        with pytest.raises(EvidenceRecordError, match="already"):
+            emit_evidence_record(tmp_path, **arguments)  # type: ignore[arg-type]
+
+    assert first.read_bytes() == before
+    verification = verify_evidence_records(tmp_path, spec=spec, anchor_dir=anchor_dir)
+    assert [record.record_index for record in verification.records] == [0]
+
+
 # --------------------------------------------------------------------------
 # Spec construction.
 # --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        "",
+        "d" * 63,
+        "d" * 65,
+        "D" * 64,
+        "g" * 64,
+        b"d" * 64,
+        64,
+    ],
+)
+def test_a_producer_pin_that_cannot_pin_refuses_at_construction(
+    value: object,
+) -> None:
+    """The hole ChainSpec had, in this module's own spec: a pin of ``None``
+    reaches verify_signature_bytes, which reads it as no pin requested, skips
+    the SPKI comparison, and accepts a substituted producer key."""
+
+    with pytest.raises(EvidenceRecordError, match="producer_spki_sha256"):
+        EvidenceSpec(
+            records_relative=RECORDS,
+            producer_spki_sha256=value,  # type: ignore[arg-type]
+        )
+
+
+def test_a_spec_with_no_producer_pin_cannot_be_constructed() -> None:
+    """The unpinned spec is not expressible: the field carries no default, so
+    the consumer states the pin or writes no spec at all."""
+
+    with pytest.raises(TypeError, match="producer_spki_sha256"):
+        EvidenceSpec(records_relative=RECORDS)  # type: ignore[call-arg]
 
 
 def test_records_inside_the_release_root_are_refused_at_construction() -> None:
     with pytest.raises(EvidenceRecordError, match="outside the release directory"):
         EvidenceSpec(
             records_relative=pathlib.PurePosixPath("releases/manifests/evidence"),
+            producer_spki_sha256=PIN,
             release_root_relative=pathlib.PurePosixPath("releases"),
         )
 
@@ -818,6 +1103,7 @@ def test_records_equal_to_the_release_root_are_refused() -> None:
     with pytest.raises(EvidenceRecordError, match="outside the release directory"):
         EvidenceSpec(
             records_relative=pathlib.PurePosixPath("releases"),
+            producer_spki_sha256=PIN,
             release_root_relative=pathlib.PurePosixPath("releases"),
         )
 
@@ -825,12 +1111,16 @@ def test_records_equal_to_the_release_root_are_refused() -> None:
 @pytest.mark.parametrize("bad", ["/evidence", "../evidence", ""])
 def test_unsafe_records_path_is_refused(bad: str) -> None:
     with pytest.raises(EvidenceRecordError, match="records_relative"):
-        EvidenceSpec(records_relative=pathlib.PurePosixPath(bad))
+        EvidenceSpec(
+            records_relative=pathlib.PurePosixPath(bad), producer_spki_sha256=PIN
+        )
 
 
 def test_empty_domain_is_refused() -> None:
     with pytest.raises(EvidenceRecordError, match="domain"):
-        EvidenceSpec(records_relative=RECORDS, domain=b"")
+        EvidenceSpec(
+            records_relative=RECORDS, producer_spki_sha256=PIN, domain=b""
+        )
 
 
 def test_spec_is_frozen(spec: EvidenceSpec) -> None:
@@ -841,6 +1131,7 @@ def test_spec_is_frozen(spec: EvidenceSpec) -> None:
 def test_sibling_directory_is_permitted() -> None:
     EvidenceSpec(
         records_relative=pathlib.PurePosixPath("evidence/records"),
+        producer_spki_sha256=PIN,
         release_root_relative=pathlib.PurePosixPath("releases"),
     )
 

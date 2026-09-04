@@ -110,10 +110,15 @@ defines nor blesses one.
 
 from __future__ import annotations
 
+import contextlib
+import errno
+import fcntl
 import hashlib
 import json
+import os
 import pathlib
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -123,6 +128,7 @@ from receipt.release_chain import (
     MAX_RELEASE_INDEX,
     SHA256_RE,
     ReleaseChainError,
+    assert_no_symlinked_state_component,
     parse_created_at,
 )
 from receipt.sign import SignError
@@ -157,9 +163,12 @@ class EvidenceSpec:
     """
 
     records_relative: pathlib.PurePosixPath
+    #: The producer key these records must be signed by. Required, and second
+    #: so that it can be: a field with no default cannot follow one that has
+    #: one. Every caller already writes these by keyword.
+    producer_spki_sha256: str
     schema_version: str = SCHEMA_VERSION
     producer_public_key_filename: str = "producer.pem"
-    producer_spki_sha256: str | None = None
     domain: bytes = DOMAIN
     #: The release root this directory must stay outside of, when the consumer
     #: also runs a release chain. Supplying it turns the "records live outside
@@ -167,11 +176,24 @@ class EvidenceSpec:
     release_root_relative: pathlib.PurePosixPath | None = None
 
     def __post_init__(self) -> None:
+        """Refuse a spec whose pin cannot pin anything.
+
+        The demonstrated hole, and the one `ChainSpec` had: this pin is handed
+        to `sign.verify_signature_bytes`, which reads ``None`` as *no pin
+        requested* and skips the SPKI comparison entirely. A default of
+        ``None`` therefore did not mean "unset" to anything downstream — it
+        meant a directory of records signed by any key at all verifying green,
+        with the one line of consumer code that was supposed to say who may
+        write them never consulted. The pin is checked where it is written
+        instead.
+        """
+
         records = self.records_relative
         if records.is_absolute() or not records.parts or ".." in records.parts:
             raise EvidenceRecordError(
                 f"records_relative must be a relative path without '..': {records}"
             )
+        _sha256(self.producer_spki_sha256, "EvidenceSpec producer_spki_sha256")
         if type(self.domain) is not bytes or not self.domain:
             raise EvidenceRecordError("domain must be non-empty bytes")
         root = self.release_root_relative
@@ -412,10 +434,60 @@ def load_evidence_record(
     return payload, raw, sha256_bytes(raw)
 
 
+def _assert_records_directory_is_confined(
+    root: pathlib.Path, spec: EvidenceSpec
+) -> pathlib.Path:
+    """Answer where the records directory really is, before anything reads it.
+
+    `EvidenceSpec.__post_init__` compares two `PurePosixPath`s, which is all a
+    spec can do: it never sees a filesystem. So the rule it enforces — records
+    live outside the release directory — is a rule about spellings, and a
+    spelling is not where a directory is. An ``evidence/`` that is a link to an
+    ambient directory satisfies it while the records read and written under it
+    are no part of the tree the spec names; a ``releases/`` that is a link to
+    the evidence directory satisfies it while every record sits inside the
+    closed release directory. Enumeration checked only the final component and
+    caught neither.
+
+    Both halves are answered here, where the root is known and the join has
+    already happened: `release_chain`'s own component walk, refusing a link at
+    any component in its words rather than in words of this module's own, and
+    then the two directories compared as the filesystem resolves them.
+    """
+
+    try:
+        assert_no_symlinked_state_component(root, spec.records_relative)
+    except ReleaseChainError as exc:
+        raise EvidenceRecordError(str(exc)) from exc
+
+    directory = root / spec.records_relative
+    release_root_relative = spec.release_root_relative
+    if release_root_relative is not None:
+        records_real = pathlib.Path(os.path.realpath(directory))
+        release_real = pathlib.Path(
+            os.path.realpath(root / release_root_relative)
+        )
+        if records_real == release_real or release_real in records_real.parents:
+            raise EvidenceRecordError(
+                "evidence records must live outside the release directory: "
+                f"{spec.records_relative} resolves to {records_real}, which is "
+                f"inside {release_real}"
+            )
+    return directory
+
+
 def _enumerate_record_files(
     root: pathlib.Path, spec: EvidenceSpec
 ) -> list[tuple[pathlib.Path, pathlib.Path, pathlib.Path]]:
-    directory = root / spec.records_relative
+    """Enumerate one closed records directory, after placing it on disk.
+
+    The confinement check stands here rather than in either caller so that
+    reading and writing get the same answer about the same directory, and it
+    stands ahead of the "does it exist" question because a dangling link is
+    still a link and an absent directory is not a reason to stop asking.
+    """
+
+    directory = _assert_records_directory_is_confined(root, spec)
     if not directory.exists():
         return []
     if directory.is_symlink() or not directory.is_dir():
@@ -567,6 +639,78 @@ def verify_evidence_records(
     return EvidenceVerification(records=tuple(records))
 
 
+def _signing_key_spki_sha256(private_key_pem: bytes) -> str:
+    """Return the SPKI digest of the public half of a signing key.
+
+    Reached through `receipt.sign`'s own loader rather than a second import of
+    the signing library, so emission depends on exactly what `sign_payload`
+    depends on and refuses in the same words when it is absent.
+    """
+
+    if type(private_key_pem) is not bytes:
+        raise EvidenceRecordError("Ed25519 private key PEM must be bytes")
+    if not _sign.CRYPTOGRAPHY_AVAILABLE:
+        raise EvidenceRecordError("Ed25519 signing requires cryptography")
+    try:
+        private_key = _sign.load_pem_private_key(private_key_pem, password=None)
+    except (TypeError, ValueError, _sign.UnsupportedAlgorithm) as exc:
+        raise EvidenceRecordError("cannot decode Ed25519 private key") from exc
+    if not isinstance(private_key, _sign.Ed25519PrivateKey):
+        raise EvidenceRecordError("private key is not Ed25519")
+    public_key_pem = private_key.public_key().public_bytes(
+        _sign.Encoding.PEM,
+        _sign.PublicFormat.SubjectPublicKeyInfo,
+    )
+    try:
+        return _sign.spki_sha256(public_key_pem)
+    except SignError as exc:
+        raise EvidenceRecordError(str(exc)) from exc
+
+
+@contextlib.contextmanager
+def _exclusive_records_directory(directory: pathlib.Path) -> Iterator[None]:
+    """Hold the records directory for one emitter, enumeration through write.
+
+    The next index is the last enumerated one plus one, so two emitters that
+    enumerate the same state compute the same index. Creating the record
+    exclusively does not close that on its own: the filename carries the
+    record's own digest, so two different payloads at one index are two
+    different filenames, both creates succeed, and the directory is refused at
+    verification for a duplicate index — with both emitters having been told
+    they wrote it. The whole read-decide-write is what has to be exclusive.
+
+    The lock is advisory and non-blocking, which is the fail-closed reading:
+    a second emitter is told another one holds the directory rather than
+    queueing behind it or, worse, proceeding. `fcntl.flock` is POSIX, which
+    this package already requires (README): its state reads open through
+    directory descriptors.
+
+    Only ``EAGAIN`` (``EWOULDBLOCK`` is the same number) says a second emitter
+    holds it. A filesystem with no advisory locks answers ``ENOTSUP``, a
+    descriptor the kernel will not lock answers something else again, and
+    every one of those refuses too — in words that do not assert a competitor
+    nobody observed.
+    """
+
+    descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in {errno.EAGAIN, errno.EWOULDBLOCK}:
+                raise EvidenceRecordError(
+                    "another emitter holds the evidence-record directory: "
+                    f"{directory}"
+                ) from exc
+            raise EvidenceRecordError(
+                f"cannot hold the evidence-record directory: {directory}: "
+                f"{exc.strerror}"
+            ) from exc
+        yield
+    finally:
+        os.close(descriptor)
+
+
 def emit_evidence_record(
     root: pathlib.Path,
     *,
@@ -582,10 +726,57 @@ def emit_evidence_record(
 
     This is the producer-side half: the record is signed when it is emitted,
     not when some later release happens to sweep it up.
+
+    Three things are settled before any byte is written. The signing key is
+    compared to the spec's pin, because a key the verifier will refuse is a
+    fact the producer can know at emission time rather than one an auditor
+    discovers later; that comparison stands ahead of the `mkdir`, so a refused
+    emission leaves no directory behind. The records directory is placed on
+    disk, so a linked component cannot receive the write. And the directory is
+    held exclusively from enumeration through the last write, so the index
+    this emission claims is still free when it claims it.
+
+    The record is created exclusively and written last: a record on disk
+    therefore implies its body and signature are already there, which is the
+    order enumeration reads them in.
     """
 
-    directory = root / spec.records_relative
+    signing_spki_sha256 = _signing_key_spki_sha256(private_key_pem)
+    if signing_spki_sha256 != spec.producer_spki_sha256:
+        raise EvidenceRecordError(
+            f"producer signing key is not code-pinned: {signing_spki_sha256}"
+        )
+
+    directory = _assert_records_directory_is_confined(root, spec)
     directory.mkdir(parents=True, exist_ok=True)
+    with _exclusive_records_directory(directory):
+        return _write_evidence_record(
+            root,
+            directory,
+            spec=spec,
+            private_key_pem=private_key_pem,
+            body=body,
+            body_schema=body_schema,
+            refs=refs,
+            producer=producer,
+            emitted_at_utc=emitted_at_utc,
+        )
+
+
+def _write_evidence_record(
+    root: pathlib.Path,
+    directory: pathlib.Path,
+    *,
+    spec: EvidenceSpec,
+    private_key_pem: bytes,
+    body: Any,
+    body_schema: str,
+    refs: list[dict[str, Any]],
+    producer: dict[str, Any],
+    emitted_at_utc: str,
+) -> pathlib.Path:
+    """The emitter's critical section: enumerate, decide the index, write."""
+
     existing = _enumerate_record_files(root, spec)
     if existing:
         previous_path = existing[-1][0]
@@ -613,9 +804,24 @@ def emit_evidence_record(
     validate_evidence_record_schema(payload, spec)
     raw = canonical_document_bytes(payload)
     record_path = directory / record_filename(index, raw)
+    if record_path.exists() or record_path.is_symlink():
+        raise EvidenceRecordError(
+            f"evidence record {record_path.name} already exists at index {index}"
+        )
     signature = _sign.sign_payload(private_key_pem, raw, domain=spec.domain)
 
     body_path_for_record(record_path).write_bytes(body_raw)
-    record_path.write_bytes(raw)
     producer_signature_path_for_record(record_path).write_bytes(signature)
+    # Exclusive, and last: the create is the one step that cannot be racing a
+    # writer outside this lock, and a record's presence implies its sidecars'.
+    try:
+        descriptor = os.open(
+            record_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666
+        )
+    except FileExistsError as exc:
+        raise EvidenceRecordError(
+            f"evidence record {record_path.name} already exists at index {index}"
+        ) from exc
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(raw)
     return record_path
