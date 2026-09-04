@@ -544,6 +544,19 @@ gate's rather than ``ChainSpec``'s deliberately: a spec is the consumer's
 committed code and validating one is #41's subject, while this is the one
 consumer that cannot answer for it.
 
+Beside those three, and unlike them, is one about the candidate tree: that
+there is none. A ``root`` naming nothing, or naming a regular file, or reached
+through a component that is one, is not a tree this gate can answer about, and
+it used to escape as the ``OSError`` the root's own open raised — a bare
+``FileNotFoundError`` or ``NotADirectoryError`` carrying the OS's message and
+not the root, where every other refusal in this module is an ``AppendError``
+naming what it refused. A CLI boundary that catches everything reported that
+as a failure, so the fail-closed property was never in question; a library
+caller got an exception from outside this module's vocabulary. ``_set_root``
+now answers both in one sentence — ``candidate repository is missing or not a
+git repository`` — from the open itself rather than from a check placed ahead
+of it, which would be a statement about a path this open may not reach (#46).
+
 All of it carries its own tests in tests/test_append_gate.py.
 """
 
@@ -697,6 +710,11 @@ def _set_root(root: pathlib.Path, spec: AppendGateSpec) -> _CandidateTree:
     commit, while ``--root`` points at the checked-out PR merge tree. Imports
     and production anchors therefore remain rooted at immutable ``CODE_ROOT``;
     only candidate data paths and git comparisons use ``ROOT``.
+
+    A root that is not there to be opened — absent, or a regular file, or
+    reached through one — is refused here as an ``AppendError`` naming the
+    root the caller supplied, before any git command is run (#46). It is the
+    open that answers, not an ``lstat`` before it.
     """
 
     candidate_root = root.resolve()
@@ -745,6 +763,24 @@ def _set_root(root: pathlib.Path, spec: AppendGateSpec) -> _CandidateTree:
                         candidate_root, spec.chain.state_relative
                     )
                 )
+            ) from exc
+        # And the two answers this open gives for "there is no candidate tree
+        # here at all" (#46). A ``--root`` naming nothing is ``ENOENT``; one
+        # naming a regular file, or reached through a component that is one,
+        # is ``ENOTDIR`` — ``O_DIRECTORY`` is what makes the second an error
+        # rather than an open. Both escaped as the OS's own ``OSError``, with
+        # the OS's message and no mention of the root, where every other
+        # refusal in this module is an ``AppendError`` naming what it refused.
+        # It is answered here, at the one open, rather than by an ``lstat``
+        # before it: a check ahead of the open is a check on a path this open
+        # may not reach, and this module refuses check-then-open everywhere
+        # else it reads. Every other errno still raises as it stands, ``ELOOP``
+        # included — a link at a root this function has already resolved is a
+        # race, not a missing tree, and it is not this refusal's fact.
+        if exc.errno in {errno.ENOENT, errno.ENOTDIR}:
+            raise AppendError(
+                "candidate repository is missing or not a git repository: "
+                f"{root}"
             ) from exc
         raise
     recorded = os.fstat(descriptor)

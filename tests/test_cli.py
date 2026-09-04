@@ -148,6 +148,40 @@ def test_refusal_writes_to_a_redirected_stringio_stderr(
     )
 
 
+def test_a_regular_file_named_as_the_root_refuses_in_the_same_words(
+    repo: pathlib.Path,
+) -> None:
+    """The command's other half of #46: a ``--root`` that is not a directory.
+
+    ``receipt verify`` already answered both cases here — ``root.is_dir()`` is
+    false for an absent path and for a file alike — so this is coverage of a
+    refusal the command already made, not a new one. It is pinned because #46
+    is about the same two inputs one layer down, in ``append_gate._set_root``,
+    where they escaped as the OS's own ``OSError``; the two now refuse in
+    their own layer's words rather than one of them borrowing the platform's.
+    """
+
+    file_root = repo / "not-a-tree"
+    file_root.write_text("this is a file, not a checkout\n", encoding="utf-8")
+    captured = io.StringIO()
+    with contextlib.redirect_stderr(captured):
+        code = main(
+            [
+                "verify",
+                "--spec",
+                str(repo / "verification/spec.py"),
+                "--root",
+                str(file_root),
+            ]
+        )
+
+    assert code == EXIT_USAGE
+    assert captured.getvalue() == (
+        f"receipt verify: root is not a directory: {file_root}\n"
+        "receipt verify: FAIL\n"
+    )
+
+
 def _a_non_ascii_character_this_page_spells(name: str) -> str | None:
     """A character above 0x7F this code page encodes, from its own table.
 

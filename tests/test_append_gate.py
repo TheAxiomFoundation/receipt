@@ -5776,6 +5776,134 @@ def test_an_ordinary_spec_names_a_subdirectory_for_every_release_path(
     )
 
 
+# The candidate root that is not there to be opened (#46). ``_set_root``
+# recorded the root's identity with an unguarded open, so a ``--root`` naming
+# nothing, or naming a regular file, escaped as the OS's own ``OSError``
+# rather than as the ``AppendError`` every other refusal in this module
+# raises. The CLI's fail-closed boundary caught it and reported a FAIL, so
+# nothing was ever accepted that should not have been; a library caller got an
+# exception from outside this module's vocabulary, with the OS's message and
+# no mention of the root it was asked about.
+MISSING_ROOT_REFUSAL = "candidate repository is missing or not a git repository: "
+
+
+@pytest.mark.parametrize("with_base", [False, True], ids=["push", "base-ref"])
+def test_a_root_that_is_not_there_refuses_as_the_gate_rather_than_the_os(
+    tmp_path: pathlib.Path, with_base: bool
+) -> None:
+    """#46, the absent root: an ``AppendError`` naming what the caller named.
+
+    Measured with the refusal removed, on both paths: ``FileNotFoundError:
+    [Errno 2] No such file or directory: '<root>'`` — the OS's exception, the
+    OS's message, and the resolved path rather than the one asked about.
+    """
+
+    candidate = base_repository(tmp_path)
+    missing = replace(candidate, root=tmp_path / "no-such-tree")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(missing) if with_base else run_push_gate(missing)
+
+    assert str(refusal.value) == MISSING_ROOT_REFUSAL + str(missing.root)
+    # The OS's exception is kept as the cause, so nothing about what happened
+    # is lost; it is no longer what the caller has to catch.
+    assert isinstance(refusal.value.__cause__, FileNotFoundError)
+
+
+@pytest.mark.parametrize("with_base", [False, True], ids=["push", "base-ref"])
+def test_a_regular_file_named_as_the_root_refuses_in_the_same_words(
+    tmp_path: pathlib.Path, with_base: bool
+) -> None:
+    """#46's other half: a root that exists and is not a directory.
+
+    ``O_DIRECTORY`` is what makes this an error rather than an open of the
+    file, and it arrives as ``ENOTDIR`` rather than ``ENOENT``. One sentence
+    covers both, because the fact it states is the same one: there is no
+    candidate tree at this name for the gate to answer about.
+    """
+
+    candidate = base_repository(tmp_path)
+    file_root = tmp_path / "not-a-tree"
+    file_root.write_text("this is a file, not a checkout\n", encoding="utf-8")
+    named = replace(candidate, root=file_root)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(named) if with_base else run_push_gate(named)
+
+    assert str(refusal.value) == MISSING_ROOT_REFUSAL + str(file_root)
+    assert isinstance(refusal.value.__cause__, NotADirectoryError)
+
+
+def test_a_root_reached_through_a_regular_file_refuses_in_the_same_words(
+    tmp_path: pathlib.Path,
+) -> None:
+    """And a root whose *component* is a file, which is the same ``ENOTDIR``.
+
+    ``pathlib.Path.resolve`` does not raise for a path that does not resolve,
+    so this arrives at the open exactly as the two above do rather than being
+    caught earlier by something else.
+    """
+
+    candidate = base_repository(tmp_path)
+    blocker = tmp_path / "blocker"
+    blocker.write_text(
+        "a file standing where a directory was asked for\n", encoding="utf-8"
+    )
+    through = replace(candidate, root=blocker / "inside")
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(through)
+
+    assert str(refusal.value) == MISSING_ROOT_REFUSAL + str(through.root)
+    assert isinstance(refusal.value.__cause__, NotADirectoryError)
+
+
+def test_the_absent_root_is_refused_before_any_git_command_runs(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal's other claim: it is made before git is asked anything.
+
+    Every git read in this package goes through ``subprocess.run`` or
+    ``subprocess.check_output``; both are replaced here with a raise, so a
+    verdict that consulted git at all would arrive as ``RuntimeError`` rather
+    than as the gate's sentence. Bound on both paths, because the base-ref
+    path resolves the base with a git command and would otherwise be the one
+    that reached it first.
+    """
+
+    def refuse_to_run(*arguments: Any, **keywords: Any) -> Any:
+        raise RuntimeError("a git command ran before the root was refused")
+
+    monkeypatch.setattr(subprocess, "run", refuse_to_run)
+    monkeypatch.setattr(subprocess, "check_output", refuse_to_run)
+
+    missing = tmp_path / "no-such-tree"
+    for base_ref in (None, "HEAD"):
+        with pytest.raises(AppendError) as refusal:
+            verify_append_gate(missing, spec=GATE_SPEC, base_ref=base_ref)
+        assert str(refusal.value) == MISSING_ROOT_REFUSAL + str(missing)
+
+
+def test_an_ordinary_root_is_unaffected_by_the_missing_root_refusal(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The refusal's negative side: a root that is there still verifies.
+
+    The check is the one ``os.open`` already made; only the two errnos that
+    mean "no tree here" are answered differently, so every accepting input
+    reaches exactly what it reached before.
+    """
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    assert run_gate(candidate) == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 1, "
+        "+1 appended vs base"
+    )
+    assert run_push_gate(candidate) == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 1"
+    )
+
 
 def test_the_chain_inside_a_walked_root_is_what_the_verdict_reads(
     tmp_path: pathlib.Path, witnesses: Witnesses
