@@ -4,8 +4,9 @@
 
 The immutable reader and name-policy modules are implemented. The reader's
 process lifecycle, entry provenance, repository-control re-audits, bounded
-fsck heads, and byte accounting have received a second hardening pass. Feature,
-budget, and hostile-environment tests remain in progress.
+fsck heads, and byte accounting have received a second hardening pass. Feature
+and budget coverage is complete; hostile-environment coverage remains in
+progress.
 
 The brief contains incompatible instructions about this file: the standing
 order requires it to be committed from the start, while a later ground rule
@@ -34,12 +35,20 @@ in the module and will be listed in the final report.
 - Hardened abandoned batch-child teardown, bounded batch reads and stderr,
   independent closing audits, one-snapshot entry binding, cumulative ancestry,
   exact fsck heads, and per-write materialization accounting.
-- Passed 56 isolated core reader tests and 951 existing offline tests (94
+- Added the fail-closed attribute differential, Chronicle's eight quoted
+  rules, comments and blank-line grammar, materialization and anchor-digest
+  coverage, all six cleanup paths, verification-wide candidate/base budget
+  sharing, and one refusal for every frozen ceiling.
+- Passed the generated 20,000-entry, exactly 128 MiB acceptance fixture. Its
+  principal counters are 60,000 tree entries (20,000 maximum in one walk),
+  860,185 tree bytes, 600,000 path bytes, and 134,217,728 bytes each streamed
+  and materialized, all below their ceilings.
+- Passed 145 isolated core, feature, and budget tests and 951 existing offline tests (94
   equivalence tests deselected) on the worktree's default interpreter.
 
 ## Next
 
-- Add attributes, materialization, store-verification, hostile-environment,
-  per-budget, and generated acceptance-fixture tests.
+- Add tamper, hostile-environment, refusal-order, and full optional-command
+  recorder tests.
 - Run the permitted focused, offline, and equivalence selections on the
   available interpreters, then push and open a draft PR.
