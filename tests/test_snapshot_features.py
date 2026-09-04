@@ -222,7 +222,7 @@ def test_exact_chronicle_eight_line_attributes_fixture_is_accepted(
         assert selected.work.attribute_bytes == len(CHRONICLE_ATTRIBUTES)
         assert (
             selected.work.attribute_match_work
-            == 309
+            == 320
             < snapshot_module.MAX_ATTRIBUTE_MATCH_WORK
         )
 
@@ -1035,6 +1035,7 @@ def test_reader_budget_constants_are_pinned_to_the_frozen_values() -> None:
         "MAX_ATTRIBUTE_BYTES": 1 * 1024 * 1024,
         "MAX_ATTRIBUTE_BYTES_TOTAL": 16 * 1024 * 1024,
         "MAX_ATTRIBUTE_RULES_TOTAL": 65_536,
+        "MAX_ATTRIBUTE_STATES_PER_LINE": 256,
         "MAX_ATTRIBUTE_MATCH_WORK": 67_108_864,
         "MAX_CONTENT_BLOB_BYTES": 256 * 1024 * 1024,
         "MAX_CONTENT_BYTES_TOTAL": 16 * 1024 * 1024 * 1024,
@@ -1158,6 +1159,42 @@ def test_attribute_parser_enforces_rule_budget_while_expanding(
             b"one -filter\ntwo -ident\n",
             rule_limit=1,
         )
+
+
+def test_attribute_state_application_is_charged_per_matching_path(
+    git_repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer's 1,000-state/500-path shape charges every application."""
+
+    attributes = b"*.json " + b" ".join([b"a"] * 1_000) + b"\n"
+    paths = tuple(f"releases/m{index:04d}.json" for index in range(500))
+    selected = _raw_attribute_snapshot(git_repo, attributes)
+    monkeypatch.setattr(
+        snapshot_module,
+        "MAX_ATTRIBUTE_STATES_PER_LINE",
+        1_000,
+        raising=False,
+    )
+
+    with selected:
+        selected.refuse_transforming_attributes(paths)
+        assert selected.work.attribute_match_work == 505_500
+
+
+def test_attribute_state_count_has_a_per_line_ceiling(
+    git_repo: pathlib.Path,
+) -> None:
+    attributes = b"* " + b" ".join([b"a"] * 257) + b"\n"
+    selected = _raw_attribute_snapshot(git_repo, attributes)
+
+    with selected, pytest.raises(
+        SnapshotError,
+        match=(
+            r"^attribute states at \.gitattributes:1 exceed the per-line "
+            r"budget of 256 states$"
+        ),
+    ):
+        selected.refuse_transforming_attributes(("protected.txt",))
 
 
 def test_digest_per_blob_and_cumulative_budgets(

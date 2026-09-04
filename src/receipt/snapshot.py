@@ -60,8 +60,12 @@ materialization totals are then enforced across both snapshots together.
 * ``MAX_ATTRIBUTE_BYTES`` is 1 MiB per attributes file;
   ``MAX_ATTRIBUTE_BYTES_TOTAL`` is 16 MiB and
   ``MAX_ATTRIBUTE_RULES_TOTAL`` is 65,536 per verification.
-  ``MAX_ATTRIBUTE_MATCH_WORK`` is 67,108,864 matcher transitions. Checks cover
-  protected paths only, making this generous for Chronicle's small surface.
+  ``MAX_ATTRIBUTE_STATES_PER_LINE`` is 256; Git has no corresponding limit,
+  but this bounds one matching rule's application fan-out and is far above
+  Chronicle's maximum of three expanded states on one line.
+  ``MAX_ATTRIBUTE_MATCH_WORK`` is 67,108,864 matcher transitions and applied
+  states. Checks cover protected paths only, making this generous for
+  Chronicle's small surface.
   Git 2.53.0 discards physical attribute lines at least 2,048 bytes long and
   lines containing invalid or reserved attribute names, and stops a blob at
   embedded NUL; this reader refuses each case so discarded input cannot
@@ -130,6 +134,7 @@ MAX_ANCESTRY_COMMITS = 1_048_576
 MAX_ATTRIBUTE_BYTES = 1 * 1024 * 1024
 MAX_ATTRIBUTE_BYTES_TOTAL = 16 * 1024 * 1024
 MAX_ATTRIBUTE_RULES_TOTAL = 65_536
+MAX_ATTRIBUTE_STATES_PER_LINE = 256
 MAX_ATTRIBUTE_MATCH_WORK = 67_108_864
 MAX_CONTENT_BLOB_BYTES = 256 * 1024 * 1024
 MAX_CONTENT_BYTES_TOTAL = 16 * 1024 * 1024 * 1024
@@ -994,6 +999,15 @@ def _parse_attribute_file(
                 fields[0], path=path, line=line_number
             )
             states: list[tuple[str, str]] = []
+
+            def add_states(additions: tuple[tuple[str, str], ...]) -> None:
+                if len(states) + len(additions) > MAX_ATTRIBUTE_STATES_PER_LINE:
+                    raise SnapshotError(
+                        f"attribute states at {path}:{line_number} exceed the "
+                        f"per-line budget of {MAX_ATTRIBUTE_STATES_PER_LINE} states"
+                    )
+                states.extend(additions)
+
             for raw_state in fields[1:]:
                 try:
                     state = raw_state.decode("ascii", errors="strict")
@@ -1002,7 +1016,7 @@ def _parse_attribute_file(
                         path, line_number, "non-ASCII attribute state"
                     ) from exc
                 if state == "binary":
-                    states.extend(
+                    add_states(
                         (
                             ("diff", "unset"),
                             ("merge", "unset"),
@@ -1025,7 +1039,7 @@ def _parse_attribute_file(
                     raise _unsupported_attribute(
                         path, line_number, f"attribute name {name!r}"
                     )
-                states.append((name, disposition))
+                add_states(((name, disposition),))
             trailing_globstars = 0
             for segment in reversed(segments):
                 if segment != b"**":
@@ -2990,6 +3004,7 @@ class TreeSnapshot:
                 for rule in rules:
                     if _attribute_matches(rule, relative, self._attribute_step):
                         for name, disposition in rule.states:
+                            self._attribute_step()
                             final[name] = disposition
             for name in sorted(transforms):
                 if final.get(name) in {"set", "value"}:
@@ -3372,6 +3387,7 @@ __all__ = [
     "MAX_ATTRIBUTE_BYTES_TOTAL",
     "MAX_ATTRIBUTE_MATCH_WORK",
     "MAX_ATTRIBUTE_RULES_TOTAL",
+    "MAX_ATTRIBUTE_STATES_PER_LINE",
     "MAX_CONTENT_BLOB_BYTES",
     "MAX_CONTENT_BYTES_TOTAL",
     "MAX_ENTRY_NAME_BYTES",
