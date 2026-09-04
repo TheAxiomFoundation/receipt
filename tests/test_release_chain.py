@@ -115,11 +115,17 @@ def commit_snapshot(root: pathlib.Path, message: str) -> str:
     subprocess.run(
         ["git", "-C", str(root), "add", "-A"], check=True, env=environment
     )
-    subprocess.run(
-        ["git", "-C", str(root), "commit", "--quiet", "-m", message],
-        check=True,
+    changed = subprocess.run(
+        ["git", "-C", str(root), "diff", "--cached", "--quiet", "HEAD", "--"],
+        check=False,
         env=environment,
-    )
+    ).returncode
+    if changed:
+        subprocess.run(
+            ["git", "-C", str(root), "commit", "--quiet", "-m", message],
+            check=True,
+            env=environment,
+        )
     completed = subprocess.run(
         ["git", "-C", str(root), "rev-parse", "HEAD"],
         check=True,

@@ -20,6 +20,7 @@ In progress on `feat/0.6-lane-c`, based at `145f3db93d745ddc43aeb47f6b7bd8b30aa3
 - Added `receipts/repin-0.6-tree-object.md` with the Lane E fixture change, genuine ledger divergence, 26 re-pinned / 68 unchanged / 94 prior / 101 integrated census, and the two narrow snapshot diagnostic adapters.
 - Merged Lane D through `4e6070c`: the corpus binder now consumes an entered immutable snapshot, shared name-policy screens and both repertoire fields are present, generated corpus fixtures commit by default, and subjectless filesystem tests are removed. Lane D's remaining retained-test conversions will be merged when committed.
 - Corrected the OpenSSL preflight cache so an unsupported-version refusal, as well as an acceptance, executes `openssl version` only once per process; the focused 11-case version-gate slice passes.
+- Adapted the release-tree test commit helper to Lane D's now-committed corpus fixture; the six history/base materialization tests pass without manufacturing an empty commit.
 
 ## Decisions
 
