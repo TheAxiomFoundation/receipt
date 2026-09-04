@@ -7,7 +7,7 @@ byte-identical behavior, and the combined digest is receipt-canonical JSON —
 an injective encoding for any accepted filename strings.
 
 Two tests at the end are labelled S4-F6 and belong to a fourth review gate's
-first round on the append-gate branch: the ``dir_fd`` requirement was
+first round on the append-gate branch: the ``O_NOFOLLOW`` requirement was
 documented as the append gate's, and this is where it is shown to be the
 package's — ``verify_release_chain`` and ``receipt verify``'s custody pass
 refuse on the same platforms, in the same words, with no append gate in the
@@ -53,7 +53,7 @@ from receipt.release_chain import (
     verify_release_history_immutable,
 )
 from receipt.snapshot import GitEntry as SnapshotGitEntry
-from receipt.snapshot import TreeSnapshot
+from receipt.snapshot import Materialization, SnapshotError, TreeSnapshot
 from receipt.cli import EXIT_FAIL, main
 from receipt.verify import load_spec, run_verification
 
@@ -126,6 +126,50 @@ def commit_snapshot(root: pathlib.Path, message: str) -> str:
             check=True,
             env=environment,
         )
+    completed = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    return completed.stdout.strip()
+
+
+def commit_gitlink(
+    root: pathlib.Path,
+    relative: str,
+    target: str,
+    message: str,
+) -> str:
+    """Commit one index-only gitlink, which a working tree cannot represent."""
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            f"160000,{target},{relative}",
+        ],
+        check=True,
+        env=environment,
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "--quiet", "-m", message],
+        check=True,
+        env=environment,
+    )
     completed = subprocess.run(
         ["git", "-C", str(root), "rev-parse", "HEAD"],
         check=True,
@@ -284,6 +328,79 @@ def test_release_history_retains_the_directory_verifier_refusals(
                 )
 
 
+@pytest.mark.parametrize(
+    ("shape", "message"),
+    [
+        (
+            "blob-to-tree",
+            "existing release file was deleted relative to {base}: releases/node",
+        ),
+        (
+            "tree-to-blob",
+            "existing release file was deleted relative to {base}: "
+            "releases/node/leaf",
+        ),
+        ("candidate-gitlink", "release path is not regular: releases/node"),
+        (
+            "base-gitlink",
+            "base release entry has non-regular git mode 160000: releases/node",
+        ),
+    ],
+)
+def test_release_history_classifies_tree_replacements_and_gitlinks(
+    repo: pathlib.Path,
+    shape: str,
+    message: str,
+) -> None:
+    spec = load_spec(repo / "verification/spec.py").verification
+    node = repo / "releases/node"
+
+    if shape == "blob-to-tree":
+        node.write_text("base blob\n", encoding="utf-8")
+        base_oid = commit_snapshot(repo, "base blob")
+        node.unlink()
+        node.mkdir()
+        (node / "leaf").write_text("candidate leaf\n", encoding="utf-8")
+        candidate_oid = commit_snapshot(repo, "candidate tree")
+    elif shape == "tree-to-blob":
+        node.mkdir()
+        (node / "leaf").write_text("base leaf\n", encoding="utf-8")
+        base_oid = commit_snapshot(repo, "base tree")
+        shutil.rmtree(node)
+        node.write_text("candidate blob\n", encoding="utf-8")
+        candidate_oid = commit_snapshot(repo, "candidate blob")
+    elif shape == "candidate-gitlink":
+        base_oid = commit_snapshot(repo, "base without gitlink")
+        candidate_oid = commit_gitlink(
+            repo,
+            "releases/node",
+            base_oid,
+            "candidate gitlink",
+        )
+    else:
+        parent_oid = commit_snapshot(repo, "parent without gitlink")
+        base_oid = commit_gitlink(
+            repo,
+            "releases/node",
+            parent_oid,
+            "base gitlink",
+        )
+        node.write_text("candidate blob\n", encoding="utf-8")
+        candidate_oid = commit_snapshot(repo, "candidate regular file")
+
+    with TreeSnapshot.select(repo, candidate_oid) as candidate:
+        with TreeSnapshot.select(repo, base_oid) as base:
+            candidate.assert_ancestor(base)
+            with pytest.raises(ReleaseChainError) as caught:
+                verify_release_history_immutable(
+                    spec.chain,
+                    candidate=candidate,
+                    base=base,
+                )
+
+    assert str(caught.value) == message.format(base=base_oid)
+
+
 def test_base_release_chain_materializes_the_entered_snapshot(
     repo: pathlib.Path,
 ) -> None:
@@ -319,6 +436,154 @@ def test_base_release_chain_materializes_anchors_outside_the_release_root(
         verification = verify_base_release_chain(chain, base=base)
 
     assert verification.head is not None
+
+
+@pytest.mark.parametrize("absolute_filenames", [True, False])
+def test_base_release_chain_binds_anchors_before_openssl(
+    repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    absolute_filenames: bool,
+) -> None:
+    chain = load_spec(repo / "verification/spec.py").verification.chain
+    external = tmp_path / "external-anchors"
+    shutil.move(repo / chain.anchor_relative, external)
+    base_oid = commit_snapshot(repo, "base without anchors")
+    if absolute_filenames:
+        chain = replace(
+            chain,
+            producer_public_key_filename=str(
+                external / chain.producer_public_key_filename
+            ),
+            anchors={
+                name: replace(anchor, filename=str(external / anchor.filename))
+                for name, anchor in chain.anchors.items()
+            },
+        )
+
+    def no_openssl() -> None:
+        pytest.fail("base anchor binding must precede the OpenSSL preflight")
+
+    monkeypatch.setattr(release_chain._tsa, "_require_supported_openssl", no_openssl)
+    message = (
+        "configured anchor filename leaves the anchor directory"
+        if absolute_filenames
+        else "configured anchor was not materialized"
+    )
+    with TreeSnapshot.select(repo, base_oid) as base:
+        assert not base.entries(chain.anchor_relative.as_posix()).as_dict()
+        with pytest.raises(SnapshotError, match=message):
+            verify_base_release_chain(chain, base=base)
+
+
+def test_base_release_chain_shares_normalized_spec_with_anchor_binding(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chain = load_spec(repo / "verification/spec.py").verification.chain
+
+    class OncePath:
+        calls = 0
+
+        def __fspath__(self) -> str:
+            self.calls += 1
+            assert self.calls == 1
+            return chain.producer_public_key_filename
+
+    filename = OncePath()
+    configured = replace(chain, producer_public_key_filename=filename)
+    base_oid = commit_snapshot(repo, "base with matching anchors")
+    bound = []
+    original_digest = Materialization.anchor_set_sha256
+    original_verify = release_chain.verify_release_chain
+
+    def bind(materialized: Materialization, normalized: object) -> str:
+        bound.append(normalized)
+        return original_digest(materialized, normalized)
+
+    def verify(root: pathlib.Path, *, spec: object, **kwargs: object):
+        assert len(bound) == 1 and spec is bound[0]
+        assert spec.producer_public_key_filename == chain.producer_public_key_filename
+        return original_verify(root, spec=spec, **kwargs)
+
+    monkeypatch.setattr(Materialization, "anchor_set_sha256", bind)
+    monkeypatch.setattr(release_chain, "verify_release_chain", verify)
+    with TreeSnapshot.select(repo, base_oid) as base:
+        verification = verify_base_release_chain(configured, base=base)
+    assert verification.head is not None
+    assert filename.calls == 1
+
+
+@pytest.mark.parametrize("tree_anchors", ["absent", "invalid"])
+def test_base_release_chain_uses_callers_trusted_anchor_directory(
+    repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tree_anchors: str,
+) -> None:
+    chain = load_spec(repo / "verification/spec.py").verification.chain
+    external = tmp_path / "trusted-anchors"
+    shutil.copytree(repo / chain.anchor_relative, external)
+    if tree_anchors == "absent":
+        shutil.rmtree(repo / chain.anchor_relative)
+    else:
+        for path in (repo / chain.anchor_relative).iterdir():
+            path.write_bytes(b"the base tree is not the caller's trust material")
+    base_oid = commit_snapshot(repo, "base with untrusted anchors")
+    reads = []
+    original_read = release_chain._regular_file_bytes
+
+    def read(root: pathlib.Path, relative: pathlib.PurePosixPath, **kwargs: object):
+        if root.name in {"anchors", external.name}:
+            assert root == external
+            reads.append(relative.as_posix())
+        return original_read(root, relative, **kwargs)
+
+    def no_tree_binding(*args: object) -> str:
+        pytest.fail("caller trust must not bind the base tree's anchor set")
+
+    monkeypatch.setattr(release_chain, "_regular_file_bytes", read)
+    monkeypatch.setattr(Materialization, "anchor_set_sha256", no_tree_binding)
+    with TreeSnapshot.select(repo, base_oid) as base:
+        verification = verify_base_release_chain(chain, base=base, anchor_dir=external)
+    assert verification.head is not None
+    assert set(reads) == {chain.producer_public_key_filename} | {
+        anchor.filename for anchor in chain.anchors.values()
+    }
+
+
+def test_base_release_chain_forwards_pin_and_clock_options(repo: pathlib.Path) -> None:
+    chain = load_spec(repo / "verification/spec.py").verification.chain
+    base_oid = commit_snapshot(repo, "base with matching anchors")
+    wrong_pin = replace(chain, producer_spki_sha256="0" * 64)
+    with TreeSnapshot.select(repo, base_oid) as base:
+        with pytest.raises(ReleaseChainError, match="not code-pinned"):
+            verify_base_release_chain(wrong_pin, base=base)
+        verification = verify_base_release_chain(
+            wrong_pin, base=base, enforce_production_pins=False, clock_skew_seconds=0
+        )
+    assert verification.head is not None
+
+
+def test_base_release_chain_refuses_transforming_attributes_before_openssl(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chain = load_spec(repo / "verification/spec.py").verification.chain
+    (repo / ".gitattributes").write_text("releases/** filter=evil\n", encoding="utf-8")
+    base_oid = commit_snapshot(repo, "base with transforming release attributes")
+
+    def no_openssl() -> None:
+        pytest.fail("base attributes must be checked before the OpenSSL preflight")
+
+    monkeypatch.setattr(release_chain._tsa, "_require_supported_openssl", no_openssl)
+    with TreeSnapshot.select(repo, base_oid) as base:
+        with pytest.raises(SnapshotError) as expected:
+            base.refuse_transforming_attributes(base.entries("releases").as_dict().values())
+        with pytest.raises(SnapshotError) as caught:
+            verify_base_release_chain(chain, base=base)
+    assert str(caught.value) == str(expected.value)
+    assert "transforming attribute filter applies to protected path releases/" in str(
+        caught.value
+    )
 
 
 def test_observing_adds_no_anchor_reads(built: pathlib.Path, tmp_path: pathlib.Path) -> None:
@@ -459,9 +724,18 @@ def test_release_chain_validates_arguments_then_runs_its_path_guards(
 
     spec = load_spec(repo / "verification/spec.py").verification
     events: list[str] = []
+    anchor_path = repo.resolve() / spec.chain.anchor_relative
+    path_is_symlink = pathlib.Path.is_symlink
+
+    def observe_anchor_probe(path: pathlib.Path) -> bool:
+        if path == anchor_path:
+            events.append("anchors")
+        return path_is_symlink(path)
+
     monkeypatch.setattr(
         tsa, "_require_supported_openssl", lambda: events.append("openssl")
     )
+    monkeypatch.setattr(pathlib.Path, "is_symlink", observe_anchor_probe)
     monkeypatch.setattr(
         release_chain,
         "assert_no_symlinked_release_root",
@@ -485,7 +759,13 @@ def test_release_chain_validates_arguments_then_runs_its_path_guards(
         verify_state=False,
     )
     assert verification.releases == ()
-    assert events == ["openssl", "paths", "manifest-shape", "enumerate"]
+    assert events == [
+        "openssl",
+        "anchors",
+        "paths",
+        "manifest-shape",
+        "enumerate",
+    ]
 
     events.clear()
     with pytest.raises(
@@ -494,6 +774,24 @@ def test_release_chain_validates_arguments_then_runs_its_path_guards(
     ):
         verify_release_chain(repo, spec=spec.chain, clock_skew_seconds=-1)
     assert events == []
+
+
+def test_anchor_symlink_probe_precedes_the_release_root_refusal(
+    repo: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    spec = load_spec(repo / "verification/spec.py").verification
+    releases = repo / "releases"
+    actual_releases = tmp_path / "actual-releases"
+    shutil.move(releases, actual_releases)
+    releases.symlink_to(actual_releases, target_is_directory=True)
+
+    with pytest.raises(ReleaseChainError) as caught:
+        verify_release_chain(repo, spec=spec.chain)
+
+    assert str(caught.value) == (
+        "anchor path component is a symlink or reparse point: "
+        f"{releases}"
+    )
 
 
 def test_release_chain_routes_every_input_file_through_the_regular_reader(
@@ -526,6 +824,26 @@ def test_release_chain_routes_every_input_file_through_the_regular_reader(
             spec.chain.state_relative.name,
             spec.chain.prefix_relative.name,
         ]
+    )
+
+
+def test_component_spelling_uses_constant_time_listing_membership(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The per-component spelling check must not linearly scan its listing."""
+
+    class Listing(list[str]):
+        def __contains__(self, item: object) -> bool:
+            del item
+            raise AssertionError("list membership scanned the directory")
+
+    monkeypatch.setattr(os, "listdir", lambda _parent: Listing(["leaf"]))
+
+    release_chain._assert_component_spelled(
+        tmp_path,
+        "leaf",
+        ("leaf",),
+        pathlib.PurePosixPath("leaf"),
     )
 
 
@@ -1831,7 +2149,7 @@ def test_state_bytes_must_map_exact_strings_to_exact_bytes(
 
 PLATFORM_REFUSAL = (
     "state files cannot be read with secure descent on this platform "
-    "(os.open lacks dir_fd support); receipt requires a POSIX platform"
+    "(os.O_NOFOLLOW is unavailable); receipt requires a POSIX platform"
 )
 
 
@@ -1844,7 +2162,7 @@ def without_no_follow(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_the_custody_read_refuses_a_platform_without_no_follow(
     repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Binds S4-F6: the ``dir_fd`` requirement was documented as the append
+    """Binds S4-F6: the ``O_NOFOLLOW`` requirement was documented as the append
     gate's, but ``_regular_file_bytes`` is where it lives and this verifier is
     that function's other caller — so ``verify_release_chain`` stops on the
     same refusal, on the public path, with no append gate anywhere in the

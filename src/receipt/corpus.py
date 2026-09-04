@@ -378,6 +378,8 @@ class CorpusSpec:
     accepted_gate_tiers: frozenset[str]
     required_gates: frozenset[str]
     journal_row_capacity: int = MAX_JOURNAL_ROWS
+    # Repertoire selects admissible spellings; both choices use _path_fold's
+    # component-wise ASCII fold, never Unicode normalization or casefolding.
     name_repertoire: Literal["portable", "posix-bytes"] = "portable"
 
     def __post_init__(self) -> None:
@@ -429,6 +431,11 @@ class CorpusSpec:
                     "more portable characters (ASCII letters, digits, '.', "
                     f"'_' and '-'): {_quoted(suffix)}"
                 )
+            if suffix == "..":
+                raise CorpusError(
+                    "CorpusSpec content suffix cannot be the Git dot-dot "
+                    f"component: {_quoted(suffix)}"
+                )
         if type(self.required_attested_paths) is not frozenset:
             raise CorpusError("CorpusSpec required_attested_paths must be a frozenset")
         for path in sorted(self.required_attested_paths):
@@ -455,7 +462,11 @@ class CorpusSpec:
                 )
 
     def content_root_of(self, path: str) -> pathlib.PurePosixPath | None:
-        """Return the pinned root prefix after component-wise ASCII folding."""
+        """Return the pinned root prefix after component-wise ASCII folding.
+
+        Raise :class:`CorpusError` if ``path`` contains a component Git cannot
+        store.
+        """
 
         folded = _path_fold(path)
         for root in self.content_roots:
@@ -464,6 +475,12 @@ class CorpusSpec:
         return None
 
     def is_content_path(self, path: str) -> bool:
+        """Return whether ``path`` is content under this spec.
+
+        Raise :class:`CorpusError` if ``path`` contains a component Git cannot
+        store.
+        """
+
         if self.content_root_of(path) is None:
             return False
         return _has_pinned_suffix(path, self.content_suffixes)
@@ -879,9 +896,10 @@ def _short_name_carries_pinned_suffix(name: str, suffixes: tuple[str, ...]) -> b
     and keeps the two halves in the order they belong: where no pin can be
     carried by an alias there is no question, and no name is asked one.
 
-    Compared through :func:`_path_fold`, the key by which membership is
-    decided everywhere else in this module, so ``.YML`` and ``.yml`` are one
-    suffix here exactly as they are there.
+    The delegated helper compares the alias and pins after translating ASCII
+    bytes directly to lowercase. It performs no Unicode normalization or
+    casefolding, so ``.YML`` and ``.yml`` are one suffix by the same narrow
+    ASCII rule used for membership.
     """
 
     return short_name_carries_pinned_suffix(name, suffixes)
@@ -1340,7 +1358,12 @@ def _under(directory: str, name: str) -> str:
 
 
 def _path_fold(relative: str) -> str:
-    """Fold ASCII letters component-wise and preserve every other code point."""
+    """Fold ASCII letters per component and preserve every other code point.
+
+    This deliberately narrows 0.5.x's ``NFC(casefold)`` key: neither Unicode
+    normalization nor Unicode casefolding participates under either name
+    repertoire.
+    """
 
     try:
         return "/".join(ascii_fold_text(component) for component in relative.split("/"))

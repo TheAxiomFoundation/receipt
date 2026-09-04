@@ -469,6 +469,11 @@ def run_verification(
     violations are different: comparing history without pinning the candidate,
     presenting an anchor pin without first pinning the executable spec, or
     declaring two name repertoires raises :class:`ValueError`.
+
+    The 0.5.2 refusal of redirecting Git environment variables is deliberately
+    retained before snapshot selection. The underlying ``TreeSnapshot`` reader
+    remains invariant under those variables through its frozen Git environment
+    and explicit repository selection.
     """
 
     if not isinstance(spec, LoadedSpec):
@@ -802,7 +807,12 @@ def run_verification(
 
 
 def result_to_dict(result: VerifyResult) -> dict[str, Any]:
-    """Machine-readable verdict. Mirrors the text exactly, including its limits."""
+    """Machine-readable verdict, including the text's three object-store states.
+
+    ``objectStore: null`` means verification was not requested, a requested
+    run that did not complete carries ``requested: true`` with a null report,
+    and a completed run carries the measured report.
+    """
 
     def established_claim(item: PassResult) -> str:
         if item.name == "binding":
@@ -821,13 +831,15 @@ def result_to_dict(result: VerifyResult) -> dict[str, Any]:
     if result.base_commit is not None:
         assert result.base_tree is not None
         base = {"commit": result.base_commit, "tree": result.base_tree}
-    object_store: dict[str, int | float] | None = None
+    object_store: dict[str, Any] | None = None
     if result.object_store is not None:
         object_store = {
             "objects": result.object_store.objects,
             "storeKiB": result.object_store.store_kib,
             "seconds": result.object_store.seconds,
         }
+    elif result._object_store_requested:
+        object_store = {"requested": True, "report": None}
 
     not_established = [
         "that any declared gate actually passed",

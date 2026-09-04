@@ -29,6 +29,7 @@ import pytest
 
 from receipt.cli import EXIT_FAIL, EXIT_OK, EXIT_USAGE, main
 from receipt.sign import generate_signing_keypair, sign_payload
+from receipt.snapshot import TreeSnapshot
 from receipt.verify import VerifySpecError, load_spec
 
 from corpus_fixture import CONTENT, append_release, build_corpus
@@ -662,6 +663,13 @@ def test_requested_object_store_failure_is_not_rendered_as_not_requested(
     assert "objects requested; verification did not complete" in error
     assert "objects not requested" not in error
 
+    assert run(repo, "--verify-objects", "--json") == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["objectStore"] == {
+        "requested": True,
+        "report": None,
+    }
+
 
 def anchor_set_recomputed(repo: pathlib.Path) -> tuple[str, dict[str, str]]:
     """The recomputation an auditor would script, sharing no package code:
@@ -684,6 +692,62 @@ def anchor_set_recomputed(repo: pathlib.Path) -> tuple[str, dict[str, str]]:
         json.dumps(per_file, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     return combined, per_file
+
+
+def anchor_set_from_materialized_tree(
+    repo: pathlib.Path, destination: pathlib.Path
+) -> str:
+    """Compute the auditor pin through the same materialized-tree API as the run."""
+
+    chain = load_spec(repo / "verification/spec.py").verification.chain
+    prefixes = (
+        chain.release_root_relative,
+        chain.manifest_relative,
+        chain.state_relative,
+        chain.prefix_relative,
+        chain.anchor_relative,
+    )
+    with TreeSnapshot.select(repo, "HEAD") as snapshot:
+        with snapshot.materialize(
+            prefixes,
+            destination,
+            repertoire=chain.name_repertoire,
+        ) as materialized:
+            return materialized.anchor_set_sha256(chain)
+
+
+def test_matching_spec_and_anchor_pins_publish_full_custody(
+    repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    spec_path = repo / "verification/spec.py"
+    spec_digest = hashlib.sha256(spec_path.read_bytes()).hexdigest()
+    anchor_digest = anchor_set_from_materialized_tree(repo, tmp_path)
+    pins = (
+        "--expect-spec-sha256",
+        spec_digest,
+        "--expect-anchor-set",
+        anchor_digest,
+    )
+
+    assert run(repo, *pins) == EXIT_OK
+    text = capsys.readouterr().out
+    assert "the 2 auditor-pinned RFC 3161 authorities (alpha, beta)" in text
+    assert "Custody is under the anchor set" not in text
+    assert "anchor set is one the auditor trusts" not in text
+    assert "spec's code was trusted" not in text
+
+    assert run(repo, *pins, "--json") == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["scope"]["established"][0] == "custody of the release chain"
+    assert payload["chain"]["anchorSetSha256"] == anchor_digest
+    assert "that the anchor set is one the auditor trusts" not in (
+        payload["scope"]["notEstablished"]
+    )
+    assert "that the spec's code was trusted" not in (
+        payload["scope"]["notEstablished"]
+    )
 
 
 def test_the_json_verdict_names_the_anchor_set_in_force(
@@ -1113,6 +1177,25 @@ def test_pass_verdict_derives_the_witness_clause(
     assert "newest release" in out  # staleness is named, not implied away
 
 
+def test_default_verdict_keeps_the_witness_sentence_whole_before_custody(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The default first-contact paragraph keeps its principal sentence whole."""
+
+    assert run(repo) == EXIT_OK
+    lines = capsys.readouterr().out.split("VERDICT: PASS", 1)[1].splitlines()
+    anchor_set, _ = anchor_set_recomputed(repo)
+
+    assert lines[:6] == [
+        " — custody and corpus binding",
+        "  This proves the published rule files are exactly the bytes the loaded",
+        "  spec's producer key signed,",
+        "  and the 2 RFC 3161 authorities configured by that spec (alpha, beta)",
+        "  witnessed that each recorded prefix existed no later than those times.",
+        f"  Custody is under the anchor set {anchor_set} the verified tree carries.",
+    ]
+
+
 def test_a_verdict_with_no_witnesses_states_no_timing_claim(
     repo: pathlib.Path,
     capsys: pytest.CaptureFixture[str],
@@ -1416,7 +1499,7 @@ def test_refuses_a_symlinked_spec(
         ),
     ],
 )
-def test_pin_dependencies_are_parser_errors_before_the_spec_runs(
+def test_pin_dependencies_are_usage_errors_before_the_spec_runs(
     repo: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1427,17 +1510,34 @@ def test_pin_dependencies_are_parser_errors_before_the_spec_runs(
         raise AssertionError("the parser dependency must run first")
 
     monkeypatch.setattr("receipt.cli.load_spec", must_not_load)
-    with pytest.raises(SystemExit) as refusal:
-        main(
-            [
-                "verify",
-                "--spec",
-                str(repo / "verification/spec.py"),
-                *arguments,
-            ]
-        )
-    assert refusal.value.code == EXIT_USAGE
+    assert main(
+        [
+            "verify",
+            "--spec",
+            str(repo / "verification/spec.py"),
+            *arguments,
+        ]
+    ) == EXIT_USAGE
     assert message in capsys.readouterr().err
+
+
+def test_pin_dependency_usage_refusal_honors_json(
+    repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def must_not_load(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("the dependency refusal must run first")
+
+    monkeypatch.setattr("receipt.cli.load_spec", must_not_load)
+    assert run(repo, "--base-ref", "main", "--json") == EXIT_USAGE
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "failure": "--base-ref requires --expect-commit",
+        "passesCompleted": [],
+        "stage": "arguments",
+        "verdict": "FAIL",
+    }
 
 
 def test_spec_expectation_mismatch_is_an_exact_pre_execution_refusal(
@@ -1454,6 +1554,33 @@ def test_spec_expectation_mismatch_is_an_exact_pre_execution_refusal(
         f"spec {actual} is not the expected spec {expected}"
         in capsys.readouterr().err
     )
+
+
+def test_malformed_anchor_expectation_is_a_json_usage_refusal(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    spec_path = repo / "verification/spec.py"
+    spec_digest = hashlib.sha256(spec_path.read_bytes()).hexdigest()
+
+    assert run(
+        repo,
+        "--expect-spec-sha256",
+        spec_digest,
+        "--expect-anchor-set",
+        "NOTAHEX",
+        "--json",
+    ) == EXIT_USAGE
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "failure": (
+            "expected anchor-set SHA-256 must be a lowercase 64-character "
+            "hex digest"
+        ),
+        "passesCompleted": [],
+        "stage": "spec",
+        "verdict": "FAIL",
+    }
+    assert "verification aborted" not in captured.err
 
 
 def test_candidate_expectations_refuse_commit_before_tree_through_the_cli(

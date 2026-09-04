@@ -34,12 +34,13 @@ from receipt.corpus import (
     verify_corpus_binding as _verify_corpus_binding,
     verify_declarations,
 )
-from receipt.snapshot import TreeSnapshot
+from receipt.snapshot import SnapshotError, TreeSnapshot
 
 from corpus_fixture import (
     ATTESTED,
     CONTENT,
     JOURNAL_SCHEMA,
+    _commit_fixture,
     append_release,
     build_corpus,
     corpus_spec,
@@ -86,6 +87,8 @@ def _commit_worktree(root: pathlib.Path) -> str:
         _git(root, "init", "-q")
         _git(root, "config", "user.name", "Receipt Tests")
         _git(root, "config", "user.email", "receipt-tests@example.invalid")
+        _git(root, "config", "commit.gpgSign", "false")
+        _git(root, "config", "core.autocrlf", "false")
     _git(root, "add", "-A")
     _git(root, "commit", "-q", "--allow-empty", "-m", "corpus fixture")
     return _git(root, "rev-parse", "HEAD").decode("ascii").strip()
@@ -97,6 +100,14 @@ def _hash_blob(root: pathlib.Path, payload: bytes) -> str:
         .decode("ascii")
         .strip()
     )
+
+
+def _loose_object_path(root: pathlib.Path, object_id: str) -> pathlib.Path:
+    """Return an asserted loose-object path in one freshly initialized fixture."""
+
+    path = root / ".git" / "objects" / object_id[:2] / object_id[2:]
+    assert path.is_file(), f"fixture object is not loose: {object_id}"
+    return path
 
 
 def _commit_index_updates(
@@ -242,6 +253,99 @@ def test_binding_accepts_a_journal_that_describes_the_tree(
     assert verification.name_repertoire == name_repertoire
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "rules/scratch+1.txt",
+        "docs/My Notes.md",
+        "docs/règles.md",
+        "docs/COM1.txt",
+    ],
+)
+def test_posix_bytes_accepts_tree_names_outside_the_portable_repertoire(
+    tmp_path: pathlib.Path, path: str
+) -> None:
+    """The declared repertoire changes which committed UTF-8 names pass."""
+
+    write_tree(tmp_path)
+    oid = _commit_extra_blob(tmp_path, path.encode("utf-8"))
+    journal_bytes = render_journal(journal_rows())
+
+    verification = _verify_commit(
+        tmp_path,
+        oid,
+        journal_bytes,
+        spec=corpus_spec(name_repertoire="posix-bytes"),
+    )
+    assert verification.name_repertoire == "posix-bytes"
+
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(
+            tmp_path,
+            oid,
+            journal_bytes,
+            spec=corpus_spec(name_repertoire="portable"),
+        )
+    assert NOT_PORTABLE in str(caught.value)
+    assert path in str(caught.value)
+
+
+def test_posix_bytes_preserves_normalization_and_still_folds_ascii_case(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NFC and NFD stay distinct while ASCII-case siblings still merge."""
+
+    from receipt import corpus as corpus_module
+
+    composed = "rules/tax/règles.yaml"
+    decomposed = unicodedata.normalize("NFD", composed)
+    assert composed != decomposed
+    payload = "name: unicode spelling\n"
+    content = {**CONTENT, composed: payload, decomposed: payload}
+
+    write_tree(tmp_path)
+    _commit_worktree(tmp_path)
+    blob_oid = _hash_blob(tmp_path, payload.encode("utf-8"))
+    oid = _commit_index_updates(
+        tmp_path,
+        [
+            ("100644", blob_oid, composed.encode("utf-8")),
+            ("100644", blob_oid, decomposed.encode("utf-8")),
+        ],
+    )
+
+    validated_tree_names: list[str] = []
+    real_validate = corpus_module.validate_component_text
+
+    def recording_validate(value: str, **kwargs: object) -> str:
+        if str(kwargs.get("label", "")).startswith("tree entry "):
+            validated_tree_names.append(value)
+        return real_validate(value, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(corpus_module, "validate_component_text", recording_validate)
+    journal_bytes = render_journal(journal_rows(content=content))
+    spec = corpus_spec(name_repertoire="posix-bytes")
+    verification = _verify_commit(tmp_path, oid, journal_bytes, spec=spec)
+    assert {composed.rpartition("/")[2], decomposed.rpartition("/")[2]} <= set(
+        validated_tree_names
+    )
+    assert {entry.path for entry in verification.content} == set(content)
+
+    case_oid = _commit_index_updates(
+        tmp_path,
+        [
+            ("100644", blob_oid, b"misc/ASCII"),
+            ("100644", blob_oid, b"misc/ascii"),
+        ],
+    )
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(tmp_path, case_oid, journal_bytes, spec=spec)
+    assert str(caught.value) == (
+        "directory holds two entries a case-insensitive filesystem would merge: "
+        "'misc/ASCII' and 'misc/ascii'"
+    )
+
+
 def test_binding_requires_a_selected_tree_snapshot(tmp_path: pathlib.Path) -> None:
     with pytest.raises(CorpusError) as caught:
         _verify_corpus_binding(
@@ -300,6 +404,112 @@ def test_refuses_unsupported_committed_tree_shapes_under_each_repertoire(
         updates = [
             ("100644", blob_oid, b"misc/README"),
             ("100644", blob_oid, b"misc/ReadMe"),
+        ]
+    oid = _commit_index_updates(tmp_path, updates)
+
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(
+            tmp_path,
+            oid,
+            render_journal(journal_rows()),
+            spec=corpus_spec(name_repertoire=name_repertoire),
+        )
+    assert str(caught.value) == message
+
+
+@pytest.mark.parametrize("mode", ["120000", "160000"])
+def test_refuses_a_non_blob_at_an_attested_path(
+    tmp_path: pathlib.Path, mode: str
+) -> None:
+    """An exact attested path must select a regular blob in the tree."""
+
+    write_tree(tmp_path)
+    base_oid = _commit_worktree(tmp_path)
+    if mode == "120000":
+        object_id = _hash_blob(
+            tmp_path,
+            ATTESTED[".axiom/toolchain.toml"].encode("utf-8"),
+        )
+    else:
+        object_id = base_oid
+    oid = _commit_index_updates(
+        tmp_path,
+        [(mode, object_id, b".axiom/toolchain.toml")],
+    )
+
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(
+            tmp_path,
+            oid,
+            render_journal(journal_rows()),
+            spec=corpus_spec(),
+        )
+    assert str(caught.value) == (
+        "bound file is not a regular file: .axiom/toolchain.toml"
+    )
+
+
+def test_refuses_a_suffix_bearing_directory_under_a_content_root(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A tree whose own name carries a pinned suffix is not content."""
+
+    write_tree(tmp_path)
+    _commit_worktree(tmp_path)
+    blob_oid = _hash_blob(tmp_path, b"nested fixture\n")
+    oid = _commit_index_updates(
+        tmp_path,
+        [("100644", blob_oid, b"rules/tax/pipe.yaml/child.txt")],
+    )
+
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(
+            tmp_path,
+            oid,
+            render_journal(journal_rows()),
+            spec=corpus_spec(),
+        )
+    assert str(caught.value) == (
+        "content root contains a non-regular file: 'rules/tax/pipe.yaml'"
+    )
+
+
+@pytest.mark.parametrize("name_repertoire", ["portable", "posix-bytes"])
+@pytest.mark.parametrize(
+    ("shape", "message"),
+    [
+        (
+            "root-blobs",
+            "directory holds two entries a case-insensitive filesystem would "
+            "merge: 'README' and 'ReadMe'",
+        ),
+        (
+            "tree-and-blob",
+            "directory holds two entries a case-insensitive filesystem would "
+            "merge: 'misc/TREE' and 'misc/tree'",
+        ),
+    ],
+)
+def test_refuses_fold_equal_root_and_mixed_mode_siblings(
+    tmp_path: pathlib.Path,
+    name_repertoire: str,
+    shape: str,
+    message: str,
+) -> None:
+    """Root siblings and tree/blob siblings share the same ASCII fold screen."""
+
+    write_tree(tmp_path)
+    _commit_worktree(tmp_path)
+    blob_oid = _hash_blob(tmp_path, b"fold fixture\n")
+    if shape == "root-blobs":
+        updates = [
+            ("100644", blob_oid, b"README"),
+            ("100644", blob_oid, b"ReadMe"),
+        ]
+    else:
+        updates = [
+            ("100644", blob_oid, b"misc/TREE/child.txt"),
+            ("100644", blob_oid, b"misc/tree"),
         ]
     oid = _commit_index_updates(tmp_path, updates)
 
@@ -390,6 +600,100 @@ def test_binding_materializes_each_listing_path_once(tmp_path: pathlib.Path) -> 
     assert charged == expected_listing + expected_attested_lookups
 
 
+def test_translates_a_snapshot_error_from_the_tree_listing(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A subtree lost after selection fails through the listing translation."""
+
+    write_tree(tmp_path)
+    oid = _commit_worktree(tmp_path)
+    rules_oid = _git(tmp_path, "rev-parse", f"{oid}:rules").decode("ascii").strip()
+
+    with TreeSnapshot.select(tmp_path, oid) as snapshot:
+        _loose_object_path(tmp_path, rules_oid).unlink()
+        with pytest.raises(CorpusError) as caught:
+            _verify_corpus_binding(
+                snapshot,
+                render_journal(journal_rows()),
+                spec=corpus_spec(),
+            )
+    assert str(caught.value) == f"object {rules_oid} is unavailable"
+    assert type(caught.value.__cause__) is SnapshotError
+
+
+def test_translates_a_snapshot_error_from_listing_materialization(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A charged full path fails through the TreeListing.as_dict translation."""
+
+    from receipt import snapshot as snapshot_module
+
+    write_tree(tmp_path)
+    oid = _commit_worktree(tmp_path)
+    monkeypatch.setattr(snapshot_module, "MAX_PATH_BYTES_TOTAL", 0)
+
+    with TreeSnapshot.select(tmp_path, oid) as snapshot:
+        with pytest.raises(CorpusError) as caught:
+            _verify_corpus_binding(
+                snapshot,
+                render_journal(journal_rows()),
+                spec=corpus_spec(),
+            )
+    assert str(caught.value) == "tree paths exceed the snapshot budget of 0 bytes"
+    assert type(caught.value.__cause__) is SnapshotError
+
+
+def test_translates_a_snapshot_error_from_the_attested_lookup(
+    tmp_path: pathlib.Path,
+) -> None:
+    """An absent exact attested entry retains the corpus-level diagnostic."""
+
+    write_tree(tmp_path)
+    (tmp_path / ".axiom/toolchain.toml").unlink()
+
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path,
+            render_journal(journal_rows()),
+            spec=corpus_spec(),
+        )
+    assert str(caught.value) == (
+        "bound file is missing or not a regular file: .axiom/toolchain.toml"
+    )
+    assert type(caught.value.__cause__) is SnapshotError
+
+
+def test_translates_a_snapshot_error_from_the_digest_stream(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bound blob lost after listing fails through the digest translation."""
+
+    write_tree(tmp_path)
+    oid = _commit_worktree(tmp_path)
+    blob_oid = (
+        _git(tmp_path, "rev-parse", f"{oid}:rules/tax/rate.yaml")
+        .decode("ascii")
+        .strip()
+    )
+    blob_path = _loose_object_path(tmp_path, blob_oid)
+    real_digests = TreeSnapshot.digests
+
+    def deleting_digests(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        blob_path.unlink()
+        return real_digests(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(TreeSnapshot, "digests", deleting_digests)
+    with TreeSnapshot.select(tmp_path, oid) as snapshot:
+        with pytest.raises(CorpusError) as caught:
+            _verify_corpus_binding(
+                snapshot,
+                render_journal(journal_rows()),
+                spec=corpus_spec(),
+            )
+    assert str(caught.value) == f"object {blob_oid} is unavailable"
+    assert type(caught.value.__cause__) is SnapshotError
+
+
 def test_corpus_fixture_commit_controls_return_the_selected_oid(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -424,15 +728,64 @@ def test_corpus_fixture_commit_controls_return_the_selected_oid(
 
     uncommitted_root = tmp_path / "uncommitted"
     uncommitted_root.mkdir()
+    uncommitted_workspace = tmp_path / "uncommitted-tsa"
     assert (
         build_corpus(
             uncommitted_root,
-            tmp_path / "uncommitted-tsa",
+            uncommitted_workspace,
             commit=False,
         )
         is None
     )
     assert not (uncommitted_root / ".git").exists()
+    journal_before = (uncommitted_root / "receipt/corpus-journal.jsonl").read_bytes()
+    manifests_before = tuple((uncommitted_root / "releases/manifests").iterdir())
+
+    with pytest.raises(ValueError) as caught:
+        append_release(
+            uncommitted_root,
+            uncommitted_workspace,
+            content=CONTENT,
+        )
+    assert str(caught.value) == (
+        "append_release(commit=True) cannot follow build_corpus(commit=False)"
+    )
+    assert (uncommitted_root / "receipt/corpus-journal.jsonl").read_bytes() == (
+        journal_before
+    )
+    assert tuple((uncommitted_root / "releases/manifests").iterdir()) == (
+        manifests_before
+    )
+
+
+def test_commit_helpers_override_hostile_global_git_config(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fixture commits neither sign nor rewrite bytes under hostile globals."""
+
+    global_config = tmp_path / "global.gitconfig"
+    global_config.write_text(
+        "[commit]\n\tgpgSign = true\n[core]\n\tautocrlf = true\n"
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+    payload = b"alpha\r\nbeta\r\n"
+
+    worktree_root = tmp_path / "worktree-helper"
+    worktree_root.mkdir()
+    (worktree_root / "payload.txt").write_bytes(payload)
+    worktree_oid = _commit_worktree(worktree_root)
+    assert _git(worktree_root, "show", f"{worktree_oid}:payload.txt") == payload
+
+    fixture_root = tmp_path / "fixture-helper"
+    fixture_root.mkdir()
+    (fixture_root / "payload.txt").write_bytes(payload)
+    fixture_oid = _commit_fixture(
+        fixture_root,
+        "hostile config fixture",
+        initialize=True,
+    )
+    assert _git(fixture_root, "show", f"{fixture_oid}:payload.txt") == payload
 
 
 def test_refuses_a_content_file_edited_after_witnessing(tmp_path: pathlib.Path) -> None:
@@ -442,6 +795,26 @@ def test_refuses_a_content_file_edited_after_witnessing(tmp_path: pathlib.Path) 
         verify_corpus_binding(
             tmp_path, render_journal(journal_rows()), spec=corpus_spec()
         )
+
+
+def test_refuses_an_attested_file_edited_after_witnessing(
+    tmp_path: pathlib.Path,
+) -> None:
+    write_tree(tmp_path)
+    path = ".axiom/toolchain.toml"
+    tampered = '[toolchain]\ncorpus_release = "tampered"\n'
+    (tmp_path / path).write_text(tampered)
+
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path,
+            render_journal(journal_rows()),
+            spec=corpus_spec(),
+        )
+    assert str(caught.value) == (
+        f"attested file {path!r} does not match its witnessed digest: tree has "
+        f"{sha256_text(tampered)}, journal binds {sha256_text(ATTESTED[path])}"
+    )
 
 
 def test_refuses_an_unlisted_content_file(tmp_path: pathlib.Path) -> None:
@@ -558,6 +931,26 @@ def test_refuses_an_attested_path_the_spec_requires_but_the_journal_omits(
     rows = reindex([row for row in journal_rows() if row.get("kind") != "attested"])
     with pytest.raises(CorpusError, match="does not attest a path the pinned spec"):
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_required_attestation_precedes_a_content_digest_mismatch(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Completeness is checked before the combined bound-file digest stream."""
+
+    write_tree(tmp_path)
+    rows = [row for row in journal_rows() if row.get("kind") != "attested"]
+    for row in rows:
+        if row.get("path") == "rules/benefit/amount.yaml":
+            row["sha256"] = "0" * 64
+    reindex(rows)
+
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+    assert str(caught.value) == (
+        "the witnessed journal does not attest a path the pinned spec requires: "
+        "'.axiom/toolchain.toml'"
+    )
 
 
 def test_refuses_a_required_gate_the_journal_omits(tmp_path: pathlib.Path) -> None:
@@ -967,6 +1360,24 @@ def test_the_spec_pins_a_suffix_by_one_rule_or_refuses_it() -> None:
     # The five shapes the sixteen-character grammar took away, given back.
     for suffix in (".tar.gz", ".ssxx", ".a-b", "._", "." + "y" * 20):
         assert corpus_spec(content_suffixes=(suffix,)).content_suffixes == (suffix,)
+
+
+def test_spec_refuses_the_dot_dot_content_suffix_at_construction() -> None:
+    with pytest.raises(CorpusError) as caught:
+        corpus_spec(content_suffixes=("..",))
+    assert str(caught.value) == (
+        "CorpusSpec content suffix cannot be the Git dot-dot component: '..'"
+    )
+
+
+@pytest.mark.parametrize("predicate", ["content_root_of", "is_content_path"])
+def test_content_predicates_raise_for_an_invalid_git_component(
+    predicate: str,
+) -> None:
+    spec = corpus_spec()
+    with pytest.raises(CorpusError) as caught:
+        getattr(spec, predicate)("rules/../x.yaml")
+    assert str(caught.value) == "tree entry name is a dot component: b'..'"
 
 
 def test_the_spec_refuses_a_content_root_outside_the_portable_repertoire() -> None:
@@ -1867,9 +2278,11 @@ def test_refuses_a_lone_surrogate_in_gate_evidence(tmp_path: pathlib.Path) -> No
 def test_refuses_a_lone_surrogate_in_a_journal_path(tmp_path: pathlib.Path) -> None:
     """A path carrying a lone surrogate cannot be looked for at all.
 
-    ``os.lstat`` raises ``UnicodeEncodeError`` on it, a ``ValueError`` that no
-    ``OSError`` handler in this module sees, so without the screen the row
-    escaped as an unclassified exception instead of a refusal that names it.
+    On the filesystem walk this module no longer makes, ``os.lstat`` raised
+    ``UnicodeEncodeError`` on it, a ``ValueError`` no ``OSError`` handler saw,
+    so without the screen the row escaped as an unclassified exception; the
+    tree listing never looks such a path up, and the screen refuses the row
+    by name before any lookup.
 
     Binds the policy for the message: a lone surrogate is outside the
     portable repertoire, so the refusal is the portable-name one and the
@@ -2933,16 +3346,14 @@ def test_refuses_a_tree_entry_whose_name_windows_would_strip(
     ``rules/tax/notes.yaml.`` opens ``rules/tax/notes.yaml`` there. The two
     spellings are not fold-equal, so no fold key pairs them, and a declared
     path spelled either way has been refused since round three — but the
-    entry the *tree* carries was never asked. A file emitted under the dotted
-    spelling is not content by suffix, is skipped by the sweep, and answers
-    to a content name on the filesystem this module's whole portability model
-    is about.
+    entry the *tree* carries was never asked. A blob committed under the
+    dotted spelling is not content by suffix, is omitted from the derived
+    content set, and answers to a content name on the checkout filesystem
+    this module's portability claim is about.
 
-    The name is injected through the sweep's listing rather than written:
-    what the verifier has to hold against is a filesystem that emits the
-    name, and injecting it makes the test say the same thing on every host.
-    Without the screen the entry falls through to the ``lstat``, which fails,
-    and the refusal is the non-regular-file one instead.
+    The name is committed through a raw index entry, so the authenticated
+    listing contains it even when the host checkout cannot. Without the
+    screen it remains an ordinary non-content blob and verification passes.
 
     Binds the policy for the message: the trailing period is the one Win32
     alias rule the portable repertoire does not subsume, so it is one of the
@@ -3445,16 +3856,15 @@ def test_refuses_a_tombstone_listing_entry_a_filesystem_may_ignore(
 
     A tombstone is honoured when no fold-equal spelling survives in a
     listing. ``apply-manifest.jso\\u200dn`` is not fold-equal to
-    ``apply-manifest.json`` here — the joiner survives NFC and case folding
-    — so the bucket lookup misses it and the verdict names the path as
+    ``apply-manifest.json`` here — the joiner survives the ASCII-only fold —
+    so the bucket lookup misses it and the verdict names the path as
     removed. On HFS+ that entry *is* the removed path: the file the journal
     says is gone still answers to the name it was retired under.
 
-    The entry is injected into the listing rather than written, for the
-    reason ``_late_survivor_scandir`` gives: what has to be held against is
-    a filesystem that emits the name, and injecting it says the same thing
-    on every host. Without the screen this verification passes and reports
-    ``retired/apply-manifest.json`` under removedPaths.
+    The survivor is written and committed before selecting the snapshot, so
+    the tombstone index reads it from the authenticated flat tree listing.
+    Without the repertoire screen this verification passes and reports
+    ``retired/apply-manifest.json`` under ``removed_paths``.
 
     Binds the policy for the message: the tombstone listing is screened by
     the same one screen every other listing is.
@@ -4005,29 +4415,17 @@ def test_refuses_an_unscreened_sibling_of_a_bound_component(
     sibling: str,
     why: str,
 ) -> None:
-    """Binds S5R4-F1: the sibling scan compared names it never screened.
+    """Binds S5R4-F1: every name in the committed listing is screened.
 
-    S5R3-F3 made this check consume the whole listing and refuse a sibling
-    that folds onto the bound component. What it did not do is screen the
-    entries it was handed, and the fold key answers exactly one class of
-    equivalence — two spellings that differ in case. A spelling a *lookup*
-    collapses onto the bound name without collapsing under the fold walked
-    straight through: a POSIX tree holding both ``.axiom/toolchain.toml``
-    and ``.axiom/toolchain.toml.`` passes, because the exact spelling is
-    present and the sibling's fold key differs, while Win32 strips the
-    trailing period before it resolves the name and hands back whichever of
-    the two it stores — so the witnessed digest covers a file the auditor
-    cannot identify. A trailing space is the same story with the other
-    character Win32 strips.
+    The raw tree holds both ``.axiom/toolchain.toml`` and a sibling ending in
+    a period or space. Their ASCII fold keys differ, but Win32 collapses the
+    sibling onto the attested spelling before lookup, so an exact attested
+    lookup alone cannot make the checkout unambiguous.
 
-    The portable-name screen is what answers both, and it is the screen
-    every other listing in this module already runs. Without it this
-    verification returns a CorpusVerification over the corpus, on the host
-    where the two names coexist and on the host where they do not.
-
-    The sibling is injected into the listing rather than written, so the
-    test says the same thing wherever it runs — including on a host whose
-    filesystem refuses to store the name at all.
+    The sibling is committed through a raw index entry, so the authenticated
+    listing contains it even on a host that cannot check the name out. The
+    portable repertoire screens it before attested lookup; without that
+    screen the extra non-content blob is ignored and verification passes.
     """
 
     write_tree(tmp_path)
@@ -4083,18 +4481,13 @@ def test_refuses_a_required_attested_path_the_directory_does_not_spell(
 def test_a_content_file_found_by_its_spelled_name_still_verifies(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds S5R2-F1, the other side: the sweep already spells its own names.
+    """Binds S5R2-F1: exact committed tree keys decide content membership.
 
-    Every content path in the journal is compared against a set the walk
-    built out of ``os.scandir`` names, so a content file that verifies is one
-    the listing emitted under exactly that spelling. That is why the spelling
-    check is asked of attested paths only: asking it of content too would
-    answer a question already answered, at one listing per component per
-    file, which for a wide content directory is quadratic and unbudgeted.
-
-    Both halves are asserted — an ordinary corpus verifies, and a content
-    file whose on-disk spelling differs from the bound one is refused by the
-    sweep itself, on any host, with the spelling walk never consulted.
+    Every journal content path is compared with the content set derived from
+    one authenticated flat tree listing. An ordinary corpus therefore passes
+    with its exact keys, while replacing one committed key by a case-varied
+    raw index entry leaves that entry unbound and refuses it during membership
+    equality; no host directory walk or separate spelling pass participates.
 
     This test passes with the fix disabled, which is the point.
     """
@@ -4138,7 +4531,8 @@ def test_refuses_a_tombstone_survivor_windows_strips_to_the_tombstoned_name(
     ``retired/gone.`` and ``retired/gone `` open ``retired/gone`` on Win32,
     which removes a trailing dot or space from a component before the
     lookup. Neither of the two questions a tombstone asks can see that: the
-    exact ``os.lstat`` of ``retired/gone`` misses on POSIX, and the fold key
+    exact lookup of ``retired/gone`` (once an ``os.lstat``, now the listing's
+    exact index) misses on POSIX, and the fold key
     of ``gone.`` is not the fold key of ``gone``, so the survivor sits in a
     different bucket from the one the search reads. Both answered "absent",
     the verdict named the path under removedPaths, and the file still opened
@@ -4772,22 +5166,14 @@ def test_the_device_table_is_exactly_what_its_two_sources_say() -> None:
 def test_a_real_aliasing_root_spelling_keeps_the_root_component_refusal(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds S5R2-F1, adversarially: the generic refusal must not preempt.
+    """A committed root alias keeps the path-rich component refusal.
 
-    S5R2-F1 binds every bound path component to the spelling its directory
-    emits, and the pinned content root's own components pass through the
-    same walk. On a case-insensitive host that made the generic "not spelled
-    by its directory" refusal fire for a tree holding ``RULES/`` under a
-    ``rules`` pin — preempting ``_assert_no_aliasing_root_component``, which
-    asks the same question a line later and names the entry that aliases the
-    pinned spelling. The existing test for that wording injects a phantom
-    entry into the listing and so never exercised the real case.
-
-    The content-root walk asks the symlink question and not the spelling
-    one, because the check a line later says more. This asserts the refusal
-    an auditor actually gets, following the host: where the pinned spelling
-    resolves to the differently-spelled directory, the aliasing refusal
-    names it; where it does not, the root is simply absent.
+    The fixture commits the spelling produced by renaming ``rules`` to
+    ``RULES``. ``_assert_content_root_spellings`` reads the authenticated root
+    listing before content membership: when the listing carries ``RULES`` it
+    names that fold-equal entry, and when the host did not record the distinct
+    spelling the pinned root is absent. No live host resolution or separate
+    component-spelling walk participates in the verdict.
     """
 
     write_tree(tmp_path)

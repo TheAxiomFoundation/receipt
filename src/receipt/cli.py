@@ -778,10 +778,11 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
             # closes on what the signature alone proves, and the absence is
             # said out loud rather than rendered as a count of zero.
             timing = "  This verdict makes no witnessed timing claim"
+        anchor_set_sentence: str | None = None
         if not result._anchor_set_pinned:
             anchor_set = result.anchor_set_sha256
             if anchor_set is not None:
-                lines.append(
+                anchor_set_sentence = (
                     "  Custody is under the anchor set "
                     f"{rendered(anchor_set)} the verified tree carries."
                 )
@@ -795,9 +796,14 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
                 "  and every release object present at the supplied base "
                 "reference is"
             )
-            lines.append("  byte- and mode-identical in this tree. It does")
+            lines.append("  byte- and mode-identical in this tree.")
         else:
             lines.append(f"{timing}.")
+        if anchor_set_sentence is not None:
+            lines.append(anchor_set_sentence)
+        if history is not None:
+            lines.append("  It does")
+        else:
             lines.append(
                 "  It does NOT prove the history was never rewritten — a "
                 "producer holding"
@@ -1678,20 +1684,46 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command != "verify":  # pragma: no cover - argparse enforces this
         parser.error(f"unknown command {args.command!r}")
 
-    if args.base_ref is not None and args.expect_commit is None:
-        parser.error("--base-ref requires --expect-commit")
-    if args.expect_anchor_set is not None and args.expect_spec_sha256 is None:
-        parser.error("--expect-anchor-set requires --expect-spec-sha256")
-
     # From here down the contract is: with --json, at most one JSON object
     # bearing a "verdict" key is printed on every path — spec refusals, root
     # refusals, an aborted run, even a result that cannot be rendered — and
     # the exit code carries the verdict wherever the stream will not take
     # bytes. Zero objects where the emission guard refuses stdout, and two
     # where a write completes and the flush after it fails; the module
-    # docstring says what each of those looks like. argparse's own exits,
-    # before --json is knowable, carry none either.
+    # docstring says what each of those looks like. Only failures raised inside
+    # parse_args(), before this boundary makes --json knowable, use argparse's
+    # stderr-only exit instead.
     as_json = bool(args.json)
+
+    if args.base_ref is not None and args.expect_commit is None:
+        return _refuse(
+            as_json,
+            "arguments",
+            "--base-ref requires --expect-commit",
+            EXIT_USAGE,
+        )
+    if args.expect_anchor_set is not None and args.expect_spec_sha256 is None:
+        return _refuse(
+            as_json,
+            "arguments",
+            "--expect-anchor-set requires --expect-spec-sha256",
+            EXIT_USAGE,
+        )
+
+    if args.expect_anchor_set is not None and (
+        len(args.expect_anchor_set) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in args.expect_anchor_set
+        )
+    ):
+        return _refuse(
+            as_json,
+            "spec",
+            "expected anchor-set SHA-256 must be a lowercase 64-character "
+            "hex digest",
+            EXIT_USAGE,
+        )
 
     try:
         loaded_spec = load_spec(

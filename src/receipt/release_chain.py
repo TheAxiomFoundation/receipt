@@ -12,6 +12,10 @@ to lock out a concurrent writer. Callers that need a verdict about a commit use
 ``run_verification`` or the append gate, which select immutable git objects and
 hand this function a private materialization. Release-history comparison is
 likewise over two entered :class:`receipt.snapshot.TreeSnapshot` instances.
+This directory verifier performs no Git reads, so redirecting Git environment
+variables cannot change its verdict; ``run_verification`` and
+``verify_append_gate`` retain that refusal before their snapshot reads. Its
+three subprocess call sites invoke OpenSSL only.
 
 The cryptographic and serialization behavior remains gated against the
 PolicyEngine/ledger source recorded in
@@ -475,18 +479,17 @@ def producer_signature_path_for_manifest(path: pathlib.Path) -> pathlib.Path:
 def assert_manifest_directory_regular(root: pathlib.Path, spec: ChainSpec) -> None:
     """Decide what the manifest path *is*, for a caller about to ask if it has one.
 
-    ``_enumerate_manifest_files`` below answers this for itself, but only once
-    something has decided to enumerate. A caller that decides whether a chain
-    exists by asking the filesystem — ``append_gate``'s push path, whose
-    ``initialized`` is ``manifest_directory.is_dir() and any(iterdir())`` —
-    gets ``False`` for every way the path can be something other than a
-    directory: a tracked 100644 blob standing where the manifest directory
-    was, an empty untracked symlink there, a dangling one. Each of those is
-    then "this tree has no chain", which is an acceptance, and the enumeration
-    that would have said otherwise never runs. Nothing else on that path says
-    it either: the release root's walk stops one component short of this leaf,
-    and the root's index scan reconciles a tracked blob here with the walk that
-    finds a regular file, which is exactly what it is.
+    ``verify_release_chain`` calls this guard itself before enumeration, after
+    the configured path walk has bound the manifest leaf's spelling but
+    deliberately left its type to this check. The append gate's push path also
+    calls it before asking whether a chain is initialized. Without that guard,
+    ``manifest_directory.is_dir() and any(iterdir())`` gets ``False`` for every
+    way the path can be something other than a directory: a 100644 blob
+    standing where the manifest directory was, an empty symlink there, or a
+    dangling one. Each would become "this tree has no chain", and the
+    enumeration that says otherwise would never run. The configured path walk
+    reaches this leaf to bind its spelling but deliberately leaves its type to
+    this check.
 
     So the type is decided first, in the enumeration's own words and for the
     same three shapes — an ``lstat``, so a symlink is not a directory here
@@ -498,13 +501,13 @@ def assert_manifest_directory_regular(root: pathlib.Path, spec: ChainSpec) -> No
     Absence is the only thing that returns, and it is asked component by
     component so that it can be told apart from the two facts that used to be
     folded into it. One ``lstat`` of the whole path answers ``ENOTDIR`` when an
-    *ancestor* is a regular file — a release root that is an untracked blob,
+    *ancestor* is a regular file — a release root that is a blob,
     or any component of a multi-component manifest path — and ``EACCES`` when
     an ancestor is unsearchable, and catching ``OSError`` turned both into "no
     manifest directory here". On the push path that is an acceptance with no
-    chain: ``initialized`` is false, nothing is enumerated, the index scan has
-    no entry under an untracked root to object to, and ``verify_release_chain``
-    is never called, while the commit under review may carry the whole chain.
+    chain: ``initialized`` is false, nothing is enumerated, and
+    ``verify_release_chain`` is never called, while the commit under review may
+    carry the whole chain.
 
     So the components are walked. ``FileNotFoundError`` at any of them is
     absence — nothing stands there, so nothing stands at the leaf either, and
@@ -1343,8 +1346,8 @@ def _assert_component_spelled(
     normalisation-insensitive filesystem answers about a directory this
     package never named. ``releases`` resolves to a ``Releases`` on disk, every
     check that follows reads that directory, and the verdict is about a
-    release tree whose name is not the one the spec pins or the one the index
-    records. The directory's own listing is the question that does not go
+    release tree whose name is not the exact one the spec pins. The directory's
+    own listing is the question that does not go
     through resolution: a directory holds the spelling it holds, and a
     component that resolves but is not in the listing is a component this
     verifier reached by a name the filesystem folded onto another.
@@ -1388,10 +1391,15 @@ def _assert_component_spelled(
     ahead of the read they guard, so either refusal stands where a pre-existing
     refusal about the content behind that name would have; ``append_gate``'s
     module docstring states that with the cases measured.
+
+    Scaling: the parent listing is rebuilt for every file read, so a
+    manifest directory of N entries costs N listings, quadratic in N and
+    bounded by ``MAX_RELEASE_INDEX``; reusing one listing within an owned
+    materialization is a later optimization (GPT-6 Astra, round 2).
     """
 
     try:
-        names = os.listdir(parent)
+        names = set(os.listdir(parent))
     except OSError as exc:
         if exc.errno in {errno.ENOENT, errno.ENOTDIR}:
             # There is no directory here to withhold a listing: the parent is
@@ -1549,13 +1557,15 @@ def _regular_file_bytes(
     bound before the leaf is opened once with ``O_NOFOLLOW | O_NONBLOCK``.
     The opened descriptor must still name the regular inode approved by the
     walk. This is deliberately a read-once directory contract, not a lock
-    against a concurrent writer.
+    against a concurrent writer. ``O_NOFOLLOW`` is mandatory even for private
+    materializations, so commit-addressed verification retains the POSIX
+    requirement.
     """
 
     if not getattr(os, "O_NOFOLLOW", 0):
         raise ReleaseChainError(
             "state files cannot be read with secure descent on this platform "
-            "(os.open lacks dir_fd support); receipt requires a POSIX platform"
+            "(os.O_NOFOLLOW is unavailable); receipt requires a POSIX platform"
         )
     if relative.is_absolute():
         path = pathlib.Path(relative)
@@ -1566,6 +1576,7 @@ def _regular_file_bytes(
         current = root
         components = relative.parts
     missing = nonregular or f"required state file is missing or non-regular: {path}"
+    # Four non-state callers omit replaced=, so they report a state file here.
     changed = replaced or f"required state file was replaced while being read: {path}"
     approved: os.stat_result | None = None
     walked: tuple[str, ...] = ()
@@ -2213,30 +2224,47 @@ def verify_base_release_chain(
     spec: ChainSpec,
     *,
     base: TreeSnapshot,
+    anchor_dir: pathlib.Path | None = None,
+    enforce_production_pins: bool = True,
+    clock_skew_seconds: int = DEFAULT_CLOCK_SKEW_SECONDS,
 ) -> ChainVerification:
-    """Materialize and verify one entered base snapshot's release chain."""
+    """Materialize and verify one entered base snapshot's release chain.
 
+    By default every configured anchor must belong to the materialized tree.
+    An explicit ``anchor_dir`` supplies the caller's trust material instead,
+    as the append gate requires; those anchors are not bound to the base tree.
+    """
+
+    normalized = _normalized_spec(spec)
     prefixes = (
-        spec.release_root_relative,
-        spec.manifest_relative,
-        spec.state_relative,
-        spec.prefix_relative,
-        spec.anchor_relative,
+        normalized.release_root_relative,
+        normalized.manifest_relative,
+        normalized.state_relative,
+        normalized.prefix_relative,
+        normalized.anchor_relative,
     )
     with tempfile.TemporaryDirectory(prefix="receipt-release-base-") as name:
         destination = pathlib.Path(name)
         with base.materialize(
             prefixes,
             destination,
-            repertoire=spec.name_repertoire,
+            repertoire=normalized.name_repertoire,
         ) as materialized:
+            base.refuse_transforming_attributes(materialized.entries.values())
+            if anchor_dir is None:
+                materialized.anchor_set_sha256(normalized)
             return verify_release_chain(
                 materialized.path,
-                spec=spec,
-                anchor_dir=materialized.path / spec.anchor_relative,
+                spec=normalized,
+                anchor_dir=(
+                    materialized.path / normalized.anchor_relative
+                    if anchor_dir is None
+                    else anchor_dir
+                ),
                 require_chain=True,
                 verify_state=True,
-                enforce_production_pins=True,
+                enforce_production_pins=enforce_production_pins,
+                clock_skew_seconds=clock_skew_seconds,
             )
 
 

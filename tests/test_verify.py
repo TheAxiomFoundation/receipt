@@ -429,6 +429,7 @@ def test_run_verification_composes_one_normalized_tree_subject(
         "storeKiB": 23,
         "seconds": 0.25,
     }
+    assert payload["scope"]["established"][1] == "custody of the release chain"
     assert (
         f"binding of the witnessed journal to tree {CANDIDATE_TREE[:12]}"
         in payload["scope"]["established"]
@@ -557,6 +558,10 @@ def test_object_store_refusal_keeps_the_requested_failure_shape(
     assert result.object_store is None
     assert result._object_store_requested is True
     assert result.passes[0].failure == message
+    assert result_to_dict(result)["objectStore"] == {
+        "requested": True,
+        "report": None,
+    }
 
 
 def test_unpinned_spec_anchor_field_is_a_producer_proposal(

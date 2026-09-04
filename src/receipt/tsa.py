@@ -1195,7 +1195,7 @@ def _openssl_version_requirement() -> tuple[bool, str, str | None]:
 
 @functools.cache
 def _require_supported_openssl() -> None:
-    """Refuse, once per process, an ``openssl`` this module cannot rely on.
+    """Probe once per process for an ``openssl`` this package can rely on.
 
     Loading any trust bundle counts a pinned root's certificates with
     ``openssl storeutl``, which LibreSSL does not have.  Without this a
@@ -1216,12 +1216,15 @@ def _require_supported_openssl() -> None:
     ``-CAfile`` loads.
 
     Cached because it is a property of the machine and not of the input.  Run
-    from ``_certificate_count``, so that no path to a count can skip it, and
-    from the top of ``_load_trust_bundle``, so that the refusal reaches an
-    auditor as itself rather than wrapped in that function's message about an
-    anchor's root material.  A missing ``openssl`` raises the ported
-    "openssl is required to verify RFC 3161 tokens" from ``_run_openssl``,
-    which is left to propagate.
+    from ``_certificate_count``, so that no path to a count can skip it, from
+    the top of ``_load_trust_bundle``, so that the refusal reaches an auditor
+    as itself rather than wrapped in that function's message about an anchor's
+    root material, and from ``release_chain.verify_release_chain`` before any
+    path access, so the public directory verifier carries the same floor.  A
+    missing ``openssl`` raises the ported "openssl is required to verify RFC
+    3161 tokens" inside ``_run_openssl``; ``_openssl_version_requirement``
+    catches and caches that refusal text, and this function re-raises it on
+    each call without probing the command again.
 
     ``tests/test_tsa.py`` binds the parser one banner at a time by
     substituting the answer to ``openssl version``, which says what this
