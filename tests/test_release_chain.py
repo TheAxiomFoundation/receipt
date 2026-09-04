@@ -300,6 +300,27 @@ def test_base_release_chain_materializes_the_entered_snapshot(
     assert verification.head is not None
 
 
+def test_base_release_chain_materializes_anchors_outside_the_release_root(
+    repo: pathlib.Path,
+) -> None:
+    spec = load_spec(repo / "verification/spec.py").verification
+    external_anchors = repo / "trust" / "anchors"
+    external_anchors.parent.mkdir()
+    shutil.move(repo / spec.chain.anchor_relative, external_anchors)
+    chain = replace(
+        spec.chain,
+        anchor_relative=pathlib.PurePosixPath("trust/anchors"),
+    )
+    base_oid = commit_snapshot(repo, "base with standalone anchors")
+
+    shutil.rmtree(repo / "releases")
+    shutil.rmtree(repo / "trust")
+    with TreeSnapshot.select(repo, base_oid) as base:
+        verification = verify_base_release_chain(chain, base=base)
+
+    assert verification.head is not None
+
+
 def test_observing_adds_no_anchor_reads(built: pathlib.Path, tmp_path: pathlib.Path) -> None:
     """Digest observation rides the same regular-file reads as default mode."""
 

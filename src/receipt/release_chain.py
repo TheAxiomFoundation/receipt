@@ -2221,6 +2221,7 @@ def verify_base_release_chain(
         spec.manifest_relative,
         spec.state_relative,
         spec.prefix_relative,
+        spec.anchor_relative,
     )
     with tempfile.TemporaryDirectory(prefix="receipt-release-base-") as name:
         destination = pathlib.Path(name)
