@@ -2749,6 +2749,51 @@ def test_refuses_a_tree_file_whose_short_name_alias_would_be_content(
     )
 
 
+@pytest.mark.parametrize("shape", ["symlink", "directory"])
+@pytest.mark.parametrize("name_repertoire", ["portable", "posix-bytes"])
+def test_short_name_suffix_screen_covers_every_tree_entry_kind_in_portable(
+    tmp_path: pathlib.Path,
+    shape: str,
+    name_repertoire: str,
+) -> None:
+    """A non-blob cannot evade portable 8.3 screening by its entry mode."""
+
+    write_tree(tmp_path)
+    _commit_worktree(tmp_path)
+    blob_oid = _hash_blob(tmp_path, b"shape fixture\n")
+    path = "rules/hidden.ymlx"
+    if shape == "symlink":
+        updates = [("120000", blob_oid, path.encode())]
+    else:
+        updates = [("100644", blob_oid, f"{path}/child.txt".encode())]
+    oid = _commit_index_updates(tmp_path, updates)
+    spec = corpus_spec(
+        content_suffixes=(".yaml", ".yml"),
+        name_repertoire=name_repertoire,
+    )
+
+    if name_repertoire == "posix-bytes":
+        verification = _verify_commit(
+            tmp_path,
+            oid,
+            render_journal(journal_rows()),
+            spec=spec,
+        )
+        assert verification.name_repertoire == "posix-bytes"
+    else:
+        with pytest.raises(CorpusError) as caught:
+            _verify_commit(
+                tmp_path,
+                oid,
+                render_journal(journal_rows()),
+                spec=spec,
+            )
+        assert str(caught.value) == (
+            "content root contains a file whose short-name alias would carry a "
+            f"pinned suffix: {path!r}"
+        )
+
+
 def _refuses_short_name_alias(tmp_path: pathlib.Path, name: str) -> None:
     """Write ``rules/<name>`` and assert the short-name screen refuses it."""
 

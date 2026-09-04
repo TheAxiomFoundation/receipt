@@ -1623,7 +1623,6 @@ def _content_entries_from_listing(
             if not carries_suffix:
                 if (
                     spec.name_repertoire == "portable"
-                    and entry.mode in _REGULAR_BLOB_MODES
                     and _short_name_carries_pinned_suffix(
                         relative.rpartition("/")[2], spec.content_suffixes
                     )

@@ -37,6 +37,8 @@
 - Added #44's working-tree-independence property across two content roots and `.axiom`: rewrite, insert, and rename mutations leave the verified verdict, commit OID, and tree OID unchanged.
 - Added a path-work regression proving the whole-tree flat listing charges each path once, with only the required exact attested lookup adding its own charge.
 - Focused corpus plus shared-name battery with replacements: 227 passed.
+- Final review found and closed one entry-kind gap: the portable 8.3 suffix screen now runs before mode classification, so a suffix-bearing alias cannot hide behind a symlink or directory; four portable/`posix-bytes` mode cases cover the boundary.
+- `build_corpus` now follows the plan literally by returning its commit OID directly (`str | None` with `commit=False`), matching `append_release`; a default build-plus-append smoke returned two distinct OIDs.
 
 ## Next
 
@@ -50,4 +52,5 @@
 - `src/receipt/verify.py` still passes a `Path` to the intentionally breaking API. Lane C owns and is concurrently changing that caller; this branch's full offline suite will retain that expected integration failure until Lane C is merged or its change is available.
 - `tests/test_cli.py` has one `committed_repo` fixture that initializes and commits a second time; default fixture commits make that second commit empty. The CLI file belongs to Lane C, so this lane records the integration point and does not edit it.
 - Section 3.6's final `verify_declarations` step remains the separate pass that `run_verification` already performs after binding. Calling it inside `verify_corpus_binding` would collapse the public binding/declaration pass boundary and make Lane C's unchanged call duplicate the check.
+- The stable pre-review offline run reached 1,315 passes with 94 equivalence cases deselected; its 44 failures are all the expected Lane C `verify.py` Path caller, and its 9 setup errors are the Lane C-owned CLI fixture's now-redundant second commit. A post-review focused/full rerun remains required for final totals.
 - Baseline census: 199 corpus test functions / 206 collected cases. Exactly 57 current functions have vanished filesystem/race/index subjects (43 host/race, 14 obsolete budget/index); replacement tree-shape/property cases will restore the required coverage, not those subjects.
