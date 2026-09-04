@@ -1446,10 +1446,12 @@ def test_the_alias_scan_covers_the_manifest_and_anchor_directories(
     named the release root and the two state paths, but not the manifest and
     anchor directories this module also reads for itself. An index entry
     spelled ``releases/Manifests/…`` beside the spec's ``releases/manifests``
-    is one present regular file on a name-folding checkout, which the release
-    root's index scan passes twice, and with no surfaces named nothing else
-    asked about it. Both directories are protected on their own now, so the
-    alias is refused with no ``surfaces`` argument at all."""
+    folds onto a directory this module reads for itself, and with no surfaces
+    named nothing in this scan asked about it; the release root's own index
+    scan answers only where it runs, which the append gate's push path is and
+    a direct caller of this function is not. Both directories are protected on
+    their own now, so the alias is refused with no ``surfaces`` argument at
+    all."""
 
     spec, _ = load_spec(repo / "verification/spec.py")
     for alias, protected in (
@@ -1473,8 +1475,9 @@ def test_the_alias_scan_protects_only_what_its_caller_names(
     """Binds S5-G1-F2 where the widening is decided: the package's own scan.
 
     ``assert_index_carries_no_protected_alias`` compared every index entry
-    against the three paths a ``ChainSpec`` carries, and those are the paths
-    this module reads for itself. A caller that also classifies proposals by
+    against three of the five paths a ``ChainSpec`` carries (the manifest and
+    anchor directories joined them later in this round), the paths this
+    module reads for itself. A caller that also classifies proposals by
     surface patterns protects more than that, and every surface match is by
     exact spelling, so an entry folding onto one of them was invisible on both
     sides — which is the finding, bound end to end in

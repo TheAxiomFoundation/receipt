@@ -134,8 +134,9 @@ the release root's index and working tree agree in both directions — no index
 entry the walk cannot see, no entry the walk cannot find, and no entry
 answered for through a symlinked component or under another entry's spelling —
 the index holds no entry spelled as another spelling of any path this run
-protects — the release root, the two state paths, and every path the
-configured gate and data surfaces name — or of any prefix of one — the
+protects — the release root, the two state paths, the manifest and anchor
+directories, and every path the configured gate and data surfaces name — or
+of any prefix of one — the
 directory a state file is read through is named by
 that path as much as its leaf is — which every one of those reconciliations is
 blind to because each is a comparison by exact spelling, what the index
