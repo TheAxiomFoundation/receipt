@@ -290,7 +290,17 @@ def _sha256(value: Any, label: str) -> str:
     return value
 
 
-def _validate_refs(value: Any) -> list[dict[str, Any]]:
+def _validate_ref_entries(value: Any) -> list[tuple[str, str]]:
+    """Check the container and every entry, and answer with the sort keys.
+
+    Split from the sorted-and-strictly-unique half because the two halves are
+    asked at different moments. The schema check asks both of a record that
+    already exists. Emission can only be asked this half: it is emission that
+    establishes the order, by sorting the caller's refs on ``(kind, sha256)``
+    — and a sort key is not a place to discover that an entry has no
+    ``sha256``, or that a ``kind`` is not a string.
+    """
+
     if type(value) is not list:
         raise EvidenceRecordError("refs must be an array")
     seen: list[tuple[str, str]] = []
@@ -302,6 +312,13 @@ def _validate_refs(value: Any) -> list[dict[str, Any]]:
                 f"refs[{position}].kind must be one of {sorted(REF_KINDS)}: {kind!r}"
             )
         seen.append((kind, _sha256(ref["sha256"], f"refs[{position}].sha256")))
+    return seen
+
+
+def _validate_refs(value: Any) -> list[dict[str, Any]]:
+    """Check every entry, then require the list sorted and strictly unique."""
+
+    seen = _validate_ref_entries(value)
     # Both `kind` and a lowercase-hex digest are drawn from ASCII alphabets, so
     # Python's tuple ordering and canonical.py's UTF-16 code-unit ordering agree
     # here; sorting is required so one set of refs has exactly one serialization.
@@ -775,7 +792,16 @@ def _write_evidence_record(
     producer: dict[str, Any],
     emitted_at_utc: str,
 ) -> pathlib.Path:
-    """The emitter's critical section: enumerate, decide the index, write."""
+    """The emitter's critical section: enumerate, decide the index, write.
+
+    The caller's refs are checked entry by entry before they are sorted. The
+    sort below reads ``kind`` and ``sha256`` out of every entry to build its
+    key, so a malformed one reached that key first and left this module as a
+    `KeyError` or a `TypeError` rather than as a refusal naming ``refs[i]``;
+    and a caller's tuple was already a list by the time the schema check asked
+    whether refs is an array. Ordering is the one thing not asked here, since
+    the sort is what establishes it.
+    """
 
     existing = _enumerate_record_files(root, spec)
     if existing:
@@ -788,6 +814,7 @@ def _write_evidence_record(
         index = 0
         previous_sha256 = None
 
+    _validate_ref_entries(refs)
     body_raw = canonical_document_bytes(body)
     payload = {
         "schemaVersion": spec.schema_version,

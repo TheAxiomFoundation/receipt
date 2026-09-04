@@ -605,6 +605,87 @@ def test_refs_must_be_an_array(spec: EvidenceSpec) -> None:
         validate_evidence_record_schema(payload, spec)
 
 
+def test_emission_refuses_a_ref_with_no_digest_by_name(
+    tmp_path: pathlib.Path, spec: EvidenceSpec, keys: tuple[bytes, bytes]
+) -> None:
+    """The sort key read `sha256` out of an entry nothing had checked.
+
+    Emission sorts the caller's refs on ``(kind, sha256)`` to build the
+    record, and it did that before the schema saw them — so a ref with no
+    digest left this module as a `KeyError`, not as the refusal that names
+    `refs[0]`.
+    """
+
+    private_pem, _ = keys
+    with pytest.raises(EvidenceRecordError, match=r"refs\[0\]"):
+        emit_evidence_record(
+            tmp_path,
+            spec=spec,
+            private_key_pem=private_pem,
+            body=BODY,
+            body_schema=BODY_SCHEMA,
+            refs=[{"kind": "record"}],
+            producer=PRODUCER,
+            emitted_at_utc=EMITTED,
+        )
+    assert list((tmp_path / RECORDS).iterdir()) == []
+
+
+def test_emission_refuses_refs_that_are_not_an_array(
+    tmp_path: pathlib.Path, spec: EvidenceSpec, keys: tuple[bytes, bytes]
+) -> None:
+    """`sorted` takes any iterable and hands back a list.
+
+    A caller's tuple was therefore already a list by the time the schema
+    check asked whether refs is an array: the one line that enforces the
+    container type was answering about this module's own output rather than
+    about what the caller passed.
+    """
+
+    private_pem, _ = keys
+    with pytest.raises(EvidenceRecordError, match="refs must be an array"):
+        emit_evidence_record(
+            tmp_path,
+            spec=spec,
+            private_key_pem=private_pem,
+            body=BODY,
+            body_schema=BODY_SCHEMA,
+            refs=({"kind": "record", "sha256": "a" * 64},),  # type: ignore[arg-type]
+            producer=PRODUCER,
+            emitted_at_utc=EMITTED,
+        )
+    assert list((tmp_path / RECORDS).iterdir()) == []
+
+
+def test_emission_refuses_a_non_string_ref_kind_by_name(
+    tmp_path: pathlib.Path, spec: EvidenceSpec, keys: tuple[bytes, bytes]
+) -> None:
+    """Two entries whose keys are not the same type are not comparable.
+
+    The sort key is a tuple built from values nothing has checked, so a
+    `kind` that is not a string reached `sorted` and left as a `TypeError`
+    about `int` and `str` — a refusal from Python rather than from this
+    module, naming neither the entry nor the field.
+    """
+
+    private_pem, _ = keys
+    with pytest.raises(EvidenceRecordError, match=r"refs\[1\]\.kind must be a string"):
+        emit_evidence_record(
+            tmp_path,
+            spec=spec,
+            private_key_pem=private_pem,
+            body=BODY,
+            body_schema=BODY_SCHEMA,
+            refs=[
+                {"kind": "record", "sha256": "a" * 64},
+                {"kind": 3, "sha256": "b" * 64},
+            ],
+            producer=PRODUCER,
+            emitted_at_utc=EMITTED,
+        )
+    assert list((tmp_path / RECORDS).iterdir()) == []
+
+
 # --------------------------------------------------------------------------
 # On-disk refusals.
 # --------------------------------------------------------------------------
