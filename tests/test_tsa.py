@@ -5394,6 +5394,150 @@ def test_a_rename_and_a_rotation_leave_one_class_a_further_rename_may_carry(
     assert str(witness.value) == splits
 
 
+def test_a_rename_after_an_activated_rotation_is_measured_against_the_live_era(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_alpha: LocalTsa,
+) -> None:
+    """S6-OP1-F1: a class is renamed against the keys it allows today.
+
+    ``activate_trust_bundles`` accumulates, so an authority whose signer
+    rotation has already been activated has two eras on the record: the
+    version that allowed the retired key and the version that allows the live
+    one. ``class_signers`` is the union of both, and an honest rename over the
+    live root carries the live key alone -- which equals neither the union nor
+    any pending era, because a class whose rotation activated has no pending
+    occurrence at all. So the rename was refused as a split or a merge, in a
+    verdict raised inside the candidate walk before any supplemental outcome
+    is read: unanswerable by evidence, and a regression against 0.5.1, which
+    made the same input a candidate a supplemental token could satisfy.
+
+    Without the fix the first assertion below raises that verdict instead of
+    returning no candidate, and the transition at the end of the test fails
+    with it.
+
+    The rule this replaces the union with: a pending anchor filed under an
+    ``(id, root SPKI)`` the history does not hold is the class renamed when it
+    carries every key the class allows today and no key the class has never
+    held. Both bounds are load-bearing and the interval between them is the
+    class's own retired keys. Dropping a live key is the split the rule has
+    always refused -- two anchors could take one live key each and both be
+    skipped -- so the lower bound stays exactly where the old rule put it.
+    Re-listing a retired key of the anchor's own class is what the union
+    already accepted, and turning an accepted input into a refusal the
+    candidate walk raises is the very defect this finding is about, so the
+    upper bound stays where the old rule put it too. What changes is only
+    what sits between: carrying the live key and not the retired one, which
+    is what a rename written after a rotation actually looks like.
+    """
+
+    alpha = local_anchors[0]
+    rotated = certificate_pins(rotated_alpha.signer_pem)
+    # v1 allows both keys and the token is stamped by the second, so that the
+    # rotation below can retire the first without stranding the evidence.
+    tree = build_witness_tree(
+        tmp_path,
+        local_anchors[:1],
+        extra_signers={alpha.anchor_id: rotated_alpha},
+        stamp_with={alpha.anchor_id: rotated_alpha},
+    )
+    assert verify_tree(tree).status == "available"
+    # v2, activated: the rotation that retires the first key.
+    rotation, spec = add_bundle_version(
+        tree, local_anchors[:1], version=2, signers={alpha.anchor_id: rotated}
+    )
+    active = {
+        BUNDLE_LOGICAL: tree.reference,
+        str(rotation["path"]): rotation,
+    }
+
+    # Three pending renames of that authority, differing only in which of its
+    # keys they carry.
+    live_only = alias_of(alpha, anchor_id="alpha-renamed-2026")
+    rename, spec = add_bundle_version(
+        tree,
+        [live_only],
+        version=3,
+        signers={live_only.anchor_id: rotated},
+        base=spec,
+    )
+    both = alias_of(alpha, anchor_id="alpha-renamed-both-2026")
+    carries_retired, spec = add_bundle_version(
+        tree,
+        [both],
+        version=4,
+        extra_signers={both.anchor_id: [rotated]},
+        base=spec,
+    )
+    retired_only = alias_of(alpha, anchor_id="alpha-renamed-stale-2026")
+    drops_live, spec = add_bundle_version(
+        tree, [retired_only], version=5, base=spec
+    )
+
+    # The premises, read back out of the bundles that were written: one
+    # authority, two eras, and three pending anchors over the same root.
+    keys = {
+        version: {
+            signer["spkiSha256"]
+            for signer in json.loads(
+                (tree.records / "trust" / f"tsa-anchors-v{version}.json").read_text()
+            )["anchors"][0]["allowedSigners"]
+        }
+        for version in (1, 2, 3, 4, 5)
+    }
+    assert keys[1] == {alpha.signer_pins["spkiSha256"], rotated["spkiSha256"]}
+    assert keys[2] == {rotated["spkiSha256"]}
+    assert keys[3] == keys[2]
+    assert keys[4] == keys[1]
+    assert keys[5] == {alpha.signer_pins["spkiSha256"]}
+
+    def candidates_for(pending: dict[str, Any]) -> set[tuple[str, str]]:
+        return set(
+            tsa_module._supplemental_candidates(
+                tree.records, active, [pending], spec=spec
+            )
+        )
+
+    # The live era, and nothing else: the rename this finding is about.
+    assert candidates_for(rename) == set()
+    # The live era beside the key the rotation retired, which the union rule
+    # accepted and this one goes on accepting.
+    assert candidates_for(carries_retired) == set()
+    # And the retired key alone, which drops a live key: the split, refused
+    # exactly where it was refused before.
+    splits = (
+        f"pending TSA anchor {retired_only.anchor_id} splits or merges active "
+        "authorities' signers; a pending anchor must carry one active "
+        "anchor's signers exactly, or none of them"
+    )
+    with pytest.raises(TsaError) as caught:
+        candidates_for(drops_live)
+    assert str(caught.value) == splits
+
+    # And the whole witness, against the newest active bundle -- the rotation
+    # -- which is the one a v2 witness has to name.
+    rewrite_witness(
+        tree,
+        lambda payload: payload.update(
+            {
+                "trustBundleId": str(rotation["bundleId"]),
+                "trustBundlePath": str(rotation["path"]),
+                "trustBundleSha256": str(rotation["sha256"]),
+            }
+        ),
+    )
+    evidence = verify_step(
+        tree.record,
+        spec=spec,
+        records=tree.records,
+        trusted_bundles=active,
+        prior_pending_updates=[rename],
+    )
+    assert evidence.status == "available"
+    assert [token.anchor_id for token in evidence.tokens] == [alpha.anchor_id]
+    assert evidence.supplemental_tokens == ()
+
+
 def test_a_skipped_pending_rotation_is_history_for_a_later_rename(
     tmp_path: pathlib.Path,
     local_anchors: tuple[LocalAnchor, ...],

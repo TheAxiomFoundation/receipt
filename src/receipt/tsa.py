@@ -57,13 +57,20 @@ reusing an active anchor ID under a different code-pinned root, which is a
 new authority and so must carry a supplemental outcome before the transition
 can activate it -- the ported supplemental-outcome refusal, reaching a case
 the baseline let through because it took the ID alone for the identity,
-while a pending anchor whose signers are exactly the signers of one active
-authority's equivalence class is that authority under a new name and is
-skipped for the same reason a bundle may not allow one signer under two of
-its anchors; a pending anchor carrying part of an active authority and not
-the whole of it -- a piece of one active class's signers (a split), the
-signers of two classes together (a merge), or a class's signers beside a key
-that is nobody's --
+while a pending anchor carrying every signer one active authority's
+equivalence class allows today and no signer that class has never held is
+that authority under a new name and is skipped for the same reason a bundle
+may not allow one signer under two of its anchors -- what a class allows
+today being the union over its active occurrences in its newest active era,
+because membership must remember every key the class has ever held and a
+rename need not: an authority whose rotation has already activated has both
+eras on the record, and a rename over the live root carries the live key
+alone, so measuring the rename against the union refused the plainest rename
+there is, here in the candidate walk where no supplemental outcome can
+answer it (peer review, first Opus round); a pending anchor carrying part of
+an active authority and not the whole of it -- a piece of that live era's
+signers (a split), the signers of two classes together (a merge), or a
+class's signers beside a key that is nobody's --
 which is neither a rename nor a new authority and so is refused rather than
 skipped or admitted, since skipping it activates something with no
 supplemental evidence and admitting it lets an authority the chain already
@@ -172,7 +179,12 @@ key and not its own carries exactly one active class's signers, which the
 clause before that one calls that authority under a new name and skips; it is
 a merge for the identity it is filed under and not for the signers it
 declares, and what claims it is the sub-clause this round added.  One place
-carries both, which is why the count does not move.  The withdrawal is
+carries both, which is why the count does not move.  The first Opus round
+added none and withdrew none either, and changed the reach of that same
+place a second time, narrowing it: what a rename is measured against is the
+class's live era rather than its whole history, which is a strictly smaller
+set of inputs refused and so leaves the count where it stands.  The
+withdrawal is
 the only one in the port's history, so it is stated rather than absorbed.
 What it withdrew was the refusal of two pending bundles introducing one
 authority under two anchors, sharing a signer.  Pending history was a rolling
@@ -2947,6 +2959,41 @@ class _AuthorityHistory:
                 newest = occurrence.signers
         return newest
 
+    def current_signers(self, authority: _Authority) -> frozenset[str]:
+        """The keys a live anchor of this class allows today.
+
+        The union over the class's *active* occurrences in its newest active
+        era -- the greatest bundle version at which any of them is active,
+        unioned because one bundle may legitimately file one class under two
+        anchors that an older version joined.  Empty for a class with no
+        active occurrence, which the rule below never asks.
+
+        Distinct from ``class_signers``, which is the union over the whole
+        history and never forgets a key.  History is right for membership --
+        an activated rename and a rotation each join two things permanently,
+        and forgetting either would make a rename cease to be transitive --
+        and wrong for the question "is this pending anchor the live authority
+        under another name?", because a rotation retires a key without
+        removing it from the class.  Asked against the history, an honest
+        rename over the live root carrying only the live key equals no era
+        the class ever had -- the union is {retired, live} and the anchor
+        holds {live} -- and was refused as a split or a merge, in a verdict
+        raised before any supplemental outcome is read and so answerable by
+        no evidence at all (peer review, first Opus round).
+        """
+
+        root = self.find(authority)
+        era: int | None = None
+        signers: set[str] = set()
+        for occurrence in self.occurrences:
+            if not occurrence.active or self.find(occurrence.authority) != root:
+                continue
+            if era is None or occurrence.version > era:
+                era, signers = occurrence.version, set(occurrence.signers)
+            elif occurrence.version == era:
+                signers.update(occurrence.signers)
+        return frozenset(signers)
+
     def class_signers(self, authority: _Authority) -> set[str]:
         root = self.find(authority)
         return {
@@ -3185,10 +3232,22 @@ def _build_authority_history(
                 # A class nothing trusts yet contributes one candidate however
                 # many names it is filed under, so the election below decides
                 # it and this test has nothing to protect.
+                # Every key the class allows today, and no key it has never
+                # held.  Dropping a live key is the split this refuses; a key
+                # outside the class's own history is the merge or the
+                # nobody's-key shape, both already refused above.  What sits
+                # between the two bounds is the class's own retired keys, and
+                # re-listing one beside the live key is what the rule this
+                # replaced already accepted -- against the historical union,
+                # which was also what made a rename carrying only the live key
+                # a refusal no evidence could answer (peer review, first Opus
+                # round).
                 valid_alias = (
                     not history.holds_an_active_anchor(root)
                     or occurrence.signers == history.newest_pending_era(root)
-                    or set(occurrence.signers) == history.class_signers(root)
+                    or history.current_signers(root)
+                    <= occurrence.signers
+                    <= history.class_signers(root)
                 )
             if not valid_alias:
                 errors.append(
@@ -3331,6 +3390,36 @@ def _supplemental_candidates(
     of one class reports the same set, so this differs from "exactly one"
     only where two *different* classes are touched -- which is the merge, and
     is refused either way.)
+
+    But not the class's whole history, which is what "the class" first meant
+    and what made the same clause refuse the plainest rename there is.  The
+    class remembers every key it has ever held, because membership has to:
+    forgetting an era would make a rename after a rotation cease to be
+    transitive.  A rename does not.  An authority whose rotation has already
+    been activated has two eras on the record -- the version that allowed the
+    retired key and the version that allows the live one -- and an honest
+    rename over the live root carries the live key alone, which equals the
+    union of the two only if the producer re-lists a key the rotation
+    retired.  So a chain that rotated a key could not then rename the
+    authority, and the refusal was raised here, in the candidate walk, where
+    no supplemental outcome can answer it: unwitnessable, and a regression
+    against the release, which made that input a candidate a token could
+    satisfy (peer review, first Opus round).  The comparison is therefore
+    against the class's *current* signers -- the union over its active
+    occurrences in its newest active era, which is what a live anchor of that
+    class allows today -- and it is an interval rather than an equality: a
+    pending anchor is that class renamed when it carries every current key
+    and no key the class has never held.  Both bounds are the old rule's.
+    Dropping a current key is the split, since two anchors could take one
+    each and both be skipped; a key outside the class is the merge or the
+    nobody's-key shape, each refused before this test is reached.  What lies
+    strictly between them is the class's own retired keys, which the union
+    rule accepted beside the live one and this goes on accepting -- turning
+    an accepted input into a refusal raised here is the defect being fixed,
+    not a direction to fix it in.  ``newest_pending_era`` keeps its own
+    clause beside the interval, for a class whose newest occurrence is a
+    pending rotation the walk skipped and whose current active era is
+    therefore a key that rotation superseded.
 
     Nor may an anchor that is partly one thing and partly another simply be
     treated as new: the supplemental outcome is supposed to show that whoever
