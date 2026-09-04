@@ -27,6 +27,7 @@ In progress on `feat/0.6-lane-c`, based at `145f3db93d745ddc43aeb47f6b7bd8b30aa3
 - Removed the module-level `LoadedSpec` construction helper and validate expected spec digests as exact lowercase SHA-256 strings before comparison, closing callable/equality-object forge paths found in peer review.
 - Corrected the port-only deliberate divergence to authenticate and invoke the pinned append oracle from the ledger harness itself: its exact `change rewrites existing line 129 ...` refusal now contrasts with acceptance of the unchanged selected commit (1 focused case passes), without editing Lane B's append harness or either oracle.
 - Closed runner peer-review gaps: redirecting Git environment keeps priority over a simultaneous pin conflict; the post-crypto anchor equality, commit-before-tree expectation ladder, object-store failure/report state, and repertoire mismatch now have focused coverage; trust/declaration docstrings no longer call an unpinned producer policy auditor-pinned. `tests/test_verify.py` passes all 20 cases.
+- Implemented the complete CLI flag surface, pre-load parser dependency rules, top-level root/default walk, LoadedSpec forwarding, selected/base/name/object text lines, new JSON identity/store fields, and trust-sensitive PASS prose. The re-pinned tree-addressed CLI battery now has 158 passing cases, including real object-store reporting, requested-failure wording, exact expectation refusals, root shape, output fields, checkout/index invariance, and a real coordinated anchors/signed-content/spec substitution ladder.
 
 ## Decisions
 
@@ -45,5 +46,5 @@ In progress on `feat/0.6-lane-c`, based at `145f3db93d745ddc43aeb47f6b7bd8b30aa3
 
 ## Next
 
-- Finish the CLI text/JSON renderer and checkpoint the re-pinned 151-case CLI battery after peer review.
+- Merge Lane D's final three commits, then run the ledger, full equivalence, and offline suites.
 - Re-run the ledger harness after the final verifier/CLI integration, then run the complete 101-case equivalence census.

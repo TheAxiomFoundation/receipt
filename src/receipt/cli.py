@@ -1,9 +1,11 @@
 """``receipt verify`` — the outside auditor's command.
 
 A clone, commodity tools, one offline fail-closed verdict. No network, no
-credentials, no service to ask. Everything the command trusts arrives from the
-consumer's committed spec, named on the command line, and the spec's own
-SHA-256 is printed with the verdict so the configuration can be quoted.
+credentials, no service to ask. The loaded spec selects every configured key
+and anchor, and its SHA-256 is printed so that configuration can be quoted.
+Those bytes become auditor-owned trust only when the auditor supplies
+``--expect-spec-sha256``; otherwise the verdict explicitly treats the spec and
+the anchor set it proposes as untrusted.
 
 The output is deliberately two-part. What the command *established* is stated
 without hedging. What it *did not* establish — that any declared gate actually
@@ -283,10 +285,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     verify = subparsers.add_parser(
         "verify",
-        help="verify a published corpus against its committed trust anchors",
+        help="verify a published corpus against its configured anchors",
         description=(
-            "Run every offline pass the consumer's committed spec configures, "
-            "and print one fail-closed verdict."
+            "Run every offline pass the loaded spec configures and print one "
+            "fail-closed verdict; auditor pins are supplied explicitly."
         ),
     )
     verify.add_argument(
@@ -294,24 +296,56 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         type=pathlib.Path,
         help=(
-            "path to the repository's committed verification spec (a short "
+            "path to the verification spec (a short "
             "Python module defining SPEC = receipt.verify.VerificationSpec(...))"
         ),
+    )
+    verify.add_argument(
+        "--expect-spec-sha256",
+        default=None,
+        help="require the exact spec source digest before its code executes",
     )
     verify.add_argument(
         "--root",
         type=pathlib.Path,
         default=None,
-        help="repository root to verify (default: the spec's parent repository)",
+        help=(
+            "repository top level to verify "
+            "(default: walk upward from the spec to its repository top level)"
+        ),
+    )
+    verify.add_argument(
+        "--commit",
+        default="HEAD",
+        help="commit or revision to verify (default: HEAD)",
+    )
+    verify.add_argument(
+        "--expect-commit",
+        default=None,
+        help="require the selected revision to resolve to this full commit OID",
+    )
+    verify.add_argument(
+        "--expect-tree",
+        default=None,
+        help="require the selected commit to carry this full root-tree OID",
+    )
+    verify.add_argument(
+        "--expect-anchor-set",
+        default=None,
+        help="require the materialized anchor set to have this SHA-256",
     )
     verify.add_argument(
         "--base-ref",
         default=None,
         help=(
             "additionally prove every release object present at this git ref "
-            "is byte- and mode-identical in the working tree (requires git "
-            "and a repository)"
+            "is byte- and mode-identical in the selected tree"
         ),
+    )
+    verify.add_argument(
+        "--verify-objects",
+        action="store_true",
+        help="also run bounded verification of the primary Git object store",
     )
     verify.add_argument(
         "--json",
@@ -601,9 +635,9 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
 
     Every such field goes through the local ``rendered`` below, which is
     :func:`_rendered` with this encoding bound to it. A local binding rather
-    than an argument at each of the fourteen call sites, so that forgetting
+    than an argument at each call site, so that forgetting
     one is not possible: the escaping, the bound and the units are one
-    decision applied to one set of strings.
+    decision applied to the complete set of result strings.
     """
 
     def rendered(text: str) -> str:
@@ -613,6 +647,27 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
     version = rendered(result.receipt_version)
     lines.append(f"receipt {version} — {rendered(result.spec_name)}")
     lines.append(f"  root  {rendered(str(result.root))}")
+    if result.commit is not None and result.tree is not None:
+        lines.append(
+            f"  commit {rendered(result.commit)} "
+            f"(tree {rendered(result.tree)})"
+        )
+    if result.base_commit is not None and result.base_tree is not None:
+        lines.append(
+            f"  base {rendered(result.base_commit)} "
+            f"(tree {rendered(result.base_tree)})"
+        )
+    lines.append(f"  names {rendered(result.name_repertoire)}")
+    if result.object_store is None:
+        lines.append(
+            "  objects requested; verification did not complete"
+            if result._object_store_requested
+            else "  objects not requested"
+        )
+    else:
+        lines.append(
+            f"  objects verified: {result.object_store.objects}"
+        )
     lines.append(f"  spec  {rendered(str(result.spec_path))}")
     lines.append(f"        sha256 {rendered(result.spec_sha256)}")
     lines.append("")
@@ -683,16 +738,34 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
             (p for p in result.passes if p.name == "history" and p.ok), None
         )
         lines.append("VERDICT: PASS — custody and corpus binding")
-        lines.append(
-            "  This proves the published rule files are exactly the bytes a "
-            "code-pinned"
-        )
+        if result._spec_pinned:
+            lines.append(
+                "  This proves the published rule files are exactly the bytes "
+                "the auditor-pinned"
+            )
+            lines.append(
+                f"  spec's producer key signed{',' if count else '.'}"
+            )
+        else:
+            lines.append(
+                "  This proves the published rule files are exactly the bytes "
+                "the loaded"
+            )
+            lines.append(
+                f"  spec's producer key signed{',' if count else '.'}"
+            )
         if count:
             noun = "authorities" if count != 1 else "authority"
-            lines.append(
-                f"  producer key signed, and the {count} pinned RFC 3161 {noun} "
-                f"({', '.join(witnesses)})"
-            )
+            if result._anchor_set_pinned:
+                lines.append(
+                    f"  and the {count} auditor-pinned RFC 3161 {noun} "
+                    f"({', '.join(witnesses)})"
+                )
+            else:
+                lines.append(
+                    f"  and the {count} RFC 3161 {noun} configured by that spec "
+                    f"({', '.join(witnesses)})"
+                )
             timing = (
                 "  witnessed that each recorded prefix existed no later than "
                 "those times"
@@ -704,8 +777,14 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
             # timing claim assembled from no witness at all — so the sentence
             # closes on what the signature alone proves, and the absence is
             # said out loud rather than rendered as a count of zero.
-            lines.append("  producer key signed.")
             timing = "  This verdict makes no witnessed timing claim"
+        if not result._anchor_set_pinned:
+            anchor_set = result.anchor_set_sha256
+            if anchor_set is not None:
+                lines.append(
+                    "  Custody is under the anchor set "
+                    f"{rendered(anchor_set)} the verified tree carries."
+                )
         if history is not None:
             lines.append(f"{timing},")
             # Scoped to what verify_release_history_immutable compares: release
@@ -748,12 +827,25 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
             "  the producer maintains — a stale or equivocated but honestly "
             "witnessed"
         )
+        lines.append(
+            "  clone may pass, and this verdict does NOT prove that files in "
+            "any checkout"
+        )
+        lines.append("  equal the verified tree.")
+        if not result._spec_pinned:
+            lines.append(
+                "  It does NOT establish that the spec's code was trusted."
+            )
+        if not result._anchor_set_pinned:
+            lines.append(
+                "  It does NOT establish that the anchor set is one the "
+                "auditor trusts."
+            )
         # A base ref binds this clone against a checkpoint the auditor chose;
         # it cannot make this clone the newest or the only history. Freshness
         # and uniqueness have exactly one remedy, so name only that.
         lines.append(
-            "  clone also passes. Check freshness and uniqueness by comparing "
-            "head"
+            "  Check freshness and uniqueness by comparing head"
         )
         lines.append("  digests out of band.")
     else:
@@ -1586,6 +1678,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command != "verify":  # pragma: no cover - argparse enforces this
         parser.error(f"unknown command {args.command!r}")
 
+    if args.base_ref is not None and args.expect_commit is None:
+        parser.error("--base-ref requires --expect-commit")
+    if args.expect_anchor_set is not None and args.expect_spec_sha256 is None:
+        parser.error("--expect-anchor-set requires --expect-spec-sha256")
+
     # From here down the contract is: with --json, at most one JSON object
     # bearing a "verdict" key is printed on every path — spec refusals, root
     # refusals, an aborted run, even a result that cannot be rendered — and
@@ -1597,9 +1694,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     as_json = bool(args.json)
 
     try:
-        loaded_spec = load_spec(args.spec)
-        spec = loaded_spec.verification
-        spec_sha256 = loaded_spec.sha256
+        loaded_spec = load_spec(
+            args.spec,
+            expect_sha256=args.expect_spec_sha256,
+        )
     except VerifySpecError as exc:
         return _refuse(as_json, "spec", str(exc), EXIT_USAGE)
     except KeyboardInterrupt:  # the operator's interrupt, never a verdict
@@ -1630,10 +1728,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         result = run_verification(
             root,
-            spec,
-            spec_path=args.spec.resolve(),
-            spec_sha256=spec_sha256,
+            loaded_spec,
             base_ref=args.base_ref,
+            commit=args.commit,
+            expect_commit=args.expect_commit,
+            expect_tree=args.expect_tree,
+            expect_anchor_set=args.expect_anchor_set,
+            verify_objects=args.verify_objects,
         )
     except KeyboardInterrupt:  # the operator's interrupt, never a verdict
         raise
