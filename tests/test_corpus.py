@@ -438,6 +438,80 @@ def test_refuses_a_non_blob_at_an_attested_path(
     )
 
 
+def test_refuses_a_suffix_bearing_directory_under_a_content_root(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A tree whose own name carries a pinned suffix is not content."""
+
+    write_tree(tmp_path)
+    _commit_worktree(tmp_path)
+    blob_oid = _hash_blob(tmp_path, b"nested fixture\n")
+    oid = _commit_index_updates(
+        tmp_path,
+        [("100644", blob_oid, b"rules/tax/pipe.yaml/child.txt")],
+    )
+
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(
+            tmp_path,
+            oid,
+            render_journal(journal_rows()),
+            spec=corpus_spec(),
+        )
+    assert str(caught.value) == (
+        "content root contains a non-regular file: 'rules/tax/pipe.yaml'"
+    )
+
+
+@pytest.mark.parametrize("name_repertoire", ["portable", "posix-bytes"])
+@pytest.mark.parametrize(
+    ("shape", "message"),
+    [
+        (
+            "root-blobs",
+            "directory holds two entries a case-insensitive filesystem would "
+            "merge: 'README' and 'ReadMe'",
+        ),
+        (
+            "tree-and-blob",
+            "directory holds two entries a case-insensitive filesystem would "
+            "merge: 'misc/TREE' and 'misc/tree'",
+        ),
+    ],
+)
+def test_refuses_fold_equal_root_and_mixed_mode_siblings(
+    tmp_path: pathlib.Path,
+    name_repertoire: str,
+    shape: str,
+    message: str,
+) -> None:
+    """Root siblings and tree/blob siblings share the same ASCII fold screen."""
+
+    write_tree(tmp_path)
+    _commit_worktree(tmp_path)
+    blob_oid = _hash_blob(tmp_path, b"fold fixture\n")
+    if shape == "root-blobs":
+        updates = [
+            ("100644", blob_oid, b"README"),
+            ("100644", blob_oid, b"ReadMe"),
+        ]
+    else:
+        updates = [
+            ("100644", blob_oid, b"misc/TREE/child.txt"),
+            ("100644", blob_oid, b"misc/tree"),
+        ]
+    oid = _commit_index_updates(tmp_path, updates)
+
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(
+            tmp_path,
+            oid,
+            render_journal(journal_rows()),
+            spec=corpus_spec(name_repertoire=name_repertoire),
+        )
+    assert str(caught.value) == message
+
+
 def test_binding_is_invariant_to_every_worktree_mutation_class(
     tmp_path: pathlib.Path,
 ) -> None:
