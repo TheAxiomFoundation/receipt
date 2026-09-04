@@ -15,6 +15,7 @@ from __future__ import annotations
 import builtins
 import collections
 import dataclasses
+import fcntl
 import inspect
 import json
 import os
@@ -4886,6 +4887,276 @@ def test_a_record_path_that_walks_out_of_the_records_root_is_refused(
         "witnessed record path is not below the records root: "
         f"{outside / RECORD_NAME}"
     )
+
+
+def test_the_read_clears_o_nonblock_before_it_reads(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S6-OP1-F13a: ``O_NONBLOCK`` governs the open and nothing after it.
+
+    The flag is set for the open, where it is the difference between a
+    refusal and a hang on a FIFO raced in behind a path-level check, and
+    ``open(2)`` says it "also has the effect of making all subsequent I/O on
+    the open file non-blocking". Only regular files are ever read here and a
+    regular file's reads do not block, so clearing it is what keeps the read
+    exactly the read it was rather than one that has to be prepared for
+    ``EAGAIN`` -- and the alternative, tolerating ``EAGAIN`` in the loop, would
+    be a second reading mode with nothing in any tree to exercise it.
+
+    Both halves are asserted, because the branch has two: that the function
+    clears the flag, on a descriptor opened exactly as the read opens one; and
+    that every anchored read calls it, with the flag still set when it does.
+    Neutered to ``return``, the second assertion sees ``O_NONBLOCK`` still set
+    on every descriptor the reads are about to use; removed from
+    ``_read_file_once``, the recorder is never called at all.
+    """
+
+    assert fcntl is not None and hasattr(os, "O_NONBLOCK")
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+
+    # The function itself, on a descriptor opened the way the read opens one.
+    descriptor = os.open(tree.record, tsa_module._ONE_READ_FLAGS)
+    try:
+        assert fcntl.fcntl(descriptor, fcntl.F_GETFL) & os.O_NONBLOCK
+        tsa_module._clear_nonblocking(descriptor)
+        assert not fcntl.fcntl(descriptor, fcntl.F_GETFL) & os.O_NONBLOCK
+    finally:
+        os.close(descriptor)
+
+    # And its place in the read: called on every descriptor, with the flag
+    # set when it arrives and clear when it returns.
+    original = tsa_module._clear_nonblocking
+    before: list[int] = []
+    after: list[int] = []
+
+    def watching(judged: int) -> None:
+        before.append(fcntl.fcntl(judged, fcntl.F_GETFL) & os.O_NONBLOCK)
+        original(judged)
+        after.append(fcntl.fcntl(judged, fcntl.F_GETFL) & os.O_NONBLOCK)
+
+    monkeypatch.setattr(tsa_module, "_clear_nonblocking", watching)
+    assert verify_tree(tree).status == "available"
+    assert before and set(before) == {os.O_NONBLOCK}
+    assert set(after) == {0}
+
+
+def test_the_two_transition_shapes_may_not_be_supplied_together(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """S6-OP1-F13b: no call means both things at once.
+
+    ``transition_bundle_updates`` is prior and current together from the
+    caller's own read; ``prior_pending_updates`` is the earlier records'
+    alone. There is no reading of a call that says "these are the earlier
+    records' updates" and "these are the earlier records' updates and this
+    one's" at the same time, so supplying both is a ``TypeError`` and not a
+    refusal -- a caller's bug rather than an input's.
+
+    Not dead code: without the guard the compatibility branch wins and
+    silently discards the ``prior_pending_updates`` list, which is the exact
+    defect the two-shape split exists against, and the caller believes the
+    list it passed was honoured. Deleted, the call below returns evidence.
+    """
+
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    assert verify_tree(tree).status == "available"
+    with pytest.raises(TypeError) as caught:
+        tsa_module._verify_witness_with_updates(
+            tree.record,
+            spec=tree.spec,
+            records=tree.records,
+            trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+            transition_bundle_updates=[],
+            prior_pending_updates=[],
+        )
+    assert str(caught.value) == (
+        "supply transition_bundle_updates or prior_pending_updates, not both"
+    )
+
+
+def test_the_pinned_roots_read_descends_the_components_it_checked(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S6-OP1-F13c: the third anchored read, bound like the other two.
+
+    The record's descent and the response's each have a test that replaces a
+    checked parent between the pathname preflight and the leaf open; the
+    pinned root's did not, so reverting ``_read_pinned_root`` to a whole-
+    pathname read left the whole suite green. The same writer is used here:
+    ``records/trust`` is real when the walk answers about it and a symlink to
+    itself by the time the read descends, so a whole-path open follows the
+    link and reads the pinned root through it while the anchored descent
+    refuses -- in the walk's own traversal words, wrapped in the load-time
+    material message the way every root refusal at load is.
+
+    The successful-read recorder proves it: no byte of the pinned root reaches
+    the one-read snapshot.
+    """
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    assert verify_tree(tree).status == "available"
+    parent = tree.records / "trust"
+    root_path = parent / alpha.tsa.root_pem.name
+    swapped = replace_a_parent_after_its_component_check(
+        monkeypatch,
+        parent,
+        subject="pinned TSA root path",
+        replacement="symlink",
+    )
+    reads = record_one_reads(monkeypatch)
+
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+
+    assert swapped == [str(parent)]
+    assert parent.is_symlink() and root_path.is_file()
+    assert str(caught.value) == (
+        f"TSA anchor {alpha.anchor_id} in bundle {BUNDLE_ID} references root "
+        "material that fails validation: pinned TSA root path traverses a "
+        f"symlink at {parent}: {root_path}"
+    )
+    assert str(root_path) not in reads
+
+
+def test_a_token_path_the_duplicate_rules_cannot_read_keeps_its_ported_refusal(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """S6-OP1-F13d: both guards at the head of the token-path rule.
+
+    The rule folds an outcome's ``tokenPath`` to a key and refuses a second
+    outcome that reaches the same one, and it runs before the token verifier
+    so that a duplicate is refused before its bytes are put to OpenSSL. Two
+    claims cannot be folded at all, and each has its own guard.
+
+    A ``tokenPath`` that is not a string cannot be handed to
+    ``physical_path``, whose argument is a string: without the type guard the
+    fold raises ``TypeError`` out of ``verify_witness``, whose contract is
+    ``TsaError``, so a caller that catches this module's own error sees an
+    exception it does not handle. With it, the ported ``witness token lacks
+    tokenPath`` speaks in its own place.
+
+    A ``tokenPath`` ``physical_path`` refuses cannot be folded either, and
+    leaving it alone is what keeps that ported refusal where it has always
+    been: after the token verifier's bundle-pin comparison and its anchor
+    selection. The second case below carries a bad path *and* a bad bundle
+    pin, and the pin is what answers -- without the ``except TsaError``, the
+    unsafe-path refusal jumps in front of it.
+    """
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    assert verify_tree(tree).status == "available"
+
+    rewrite_witness(
+        tree,
+        lambda payload: payload["anchorOutcomes"][0].update({"tokenPath": []}),
+    )
+    with pytest.raises(TsaError) as unhashable:
+        verify_tree(tree)
+    assert str(unhashable.value) == "witness token lacks tokenPath"
+
+    rewrite_witness(
+        tree,
+        lambda payload: payload["anchorOutcomes"][0].update(
+            {
+                "tokenPath": "../escape.tsr",
+                "trustBundleSha256": "0" * 64,
+            }
+        ),
+    )
+    with pytest.raises(TsaError) as unsafe:
+        verify_tree(tree)
+    assert str(unsafe.value) == (
+        "timestamp token trustBundleSha256 does not match its bundle pin"
+    )
+    assert alpha.anchor_id  # the outcome still selects its anchor first
+
+
+def test_every_question_about_the_record_is_asked_of_the_one_read(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S6-OP1-F13e: the record's two remaining consumers read no path.
+
+    The witnessed record was consumed through four opens of one pathname, and
+    two of the four are these: the trust-bundle updates it carries, and the
+    creation claims a token's ``genTime`` is measured against. Both now read
+    the snapshot the witness digest was taken from; reverting either to
+    ``load_json(path)`` left the suite green, and the counting test that
+    builds an ``opens`` recorder clears it before the interesting part and
+    never asserts on it again.
+
+    The writer here replaces the record the instant its one read returns, with
+    a record that carries a different trust-bundle update and claims to have
+    been created a decade later. Nothing downstream may notice: the digest
+    came from the bytes that were read, ``openssl ts -verify -data`` is given
+    a copy of them, and both consumers under test are handed the same bytes.
+    Reverting the updates consumer makes the walk return the replacement's
+    reference; reverting the creation-claims consumer makes the token's
+    ``genTime`` fail against a creation time ten years after it.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    stranger = alias_of(beta, anchor_id="beta-arriving-2026")
+    pending, spec = pending_authority(tree, stranger, version=2)
+    carrier = add_record(
+        tree,
+        [alpha],
+        name="record-0002.json",
+        observation="the record every question is asked of one read of",
+        updates=[pending],
+        supplemental=[(pending, stranger, beta.tsa)],
+    )
+    payload = json.loads(carrier.read_text())
+    digest = sha256_bytes(carrier.read_bytes())
+
+    decoy = dict(payload)
+    decoy["trustBundleUpdates"] = []
+    decoy["recordedAt"] = "2036-09-02T00:00:00Z"
+    replacement = canonical_bytes(decoy) + b"\n"
+
+    original = tsa_module._read_file_once
+    replaced: list[str] = []
+
+    def replacing(
+        path: pathlib.Path, missing: str, **keywords: Any
+    ) -> tuple[bytes, tuple[int, int]]:
+        answer = original(path, missing, **keywords)
+        if path == carrier and not replaced:
+            carrier.write_bytes(replacement)
+            replaced.append(str(path))
+        return answer
+
+    monkeypatch.setattr(tsa_module, "_read_file_once", replacing)
+    step = tsa_module.verify_witness_step(
+        carrier,
+        spec=spec,
+        records=tree.records,
+        trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+        prior_pending_updates=[],
+    )
+
+    # The premise: the file really was replaced, and really does say
+    # something else about both questions.
+    assert replaced == [str(carrier)]
+    assert carrier.read_bytes() == replacement
+    assert json.loads(carrier.read_text())["trustBundleUpdates"] == []
+    assert json.loads(carrier.read_text())["recordedAt"] != payload["recordedAt"]
+
+    # And both answers came from the bytes the digest was taken over.
+    assert step.evidence.status == "available"
+    assert step.evidence.digest_sha256 == digest
+    assert [dict(update) for update in step.trust_bundle_updates] == [pending]
+    assert [token.anchor_id for token in step.evidence.supplemental_tokens] == [
+        stranger.anchor_id
+    ]
 
 
 def pending_authority(

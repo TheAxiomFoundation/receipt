@@ -317,7 +317,9 @@ Which leaves the accumulated shape to the entry point built for it.
 updates of *earlier* records and nothing else -- combines them with the
 snapshot's own itself (prior first, then the snapshot's, each mapping
 admitted once, since a reference repeated across the two describes one
-bundle), and returns the snapshot-derived list beside the evidence in a
+bundle and the transition ought to name it once -- a statement about the
+list an auditor is shown, the rules below reading a repeat the same way
+either way), and returns the snapshot-derived list beside the evidence in a
 :class:`WitnessStep`.  A chain walker is then written as: for each record in
 order, ``step = verify_witness_step(path, spec=spec, records=records,
 trusted_bundles=active, prior_pending_updates=pending)``; extend ``pending``
@@ -430,7 +432,8 @@ descriptor open into a refusal, not the object eventually read.  A writer
 replacing the leaf with a FIFO likewise cannot park the verifier:
 ``O_NONBLOCK`` makes the open return, ``fstat`` refuses it in the caller's own
 words, and the flag is cleared before any byte is read -- it governs the open
-and nothing after it.
+and nothing after it, which a test asserts by watching ``F_GETFL`` on the very
+descriptor each read is about to use (peer review, first Opus round).
 
 Descriptor-relative ``os.open`` is a POSIX requirement.  CPython does not
 offer it on Windows, and falling back to a whole-path open there would quietly
@@ -4196,7 +4199,17 @@ def _verify_witness_with_updates(
     derived from the snapshot, and the transition the verification weighs is
     the two combined -- prior first, then the snapshot's, each mapping
     admitted once, since a reference repeated across the two describes one
-    bundle and walking it twice would refuse it as its own alias.  So there is
+    bundle and the transition ought to name it once.  That is a statement
+    about the list and not a guard on the verdict: the reason given here for
+    two rounds, that walking a reference twice would refuse it as its own
+    alias, was false of the code it was written beside.  A repeated occurrence
+    finds its own authority already in the graph, takes the already-known
+    branch, and has no foreign class to adopt, because the only class its
+    signers own is the one its first occurrence created; it then elects the
+    same candidate under the same key.  The dedup is kept because a
+    transition that names one bundle twice is not one an auditor should be
+    shown, not because anything downstream would misread it (peer review,
+    first Opus round).  So there is
     no entry in the transition this call did not either derive or attribute to
     a record before this one, and the stale extra the supplied-list shape
     cannot see has nowhere to enter (peer review, fifth gate round three).
@@ -4280,7 +4293,12 @@ def _verify_witness_with_updates(
     # from the snapshot.  Combined here so that no caller ever has to hold both
     # kinds and hand them over as one.  Deduplicated by mapping equality, which
     # is the whole of what a bundle reference is: one reference named twice is
-    # one bundle, and walking it twice would refuse it as its own alias.
+    # one bundle, and the transition ought to name it once.  Verdict-inert --
+    # a repeated occurrence takes the already-known branch, where the only
+    # class its signers own is the one its first occurrence created, and it
+    # elects the same candidate under the same key -- so this is about the
+    # list an auditor is shown and not about what the rules would make of it
+    # (peer review, first Opus round).
     transition_bundle_updates = []
     for update in (*(prior_pending_updates or ()), *updates):
         if update not in transition_bundle_updates:
