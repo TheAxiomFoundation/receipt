@@ -1470,6 +1470,14 @@ def test_port_is_invariant_under_foreign_git_environment(
     monkeypatch: pytest.MonkeyPatch,
     variable: str,
 ) -> None:
+    """Only the ``GIT_DIR`` row is load-bearing for the environment scrub.
+
+    Without the scrub, that row redirects repository discovery and the port
+    refuses. ``GIT_INDEX_FILE`` is retained to record PLAN 3.8's invariant,
+    but this object-only port never reads an index, so that row cannot fail
+    when the scrub is removed.
+    """
+
     root, base, candidate = _committed_clean_candidate(
         pinned_tree, tmp_path, f"foreign_{variable.lower()}"
     )
