@@ -7499,5 +7499,48 @@ def test_a_root_spelled_through_a_symlink_loop_refuses_in_the_same_words(
         run_gate(inside) if with_base else run_push_gate(inside)
 
     assert str(refusal.value) == MISSING_ROOT_REFUSAL + str(inside.root)
-    assert isinstance(refusal.value.__cause__, OSError)
-    assert refusal.value.__cause__.errno == errno.ELOOP
+    # The cause is the loop however the platform reports it: ``ELOOP`` from
+    # the open on darwin, or pathlib's own ``RuntimeError`` from ``resolve``
+    # on Linux, which carries the ``ELOOP`` ``OSError`` as its context.
+    cause = refusal.value.__cause__
+    if isinstance(cause, OSError):
+        assert cause.errno == errno.ELOOP
+    else:
+        assert isinstance(cause, RuntimeError)
+        assert str(cause).startswith("Symlink loop")
+        assert isinstance(cause.__context__, OSError)
+        assert cause.__context__.errno == errno.ELOOP
+
+
+@pytest.mark.parametrize("with_base", [False, True], ids=["push", "base-ref"])
+def test_a_symlink_loop_reported_by_resolve_refuses_in_the_same_words(
+    tmp_path: pathlib.Path, with_base: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The resolve-time shape, on every platform.
+
+    Linux ``pathlib`` (CPython 3.11 to 3.13) raises ``RuntimeError("Symlink
+    loop from ...")`` from ``resolve`` before any open; darwin never does. So
+    the conversion above the open is exercised here by making ``resolve``
+    raise what Linux raises, with the ``ELOOP`` ``OSError`` as its context.
+    """
+
+    candidate = base_repository(tmp_path)
+    looped = replace(candidate, root=tmp_path / "loop" / "inside")
+    original = pathlib.Path.resolve
+
+    def resolve_like_linux(self: pathlib.Path, strict: bool = False) -> pathlib.Path:
+        if self == looped.root:
+            try:
+                raise OSError(errno.ELOOP, "Too many levels of symbolic links", str(self))
+            except OSError:
+                raise RuntimeError(f"Symlink loop from {str(self)!r}")
+        return original(self, strict=strict)
+
+    monkeypatch.setattr(pathlib.Path, "resolve", resolve_like_linux)
+    with pytest.raises(AppendError) as refusal:
+        run_gate(looped) if with_base else run_push_gate(looped)
+
+    assert str(refusal.value) == MISSING_ROOT_REFUSAL + str(looped.root)
+    assert isinstance(refusal.value.__cause__, RuntimeError)
+    assert isinstance(refusal.value.__cause__.__context__, OSError)
+    assert refusal.value.__cause__.__context__.errno == errno.ELOOP

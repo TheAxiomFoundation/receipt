@@ -737,7 +737,21 @@ def _set_root(root: pathlib.Path, spec: AppendGateSpec) -> _CandidateTree:
     open that answers, not an ``lstat`` before it.
     """
 
-    candidate_root = root.resolve()
+    try:
+        candidate_root = root.resolve()
+    except RuntimeError as exc:
+        # ``pathlib`` on Linux answers a symlink loop from ``resolve`` itself,
+        # as ``RuntimeError("Symlink loop from ...")`` with the ``ELOOP``
+        # ``OSError`` as its context (CPython 3.11 to 3.13); on darwin the
+        # loop comes back unresolved and the open below answers ``ELOOP``.
+        # Both are the same fact about the root the caller named, refused in
+        # the same words (#46); anything else ``resolve`` raises is left as
+        # it stands.
+        if not str(exc).startswith("Symlink loop"):
+            raise
+        raise AppendError(
+            f"candidate root is missing or not a directory: {root}"
+        ) from exc
     # Opened once, here, because this is the only moment in the run at which
     # the root has not yet been used for anything: every later read descends
     # from it, and a root exchanged after this is a different tree answering
@@ -794,10 +808,11 @@ def _set_root(root: pathlib.Path, spec: AppendGateSpec) -> _CandidateTree:
         # It is answered here, at the one open, rather than by an ``lstat``
         # before it: a check ahead of the open is a check on a path this open
         # may not reach, and this module refuses check-then-open everywhere
-        # else it reads. ``ELOOP`` is the third: ``Path.resolve`` hands a symlink
-        # loop back unchanged, so a root spelled through one reaches this open
-        # as a static input, and it too answered with the OS's own message
-        # (peer review of the 0.5.2 release PR). A link standing at the root
+        # else it reads. ``ELOOP`` is the third: on darwin ``Path.resolve`` hands a
+        # symlink loop back unchanged, so a root spelled through one reaches
+        # this open as a static input, and it too answered with the OS's own
+        # message (peer review of the 0.5.2 release PR); on Linux ``resolve``
+        # itself raises for the loop, and that is converted above. A link standing at the root
         # itself is refused by ``O_NOFOLLOW``, and where the platform spells
         # that as one of these three errnos it lands in the same refusal.
         # Every other errno still raises as it stands.
