@@ -459,9 +459,18 @@ def test_release_chain_validates_arguments_then_runs_its_path_guards(
 
     spec = load_spec(repo / "verification/spec.py").verification
     events: list[str] = []
+    anchor_path = repo.resolve() / spec.chain.anchor_relative
+    path_is_symlink = pathlib.Path.is_symlink
+
+    def observe_anchor_probe(path: pathlib.Path) -> bool:
+        if path == anchor_path:
+            events.append("anchors")
+        return path_is_symlink(path)
+
     monkeypatch.setattr(
         tsa, "_require_supported_openssl", lambda: events.append("openssl")
     )
+    monkeypatch.setattr(pathlib.Path, "is_symlink", observe_anchor_probe)
     monkeypatch.setattr(
         release_chain,
         "assert_no_symlinked_release_root",
@@ -485,7 +494,13 @@ def test_release_chain_validates_arguments_then_runs_its_path_guards(
         verify_state=False,
     )
     assert verification.releases == ()
-    assert events == ["openssl", "paths", "manifest-shape", "enumerate"]
+    assert events == [
+        "openssl",
+        "anchors",
+        "paths",
+        "manifest-shape",
+        "enumerate",
+    ]
 
     events.clear()
     with pytest.raises(
@@ -494,6 +509,24 @@ def test_release_chain_validates_arguments_then_runs_its_path_guards(
     ):
         verify_release_chain(repo, spec=spec.chain, clock_skew_seconds=-1)
     assert events == []
+
+
+def test_anchor_symlink_probe_precedes_the_release_root_refusal(
+    repo: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    spec = load_spec(repo / "verification/spec.py").verification
+    releases = repo / "releases"
+    actual_releases = tmp_path / "actual-releases"
+    shutil.move(releases, actual_releases)
+    releases.symlink_to(actual_releases, target_is_directory=True)
+
+    with pytest.raises(ReleaseChainError) as caught:
+        verify_release_chain(repo, spec=spec.chain)
+
+    assert str(caught.value) == (
+        "anchor path component is a symlink or reparse point: "
+        f"{releases}"
+    )
 
 
 def test_release_chain_routes_every_input_file_through_the_regular_reader(
