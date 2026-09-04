@@ -22,7 +22,6 @@ from receipt.snapshot import (
     GIT_COMMANDS,
     GIT_ENVIRONMENT_DROPPED,
     GIT_MIN_VERSION,
-    GitEntry,
     SnapshotError,
     TreeListing,
     TreeSnapshot,
@@ -652,7 +651,11 @@ def test_raw_tree_parser_accepts_five_modes_and_git_directory_sort_rule() -> Non
 @pytest.mark.parametrize(
     ("payload", "message"),
     [
-        pytest.param(b"040000 legacy\0" + bytes(20), "unsupported raw mode", id="zero-padded-mode"),
+        pytest.param(
+            b"040000 legacy\0" + bytes(20),
+            "unsupported raw mode",
+            id="zero-padded-mode",
+        ),
         pytest.param(b"100600 odd\0" + bytes(20), "unsupported raw mode", id="unknown-mode"),
         pytest.param(b"100644", "malformed entry", id="missing-space"),
         pytest.param(b"100644 name", "malformed entry", id="missing-nul"),
@@ -710,6 +713,41 @@ def test_batch_contents_treats_payload_bytes_separately_from_frame_lf(
     assert reader.consume(oid, role="blob", limit=100, hold=True) == payload
     assert reader._stdin.getvalue() == f"contents {oid}\n".encode("ascii")
     assert not reader.abandoned
+
+
+def test_batch_consume_uses_info_then_contents_protocol() -> None:
+    payload = b"payload"
+    oid = _object_oid("blob", payload)
+    header = f"{oid} blob {len(payload)}\n".encode("ascii")
+    reader = _fake_batch(header + header + payload + b"\n")
+
+    assert reader.consume(oid, role="blob", limit=100, hold=True) == payload
+    assert reader._stdin.getvalue() == (
+        f"info {oid}\ncontents {oid}\n".encode("ascii")
+    )
+
+
+def test_abandoned_digest_iterator_blocks_later_requests_but_is_reaped(
+    git_repo: pathlib.Path,
+) -> None:
+    (git_repo / "second.txt").write_bytes(b"second\n")
+    _commit_worktree(git_repo, "second blob")
+    selected = TreeSnapshot.select(git_repo)
+
+    with selected:
+        process = selected._state.batch.process
+        temporary = selected.temporary_directory
+        entries = [selected.entry("tracked.txt"), selected.entry("second.txt")]
+        digests = selected.digests(entries, per_blob=100, total=200)
+        first_entry, first_digest = next(digests)
+        assert first_entry == entries[0]
+        assert first_digest == hashlib.sha256(b"committed bytes\n").hexdigest()
+        digests.close()
+        with pytest.raises(SnapshotError, match="^snapshot stream was abandoned$"):
+            selected.header(entries[1].object_id)
+
+    assert process.poll() is not None
+    assert temporary is not None and not temporary.exists()
 
 
 @pytest.mark.parametrize("terminator", [b"", b"x"])

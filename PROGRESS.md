@@ -2,8 +2,9 @@
 
 ## State
 
-The immutable reader and name-policy modules are implemented and passing the
-first isolated core battery plus the pre-existing offline suite. Feature,
+The immutable reader and name-policy modules are implemented. The reader's
+process lifecycle, entry provenance, repository-control re-audits, bounded
+fsck heads, and byte accounting have received a second hardening pass. Feature,
 budget, and hostile-environment tests remain in progress.
 
 The brief contains incompatible instructions about this file: the standing
@@ -30,7 +31,10 @@ in the module and will be listed in the final report.
   commit and raw-tree parsing, hierarchical listings, ancestry, bounded Git
   commands, configuration audits, store verification, attributes, streaming
   digests, and materialization in `receipt/snapshot.py`.
-- Passed 53 isolated core reader tests and 951 existing offline tests (94
+- Hardened abandoned batch-child teardown, bounded batch reads and stderr,
+  independent closing audits, one-snapshot entry binding, cumulative ancestry,
+  exact fsck heads, and per-write materialization accounting.
+- Passed 56 isolated core reader tests and 951 existing offline tests (94
   equivalence tests deselected) on the worktree's default interpreter.
 
 ## Next
