@@ -4654,6 +4654,39 @@ def test_no_read_this_module_makes_traverses_a_symlinked_component(
     assert str(caught.value) == expected
 
 
+def test_a_resolved_root_with_a_link_spelled_record_is_still_readable(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """Second Opus round, F1: the last mixed spelling of a linked root.
+
+    The round-1 fix ends the walk at the root as the caller spelled it, so a
+    record and a root both spelled through the link verify. A caller that
+    resolves the root itself and hands the record through the link spelled
+    neither the root the same way twice nor a boundary the walk could name:
+    the link is a parent, it is a symlink, so the resolve clause was off, and
+    the walk ran off the top and refused a real, readable regular file as not
+    below the records root. A link that *is* the root under another
+    spelling, lying outside the resolved tree, now ends the walk; a link
+    inside the tree that resolves to the root is still the alias the rule
+    refuses, and the test after this one keeps that. Without the fix the
+    step below refuses with "is not below the records root".
+    """
+
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    control = verify_tree(tree)
+    assert control.status == "available"
+    real = tmp_path / "real"
+    real.mkdir()
+    tree.records.rename(real / "records")
+    tree.records.symlink_to(real / "records", target_is_directory=True)
+    assert tree.records.is_symlink() and tree.record.is_file()
+    resolved_root = (real / "records").resolve()
+    assert resolved_root not in tree.record.parents
+    assert verify_step(tree.record, spec=tree.spec, records=resolved_root) == (
+        control
+    )
+
+
 def test_a_records_root_reached_through_a_symlink_is_still_readable(
     tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
 ) -> None:
@@ -6828,6 +6861,54 @@ def test_a_rename_may_carry_the_classs_newest_era_and_not_a_superseded_one(
     )
 
 
+def test_a_merge_of_two_pending_classes_is_refused_in_its_own_words(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_beta: LocalTsa,
+) -> None:
+    """Second Opus round, F2: the refusal names what the anchor did.
+
+    An anchor carrying the keys of two pending-only classes merges them and
+    is refused; the sentence it got said the anchor "splits or merges active
+    authorities' signers", a category no active authority in either class
+    put it in. The refusal now says the anchor carries two pending
+    authorities' signers. Without the fix the message below is the
+    split-or-merge sentence.
+    """
+
+    beta = local_anchors[1]
+    rotated = certificate_pins(rotated_beta.signer_pem)
+    tree = build_witness_tree(tmp_path / "tree", local_anchors[:1])
+    (tree.records / "trust" / beta.tsa.root_pem.name).write_bytes(
+        beta.tsa.root_pem.read_bytes()
+    )
+    first = alias_of(beta, anchor_id="beta-first-2026")
+    second = alias_of(beta, anchor_id="beta-second-2026")
+    distinct, spec = add_bundle_version(
+        tree, [first, second], version=2, signers={second.anchor_id: rotated}
+    )
+    merger = alias_of(beta, anchor_id="beta-merger-2026")
+    merging, spec = add_bundle_version(
+        tree,
+        [merger],
+        version=3,
+        extra_signers={merger.anchor_id: [rotated]},
+        base=spec,
+    )
+    with pytest.raises(TsaError) as caught:
+        tsa_module._supplemental_candidates(
+            tree.records,
+            {BUNDLE_LOGICAL: tree.reference},
+            [distinct, merging],
+            spec=spec,
+        )
+    assert str(caught.value) == (
+        "pending TSA anchor beta-merger-2026 carries the signers of two pending "
+        "authorities; a pending anchor may carry one class's signers, and "
+        "joining two classes takes each class's own rotation"
+    )
+
+
 def test_a_later_bundles_merge_does_not_convict_an_earlier_bundle(
     tmp_path: pathlib.Path,
     local_anchors: tuple[LocalAnchor, ...],
@@ -6902,9 +6983,9 @@ def test_a_later_bundles_merge_does_not_convict_an_earlier_bundle(
     with pytest.raises(TsaError) as caught:
         candidates_for(distinct, merging)
     assert str(caught.value) == (
-        f"pending TSA anchor {merger.anchor_id} splits or merges active "
-        "authorities' signers; a pending anchor must carry one active "
-        "anchor's signers exactly, or none of them"
+        f"pending TSA anchor {merger.anchor_id} carries the signers of two pending "
+        "authorities; a pending anchor may carry one class's signers, and "
+        "joining two classes takes each class's own rotation"
     )
 
 

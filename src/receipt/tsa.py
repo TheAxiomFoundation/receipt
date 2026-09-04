@@ -985,6 +985,22 @@ def _components_below(
             parent == root
             or parent == named_root
             or (not parent.is_symlink() and parent.resolve() == root)
+            # A link that *is* the records root under another spelling --
+            # the caller resolved the root and spelled the record through
+            # the link, so ``named_root`` cannot name it -- ends the walk
+            # too, provided it lies outside the resolved tree: a link inside
+            # the tree that resolves to the root is the alias the rule below
+            # exists to refuse, and whether any lexical ancestor of the link
+            # itself resolves to the root tells the two apart: the root's own
+            # spelling has none, an alias inside the tree has the root above
+            # it (peer review, second Opus round).
+            or (
+                parent.is_symlink()
+                and parent.resolve() == root
+                and not any(
+                    ancestor.resolve() == root for ancestor in parent.parents
+                )
+            )
         ):
             chain.reverse()
             return tuple(chain)
@@ -3257,6 +3273,22 @@ def _split_or_merge_message(occurrence: _AnchorOccurrence) -> str:
     )
 
 
+def _pending_merge_message(occurrence: _AnchorOccurrence) -> str:
+    """The merge refusal where no active authority is involved at all.
+
+    An anchor carrying the keys of two pending-only classes merges them and
+    is refused for it, but the split-or-merge sentence names *active*
+    authorities, a category such an input does not belong to (peer review,
+    second Opus round).  This says what the anchor did.
+    """
+
+    return (
+        f"pending TSA anchor {occurrence.anchor['id']} carries the signers of "
+        "two pending authorities; a pending anchor may carry one class's "
+        "signers, and joining two classes takes each class's own rotation"
+    )
+
+
 def _adopted_class_message(
     history: _AuthorityHistory,
     occurrence: _AnchorOccurrence,
@@ -3472,8 +3504,16 @@ def _build_authority_history(
                     <= history.class_signers(root)
                 )
             if not valid_alias:
+                pending_only = len(roots) > 1 and not any(
+                    history.holds_an_active_anchor(root) for root in roots
+                )
                 errors.append(
-                    (occurrence.order, _split_or_merge_message(occurrence))
+                    (
+                        occurrence.order,
+                        _pending_merge_message(occurrence)
+                        if pending_only
+                        else _split_or_merge_message(occurrence),
+                    )
                 )
         # A skipped rotation or rename is history too.  Adding as one batch is
         # what makes the answer independent of anchor-array order.
