@@ -364,12 +364,33 @@ def test_genesis_and_chain_link(
     assert second.name.startswith("0001-")
 
 
-def test_empty_directory_verifies_empty(
+def test_an_absent_records_directory_verifies_as_the_zero_record_chain(
     tmp_path: pathlib.Path, spec: EvidenceSpec, anchor_dir: pathlib.Path
 ) -> None:
+    """The empty state a checkout can actually carry.
+
+    This test never made the directory, so absence is what it has always
+    exercised — under a name that said the opposite. Both are the zero-record
+    chain, and the result said nothing that told them apart.
+    """
+
+    assert not (tmp_path / RECORDS).exists()
     result = verify_evidence_records(tmp_path, spec=spec, anchor_dir=anchor_dir)
     assert result.records == ()
     assert result.head is None
+    assert result.directory_present is False
+
+
+def test_an_existing_empty_records_directory_verifies_as_the_zero_record_chain(
+    tmp_path: pathlib.Path, spec: EvidenceSpec, anchor_dir: pathlib.Path
+) -> None:
+    """The other way to reach zero records, and the field that says which."""
+
+    (tmp_path / RECORDS).mkdir(parents=True)
+    result = verify_evidence_records(tmp_path, spec=spec, anchor_dir=anchor_dir)
+    assert result.records == ()
+    assert result.head is None
+    assert result.directory_present is True
 
 
 def _resign_in_place(

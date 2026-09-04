@@ -222,6 +222,10 @@ class EvidenceRecord:
 @dataclass(frozen=True)
 class EvidenceVerification:
     records: tuple[EvidenceRecord, ...]
+    #: Whether the records directory is itself on disk. A zero-record result
+    #: is reached two ways — an absent directory and an existing empty one —
+    #: and this is the only thing that tells a caller which one it has.
+    directory_present: bool
 
     @property
     def head(self) -> EvidenceRecord | None:
@@ -583,8 +587,24 @@ def verify_evidence_records(
     does not depend on it. A green result here says the records are
     well-formed, chained, and signed by the pinned producer under this
     module's domain — and says nothing about the custody of any release.
+
+    An absent records directory is the zero-record chain, not a refusal. This
+    directory is closed-world, so a placeholder file cannot be put in it to
+    keep it alive, and git tracks no empty directory: absence is therefore the
+    only empty state a checkout can carry, and refusing it would refuse every
+    consumer's state before its first emission.
+    `release_chain._enumerate_manifest_files` answers the same way about an
+    absent manifest directory. What absence and an existing empty directory
+    could not be told apart by is now `EvidenceVerification.directory_present`
+    — the one thing a zero-record result does not otherwise say, and what a
+    caller needs to refuse a mistyped `records_relative` on its own terms.
     """
 
+    # Asked before enumeration, which cannot answer it: enumeration returns
+    # the empty list for an absent directory and for an existing empty one
+    # alike. The confinement check runs first either way, so a linked
+    # component still refuses here in the same words it refuses there.
+    directory_present = _assert_records_directory_is_confined(root, spec).is_dir()
     key_spec = _sign.ProducerKeySpec(
         public_key_filename=spec.producer_public_key_filename,
         spki_sha256=spec.producer_spki_sha256,
@@ -653,7 +673,9 @@ def verify_evidence_records(
             )
         )
         previous_sha256 = digest
-    return EvidenceVerification(records=tuple(records))
+    return EvidenceVerification(
+        records=tuple(records), directory_present=directory_present
+    )
 
 
 def _signing_key_spki_sha256(private_key_pem: bytes) -> str:
