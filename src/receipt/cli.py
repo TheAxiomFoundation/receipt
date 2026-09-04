@@ -1699,6 +1699,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     # before --json is knowable, carry none either.
     as_json = bool(args.json)
 
+    if args.expect_anchor_set is not None and (
+        len(args.expect_anchor_set) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in args.expect_anchor_set
+        )
+    ):
+        return _refuse(
+            as_json,
+            "spec",
+            "expected anchor-set SHA-256 must be a lowercase 64-character "
+            "hex digest",
+            EXIT_USAGE,
+        )
+
     try:
         loaded_spec = load_spec(
             args.spec,

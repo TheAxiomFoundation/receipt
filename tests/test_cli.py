@@ -1475,6 +1475,33 @@ def test_spec_expectation_mismatch_is_an_exact_pre_execution_refusal(
     )
 
 
+def test_malformed_anchor_expectation_is_a_json_usage_refusal(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    spec_path = repo / "verification/spec.py"
+    spec_digest = hashlib.sha256(spec_path.read_bytes()).hexdigest()
+
+    assert run(
+        repo,
+        "--expect-spec-sha256",
+        spec_digest,
+        "--expect-anchor-set",
+        "NOTAHEX",
+        "--json",
+    ) == EXIT_USAGE
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "failure": (
+            "expected anchor-set SHA-256 must be a lowercase 64-character "
+            "hex digest"
+        ),
+        "passesCompleted": [],
+        "stage": "spec",
+        "verdict": "FAIL",
+    }
+    assert "verification aborted" not in captured.err
+
+
 def test_candidate_expectations_refuse_commit_before_tree_through_the_cli(
     repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
