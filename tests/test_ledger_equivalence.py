@@ -942,18 +942,13 @@ def test_mutation_refused_identically(
 # commit's tree and not a checkout that diverges from one; the module
 # docstring states that contract and the two legs each case runs.
 #
-# Deliberately out of scope for THIS PR (Sol re-review P1, scoped not deferred):
-# verify_base_release_chain and materialize_base_tree are unbound here because
-# verify_release_chain.py's own CLI never invokes them — its main() runs only
-# verify_release_history_immutable plus verify_release_chain, so the
-# byte-equivalence contract (unmodified script CLI vs port) has no baseline
-# surface for them in this module. Their real caller is the append gate,
-# check_thesis_facts_append.py, whose CLI DOES invoke verify_base_release_chain
-# (base-tree materialization + trusted-base verification). They get their
-# differential coverage when that gate is extracted in the next PR, where the
-# baseline CLI exercises them directly. Binding them earlier would require a
-# second oracle mode (import the pinned script as a module) that this harness
-# deliberately does not adopt.
+# This ledger oracle's --base-ref mode compares release history and then
+# verifies the candidate chain, so ``run_port_base_ref`` mirrors precisely
+# those two operations over the selected candidate/base tree objects.
+# ``verify_base_release_chain`` has its materialization regression in
+# ``test_release_chain.py``; its differential caller is the append gate and
+# remains Lane B's integration surface. The deleted ``materialize_base_tree``
+# helper has no subject left to exercise here.
 
 BASE_MANIFEST_RELATIVE = f"releases/manifests/{RELEASE_1_STEM}.json"
 BASE_RECEIPT_RELATIVE = f"releases/manifests/{RELEASE_1_STEM}.freetsa.tsr"
