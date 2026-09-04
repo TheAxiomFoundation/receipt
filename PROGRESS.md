@@ -32,6 +32,8 @@
   the full-candidate-OID contract for base comparisons, and preserved the
   push-path release-mode refusal wording before materialization.
 - Verified the new module with `py_compile`, Ruff, and `git diff --check`.
+- Removed Lane C's temporary `CorpusSpec.name_repertoire` compatibility read;
+  the merged Lane D field is now read directly.
 
 ## Next
 
