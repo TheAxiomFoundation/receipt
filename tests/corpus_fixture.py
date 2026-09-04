@@ -20,13 +20,11 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import NamedTuple
 
 from receipt.canonical import canonical_bytes
 from receipt.corpus import CorpusSpec
 from receipt.release_chain import AnchorSpec, ChainSpec
 from receipt.sign import generate_signing_keypair, sign_payload, spki_sha256
-from receipt.verify import VerificationSpec
 
 SCHEMA_VERSION = "receipt_test_corpus_release_v1"
 JOURNAL_SCHEMA = "receipt/test-corpus-journal/v1"
@@ -38,14 +36,6 @@ ANCHOR_NAMES = ("alpha", "beta")
 
 _GIT_SECONDS = 30
 _GIT_OUTPUT_BYTES = 64 * 1024
-
-
-class BuiltCorpus(NamedTuple):
-    """The generated verifier inputs and their optional immutable subject."""
-
-    spec: VerificationSpec
-    spec_path: pathlib.Path
-    commit_oid: str | None
 
 
 def _git(root: pathlib.Path, *arguments: str) -> str:
@@ -512,13 +502,8 @@ def build_corpus(
     attested: dict[str, str] | None = None,
     gates: list[dict[str, object]] | None = None,
     commit: bool = True,
-) -> BuiltCorpus:
-    """Write a witnessed corpus and optionally commit its immutable subject.
-
-    The first two result fields retain the fixture's existing ``spec`` and
-    ``spec_path`` values. ``commit_oid`` is ``None`` only when ``commit`` is
-    false.
-    """
+) -> str | None:
+    """Write a witnessed corpus and return its commit OID unless opted out."""
 
     content = CONTENT if content is None else content
     attested = ATTESTED if attested is None else attested
@@ -583,19 +568,11 @@ def build_corpus(
     for tsa in (alpha, beta):
         tsa.stamp(digest, manifests / f"{stem}.{tsa.name}.tsr")
 
-    spec = VerificationSpec(
-        name="receipt test corpus",
-        chain=spec_chain,
-        corpus=corpus_spec(),
-    )
-    spec_path = write_spec_module(root, spec_chain, alpha, beta)
+    write_spec_module(root, spec_chain, alpha, beta)
     (workspace / "producer.key").write_bytes(private_pem)
-    commit_oid = (
-        _commit_fixture(root, "build corpus fixture", initialize=True)
-        if commit
-        else None
-    )
-    return BuiltCorpus(spec, spec_path, commit_oid)
+    if not commit:
+        return None
+    return _commit_fixture(root, "build corpus fixture", initialize=True)
 
 
 def append_release(
