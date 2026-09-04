@@ -224,6 +224,82 @@ def test_refuses_a_directory_it_cannot_enumerate(tmp_path: pathlib.Path) -> None
         os.chmod(hidden, 0o755)
 
 
+def test_an_unreadable_tree_root_is_not_called_a_directory_under_a_content_root(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S8-F6: the refusal was worded for the one caller it used to have.
+
+    ``_list_directory`` served the closed-world sweep alone, which descends
+    *under* a content root, so its refusal said so. This branch gave it a
+    second caller — ``_assert_no_aliasing_root_component``, which walks the
+    tree root and every ancestor *above* a pinned root — and an unreadable
+    repository root then refused with "cannot enumerate a directory under a
+    content root ... '.'", naming the tree root as something inside a subtree
+    of itself. Nothing in an auditor's hands tells them the mode they need to
+    fix is on the clone's own root.
+
+    Mode 0111 is searchable and not listable, which is the same shape the
+    sweep's own regression above uses: the pinned root still resolves, so the
+    walk reaches the listing rather than failing earlier.
+
+    Without S8-F6 this refusal names a directory under a content root.
+    """
+
+    import os
+
+    write_tree(tmp_path)
+    os.chmod(tmp_path, 0o111)
+    try:
+        with pytest.raises(CorpusError) as caught:
+            verify_corpus_binding(
+                tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+            )
+    finally:
+        os.chmod(tmp_path, 0o755)
+    message = str(caught.value)
+    assert message.startswith(
+        "cannot enumerate the tree root or an ancestor of a content root, so "
+        "the file set cannot be closed: '.'"
+    )
+    assert "a directory under a content root" not in message
+
+
+def test_an_unreadable_ancestor_of_a_pinned_root_is_named_as_an_ancestor(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binds S8-F6: the intermediate ancestors carry the same wording.
+
+    A content root of more than one component makes the aliasing check list
+    every directory above it, and those are ancestors rather than anything
+    under the root. ``jurisdictions`` here holds the pinned
+    ``jurisdictions/us/rules``; unreadable, it is what the walk cannot
+    enumerate, and the refusal names it as the ancestor it is.
+
+    Without S8-F6 it is named as a directory under a content root, which is
+    the one thing it is not.
+    """
+
+    import os
+
+    content = {"jurisdictions/us/rules/rate.yaml": "name: rate\nvalue: 1\n"}
+    write_tree(tmp_path, content=content)
+    spec = corpus_spec(
+        content_roots=(pathlib.PurePosixPath("jurisdictions/us/rules"),)
+    )
+    rows = journal_rows(content=content)
+
+    os.chmod(tmp_path / "jurisdictions", 0o111)
+    try:
+        with pytest.raises(CorpusError) as caught:
+            verify_corpus_binding(tmp_path, render_journal(rows), spec=spec)
+    finally:
+        os.chmod(tmp_path / "jurisdictions", 0o755)
+    assert str(caught.value).startswith(
+        "cannot enumerate the tree root or an ancestor of a content root, so "
+        "the file set cannot be closed: 'jurisdictions'"
+    )
+
+
 def test_refuses_a_bound_path_behind_a_symlinked_parent(
     tmp_path: pathlib.Path,
 ) -> None:

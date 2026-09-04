@@ -2101,6 +2101,7 @@ def _list_directory(
     directory: pathlib.Path,
     relative: str,
     *,
+    what: str = "a directory under a content root",
     work: "_SweepWork",
     generations: "_DirectoryGenerations",
 ) -> list[pathlib.Path]:
@@ -2133,6 +2134,15 @@ def _list_directory(
     nothing more. The names are sorted afterwards — what is sorted is what
     the budget allowed through — and the entries are rebuilt as
     ``directory / name``, which is the same joining every refusal here quotes.
+
+    ``what`` names the thing that could not be enumerated, because this
+    function has two callers and they list different things. The sweep
+    descends *under* a content root; the aliasing root-component check walks
+    the tree root and every ancestor *above* one, so an unreadable repository
+    root refused as "a directory under a content root: '.'", which names the
+    tree root as something inside a subtree of it (peer review, Sol round 8).
+    The label is passed by the caller, as
+    :func:`_assert_no_symlinked_component` already takes one.
     """
 
     generations.record(directory, relative)
@@ -2144,8 +2154,8 @@ def _list_directory(
                 names.append(entry.name)
     except OSError as exc:
         raise CorpusError(
-            f"cannot enumerate a directory under a content root, so the file "
-            f"set cannot be closed: {_quoted(relative or '.')} ({exc.strerror})"
+            f"cannot enumerate {what}, so the file set cannot be closed: "
+            f"{_quoted(relative or '.')} ({exc.strerror})"
         ) from exc
     return [directory / name for name in sorted(names)]
 
@@ -3171,7 +3181,11 @@ def _assert_no_aliasing_root_component(
             return
         walked_relative = "/".join(walked)
         entries = _list_directory(
-            current, walked_relative, work=work, generations=generations
+            current,
+            walked_relative,
+            what="the tree root or an ancestor of a content root",
+            work=work,
+            generations=generations,
         )
         for entry in entries:
             # Screened, and not only for the fold question below: an entry
