@@ -148,6 +148,34 @@ def test_refusal_writes_to_a_redirected_stringio_stderr(
     )
 
 
+def test_a_redirecting_git_variable_refuses_the_command_as_a_verdict(
+    repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#45's cheap half as the auditor meets it: one fail-closed verdict.
+
+    The custody pass is ``verify_release_chain``, which refuses at its entry
+    when any of the five redirecting variables is set, so the command that
+    passes over this corpus reports FAIL with the refusal quoted rather than
+    a PASS about a repository it was never pointed at. The same tree passes
+    with the variable unset, so the environment alone is what changed.
+    """
+
+    assert run(repo) == EXIT_OK
+    assert "VERDICT: PASS" in capsys.readouterr().out
+
+    monkeypatch.setenv("GIT_DIR", str(repo.parent / "elsewhere.git"))
+    assert run(repo) == EXIT_FAIL
+    # A refused verdict is written to stderr, a passing one to stdout.
+    error = capsys.readouterr().err
+    assert "VERDICT: FAIL — custody" in error
+    assert (
+        "GIT_DIR is set in the environment and would redirect git reads; "
+        "unset it"
+    ) in error
+
+
 def test_a_regular_file_named_as_the_root_refuses_in_the_same_words(
     repo: pathlib.Path,
 ) -> None:

@@ -5776,6 +5776,133 @@ def test_an_ordinary_spec_names_a_subdirectory_for_every_release_path(
     )
 
 
+# The environment that redirects every git read this gate makes (#45, the
+# cheap half). GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY
+# and GIT_ALTERNATE_OBJECT_DIRECTORIES each send git to another repository,
+# index or object store than the checkout `root` names, from that checkout's
+# own working directory, while the verdict still speaks of the checkout named
+# — and this gate reads the candidate tree directly as well, so under any of
+# them the two halves of one verdict are about two trees. They are refused
+# rather than dropped for the child processes: dropping them would leave the
+# verifier's own environment redirected while its children's was not.
+def redirecting_refusal(name: str) -> str:
+    return f"{name} is set in the environment and would redirect git reads; unset it"
+
+
+@pytest.mark.parametrize("name", release_chain.REDIRECTING_GIT_ENVIRONMENT)
+@pytest.mark.parametrize("with_base", [False, True], ids=["push", "base-ref"])
+def test_a_redirecting_git_variable_refuses_the_whole_verdict(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    with_base: bool,
+) -> None:
+    """#45's cheap half, once per variable and on both paths.
+
+    The proposal is the ordinary accepted append, so nothing but the
+    environment distinguishes these runs from the baseline verdict — the
+    refusal is the environment's and not the tree's.
+    """
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    monkeypatch.setenv(name, str(tmp_path / "elsewhere"))
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate) if with_base else run_push_gate(candidate)
+    assert str(refusal.value) == redirecting_refusal(name)
+
+
+def test_the_five_redirecting_variables_are_the_ones_named(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The list itself, so a name cannot be dropped from it unnoticed."""
+
+    assert release_chain.REDIRECTING_GIT_ENVIRONMENT == (
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    )
+
+
+def test_the_ordinary_environment_still_reaches_a_verdict(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal's negative side: only those five names refuse.
+
+    The environment here carries the four pathspec-mode variables the reads
+    already drop, git's own configuration isolation, and a name that merely
+    begins with ``GIT_DIR`` — the prefix, not the variable — and the ordinary
+    accepted verdict is returned on both paths, unchanged.
+    """
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    for name in release_chain.PATHSPEC_ENVIRONMENT:
+        monkeypatch.setenv(name, "1")
+    monkeypatch.setenv("GIT_DIR_FIXTURE_MARKER", "not the variable")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for name in release_chain.REDIRECTING_GIT_ENVIRONMENT:
+        monkeypatch.delenv(name, raising=False)
+
+    assert run_gate(candidate) == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 1, "
+        "+1 appended vs base"
+    )
+    assert run_push_gate(candidate) == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 1"
+    )
+
+
+def test_a_redirecting_variable_is_refused_before_any_git_command_runs(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """And it is the first thing asked: before the root is opened at all.
+
+    The root here does not exist, which is its own refusal one line further
+    down (#46), and git is replaced with a raise. The environment's sentence
+    is what arrives, so the order is the stated one: the process first, then
+    the tree.
+    """
+
+    def refuse_to_run(*arguments: Any, **keywords: Any) -> Any:
+        raise RuntimeError("a git command ran before the environment was refused")
+
+    monkeypatch.setattr(subprocess, "run", refuse_to_run)
+    monkeypatch.setattr(subprocess, "check_output", refuse_to_run)
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "elsewhere.git"))
+
+    with pytest.raises(AppendError) as refusal:
+        verify_append_gate(tmp_path / "no-such-tree", spec=GATE_SPEC)
+    assert str(refusal.value) == redirecting_refusal("GIT_DIR")
+
+
+def test_the_redirecting_refusal_names_the_first_variable_set(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With several set, one sentence: the first in the module's own order.
+
+    The instruction is the same for each, so a caller with two set fixes one,
+    asks again, and is told about the other.
+    """
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    monkeypatch.setenv("GIT_INDEX_FILE", str(tmp_path / "foreign.index"))
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", str(tmp_path / "foreign-objects"))
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate)
+    assert str(refusal.value) == redirecting_refusal("GIT_INDEX_FILE")
+
+    monkeypatch.delenv("GIT_INDEX_FILE")
+    with pytest.raises(AppendError) as second:
+        run_push_gate(candidate)
+    assert str(second.value) == redirecting_refusal("GIT_OBJECT_DIRECTORY")
+
+
 # The candidate root that is not there to be opened (#46). ``_set_root``
 # recorded the root's identity with an unguarded open, so a ``--root`` naming
 # nothing, or naming a regular file, escaped as the OS's own ``OSError``

@@ -1730,3 +1730,99 @@ def test_the_alias_scan_protects_only_what_its_caller_names(
         "index carries an alias of a protected path: Tools/helper.py "
         "(for tools at tools)"
     )
+
+
+# #45, the cheap half, at the public verifier rather than at the gate. Five
+# variables redirect every git read this package makes — the base resolution,
+# every index read behind the state and release checks, the release-root scan
+# — to another repository, index or object store than the checkout named as
+# ``root``, from that checkout's own working directory, while the verdict is
+# still phrased about the checkout named. They are refused at the entry rather
+# than dropped for the child processes: a drop would leave the verifier's own
+# environment redirected while its children's was not, and this module reads
+# the candidate tree directly as well as through git. The full pin — GIT_DIR
+# stated explicitly for every read — is 0.6.
+def redirecting_refusal(name: str) -> str:
+    return f"{name} is set in the environment and would redirect git reads; unset it"
+
+
+@pytest.mark.parametrize("name", release_chain.REDIRECTING_GIT_ENVIRONMENT)
+def test_a_redirecting_git_variable_refuses_the_custody_verdict(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """One case per variable, over a chain that verifies without it.
+
+    The same call is made twice against the same tree: once with the variable
+    set and once without. Only the environment differs, so the refusal is the
+    environment's and not the tree's.
+    """
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+
+    monkeypatch.setenv(name, str(repo / "elsewhere"))
+    with pytest.raises(ReleaseChainError) as refusal:
+        verify_release_chain(repo, spec=spec.chain)
+    assert str(refusal.value) == redirecting_refusal(name)
+
+    monkeypatch.delenv(name)
+    assert verify_release_chain(repo, spec=spec.chain).releases
+
+
+def test_the_ordinary_environment_still_reaches_a_custody_verdict(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal's negative side: only those five names refuse.
+
+    The environment carries the four pathspec-mode variables these reads
+    already drop, git's configuration isolation, and a name that merely begins
+    with ``GIT_DIR`` — the prefix, not the variable — and the chain verifies
+    exactly as it does with none of them set.
+    """
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    for name in release_chain.PATHSPEC_ENVIRONMENT:
+        monkeypatch.setenv(name, "1")
+    monkeypatch.setenv("GIT_DIR_FIXTURE_MARKER", "not the variable")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for name in release_chain.REDIRECTING_GIT_ENVIRONMENT:
+        monkeypatch.delenv(name, raising=False)
+
+    assert verify_release_chain(repo, spec=spec.chain).releases
+
+
+def test_the_redirecting_refusal_precedes_resolving_the_root(
+    repo: pathlib.Path, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It is asked before the argument is even resolved, so nothing about the
+    tree can pre-empt it: the root here does not exist."""
+
+    spec, _ = load_spec(repo / "verification/spec.py")
+    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path / "elsewhere"))
+
+    with pytest.raises(ReleaseChainError) as refusal:
+        verify_release_chain(tmp_path / "no-such-tree", spec=spec.chain)
+    assert str(refusal.value) == redirecting_refusal("GIT_WORK_TREE")
+
+
+def test_the_git_environment_still_carries_the_redirecting_names_through(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_git_environment`` is unchanged, and the docstring says why.
+
+    Dropping the five here would sanitize the child processes while leaving
+    the verifier's own environment redirected, and both this module and the
+    append gate read the candidate tree directly as well as through git — so
+    the two halves of one verdict would be about two trees. The entries refuse
+    instead, which is why a run that reaches this function has already been
+    told none of the five is set.
+    """
+
+    for name in release_chain.REDIRECTING_GIT_ENVIRONMENT:
+        monkeypatch.setenv(name, "carried through")
+
+    environment = release_chain._git_environment()
+
+    for name in release_chain.REDIRECTING_GIT_ENVIRONMENT:
+        assert environment[name] == "carried through"
+    assert environment["GIT_NO_REPLACE_OBJECTS"] == "1"
+    assert not set(environment) & set(release_chain.PATHSPEC_ENVIRONMENT)

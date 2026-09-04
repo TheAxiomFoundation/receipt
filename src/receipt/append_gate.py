@@ -544,7 +544,25 @@ gate's rather than ``ChainSpec``'s deliberately: a spec is the consumer's
 committed code and validating one is #41's subject, while this is the one
 consumer that cannot answer for it.
 
-Beside those three, and unlike them, is one about the candidate tree: that
+There is a fourth of the same kind, and it is asked before all three, because
+it is a fact about the process this verdict is produced in rather than about
+the tree or the configuration it is produced for. ``GIT_DIR``,
+``GIT_WORK_TREE``, ``GIT_INDEX_FILE``, ``GIT_OBJECT_DIRECTORY`` and
+``GIT_ALTERNATE_OBJECT_DIRECTORIES`` each redirect every git read this gate
+makes — the base resolution, every index read, the release-root scan, the
+intent-to-add detection — to another repository, index or object store than
+the checkout ``root`` names, from that checkout's own working directory; and
+this gate reads the candidate tree directly as well as through git, so under
+any of them the two halves of one verdict are about two trees. With any of the
+five set, ``verify_append_gate`` refuses before it opens the root, in
+``release_chain``'s words, and ``verify_release_chain`` refuses the same way,
+so ``receipt verify``'s custody pass answers identically. They are refused
+rather than dropped for the child processes, because a drop leaves the
+verifier's own environment redirected; the full pin — ``GIT_DIR`` stated
+explicitly for every read — is 0.6 work (#45), and
+``release_chain.assert_no_redirecting_git_environment`` says so.
+
+Beside those, and unlike them, is one about the candidate tree: that
 there is none. A ``root`` naming nothing, or naming a regular file, or reached
 through a component that is one, is not a tree this gate can answer about, and
 it used to escape as the ``OSError`` the root's own open raised — a bare
@@ -583,6 +601,7 @@ from receipt.release_chain import (
     WORKING_TREE_SCAN_OPTIONS,
     assert_file_modes_authoritative,
     assert_index_agrees_with_tree,
+    assert_no_redirecting_git_environment,
     assert_index_carries_no_protected_alias,
     assert_index_hides_no_working_tree_change,
     assert_index_content_bound,
@@ -2677,8 +2696,24 @@ def verify_append_gate(
     The candidate root is selected and opened here and held open until the
     verdict is finished, which is what every comparison against its recorded
     identity relies on; see ``_set_root``.
+
+    Before any of that: an environment that would redirect git's reads away
+    from this candidate tree is refused rather than answered under. See
+    ``release_chain.assert_no_redirecting_git_environment``; the full pin is
+    0.6 (#45).
     """
 
+    # First, ahead of the platform and spec refusals below and ahead of the
+    # root's own open, because it is a fact about the process this verdict is
+    # produced in rather than about the tree or the configuration it is
+    # produced for: with any of the five set, every git read here — the base
+    # resolution, every index read, the release-root scan — is about another
+    # repository, and this gate reads the candidate tree directly as well, so
+    # the two halves of one verdict would be about two trees.
+    try:
+        assert_no_redirecting_git_environment()
+    except ReleaseChainError as exc:
+        raise AppendError(str(exc)) from exc
     candidate = _set_root(root, spec)
     try:
         return _verify_selected_tree(
