@@ -1684,20 +1684,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command != "verify":  # pragma: no cover - argparse enforces this
         parser.error(f"unknown command {args.command!r}")
 
-    if args.base_ref is not None and args.expect_commit is None:
-        parser.error("--base-ref requires --expect-commit")
-    if args.expect_anchor_set is not None and args.expect_spec_sha256 is None:
-        parser.error("--expect-anchor-set requires --expect-spec-sha256")
-
     # From here down the contract is: with --json, at most one JSON object
     # bearing a "verdict" key is printed on every path — spec refusals, root
     # refusals, an aborted run, even a result that cannot be rendered — and
     # the exit code carries the verdict wherever the stream will not take
     # bytes. Zero objects where the emission guard refuses stdout, and two
     # where a write completes and the flush after it fails; the module
-    # docstring says what each of those looks like. argparse's own exits,
-    # before --json is knowable, carry none either.
+    # docstring says what each of those looks like. Only failures raised inside
+    # parse_args(), before this boundary makes --json knowable, use argparse's
+    # stderr-only exit instead.
     as_json = bool(args.json)
+
+    if args.base_ref is not None and args.expect_commit is None:
+        return _refuse(
+            as_json,
+            "arguments",
+            "--base-ref requires --expect-commit",
+            EXIT_USAGE,
+        )
+    if args.expect_anchor_set is not None and args.expect_spec_sha256 is None:
+        return _refuse(
+            as_json,
+            "arguments",
+            "--expect-anchor-set requires --expect-spec-sha256",
+            EXIT_USAGE,
+        )
 
     if args.expect_anchor_set is not None and (
         len(args.expect_anchor_set) != 64

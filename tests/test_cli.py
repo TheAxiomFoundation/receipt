@@ -1442,7 +1442,7 @@ def test_refuses_a_symlinked_spec(
         ),
     ],
 )
-def test_pin_dependencies_are_parser_errors_before_the_spec_runs(
+def test_pin_dependencies_are_usage_errors_before_the_spec_runs(
     repo: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1453,17 +1453,34 @@ def test_pin_dependencies_are_parser_errors_before_the_spec_runs(
         raise AssertionError("the parser dependency must run first")
 
     monkeypatch.setattr("receipt.cli.load_spec", must_not_load)
-    with pytest.raises(SystemExit) as refusal:
-        main(
-            [
-                "verify",
-                "--spec",
-                str(repo / "verification/spec.py"),
-                *arguments,
-            ]
-        )
-    assert refusal.value.code == EXIT_USAGE
+    assert main(
+        [
+            "verify",
+            "--spec",
+            str(repo / "verification/spec.py"),
+            *arguments,
+        ]
+    ) == EXIT_USAGE
     assert message in capsys.readouterr().err
+
+
+def test_pin_dependency_usage_refusal_honors_json(
+    repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def must_not_load(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("the dependency refusal must run first")
+
+    monkeypatch.setattr("receipt.cli.load_spec", must_not_load)
+    assert run(repo, "--base-ref", "main", "--json") == EXIT_USAGE
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "failure": "--base-ref requires --expect-commit",
+        "passesCompleted": [],
+        "stage": "arguments",
+        "verdict": "FAIL",
+    }
 
 
 def test_spec_expectation_mismatch_is_an_exact_pre_execution_refusal(
