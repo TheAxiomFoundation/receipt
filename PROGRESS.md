@@ -4,7 +4,7 @@
 
 - Branch: `feat/0.6-lane-b`
 - Recorded starting OID: `e3af1950ff39f1eaa5ff3aad60e89b18e73a943c`
-- Phase: selected-tree gate implemented; pruning and porting tests
+- Phase: snapshot unit suite green; adding verdict and harness coverage
 - Network status: sandbox-disabled; GitHub API access fails immediately
 
 ## Done
@@ -34,11 +34,27 @@
 - Verified the new module with `py_compile`, Ruff, and `git diff --check`.
 - Removed Lane C's temporary `CorpusSpec.name_repertoire` compatibility read;
   the merged Lane D field is now read directly.
+- Rebased the local append fixture on committed candidate trees: ordinary
+  helpers commit each proposal and pass its full OID, while symbolic-base
+  tests retain a separate moving base name.
+- Deleted the legacy diagnostic module because every test targeted
+  `_set_root`, `_resolve_base_commit`, or `_manifest_at_ref`; those callers
+  and their working-tree subject no longer exist.
+- Removed append tests by obsolete subject class: ignored/untracked and
+  unreadable checkout enumeration; checkout authority and cache settings;
+  index reconciliation, aliases, pathspecs, conflicts, intent-to-add, and
+  hidden entries; FIFO/state re-read/root/release-root concurrent writers;
+  descriptor lifetime; and live-filesystem spelling/folding/confinement.
+- Retained and ported the semantic refusal battery over committed objects,
+  including surface separation, append/prefix/row/binding rules, tree modes,
+  release history, manifest shapes, specs, environment entry refusals, and
+  the exact #46 missing-repository wording. The resulting unit suite is 84/84
+  green under the cached Python 3.13 environment.
 
 ## Next
 
-- Prune tests whose working-tree/index/writer subject no longer exists, then
-  adapt retained tests and add the new immutable-snapshot cases.
+- Add the full-OID, verdict-field, pushed-commit, and immutable-snapshot
+  invariance cases.
 - Thread the committed candidate OID through the append equivalence harness.
 - Run the focused, equivalence, and full offline suites; perform the pinned production-tree differential.
 - Prepare the complete no-network PR handoff; pushing and opening the draft PR

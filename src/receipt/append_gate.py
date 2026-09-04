@@ -1057,6 +1057,13 @@ def check_release_chain_without_base(
     if not initialized:
         _screen_candidate_materialization(candidate)
         return None
+    manifest_relative = candidate.spec.chain.manifest_relative.as_posix()
+    manifest_entry = candidate.snapshot.entry(manifest_relative)
+    if manifest_entry.mode != "040000":
+        raise AppendError(
+            "release manifest path is not a regular directory: "
+            f"{candidate.snapshot.root / candidate.spec.chain.manifest_relative}"
+        )
     try:
         verification = _verify_candidate_release_chain(
             candidate=candidate,
