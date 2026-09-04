@@ -3,7 +3,7 @@
 ## State
 
 - Branch: `feat/0.6-lane-d` at baseline `145f3db93d745ddc43aeb47f6b7bd8b30aa331a3`.
-- Phase: retained corpus battery is green; required tree-shape and invariance additions are next.
+- Phase: Lane D implementation and focused acceptance coverage are complete; integration/offline gates are next.
 - Scope: immutable-tree corpus verification, shared name-policy additions, corpus fixture commit helpers, and focused tests.
 - Network is sandbox-disabled; local work, tests, commits, and a complete draft PR body remain possible. Push/PR creation will be attempted only after all gates pass.
 
@@ -33,11 +33,16 @@
 - Retained focused battery after that deletion: 198 passing cases and 18 expected migration failures. Those failures are confined to stale Unicode-normalization assertions, host-conditional spelling assertions, fake `os.scandir` entries, and removed private instrumentation; no parser, digest, membership, or declaration regression appears.
 - Converted all 18 retained migration failures to immutable-tree semantics. Raw index fixtures now express names the checkout cannot, exact attested and membership spelling no longer branches on host case behavior, and tests explicitly freeze ASCII-only folding rather than the deleted Unicode normalization/casefold model.
 - Retained corpus plus shared-name battery: 216 passed.
+- Added the required committed-tree matrix: gitlink, `120000`, non-UTF-8 component, and fold-equal siblings, each under `portable` and `posix-bytes`.
+- Added #44's working-tree-independence property across two content roots and `.axiom`: rewrite, insert, and rename mutations leave the verified verdict, commit OID, and tree OID unchanged.
+- Added a path-work regression proving the whole-tree flat listing charges each path once, with only the required exact attested lookup adding its own charge.
+- Focused corpus plus shared-name battery with replacements: 227 passed.
 
 ## Next
 
-1. Add the two-repertoire tree-shape matrix and #44 worktree-independence property.
-2. Run focused, offline, and equivalence gates; prepare the required PR body and final report with exact totals and OIDs.
+1. Run formatting/static checks, the full offline suite, and the 94-case equivalence gate.
+2. Resolve in-scope failures; record Lane C/B integration points separately.
+3. Prepare the required PR body and final report with exact totals and OIDs.
 
 ## Findings
 

@@ -123,6 +123,8 @@ def _commit_index_updates(
         "core.protectNTFS=false",
         "-c",
         "core.protectHFS=false",
+        "-c",
+        "core.ignoreCase=false",
         "update-index",
         "-z",
         "--index-info",
@@ -223,15 +225,20 @@ def first_over(cost: int, budget: int) -> tuple[int, int]:
     return number, number * cost
 
 
-def test_binding_accepts_a_journal_that_describes_the_tree(tmp_path: pathlib.Path) -> None:
+@pytest.mark.parametrize("name_repertoire", ["portable", "posix-bytes"])
+def test_binding_accepts_a_journal_that_describes_the_tree(
+    tmp_path: pathlib.Path, name_repertoire: str
+) -> None:
     write_tree(tmp_path)
     verification = verify_corpus_binding(
-        tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        tmp_path,
+        render_journal(journal_rows()),
+        spec=corpus_spec(name_repertoire=name_repertoire),
     )
     assert [entry.path for entry in verification.content] == sorted(CONTENT)
     assert [entry.path for entry in verification.attested] == sorted(ATTESTED)
     assert len(verification.gates) == 3
-    assert verification.name_repertoire == "portable"
+    assert verification.name_repertoire == name_repertoire
 
 
 def test_binding_requires_a_selected_tree_snapshot(tmp_path: pathlib.Path) -> None:
@@ -245,6 +252,141 @@ def test_binding_requires_a_selected_tree_snapshot(tmp_path: pathlib.Path) -> No
         "verify_corpus_binding requires a TreeSnapshot; select one with "
         "TreeSnapshot.select"
     )
+
+
+@pytest.mark.parametrize("name_repertoire", ["portable", "posix-bytes"])
+@pytest.mark.parametrize(
+    ("shape", "message"),
+    [
+        (
+            "gitlink",
+            "content root contains a gitlink: 'rules/vendor'",
+        ),
+        (
+            "symlink",
+            "content root contains a symlink where a regular file was recorded: "
+            "'rules/tax/linked.yaml'",
+        ),
+        (
+            "non-utf8",
+            "tree entry name is not valid UTF-8 for folding",
+        ),
+        (
+            "fold-siblings",
+            "directory holds two entries a case-insensitive filesystem would "
+            "merge: 'misc/README' and 'misc/ReadMe'",
+        ),
+    ],
+)
+def test_refuses_unsupported_committed_tree_shapes_under_each_repertoire(
+    tmp_path: pathlib.Path,
+    name_repertoire: str,
+    shape: str,
+    message: str,
+) -> None:
+    """Tree modes and names are screened from objects, not a checkout."""
+
+    write_tree(tmp_path)
+    base_oid = _commit_worktree(tmp_path)
+    blob_oid = _hash_blob(tmp_path, b"shape fixture\n")
+    if shape == "gitlink":
+        updates = [("160000", base_oid, b"rules/vendor")]
+    elif shape == "symlink":
+        updates = [("120000", blob_oid, b"rules/tax/linked.yaml")]
+    elif shape == "non-utf8":
+        updates = [("100644", blob_oid, b"misc/non-utf8-\xff")]
+    else:
+        updates = [
+            ("100644", blob_oid, b"misc/README"),
+            ("100644", blob_oid, b"misc/ReadMe"),
+        ]
+    oid = _commit_index_updates(tmp_path, updates)
+
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(
+            tmp_path,
+            oid,
+            render_journal(journal_rows()),
+            spec=corpus_spec(name_repertoire=name_repertoire),
+        )
+    assert str(caught.value) == message
+
+
+def test_binding_is_invariant_to_every_worktree_mutation_class(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Rewrite, insert, and rename below every protected root after selection."""
+
+    content_roots = (
+        pathlib.PurePosixPath("rules"),
+        pathlib.PurePosixPath("policies"),
+    )
+    content = {
+        f"{root.as_posix()}/rewrite.yaml": f"name: {root.name}-rewrite\n"
+        for root in content_roots
+    }
+    content.update(
+        {
+            f"{root.as_posix()}/rename.yaml": f"name: {root.name}-rename\n"
+            for root in content_roots
+        }
+    )
+    attested = {
+        ".axiom/toolchain.toml": 'python = "3.14"\n',
+        ".axiom/rename-me.txt": "rename me\n",
+    }
+    write_tree(tmp_path, content=content, attested=attested)
+    journal_bytes = render_journal(journal_rows(content=content, attested=attested))
+    oid = _commit_worktree(tmp_path)
+    spec = corpus_spec(content_roots=content_roots)
+
+    def selected_verdict() -> tuple[object, tuple[str, str]]:
+        with TreeSnapshot.select(tmp_path, oid) as snapshot:
+            identity = (snapshot.commit, snapshot.tree)
+            verdict = _verify_corpus_binding(snapshot, journal_bytes, spec=spec)
+        return verdict, identity
+
+    before_verdict, before_oids = selected_verdict()
+
+    for root in content_roots:
+        directory = tmp_path / root.as_posix()
+        (directory / "rewrite.yaml").write_text("rewritten outside the tree\n")
+        (directory / "inserted.yaml").write_text("inserted outside the tree\n")
+        (directory / "rename.yaml").rename(directory / "renamed.yaml")
+    (tmp_path / ".axiom/toolchain.toml").write_text("rewritten outside the tree\n")
+    (tmp_path / ".axiom/inserted.txt").write_text("inserted outside the tree\n")
+    (tmp_path / ".axiom/rename-me.txt").rename(
+        tmp_path / ".axiom/renamed.txt"
+    )
+    assert _git(tmp_path, "status", "--porcelain")
+
+    after_verdict, after_oids = selected_verdict()
+    assert after_verdict == before_verdict
+    assert before_oids[0] == oid
+    assert after_oids == before_oids
+
+
+def test_binding_materializes_each_listing_path_once(tmp_path: pathlib.Path) -> None:
+    """The one flat listing and exact attested lookup pay one path charge each."""
+
+    write_tree(tmp_path)
+    oid = _commit_worktree(tmp_path)
+    with TreeSnapshot.select(tmp_path, oid) as snapshot:
+        _verify_corpus_binding(
+            snapshot,
+            render_journal(journal_rows()),
+            spec=corpus_spec(),
+        )
+        charged = snapshot.work.path_bytes
+
+    leaves = set(CONTENT) | set(ATTESTED)
+    tree_paths = set(leaves)
+    for path in leaves:
+        parts = path.split("/")
+        tree_paths.update("/".join(parts[:depth]) for depth in range(1, len(parts)))
+    expected_listing = sum(len(path.encode()) for path in tree_paths)
+    expected_attested_lookups = sum(len(path.encode()) for path in ATTESTED)
+    assert charged == expected_listing + expected_attested_lookups
 
 
 def test_refuses_a_content_file_edited_after_witnessing(tmp_path: pathlib.Path) -> None:
