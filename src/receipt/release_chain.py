@@ -188,6 +188,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from receipt import sign as _sign
+from receipt import tsa as _tsa
 from receipt._names import NamePolicyError, validate_repertoire
 from receipt.canonical import canonical_bytes, canonical_sha256
 
@@ -903,6 +904,34 @@ def _openssl_binary(
     return completed.stdout
 
 
+_ANCHOR_SNAPSHOT_WRITE_FLAGS = (
+    os.O_WRONLY
+    | os.O_CREAT
+    | os.O_EXCL
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_BINARY", 0)
+)
+
+
+def _write_anchor_snapshot(
+    directory: pathlib.Path, payload: bytes, *, tsa: str
+) -> pathlib.Path:
+    """Write one private byte-for-byte ``-CAfile`` copy for OpenSSL."""
+
+    snapshot = directory / f"anchor-{tsa}.pem"
+    descriptor = os.open(snapshot, _ANCHOR_SNAPSHOT_WRITE_FLAGS, 0o600)
+    try:
+        written = 0
+        while written < len(payload):
+            count = os.write(descriptor, payload[written:])
+            if count <= 0:
+                raise OSError("anchor snapshot write made no progress")
+            written += count
+    finally:
+        os.close(descriptor)
+    return snapshot
+
+
 def _producer_openssl_binary(
     arguments: list[str],
     *,
@@ -1212,11 +1241,11 @@ def verify_receipt(
     anchor = anchor_dir / anchor_filename
     if anchor.is_symlink() or not anchor.is_file():
         raise ReleaseChainError(f"missing or non-regular TSA anchor: {anchor}")
-    anchor_bytes: bytes | None = None
-    if enforce_production_pins or anchor_observer is not None:
-        anchor_bytes = anchor.read_bytes()
+    # OpenSSL accepts only a pathname for -CAfile. Read the selected anchor
+    # once and hand every OpenSSL child a private copy of these exact bytes,
+    # including when production pins and digest observation are both off.
+    anchor_bytes = anchor.read_bytes()
     if enforce_production_pins:
-        assert anchor_bytes is not None
         anchor_digest = sha256_bytes(anchor_bytes)
         if anchor_digest != anchor_spec.pem_sha256:
             raise ReleaseChainError(
@@ -1224,7 +1253,6 @@ def verify_receipt(
                 f"{anchor_digest}"
             )
     if anchor_observer is not None:
-        assert anchor_bytes is not None
         _observe_anchor_bytes(anchor_observer, anchor_filename, anchor_bytes)
 
     with tempfile.TemporaryDirectory(prefix="thesis-release-tsa-") as name:
@@ -1232,16 +1260,9 @@ def verify_receipt(
         empty_ca_dir = temporary / "empty-ca"
         empty_ca_dir.mkdir()
         environment = _openssl_environment(empty_ca_dir)
-        # When observing, OpenSSL must consume exactly the bytes that were
-        # just digested — not whatever the anchor path holds by the time each
-        # subprocess independently reopens it — so the snapshot is written
-        # into this run's private directory and used as the trust anchor for
-        # every OpenSSL call below.
-        if anchor_observer is not None:
-            assert anchor_bytes is not None
-            snapshot = temporary / f"anchor-{tsa}.pem"
-            snapshot.write_bytes(anchor_bytes)
-            anchor = snapshot
+        # The private copy closes the pathname re-open window regardless of
+        # whether this caller asks to report or code-pin the anchor bytes.
+        anchor = _write_anchor_snapshot(temporary, anchor_bytes, tsa=tsa)
         # The receipt gets the same treatment, unconditionally: read once
         # through one descriptor, snapshotted here, and handed to all three
         # OpenSSL invocations below. Reopening the path per call let the
@@ -2523,6 +2544,11 @@ def verify_release_chain(
     from ``root`` is refused rather than answered under. See
     ``assert_no_redirecting_git_environment``; the full pin is 0.6 (#45).
     """
+
+    try:
+        _tsa._require_supported_openssl()
+    except _tsa.TsaError as exc:
+        raise ReleaseChainError(str(exc)) from exc
 
     # Before the root is even resolved: an ambient GIT_DIR, GIT_WORK_TREE,
     # GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY or GIT_ALTERNATE_OBJECT_DIRECTORIES

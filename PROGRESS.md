@@ -10,6 +10,7 @@ In progress on `feat/0.6-lane-c`, based at `145f3db93d745ddc43aeb47f6b7bd8b30aa3
 - Read the `receipt.snapshot` module contract and the complete `TreeSnapshot` and `Materialization` implementations without changing them.
 - Confirmed the branch is clean and starts at the requested Lane E merge.
 - Added and validated the defaulted `ChainSpec.name_repertoire` and `VerificationSpec.anchor_set_sha256` fields; focused tests pass (2 passed).
+- Wired the cached OpenSSL 3.0 preflight into `verify_release_chain` and made every RFC 3161 `-CAfile` a 0600 private byte-for-byte copy, including unpinned/unobserved calls; focused tests pass (2 passed).
 
 ## Decisions
 
@@ -20,7 +21,9 @@ In progress on `feat/0.6-lane-c`, based at `145f3db93d745ddc43aeb47f6b7bd8b30aa3
 
 ## Findings
 
-- None yet.
+- `tsa._require_supported_openssl()` was already present and cached on the starting head; Lane C only needs to wire it into `verify_release_chain` and map its refusal into `ReleaseChainError`.
+- Integration dependency: the 0.5.2 `append_gate.py` imports most release-chain guards section 3.5 requires Lane C to delete. The standalone Lane C tree cannot both remove them and collect the append-gate suite until Lane B replaces those callers; keep this visible rather than silently retaining dead compatibility code.
+- The brief assigns the exact append-only deliberate-divergence refusal (`change rewrites existing line ...`) to `tests/test_ledger_equivalence.py`, while that module's baseline is the release-chain script and the phrase belongs to the append-gate oracle. Re-check the harness composition before implementing; if the requested case truly cannot be expressed there, preserve the scope conflict in the final record rather than changing either oracle.
 
 ## Next
 

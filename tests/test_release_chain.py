@@ -242,6 +242,52 @@ def test_openssl_is_fed_the_digested_bytes(
         assert path.resolve().parent not in (repo_anchor_dir, aside.resolve())
         assert digest in reported
 
+    # A caller that requests neither byte pins nor an observed digest still
+    # gets the same private -CAfile discipline.
+    consumed.clear()
+    verify_release_chain(
+        repo,
+        spec=spec.chain,
+        anchor_dir=aside,
+        enforce_production_pins=False,
+    )
+    expected = {
+        hashlib.sha256((aside / anchor.filename).read_bytes()).hexdigest()
+        for anchor in spec.chain.anchors.values()
+    }
+    assert consumed
+    for path, digest in consumed:
+        assert path.resolve().parent not in (repo_anchor_dir, aside.resolve())
+        assert digest in expected
+
+
+def test_release_chain_runs_the_openssl_floor_preflight_before_paths(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from receipt import tsa
+
+    calls: list[str] = []
+
+    def refuse() -> None:
+        calls.append("preflight")
+        raise tsa.TsaError(
+            "receipt requires OpenSSL 3.0 or newer as `openssl` on the path; "
+            "found: LibreSSL 3.3.6"
+        )
+
+    monkeypatch.setattr(tsa, "_require_supported_openssl", refuse)
+    spec, _ = load_spec(repo / "verification/spec.py")
+    shutil.rmtree(repo / "releases")
+
+    with pytest.raises(ReleaseChainError) as refusal:
+        verify_release_chain(repo, spec=spec.chain)
+
+    assert calls == ["preflight"]
+    assert str(refusal.value) == (
+        "receipt requires OpenSSL 3.0 or newer as `openssl` on the path; "
+        "found: LibreSSL 3.3.6"
+    )
+
 
 def test_the_producer_openssl_fallback_uses_a_private_leaf(
     repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
