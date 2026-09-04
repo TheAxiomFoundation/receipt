@@ -136,6 +136,50 @@ def commit_snapshot(root: pathlib.Path, message: str) -> str:
     return completed.stdout.strip()
 
 
+def commit_gitlink(
+    root: pathlib.Path,
+    relative: str,
+    target: str,
+    message: str,
+) -> str:
+    """Commit one index-only gitlink, which a working tree cannot represent."""
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            f"160000,{target},{relative}",
+        ],
+        check=True,
+        env=environment,
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "--quiet", "-m", message],
+        check=True,
+        env=environment,
+    )
+    completed = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    return completed.stdout.strip()
+
+
 def configured_filenames(repo: pathlib.Path) -> set[str]:
     spec = load_spec(repo / "verification/spec.py").verification
     return {
@@ -282,6 +326,79 @@ def test_release_history_retains_the_directory_verifier_refusals(
                     candidate=candidate,
                     base=base,
                 )
+
+
+@pytest.mark.parametrize(
+    ("shape", "message"),
+    [
+        (
+            "blob-to-tree",
+            "existing release file was deleted relative to {base}: releases/node",
+        ),
+        (
+            "tree-to-blob",
+            "existing release file was deleted relative to {base}: "
+            "releases/node/leaf",
+        ),
+        ("candidate-gitlink", "release path is not regular: releases/node"),
+        (
+            "base-gitlink",
+            "base release entry has non-regular git mode 160000: releases/node",
+        ),
+    ],
+)
+def test_release_history_classifies_tree_replacements_and_gitlinks(
+    repo: pathlib.Path,
+    shape: str,
+    message: str,
+) -> None:
+    spec = load_spec(repo / "verification/spec.py").verification
+    node = repo / "releases/node"
+
+    if shape == "blob-to-tree":
+        node.write_text("base blob\n", encoding="utf-8")
+        base_oid = commit_snapshot(repo, "base blob")
+        node.unlink()
+        node.mkdir()
+        (node / "leaf").write_text("candidate leaf\n", encoding="utf-8")
+        candidate_oid = commit_snapshot(repo, "candidate tree")
+    elif shape == "tree-to-blob":
+        node.mkdir()
+        (node / "leaf").write_text("base leaf\n", encoding="utf-8")
+        base_oid = commit_snapshot(repo, "base tree")
+        shutil.rmtree(node)
+        node.write_text("candidate blob\n", encoding="utf-8")
+        candidate_oid = commit_snapshot(repo, "candidate blob")
+    elif shape == "candidate-gitlink":
+        base_oid = commit_snapshot(repo, "base without gitlink")
+        candidate_oid = commit_gitlink(
+            repo,
+            "releases/node",
+            base_oid,
+            "candidate gitlink",
+        )
+    else:
+        parent_oid = commit_snapshot(repo, "parent without gitlink")
+        base_oid = commit_gitlink(
+            repo,
+            "releases/node",
+            parent_oid,
+            "base gitlink",
+        )
+        node.write_text("candidate blob\n", encoding="utf-8")
+        candidate_oid = commit_snapshot(repo, "candidate regular file")
+
+    with TreeSnapshot.select(repo, candidate_oid) as candidate:
+        with TreeSnapshot.select(repo, base_oid) as base:
+            candidate.assert_ancestor(base)
+            with pytest.raises(ReleaseChainError) as caught:
+                verify_release_history_immutable(
+                    spec.chain,
+                    candidate=candidate,
+                    base=base,
+                )
+
+    assert str(caught.value) == message.format(base=base_oid)
 
 
 def test_base_release_chain_materializes_the_entered_snapshot(
