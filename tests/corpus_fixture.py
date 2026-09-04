@@ -77,6 +77,7 @@ def _commit_fixture(root: pathlib.Path, message: str, *, initialize: bool) -> st
         _git(root, "config", "user.name", "Receipt Corpus Fixture")
         _git(root, "config", "user.email", "receipt-corpus@example.invalid")
         _git(root, "config", "commit.gpgSign", "false")
+        _git(root, "config", "core.autocrlf", "false")
     _git(root, "add", "-A")
     _git(root, "commit", "--quiet", "-m", message)
     oid = _git(root, "rev-parse", "--verify", "HEAD")
@@ -592,6 +593,11 @@ def append_release(
     invariant that a growing prefix would silently break. Returns the new commit
     OID, or ``None`` when ``commit`` is false.
     """
+
+    if commit and not (root / ".git").exists():
+        raise ValueError(
+            "append_release(commit=True) cannot follow build_corpus(commit=False)"
+        )
 
     attested = ATTESTED if attested is None else attested
     for relative, text in {**content, **attested}.items():
