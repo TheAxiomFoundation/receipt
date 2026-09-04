@@ -20,6 +20,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import NamedTuple
 
 from receipt.canonical import canonical_bytes
 from receipt.corpus import CorpusSpec
@@ -34,6 +35,66 @@ PREFIX_RELATIVE = "receipt/immutable-prefix.json"
 MANIFEST_RELATIVE = "releases/manifests"
 ANCHOR_RELATIVE = "releases/anchors"
 ANCHOR_NAMES = ("alpha", "beta")
+
+_GIT_SECONDS = 30
+_GIT_OUTPUT_BYTES = 64 * 1024
+
+
+class BuiltCorpus(NamedTuple):
+    """The generated verifier inputs and their optional immutable subject."""
+
+    spec: VerificationSpec
+    spec_path: pathlib.Path
+    commit_oid: str | None
+
+
+def _git(root: pathlib.Path, *arguments: str) -> str:
+    """Run one bounded fixture-setup Git command and return stripped stdout."""
+
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), *arguments],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=_GIT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"git {' '.join(arguments)} exceeded the {_GIT_SECONDS}-second "
+            "fixture budget"
+        ) from exc
+    output_size = len(completed.stdout) + len(completed.stderr)
+    if output_size > _GIT_OUTPUT_BYTES:
+        raise RuntimeError(
+            f"git {' '.join(arguments)} produced {output_size} bytes, over the "
+            f"{_GIT_OUTPUT_BYTES}-byte fixture budget"
+        )
+    if completed.returncode:
+        diagnostic = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(
+            f"git {' '.join(arguments)} failed with exit {completed.returncode}: "
+            f"{diagnostic or 'no diagnostic'}"
+        )
+    return completed.stdout.decode("utf-8", errors="strict").strip()
+
+
+def _commit_fixture(root: pathlib.Path, message: str, *, initialize: bool) -> str:
+    """Stage the whole fixture and return the commit that records it."""
+
+    if initialize:
+        _git(root, "init", "--quiet")
+        _git(root, "config", "user.name", "Receipt Corpus Fixture")
+        _git(root, "config", "user.email", "receipt-corpus@example.invalid")
+        _git(root, "config", "commit.gpgSign", "false")
+    _git(root, "add", "-A")
+    _git(root, "commit", "--quiet", "-m", message)
+    oid = _git(root, "rev-parse", "--verify", "HEAD")
+    if len(oid) not in {40, 64} or any(
+        character not in "0123456789abcdef" for character in oid
+    ):
+        raise RuntimeError(f"git returned a malformed fixture commit OID: {oid!r}")
+    return oid
 
 
 def created_at(seconds_ago: int) -> str:
@@ -450,8 +511,14 @@ def build_corpus(
     content: dict[str, str] | None = None,
     attested: dict[str, str] | None = None,
     gates: list[dict[str, object]] | None = None,
-) -> tuple[VerificationSpec, pathlib.Path]:
-    """Write a complete witnessed corpus at ``root``; return its spec and path."""
+    commit: bool = True,
+) -> BuiltCorpus:
+    """Write a witnessed corpus and optionally commit its immutable subject.
+
+    The first two result fields retain the fixture's existing ``spec`` and
+    ``spec_path`` values. ``commit_oid`` is ``None`` only when ``commit`` is
+    false.
+    """
 
     content = CONTENT if content is None else content
     attested = ATTESTED if attested is None else attested
@@ -523,7 +590,12 @@ def build_corpus(
     )
     spec_path = write_spec_module(root, spec_chain, alpha, beta)
     (workspace / "producer.key").write_bytes(private_pem)
-    return spec, spec_path
+    commit_oid = (
+        _commit_fixture(root, "build corpus fixture", initialize=True)
+        if commit
+        else None
+    )
+    return BuiltCorpus(spec, spec_path, commit_oid)
 
 
 def append_release(
@@ -533,13 +605,15 @@ def append_release(
     content: dict[str, str],
     attested: dict[str, str] | None = None,
     gates: list[dict[str, object]] | None = None,
-) -> None:
+    commit: bool = True,
+) -> str | None:
     """Cut a second release over an updated tree, appending to the journal.
 
     Deliberately re-derives everything the way a producer must: the previous
     manifest is linked by digest, the journal is extended rather than rewritten,
     and the immutable prefix file is left exactly as genesis sealed it — the
-    invariant that a growing prefix would silently break.
+    invariant that a growing prefix would silently break. Returns the new commit
+    OID, or ``None`` when ``commit`` is false.
     """
 
     attested = ATTESTED if attested is None else attested
@@ -617,6 +691,9 @@ def append_release(
             signer_spki_sha256="",
         )
         tsa.stamp(digest, manifests / f"{stem}.{name}.tsr")
+    if not commit:
+        return None
+    return _commit_fixture(root, "append corpus release", initialize=False)
 
 
 def write_spec_module(

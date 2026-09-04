@@ -15,7 +15,9 @@ from collections.abc import Iterable
 import pytest
 
 from receipt._names import (
+    ALIAS_CAPABLE_SUFFIX_RE,
     NAME_REPERTOIRES,
+    SHORT_NAME_PUNCTUATION,
     WIN32_RESERVED_DEVICE_NAMES,
     NamePolicyError,
     _win32_device_basename,
@@ -24,6 +26,8 @@ from receipt._names import (
     assert_no_merging_entries,
     assert_portable_name,
     decode_component,
+    short_name_carries_pinned_suffix,
+    short_name_extension,
     validate_component_bytes,
     validate_component_text,
     validate_repertoire,
@@ -212,6 +216,30 @@ def test_win32_device_table_and_basename_operation_are_frozen() -> None:
     assert _win32_device_basename("conout$:stream") == "CONOUT$"
     assert _win32_device_basename("NUL   .txt") == "NUL"
     assert _win32_device_basename(" COM1.txt") == " COM1"
+
+
+def test_short_name_extension_operation_is_frozen() -> None:
+    """The shared 8.3 screen keeps the established Win32 operation order."""
+
+    assert SHORT_NAME_PUNCTUATION == frozenset("$%'-_@~`!(){}^#&")
+    assert short_name_extension("smuggled.ymlx") == "YML"
+    assert short_name_extension("smuggled.y mlx") == "YML"
+    assert short_name_extension("...archive.tar.gz") == "GZ"
+    assert short_name_extension(".yml") is None
+    assert short_name_extension("dotless") is None
+    assert short_name_extension("x.a.bcd") == "BCD"
+    assert short_name_extension("x.a.b+c") == "B_C"
+
+
+def test_short_name_suffix_screen_compares_only_alias_capable_pins() -> None:
+    """Long and multi-period pins cannot be extensions of an 8.3 alias."""
+
+    assert ALIAS_CAPABLE_SUFFIX_RE.pattern == r"\.[A-Za-z0-9_-]{1,3}\Z"
+    assert short_name_carries_pinned_suffix("smuggled.ymlx", (".yaml", ".yml"))
+    assert short_name_carries_pinned_suffix("smuggled.YMLX", (".yMl",))
+    assert not short_name_carries_pinned_suffix("notes.yam", (".yaml",))
+    assert not short_name_carries_pinned_suffix("archive.tar.gzx", (".tar.gz",))
+    assert not short_name_carries_pinned_suffix("dotless", (".yml",))
 
 
 def test_posix_bytes_preserves_every_non_structural_byte_exactly() -> None:

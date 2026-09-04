@@ -1,505 +1,74 @@
-"""Consumer-side corpus binding: does a witnessed journal describe THIS tree?
+"""Bind a witnessed corpus journal to one authenticated immutable Git tree.
 
-``receipt.release_chain`` proves custody of a journal — that the manifests are
-hash-chained, canonically serialized, signed by a code-pinned producer key, and
-witnessed by the consumer's configured RFC 3161 anchor set. It says nothing about
-what the journal's rows *mean*.
+``receipt.release_chain`` proves custody of the journal bytes. This module
+proves what those rows mean: the effective content rows are exactly the files
+selected by the consumer's content roots and suffixes, every present content
+and attested row binds a regular blob's SHA-256 digest, every effective
+tombstone is absent, and every gate declaration has the pinned schema shape.
 
-This module supplies the missing half for a published rule corpus: the journal
-rows enumerate content files by digest, and verification is a closed-world
-comparison against the working tree. An unlisted file, a missing file, a
-rewritten byte, a symlink where a regular file was recorded — each refuses.
+The listing is of an immutable tree object selected by
+:class:`receipt.snapshot.TreeSnapshot`. Every bound blob is streamed through
+the snapshot reader, which authenticates it against its object name before
+yielding a digest. The working tree and index are not read. Checkout fidelity
+is outside this claim; ``CorpusVerification.name_repertoire`` records the name
+policy under which the tree was judged.
 
-A binding covers the bytes and the regular-file type, not the permission bits
-— no row kind carries a mode, so a content file that gained the execute bit
-after witnessing still matches its digest and still verifies here, while
-release-object modes are covered separately by ``receipt verify --base-ref``,
-which holds every release file present at that ref byte- and mode-identical.
+Both name repertoires require valid UTF-8 wherever a name is quoted or ASCII
+folded and refuse sibling names that merge under ASCII case folding. The
+default ``portable`` repertoire additionally permits only ASCII letters,
+digits, ``.``, ``_`` and ``-``, refuses a trailing period and Win32 device
+basename, and screens the extension an 8.3 alias would carry. ``posix-bytes``
+otherwise compares exact tree-name bytes and deliberately adds no Unicode
+normalization or case-fold model.
 
-Three row kinds, one journal:
+``content`` rows participate in a closed-world set comparison. ``attested``
+rows are exact paths required by the consumer spec without a content sweep.
+``removed`` rows retire an effective content or attested binding and assert
+that neither the exact path nor an ASCII-fold-equal spelling survives.
+``gate`` rows are declarations, not proof a gate ran; callers use
+:func:`verify_declarations` as the separate completeness pass.
 
-``content``
-    A file inside a consumer-declared content root, with a consumer-declared
-    suffix. These are swept closed-world: the effective present set must equal
-    the tree's set exactly, in both membership and digest. Membership is
-    decided after folding — root and suffix alike are compared under Unicode
-    NFC plus case folding, which over the portable repertoire below is ASCII
-    case-insensitivity — so a case-varied spelling of a pinned suffix, or of a
-    pinned root, cannot sit outside the closed world on a filesystem that
-    treats it as the same file. A tree entry that aliases a root's own
-    spelling is refused by name rather than merged, and an entry that is a
-    symlink or any other reparse point is refused rather than followed — a
-    junction is not a symlink on Windows, and descending one would sweep a
-    directory outside the clone.
-
-    Entries are screened in pairs as well as one at a time. Every other
-    screen judges one name — the repertoire, the symlink, the kind, the
-    suffix — and none of them can see that two entries of one directory are
-    one entry on the consumer's volume. A declared ``rules/tax/x.yaml``
-    beside an undeclared ``rules/TAX/notes.txt`` is two directories on a
-    case-sensitive checkout, where the sweep descends the declared one and
-    calls the world closed, and one merged directory carrying both files on
-    a case-insensitive one (peer review, Sol round 4). So wherever the sweep
-    lists a directory — under a content root, and beside each component of a
-    pinned root — two entries whose fold keys agree refuse, directories and
-    files alike and before either is classified. The journal-side guard
-    cannot answer this: only one of the two names is declared, so there is no
-    pair of declared paths to compare.
-
-    And the sweep as a whole is bounded, which it was not. Every other walk
-    in this module charges a budget; this one read a directory of any width
-    into a sorted list, descended into every directory it found, and
-    re-listed every parent of every pinned root beside it, so a tree
-    carrying arbitrarily many portable, suffix-excluded entries made the
-    verifier allocate and ``lstat`` for as long as the tree was wide (peer
-    review, Sol round 5). Every entry either sweep or a root-component check
-    visits is charged against :data:`MAX_SWEEP_WORK`, one running total for
-    the whole verification, and a listing wider than what is left of it is
-    abandoned as it arrives — read no further than the batch in hand, and
-    sorted only after the charge has let it through.
-
-    One spelling decides membership that no listing emits, and the sweep
-    screens the names it is handed for it. An NTFS volume generating 8.3
-    short names gives a long name a second, addressable spelling whose
-    extension may be a pinned suffix although the written one is not: with
-    ``.yml`` pinned, a file emitted as ``smuggled.ymlx`` is not content
-    under the name the listing emitted, while the ``SMUGGL~1.YML`` that
-    opens the same bytes is content and sits outside a closed world the
-    sweep just called closed (peer review, round six). The extension is
-    modelled the way 8.3 generation derives it — the text after the last
-    remaining period, truncated to three characters and mapped into the 8.3
-    character set — because deriving it from the written name instead read
-    an embedded space as a character (peer review, round seven). The stem is
-    not modelled, nor is whether the volume generates short names at all;
-    the extension is what decides membership.
-
-    Only a pin an alias could carry is compared, and it is compared exactly.
-    An 8.3 extension is at most three characters, so a pin whose own
-    extension is longer is carried by no alias; comparing the first three
-    characters of a longer pin refused an ordinary ``notes.yam`` under a
-    ``.yaml`` configuration although no alias can end ``.yaml`` (peer
-    review, round eight). What the model no longer has to answer is which
-    *characters* survive into an alias, because every name it is asked about
-    is ASCII: the 8.3 namespace is an OEM code page rather than ASCII, and
-    two rounds of review were spent bounding a derivation over characters
-    the volume decides about. The portable-name policy below removes the
-    question instead.
-
-``attested``
-    An exact path bound by digest without a sweep — the toolchain pin, the
-    pinned validation workflow, an apply manifest. The consumer's spec names
-    which paths it *requires*, so a producer cannot quietly drop one. The
-    spelling is bound as well as the bytes: every component of every bound
-    path must appear in a listing of its parent under exactly the declared
-    spelling, and no *other* spelling of it may appear beside it, so a
-    case-insensitive volume resolving an attested ``readme.md`` to the
-    ``README.md`` it stores is refused rather than hashed, and a
-    case-sensitive tree holding both is refused rather than verified for a
-    consumer who can hold only one. Without the first, the same corpus
-    verified on the auditor who cloned onto APFS and refused as a missing
-    file on the auditor who cloned onto ext4 (peer review, Sol round 2);
-    without the second, the listing was consumed only as far as the exact
-    spelling and the coexisting one was never seen (peer review, Sol round
-    3). Each entry of that listing is screened for the portable repertoire
-    before it is compared, because a fold key pairs two spellings that
-    differ in case and nothing else: a ``toolchain.toml.`` beside the bound
-    ``toolchain.toml`` folds to a different key and *is* the bound name on
-    Win32, which strips the trailing period before it resolves (peer review,
-    Sol round 4). Asked of attested paths, because nothing else enumerates
-    them: a content path is already known to be spelled the way a listing
-    emits it, since the sweep builds its set out of listing names and the
-    membership comparison proves the two sets equal. It is asked twice —
-    before the hashing and again in the closing identity loop — and both
-    askings charge one budget, because draining a parent's whole listing per
-    component of every attested path costs about 2×R×E entry visits over a
-    wide parent and nothing bounded it (peer review, Sol round 4). Nothing
-    is cached between paths, for the reason the tombstone pass gives, and
-    within one path there is nothing to cache: the parents of the components
-    of one path are distinct directories, one per level.
-
-    Retiring one is recorded by a ``removed`` row, and the file has to leave
-    the tree with it: a removed path still on disk refuses, whichever kind
-    it was. Two questions are asked about a tombstone, in this order — does
-    the host resolve the exact spelling, and does any fold-equal spelling
-    survive in a listing — because a filesystem resolves names its own
-    enumeration does not emit. A third class of spelling used to answer to
-    neither, and the portable-name policy below removes it rather than
-    modelling it: a surviving ``retired/gone.`` is the tombstoned
-    ``retired/gone`` on Win32, which strips a trailing dot before the
-    lookup, while the exact ``lstat`` misses it on POSIX and its fold key
-    differs from the tombstone's — and it is refused as a non-portable name
-    wherever a listing emits it. The pair is asked twice per verification,
-    for the reason the paragraph on pass order below gives, over two indexes,
-    so a listing read for the first asking cannot answer for the second.
-    The second question walks the tree, so it is bounded: every entry taken
-    from a listing and every candidate a search visits is charged against
-    one budget for both askings together, and a listing wider than what is
-    left of that budget is abandoned part-way — unread past the batch in
-    hand — rather than fetched, sorted and indexed whole.
-
-``gate``
-    A declaration that some verification gate ran, carrying a reproducibility
-    tier (axiom-encode#1192 requirement 6). This module validates the shape of
-    the declaration and refuses an unpinned tier. It never re-executes a gate
-    and never treats a declaration as evidence the gate passed. A caller that
-    reports a ``restricted`` or ``ci-attested`` gate as "verified" is
-    misreporting; :func:`verify_corpus_binding` returns the tiers separated so
-    the distinction survives into the verdict.
-
-Two of those lists are producer-controlled and rendered verbatim — the gate
-declarations and the removed paths — so both are budgeted, and the budget is
-the renderer's own arithmetic rather than a proxy for it. What one gate or
-one removed path costs the verdict is derived from the object
-``receipt.verify.result_to_dict`` builds and the
-``json.dumps(..., indent=2, sort_keys=True)`` ``receipt.cli`` renders it
-with: the escaped strings, and every brace, key, separator, indent and
-newline JSON puts around them at that nesting depth. And the strings are
-charged *after* ``receipt._render`` has bounded them, because that is what
-the renderer prints. Charging the string the producer wrote while the CLI
-printed the bounded one made the accounting and the rendering disagree in
-both directions — a gate whose evidence renders to well under the cap once
-bounded was refused for a charge nothing would ever print, and the charge
-for a gate that passed was not the length of what appeared (peer review,
-Sol round 3). The transformation lives in one module both import, and a
-test asserts equality between what is charged and what is rendered on a
-journal filled to just under both caps. Charging a *floor* for
-the structure instead let a journal filled to just under a cap render well
-past it (peer review, round seven), so the constants are exact and a test
-asserts equality between what is charged and the length of the section that
-is rendered. Each is charged one item at a time and refused at the first
-item that carries the running total over, so no journal makes the parser
-account for more than the cap plus one item.
-
-"Cap plus one item" is a bound on *validation work*, and it means that only
-because the gate charges are made as the rows arrive. Summing after the
-parse loop had finished bounded the verdict and nothing else: a 2,050-gate
-journal reached the cardinality check with all 2,050 gates decoded and
-validated, and a journal costing twice the text budget was validated in
-full before the sum was compared (peer review, Sol round 2). Cardinality is
-counted as the gate rows are met and refused at the declaration that would
-be the cap plus one; the render cost is charged as each gate is validated
-and refused at the first row carrying the total over. One gate's own
-evidence is bounded by ``MAX_EVIDENCE_ENTRIES``, checked against the
-mapping's length before any entry of it is validated.
-
-Decoding is bounded a level above all three, and every step of it happens on
-the bytes rather than on text. ``MAX_JOURNAL_BYTES`` is checked on the raw
-payload first; the consumer-pinned :attr:`CorpusSpec.journal_row_capacity` is
-checked by counting line feeds in it, which walks the payload without building
-a list; the rows are then found by splitting the raw bytes, which finds exactly
-the rows splitting the decoded text would because a line feed cannot occur
-inside a UTF-8 multi-byte sequence; and ``MAX_JOURNAL_ROW_BYTES`` is checked on
-each row's own bytes before that row is decoded, let alone handed to
-``json.loads`` to build an object graph out of. Counting rows bounded how many
-there were and nothing about how large one of them was, so a single row of
-arbitrary size was decoded, split out and parsed with no budget consulted
-(peer review, Sol round 3); and checking the row cap on decoded *text* left
-the allocation it exists to stop already made, because the payload was
-decoded whole and split whole before the first row was measured (peer review,
-Sol round 4).
-
-The default row capacity, ``MAX_JOURNAL_ROWS``, comes from the gate cap plus
-an equal margin for the other row kinds; consumers pin the capacity in their
-spec because an append-only journal eventually outgrows that default through
-revisions and tombstones (peer review, Sol round 7). The pin cannot exceed
-``MAX_JOURNAL_ROWS_CEILING``, derived from the total byte ceiling divided by
-the smallest valid row. ``MAX_JOURNAL_ROW_BYTES`` is derived from the largest
-row this schema admits. ``MAX_JOURNAL_BYTES`` itself is stated: 64 MiB on what
-a corpus journal may be at all. It used to be the product of the default row
-count and per-row maximum — eight gibibytes, two worst cases no journal
-reaches at once — which is not a ceiling on the one input it exists for, an
-input that is not a journal (peer review, Sol round 4).
-
-One residual is outside this module and is stated rather than fixed:
-``receipt.release_chain.jsonl_line_offsets`` splits the whole journal before
-this function is reached, so the release-chain half of a verification meets
-an oversized journal first and with none of these bounds — including the
-64 MiB total, which bounds this function and everything downstream of it and
-not the custody pass that runs before it. That module is pinned byte for
-byte by a differential harness against the source verifier it was extracted
-from, so it cannot be changed here; bounding it is its own change, against
-its own harness.
-
-The order of the passes is itself load-bearing. Membership is swept, the
-tombstones are looked for, the bound bytes are hashed, membership and per-file
-identity are checked a second time, and the tombstones are looked for once
-more. The two re-checks sit after the hashing and after the first tombstone
-walk — the longest traversal here — so that both are inside the window they
-close; a pass that ran between them and the return would be time in which the
-tree could change with nothing left to notice.
-
-The tombstone pass is the one that runs twice, over an index each. The first
-run decides absence from directory listings it caches and never re-reads, so a
-survivor that appears after its parent has been listed is invisible to every
-later search in that run — two tombstones sharing a parent is enough — and
-nothing afterwards looked at a removed path at all: the re-checks close their
-window over content and over the bound bytes, not over the paths the verdict
-calls removed (peer review, round five). The second run starts with nothing
-cached and asks the host again, after everything else has finished touching
-the tree. Both runs charge one budget, carried across, so re-establishing
-absence cannot buy the tree a second walk's worth of budget.
-
-Within a run a directory is still listed once and shared. Listing it once per
-tombstone instead closed one more window — a survivor arriving in a parent the
-run had already listed, with a tombstone under it still to check — and the
-price was the pass going quadratic again in the one place a budget on a sum
-cannot bound it: 1,692 files in one directory with 154 tombstones beside them,
-a completely static tree with no writer in sight, spent 262,145 units of a
-262,144 cap and was refused as unverifiable (peer review, Sol round 8). That
-window is closed by the generation stamps below instead. A survivor has to
-arrive on disk to be one, arriving moves its parent's mtime and ctime, and the
-parent was stamped before the listing and is re-stated after the run.
-
-Putting that run last used to cost a window: no membership re-sweep follows
-it, so a content file inserted while it walked, or a bound file rewritten by
-rename while it walked, was never looked at again. A third re-sweep would only
-move that boundary, so the walk is watched by generation instead. Every
-directory any pass of the run reads is stamped — device, inode, mtime, ctime —
-an instant before it is read, and every stamp is re-stated after the last pass
-has finished. An entry added, removed or renamed moves its parent's mtime and
-ctime, so the change is refused although nothing re-derived the set.
-
-Stamping only what those passes read was not enough. Neither walk reaches the
-directory that holds an attested file — attested paths sit outside the content
-roots, and a tombstone walk descends only toward a removed path — so a journal
-whose tombstones sit elsewhere, or carries none at all, left ``.axiom``
-unstamped, and replacing ``.axiom/toolchain.toml`` by rename during the second
-tombstone pass moved a generation nothing had recorded (peer review, round
-seven). Every ancestor of
-every bound path, from the tree root down to the file's own parent, is
-therefore stamped as well.
-
-Those by-name ancestor walks share a declared-prefix budget with the
-journal's alias index and stop at the first prefix that is absent or not a
-directory. There is no directory listing to protect at that prefix and
-nothing below it can exist, so descending through every remaining component
-only multiplied strings and ``lstat`` calls before the missing bound file
-refused later (peer review, Sol round 7).
-
-The tombstone search stops there for the same reason and it took a round to
-say so. It descended through an intermediate component that was a regular
-file, which asked the index for a listing that entry cannot have; the entry
-was stamped before the listing was attempted, a file has no generation to
-stamp, and the run then refused the whole verdict as "tree changed". So an
-ordinary directory-to-file lifecycle — a tombstone for a file under
-``README.md/``, with ``README.md`` since recreated as an ordinary file —
-could not verify on any run, however still the tree was (peer review, Sol
-round 7, round 3). A non-directory now ends that branch of the search
-without being recorded, and a stamp the recorder never took is passed over
-by the re-check rather than read as movement.
-
-*When* each stamp is taken is what decides what the re-check can promise, and
-the answer is: at the run's first read of that directory, by whichever pass
-makes it. One recorder is built before anything looks at the tree and is
-carried into every directory read the run performs — the opening membership
-sweep, the root-component checks, the first tombstone pass, the parents the
-attested spelling walk drains, the closing sweep and the second tombstone
-pass — and the earliest stamp of a directory is the one that is kept.
-
-Starting it later broke that promise twice over, and the wider break is that
-re-deriving membership does not cover the span before the recorder existed. A
-content file created and then removed between the opening sweep and the
-closing one leaves the two membership snapshots equal — the set never differs
-at either look — while the directory that carried it was first stamped after
-the mutation, so the stamp matched as well and the run passed (peer review,
-Sol round 5). The narrower break was on the attested half: taking the stamps
-after the hashing left the spelling walk and the hash, which are two separate
-lookups of the same name, with nothing between them, and on the volume the
-spelling check is about a case-only rename landing there resolves through the
-declared spelling — the walk had passed, the hash took the renamed entry's
-bytes, and the stamps recorded the tree as the rename had left it (peer
-review, Sol round 3). The walk is re-run for attested paths in the closing
-identity loop, so both of its readings sit inside the window the stamps close.
-
-The per-file identity that re-check compares carries the file's own ctime for
-the same reason the directory stamp does. Size and mtime are values a writer
-restores with ``os.utime``; on POSIX the inode change time is not settable
-from userspace at all, so a rewrite in place through the same inode is visible
-even when everything else about the file has been put back.
-
-The descriptor's first ``fstat`` also fixes the hashing horizon. The reader
-hashes exactly that ``st_size`` in bounded chunks, refuses an EOF before it as
-"file shrank while being read", and probes one byte past it to refuse "file
-grew while being read". The old live-EOF loop let a writer sparsely extend the
-file into arbitrary hashing work or keep appending so the identity re-check
-was never reached (peer review, Sol round 7). Concurrent-writer *correctness*
-is still part of the residual class tracked by receipt#44; what this closes is
-the resource bound. Whatever a writer does, the read terminates after at most
-the captured ``st_size`` bytes plus one probe.
-
-What that check gives is a contract worth stating exactly, because the
-obvious stronger one is false. The stamps are re-stated twice — forwards in
-sorted order and then backwards — and a mismatch in either pass refuses. A
-directory change is therefore detected if it lands before that directory's
-final re-read, which is true as written because the stamp it is held against
-is the run's first read of that directory and not a late pass's. What remains
-is the span after each directory's last re-read,
-which is not one instant: it is one instant for whichever directory is
-re-read last and a little more for each of the others. Re-reading once, in
-sorted order, made that span much longer than the module admitted — a writer
-could change an already-re-read directory while a later one was still being
-re-read, and nothing revisited it (peer review, round eight) — and no
-re-read choreography removes the span, because some directory is always read
-last. Only verifying an immutable snapshot the verifier holds open does, and
-that is receipt#44 rather than anything shipped here.
-
-Two narrower things sit inside that span as well: a rewrite in place through
-the same inode after the identity re-check has already run, which moves the
-file's own stamps and not its parent's and which nothing afterwards reads,
-and a change on a filesystem whose directory timestamps are too coarse to
-distinguish it from the stamp taken an instant earlier.
-
-All of that rests on one platform property, so the platform is a
-precondition rather than an assumption: ``st_ctime`` must be the inode
-change time, which nothing in userspace can set. On Windows every supported
-CPython reports the *creation* time there — 3.12 deprecated the field and
-3.14 still fills it that way — so an entry could be added, removed or
-renamed and the directory's mtime put back with ``os.utime``, leaving the
-whole recorded tuple identical; the file ctime above is settable in the same
-sense. :func:`verify_corpus_binding` therefore refuses at entry when
-``os.name`` is not ``"posix"`` rather than reporting a verdict it cannot
-support. Nothing platform-specific is attempted in its place: NTFS keeps a
-real ChangeTime, but it is reachable only through ``ctypes`` and cannot be
-exercised here, so reading it is a follow-up and not part of what ships.
-
-Every name in a corpus is a *portable name*, and that policy stands in place
-of the filesystem modelling this module used to carry. Each component of a
-declared path, of a pinned content root, of a required attested path, of a
-tree entry the closed-world sweep meets, and of an entry a tombstone search
-reads must be spelled with ASCII letters, digits, ``.``, ``_`` and ``-``; it
-must not end in a period; and it must not present a Win32 reserved device
-basename. One screen asks all three — :func:`_assert_portable_name` — and it
-refuses with one message.
-
-The policy is what nine rounds of review argued this module into. Each round
-found another way a name a POSIX verifier accepts is resolved differently
-somewhere else: an OEM code page decides which characters survive into an 8.3
-alias; an NTFS upcase table built from Unicode's simple uppercase mappings
-folds the dotless ı onto ``I``; HFS+ ignores default-ignorable code points
-when it compares names; Win32 reads a colon as a stream separator and a
-backslash as a path separator, and strips a trailing dot or space before a
-lookup; and a tilde-digit grammar says which names could have been generated
-as aliases. Modelling each of them was wrong twice for every time it was
-right — the model refused ordinary names a corpus may legitimately hold, or
-missed the spelling it was built for, and the correction introduced the next
-defect. A closed world cannot be closed over a name whose equivalence class
-the verifier is guessing at.
-
-What makes the guessing unnecessary is that the corpora this package is
-built for do not need those names, with one exception that is recorded here
-rather than modelled. Of the fifty ``rulespec-*`` directories mirrored beside
-this one, thirteen are linked worktrees sharing another mirror's git
-directory, so the census is over thirty-seven distinct repositories at their
-``origin/main`` heads on 2026-09-03: thirty-six carry no tracked path outside
-the ASCII letters, digits, ``.``, ``_`` and ``-`` — ``rulespec-nz``, the
-reference consumer, among them — and ``rulespec-us`` at d58cc0c (2026-08-22) carries 33 of 15,216 that fall
-outside it, every one by character set. Eighteen spell a statute citation
-with a colon (Louisiana Title 47 and New Jersey 54A:
-``us-la/statutes/47:294.yaml`` and their encoding manifests), twelve a New
-Hampshire regulation directory with a space (``He-W 704``), and three a
-section with an en dash (``us/statutes/42/1437c–1.yaml``). A spec that pins
-those trees as content roots refuses the verification until the names are
-respelled, and whether they are respelled or the policy grows a spelling for
-them is that repository's decision rather than this module's guess. The four
-trees pinned under ``receipt/.extraction`` are extraction sources, not corpora
-this package verifies, and are outside the census (one of them carries
-Next.js ``[slug]`` route segments). An
-earlier revision of this paragraph said no consumer carried such a name; the
-census corrects it. So the module refuses the rest by name. Inside that
-repertoire :func:`_path_fold` is ASCII case-insensitivity
-and nothing else, which is a fact about the repertoire rather than a model of
-a filesystem: every insensitivity a real volume adds — case on APFS and NTFS,
-normalization and default-ignorables on HFS+ — either collapses onto it or
-cannot arise at all, because the characters it would act on are not in the
-repertoire.
-
-A pinned content suffix is bound by the same repertoire, by
-:class:`CorpusSpec` at construction: a period followed by one or more
-portable characters. That is the released semantics narrowed by the
-repertoire and by nothing else — a pin carrying a character no portable name
-can hold could never match one, and a pin is compared only against names the
-screen has already passed. A grammar of one to sixteen ASCII letters or
-digits was tried instead and was a compatibility break for no gain: it
-refused ``.tar.gz``, ``.ssxx``, ``.a-b`` and ``._``, and it capped a length
-nothing here depends on (peer review, Sol round 4). All four are admitted by
-:data:`CONTENT_SUFFIX_RE`. The 8.3 question is separate: pins structurally
-shaped as an extension — one period and one to three letters, digits, ``_`` or
-``-`` — are selected by :data:`ALIAS_CAPABLE_SUFFIX_RE`. Thus ``.a-b`` and
-``._`` are alias-capable and screened, while the four-character ``.ssxx``
-cannot be an 8.3 extension and is not (peer review, Sol round 7).
-
-The journal-side alias check is bounded and linear in those declared names,
-and it holds no index. It used to join and fold a fresh cumulative string for
-every prefix and keep both spellings: 4,096 portable paths at 1,023
-characters and 511 components made about 2.1 million dictionary entries and
-about two gibibytes of strings before any budget applied (peer review, Sol
-round 7). A component trie replaced that and was measured at 594 MB for the
-same journal, because a trie's size is the thing the journal chooses and a
-compact Python node still costs about 150 bytes (peer review, Sol round 7,
-round 3). So the prefix comparison sorts the folded component sequences and
-compares neighbours instead: every path sharing a folded prefix is contiguous
-in that order, and agreement between neighbours is transitive, so a
-disagreement anywhere is a disagreement between some adjacent pair. What is
-held is one key per declared path — a small multiple of the path text the
-journal already carries, 9.0 MB for that worst case. The distinct prefixes
-are still *counted*, because that count is the number of directories the
-declared set names and therefore the number of stamps the run may end up
-holding: :data:`MAX_ALIAS_INDEX_NODES` bounds it before anything is stat-ed.
-Every path-prefix visit, every counted prefix and every by-name ancestor
-visit charges one shared :data:`MAX_PATH_COMPONENTS_TOTAL` counter before
-allocation or ``lstat``.
-
-Two Win32 facts survive the policy rather than being subsumed by it, and both
-are screens rather than models. ``CON``, ``PRN``, ``AUX``, ``NUL`` and the
-``COM``/``LPT`` series are portable spellings that Win32 resolves to a
-character device instead of to a file, so an ordinary open of
-``rules/NUL.yaml`` reads the null device rather than the bytes a journal
-bound and a digest witnessed. The table is pinned in this module with every
-entry attributed to the source it rests on — Microsoft's naming page for all
-but two, ``ntdll``'s own matcher for ``CONIN$`` and ``CONOUT$`` — and what is
-matched against it is what that matcher compares, which
-:func:`_win32_device_basename` derives. And 8.3 *generation* still hands a
-long name a second addressable spelling, so with ``.yml`` pinned a file
-emitted as ``smuggled.ymlx`` still aliases ``.YML`` and is still refused. What
-the policy removes there is the other half of that question: no name in a
-corpus can be *spelled* like an alias, because ``~`` is outside the
-repertoire, so the tilde grammar that decided which declared paths looked
-generated is gone with the modelling it needed.
-
-The cost is real and is stated rather than hidden. A stray editor backup
-``notes.yaml~`` under a content root refuses the verification, and so does a
-name carrying a space, a rule file named in any script but Latin, and — since
-every entry beside a component of a pinned content root is screened too — any
-such name in the repository root. That is the trade the policy makes: every
-name a corpus carries means the same thing on every filesystem, and where it
-would not the verifier says so rather than modelling what it cannot see.
-Widening the repertoire is a change to one screen; modelling a filesystem was
-a change to five.
-
-Every trust anchor arrives from the consumer's committed :class:`CorpusSpec`.
-The module ships no defaults: not a content root, not a required gate, not an
-accepted tier. Its one convenience default is not an anchor but a resource
-pin: ``journal_row_capacity`` begins at :data:`MAX_JOURNAL_ROWS`, and a
-consumer whose append-only history outgrows it commits a larger value without
-changing a process-global constant.
+Journal parsing retains hard bounds on the raw payload, each raw row, row
+count, path depth and text, evidence cardinality and text, and rendered gate
+and tombstone sections. Tree width, depth, path bytes, blob bytes, and total
+content bytes are bounded by :mod:`receipt.snapshot`. Where the contract does
+not prescribe a recovery, malformed input and exhausted budgets fail closed.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import json.encoder
-import os
 import pathlib
 import re
-import stat
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, NamedTuple
+from typing import Any
 
+from receipt._names import (
+    ALIAS_CAPABLE_SUFFIX_RE,
+    PORTABLE_NAME_RE,
+    SHORT_NAME_PUNCTUATION,
+    WIN32_RESERVED_DEVICE_NAMES,
+    NamePolicyError,
+    ascii_fold_text,
+    assert_no_merging_entries as assert_no_merging_tree_names,
+    assert_portable_name,
+    short_name_carries_pinned_suffix,
+    short_name_extension,
+    validate_component_text,
+    validate_repertoire,
+)
 from receipt._render import bounded_encoded, bounded_key
 from receipt._unicode_repertoire import FORMAT_CONTROL_RANGES
+from receipt.snapshot import (
+    MAX_CONTENT_BLOB_BYTES,
+    MAX_CONTENT_BYTES_TOTAL,
+    GitEntry,
+    SnapshotError,
+    TreeSnapshot,
+)
 
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 GATE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._/-]{0,127}\Z")
@@ -508,7 +77,6 @@ GATE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._/-]{0,127}\Z")
 #: underscore when Win32 derives a short name — except a space, which is
 #: removed rather than replaced, and which is why
 #: :func:`_short_name_extension` strips spaces before it maps anything.
-SHORT_NAME_PUNCTUATION = frozenset("$%'-_@~`!(){}^#&")
 #: Every name this module screens, as one path component. The whole of the
 #: portability model is here: ASCII letters, digits, ``.``, ``_`` and ``-``.
 #: :func:`_assert_portable_name` asks two more questions of a component that
@@ -521,7 +89,6 @@ SHORT_NAME_PUNCTUATION = frozenset("$%'-_@~`!(){}^#&")
 #: refused it would refuse every corpus this package exists to verify. It
 #: does not admit an empty component, nor ``.`` or ``..``, both of which end
 #: in a period.
-PORTABLE_NAME_RE = re.compile(r"[A-Za-z0-9._-]+\Z")
 #: A pinned content suffix: a period, then one or more characters of the
 #: portable repertoire, refused by :class:`CorpusSpec` at construction if it
 #: is anything else. What it adds to :data:`PORTABLE_NAME_RE` is the leading
@@ -552,7 +119,6 @@ CONTENT_SUFFIX_RE = re.compile(r"\.[A-Za-z0-9._-]+\Z")
 #: be. A pin carrying a second period, or more than three characters after
 #: the period, is the extension of no short name and
 #: :func:`_short_name_carries_pinned_suffix` ignores it.
-ALIAS_CAPABLE_SUFFIX_RE = re.compile(r"\.[A-Za-z0-9_-]{1,3}\Z")
 
 CONTENT_KIND = "content"
 ATTESTED_KIND = "attested"
@@ -800,99 +366,11 @@ MAX_PATH_TEXT = 1024
 #: than this. Written as the arithmetic rather than as 512 because it is a
 #: consequence of the path-text bound and moves with it.
 MAX_PATH_COMPONENTS = (MAX_PATH_TEXT + 1) // 2
-#: The most declared path prefixes the alias index and by-name ancestor
-#: recorder may charge together. One counter is shared by both jobs and by
-#: every call in a verification, just as the two closed-world sweeps share
-#: ``MAX_SWEEP_WORK``: repeating a pass cannot buy another budget.
-#:
-#: Three things charge it, and the third is the one this bound exists for.
-#: The alias index charges one unit per ``(path, prefix)`` it *visits* and one
-#: more per distinct folded prefix it *counts*, and the ancestor recorder
-#: charges one unit per non-root prefix it visits. Charging only visits
-#: bounded the walking and not the holding: 4,096 portable 1,023-character
-#: paths with distinct first components visit 2,093,056 prefixes, half of this
-#: budget, and name 2,093,056 distinct prefixes — an upper bound on the
-#: directories the generations recorder stamps, each with a ``pathlib.Path``,
-#: a relative spelling and a stat tuple that live until the verdict (peer
-#: review, Sol round 7, round 3). An upper bound rather than the number: the
-#: count includes each declared path itself, and ``record_ancestors`` walks
-#: ``relative.split("/")[:-1]``, so a declared file is counted here and never
-#: stamped there (peer review, Sol round 8). What is counted is now at least
-#: what is held.
-#:
-#: Derived from the default journal capacity and the path-text bound rather
-#: than picked. A default journal contributes at most ``MAX_JOURNAL_ROWS``
-#: effective paths, and ``MAX_PATH_TEXT`` characters each, hence
-#: 4,096 × 1,024 = 4,194,304. What that no longer is, is unreachable: a path
-#: of ``n`` components costs ``n`` visits, at most ``n`` counted prefixes and
-#: at most ``n - 1`` ancestor visits — about ``3n``, against the ``2n - 1``
-#: characters it must carry — so a 4,096-row journal at the maximum depth
-#: spends 6,284,784 units and is refused, deliberately, because that is the
-#: journal whose directory stamps would be counted in gibibytes. The maximum
-#: depth is 512 and not 511: a path of 512 one-character components is 1,023
-#: characters, and one of its components may be two characters long. 4,096 of
-#: those visit 2,097,152 prefixes, count at most 2,094,576 of them and cost
-#: 2,093,056 ancestor visits (peer review, Sol round 8); the 6,275,072 this
-#: comment used to name was the 511-component fixture below. An ordinary
-#: corpus is nowhere near it: paths of four to eight components spend twelve
-#: to twenty-four units a row, so 4,096 rows spend under 100,000.
-#: A consumer that pins a larger journal capacity still meets this independent
-#: traversal ceiling rather than silently multiplying it.
-#:
-#: The package fixture spends twenty-six units: eleven component prefixes in
-#: its three content paths and one attested path, the eight distinct folded
-#: prefixes those name, and seven non-root ancestor prefixes.
+#: Total component-folding work for declared paths. The alias pass charges
+#: once while building each folded component sequence and once when counting
+#: the distinct prefixes represented by adjacent sorted paths.
 MAX_PATH_COMPONENTS_TOTAL = MAX_JOURNAL_ROWS * MAX_PATH_TEXT
-#: The most distinct folded prefixes the declared-path alias index may count,
-#: which is the most distinct directories the declared set may name.
-#:
-#: The index itself no longer allocates per prefix — see
-#: :func:`_reject_aliasing_paths` — but what it counts is an upper bound on
-#: what the rest of the run allocates for: every distinct declared prefix that
-#: exists on disk and is a *directory* becomes one entry in
-#: :class:`_DirectoryGenerations`, held from the first read to
-#: ``assert_unchanged``. The count is above that because it includes each
-#: declared path itself, which ``record_ancestors`` never stamps (peer
-#: review, Sol round 8) — conservative in the direction a ceiling should
-#: be. So the cardinality is bounded here, once,
-#: before any of it is stat-ed.
-#:
-#: Derived, not picked: no path within ``MAX_PATH_TEXT`` has more than
-#: ``MAX_PATH_COMPONENTS`` components, and a default-capacity journal declares
-#: at most ``MAX_JOURNAL_ROWS`` paths, so no valid default-capacity journal can
-#: need more than 4,096 × 512 = 2,097,152 of them, and this is that product.
-#:
-#: Being that product makes it a backstop rather than a live limit, in the
-#: way ``MAX_GATE_DECLARATIONS`` is, and for a reason that holds whatever a
-#: consumer pins. ``MAX_PATH_COMPONENTS_TOTAL`` is
-#: ``MAX_JOURNAL_ROWS × MAX_PATH_TEXT``, which is exactly twice this, and
-#: :func:`_reject_aliasing_paths` charges that one counter once per prefix it
-#: visits and once per distinct prefix it counts. A counted prefix is always
-#: a visited one, so counting N of them has already charged at least 2N: the
-#: visit budget refuses at 4,194,305 before this cap could refuse at
-#: 2,097,153, and the refusal below is unreachable by construction (peer
-#: review, Sol round 8). It is kept because it states a bound a reader can
-#: check and because it would become live again if the ratio between these
-#: constants moved; a test pins the ratio, so moving one of them fails a test
-#: rather than quietly reviving or burying this cap.
-#:
-#: The margin under it is stated rather than assumed, because the review
-#: proposed a tighter ceiling a valid journal can pass. Those 4,096 paths
-#: would name 2,097,152 distinct prefixes only if they shared none, and they
-#: cannot. Prefixes are counted by fold key, and the repertoire spells 38
-#: fold-distinct one-character names — 64 names, of which the 52 letters fold
-#: onto 26 — and 1,482 fold-distinct two-character ones; a path of 512
-#: components fits ``MAX_PATH_TEXT`` only if at most one of them is two
-#: characters long. So 1,520 maximum-depth paths can diverge at the root and
-#: the remaining 2,576 must share a first component and diverge below it:
-#: 1,520 × 512 + 2,576 × 511 = 2,094,576, which is 1,456 above the 2,093,120
-#: this comment used to claim and 2,576 below the ceiling. The old figure
-#: counted 64 first components rather than 38 fold-distinct ones, and the
-#: layout it named — 4,096 paths of 512 one-character components diverging at
-#: their second — is refused on the first pass as two paths that alias. A
-#: test builds the admissible layout and counts it rather than asserting the
-#: arithmetic, so a repertoire or a bound that made it inadmissible fails
-#: rather than passes.
+#: The most distinct folded prefixes the declared-path alias pass may count.
 MAX_ALIAS_INDEX_NODES = MAX_JOURNAL_ROWS * MAX_PATH_COMPONENTS
 #: The most characters the verdict's removedPaths may carry in total; the
 #: gate budget's counterpart for the other producer-controlled list the
@@ -904,117 +382,6 @@ MAX_ALIAS_INDEX_NODES = MAX_JOURNAL_ROWS * MAX_PATH_COMPONENTS
 #: renderer puts around each path are charged too, so this bounds the
 #: section rather than the strings inside it (peer review, round seven).
 MAX_REMOVED_TEXT = 262144
-#: The most directory entries the closed-world sweep may visit before the tree
-#: is refused as unclosable, counted once for the verification rather than once
-#: per sweep.
-#:
-#: The sweep was the one walk here with no ceiling at all.
-#: :func:`_list_directory` materialised and sorted a whole directory whatever
-#: its width; :func:`_tree_content_paths` descends into every directory that
-#: listing names; and :func:`_assert_no_aliasing_root_component` re-lists every
-#: parent of every pinned root beside it, with no counter shared between them.
-#: So a tree carrying arbitrarily many portable, suffix-excluded entries —
-#: names the sweep must look at and the journal need never mention — forced
-#: unbounded allocation and ``lstat`` work out of a verifier that had already
-#: budgeted its two other walks (peer review, Sol round 5).
-#:
-#: The same number as ``MAX_TOMBSTONE_WORK`` and ``MAX_SPELLING_WORK``, and the
-#: same shape of bound, because it answers the same question about the same
-#: tree. An entry is charged as it arrives from ``os.scandir``, inside the
-#: ``with``, so a directory wider than what is left is abandoned part-way
-#: rather than fetched, sorted and screened whole — and what survives the
-#: charge is what is sorted. Both sweeps and every root-component check charge
-#: one running total, so re-deriving the set at the end cannot buy the tree a
-#: second walk's worth of budget, exactly as the two tombstone passes share
-#: theirs.
-#:
-#: Generous for any real corpus, and it has to be read beside
-#: the default ``MAX_JOURNAL_ROWS``. At that default a journal carries at most
-#: 4,096 rows of all kinds together, and the closed world is refused unless the
-#: tree's content set equals the journal's, so a tree whose *content* files
-#: approach this number cannot verify whatever this constant says. A consumer
-#: may pin a larger journal capacity, but still gets sixty-four sweep visits
-#: per default row before this separate cap is reached. What the number bounds
-#: in ordinary use is everything else a content root may hold: directories,
-#: suffix-excluded siblings, and entries a producer adds precisely because the
-#: sweep must look at them. The package's own fixture spends fourteen entry
-#: visits over both sweeps.
-MAX_SWEEP_WORK = 262144
-#: The most directory entries the whole tombstone pass may touch before it is
-#: refused as unverifiable rather than allowed to run on. Counted in entries
-#: rather than listings, and once for the pass rather than once per removed
-#: path: a per-path listing budget bounded each search while leaving the pass
-#: itself quadratic, so R tombstones against a root of E entries cost R×E with
-#: nothing to stop it (peer review, round three). The index below reads each
-#: directory once and shares it across every removed path, so the real cost is
-#: the tree, and this bounds that.
-#:
-#: An entry is charged when it is taken from a listing and again each time a
-#: search visits it as a candidate, because both are work and neither was
-#: bounded by counting listings alone: the whole of an arbitrarily wide
-#: directory was sorted and indexed before anything checked the budget, and a
-#: cached fold-collision bucket was re-traversed by every tombstone for free
-#: (peer review, round four). The listing is fetched in batches and abandoned
-#: where the charge refuses, so the count bounds the directory read as well
-#: as the work done with what it named (peer review, round five). The two
-#: tombstone passes share the total: the second index is constructed with
-#: what the first one spent, so the pass that re-establishes absence cannot
-#: buy the tree a second walk's worth of budget.
-#:
-#: So what this bounds is two walks of the directories the tombstones touch,
-#: not one: R removed paths whose components lie in directories holding E
-#: entries between them cost about 2×(E + R×D) for paths of depth D — E for
-#: each pass's listings, R×D for the candidates each search visits on its way
-#: down — and the second pass is the same price as the first rather than R
-#: times it. It was R times it while that pass listed every directory afresh
-#: for every removed path, and the product is what a cap on a sum cannot
-#: bound: 1,692 files in one directory with 154 tombstones beside them — the
-#: shape rulespec-us's widest directory really has, at 2,004 journal rows and
-#: with no writer in sight — spent 1,848 units on the first pass and 262,145
-#: on the second and was refused as unverifiable (peer review, Sol round 8).
-#: That corpus now spends 3,696 of this budget, and what it gives up inside
-#: the second pass is stated on :class:`_TombstoneIndex`.
-#:
-#: Read beside ``MAX_JOURNAL_ROWS`` as ``MAX_SWEEP_WORK`` is: a journal is
-#: refused above 4,096 rows by default, so a default-capacity corpus reaches
-#: this cap only if the directories its tombstones walk hold about 131,000
-#: entries between them, less one for every component a search descends —
-#: more than seventy-five times the widest directory in the reference
-#: consumer's tree. A consumer that pins a larger capacity buys tombstones,
-#: not width: each one adds twice its own depth and no listings.
-MAX_TOMBSTONE_WORK = 262144
-#: The most directory entries the attested spelling walk may read before it
-#: is refused as unbindable, counted once for the verification rather than
-#: once per path.
-#:
-#: The walk asks one question per component of every attested path — does
-#: this directory emit exactly this spelling, and does it emit another one
-#: beside it — and answering it means draining the parent's whole listing,
-#: because the answer is about the entries the check does *not* want as much
-#: as the one it does. It runs twice per verification, before the hashing and
-#: again in the closing identity loop. So R attested rows sharing a parent of
-#: E entries cost about 2×R×E entry visits, and nothing bounded it: a journal
-#: attesting a few hundred paths in a directory an adversary has filled is a
-#: verifier that reads for as long as the tree is wide (peer review, Sol
-#: round 4). Every walk in this module is budgeted now. This one was called
-#: the last exception when the budget landed, and it was not: the
-#: closed-world sweep had no ceiling either, which the round after found
-#: (:data:`MAX_SWEEP_WORK`).
-#:
-#: The same number as ``MAX_TOMBSTONE_WORK`` and the same shape of bound: an
-#: entry is charged as it is taken from the listing, so the listing is
-#: abandoned where the charge refuses rather than being drained first, and
-#: both passes charge one running total, so re-asking the question cannot buy
-#: the tree a second walk's worth of budget. Nothing is cached between paths
-#: — a cached listing would answer a later question with an earlier look,
-#: which is the staleness the second tombstone pass exists to avoid — and
-#: within one path there is nothing to cache: the parents of the components
-#: of one path are distinct directories by construction, one per level.
-#:
-#: Generous for any real corpus. The package's own fixture spends six entry
-#: visits on one attested path over two passes, and a consumer attesting
-#: fifty paths in a directory of two hundred entries spends twenty thousand.
-MAX_SPELLING_WORK = 262144
 #: The most characters a refusal quotes of a producer-controlled value.
 MAX_QUOTED_TEXT = 256
 
@@ -1032,7 +399,7 @@ _ROW_KEYS: dict[str, frozenset[str]] = {
 
 
 class CorpusError(ValueError):
-    """The journal is malformed, or it does not describe this working tree."""
+    """The journal is malformed, or it does not describe the selected tree."""
 
 
 @dataclass(frozen=True)
@@ -1054,8 +421,13 @@ class CorpusSpec:
     accepted_gate_tiers: frozenset[str]
     required_gates: frozenset[str]
     journal_row_capacity: int = MAX_JOURNAL_ROWS
+    name_repertoire: str = "portable"
 
     def __post_init__(self) -> None:
+        try:
+            selected_repertoire = validate_repertoire(self.name_repertoire)
+        except NamePolicyError as exc:
+            raise CorpusError(str(exc)) from exc
         if type(self.schema_version) is not str or not self.schema_version:
             raise CorpusError("CorpusSpec schema_version must be a non-empty string")
         if (
@@ -1071,13 +443,16 @@ class CorpusSpec:
         for root in self.content_roots:
             if not isinstance(root, pathlib.PurePosixPath):
                 raise CorpusError("CorpusSpec content_roots must be PurePosixPath")
-            # The spec's own name input is screened here, before the path
-            # rules, so a refusal names the committed spec that carries the
-            # fault rather than a path. A root also reaches
-            # _validate_relative_path below, which screens it again.
-            for component in root.as_posix().split("/"):
-                _assert_portable_name(component, "CorpusSpec content root")
-            _validate_relative_path(root.as_posix(), "content root")
+            if selected_repertoire == "portable":
+                # Preserve the spec-specific portable-name diagnostic before
+                # the general relative-path screen.
+                for component in root.as_posix().split("/"):
+                    _assert_portable_name(component, "CorpusSpec content root")
+            _validate_relative_path(
+                root.as_posix(),
+                "content root",
+                repertoire=selected_repertoire,
+            )
         if type(self.content_suffixes) is not tuple or not self.content_suffixes:
             raise CorpusError("CorpusSpec must declare at least one content suffix")
         for suffix in self.content_suffixes:
@@ -1100,7 +475,11 @@ class CorpusSpec:
         if type(self.required_attested_paths) is not frozenset:
             raise CorpusError("CorpusSpec required_attested_paths must be a frozenset")
         for path in sorted(self.required_attested_paths):
-            _validate_relative_path(path, "required attested path")
+            _validate_relative_path(
+                path,
+                "required attested path",
+                repertoire=selected_repertoire,
+            )
         if type(self.accepted_gate_tiers) is not frozenset:
             raise CorpusError("CorpusSpec accepted_gate_tiers must be a frozenset")
         unknown = sorted(self.accepted_gate_tiers - set(GATE_TIERS))
@@ -1180,6 +559,7 @@ class CorpusVerification:
     attested: tuple[FileBinding, ...]
     gates: tuple[GateDeclaration, ...]
     removed_paths: tuple[str, ...]
+    name_repertoire: str
 
     def gates_in_tier(self, tier: str) -> tuple[GateDeclaration, ...]:
         return tuple(gate for gate in self.gates if gate.tier == tier)
@@ -1395,68 +775,6 @@ def _reject_oversized_text(value: str, label: str) -> str:
 #: was kept as the fail-closed side of a disagreement that does not exist,
 #: and its cost is real: a corpus holding an ordinary ``COM0.yaml`` was
 #: refused outright (peer review, Sol round 2).
-WIN32_RESERVED_DEVICE_NAMES = frozenset(
-    {"CON", "PRN", "AUX", "NUL"}
-    | {f"COM{digit}" for digit in range(1, 10)}
-    | {f"LPT{digit}" for digit in range(1, 10)}
-    | {f"COM{superscript}" for superscript in "\u00b9\u00b2\u00b3"}
-    | {f"LPT{superscript}" for superscript in "\u00b9\u00b2\u00b3"}
-    # ntdll's RtlIsDosDeviceName_U, not Microsoft's page.
-    | {"CONIN$", "CONOUT$"}
-)
-
-
-def _ascii_upper(text: str) -> str:
-    """Uppercase the ASCII letters and nothing else.
-
-    ``str.upper`` applies the full Unicode case mapping, which folds
-    characters this comparison has no business folding — U+0131 uppercases
-    to ``I`` and the ligature ``ﬀ`` to ``FF`` — while Win32's device-name
-    match is over the ASCII spellings. The superscript digits in
-    :data:`WIN32_RESERVED_DEVICE_NAMES` are compared as they are written,
-    which is what makes them entries in the table rather than a mapping.
-    """
-
-    return "".join(
-        chr(ord(character) - 32) if "a" <= character <= "z" else character
-        for character in text
-    )
-
-
-def _win32_device_basename(component: str) -> str:
-    """What Win32 compares against its device table, for one path component.
-
-    Two rules, in this order, because the order is what decides the answer.
-    The component is truncated at its first period *or colon*, and only then
-    are trailing spaces removed from what is left. So ``NUL.yaml``,
-    ``NUL .yaml``, ``nul  ....``, ``NUL:stream`` and a bare ``nul`` all
-    present ``NUL`` to the table.
-
-    Taking the text before the first period and nothing else was not enough:
-    ``NUL .yaml`` ends in ``l``, so nothing about a trailing space fired, and
-    one space was enough to walk a bound path past the device screen (peer
-    review, round eight). The composition here is ``ntdll``'s
-    ``RtlIsDosDeviceName_U``, which truncates at ``.`` or ``:`` and then
-    removes trailing spaces before it matches.
-
-    Leading spaces are *not* removed, because that matcher does not remove
-    them: `` NUL.yaml`` is an ordinary name on Win32 and is one here.
-
-    Both of the characters this composes over — the space and the colon — are
-    outside the portable repertoire, so the only names that reach the table
-    through :func:`_assert_portable_name` are the plain ones. The two rules
-    stay because what they encode is the matcher's, not the repertoire's, and
-    because a caller may reasonably ask this question of an unscreened name.
-    """
-
-    head = component
-    for index, character in enumerate(component):
-        if character in ".:":
-            head = component[:index]
-            break
-    return _ascii_upper(head.rstrip(" "))
-
-
 def _assert_portable_name(value: str, label: str) -> str:
     """Refuse a name outside the repertoire every filesystem agrees about.
 
@@ -1497,18 +815,14 @@ def _assert_portable_name(value: str, label: str) -> str:
     one, and every message quotes the value whole through :func:`_quoted`.
     """
 
-    for component in value.split("/"):
-        if (
-            PORTABLE_NAME_RE.fullmatch(component) is None
-            or component.endswith(".")
-            or _win32_device_basename(component) in WIN32_RESERVED_DEVICE_NAMES
-        ):
-            raise CorpusError(
-                f"{label} is not a portable name (ASCII letters, digits, "
-                "'.', '_' and '-', not ending in '.', not a Win32 device "
-                f"name): {_quoted(value)}"
-            )
-    return value
+    try:
+        return assert_portable_name(value, label)
+    except NamePolicyError as exc:
+        raise CorpusError(
+            f"{label} is not a portable name (ASCII letters, digits, "
+            "'.', '_' and '-', not ending in '.', not a Win32 device "
+            f"name): {_quoted(value)}"
+        ) from exc
 
 
 def _alias_capable_suffix(suffix: str) -> bool:
@@ -1590,26 +904,7 @@ def _short_name_extension(name: str) -> str | None:
     a short name and looking for it.
     """
 
-    stripped = name.replace(" ", "").lstrip(".")
-    _, dot, extension = stripped.rpartition(".")
-    if not dot:
-        return None
-    # An 8.3 extension is three characters; the fourth and later characters
-    # of the extension source are dropped whatever they are.
-    source = extension[:3]
-    return (
-        "".join(
-            character.upper()
-            if "a" <= character <= "z" or "A" <= character <= "Z"
-            else (
-                character
-                if "0" <= character <= "9" or character in SHORT_NAME_PUNCTUATION
-                else "_"
-            )
-            for character in source
-        )
-        or None
-    )
+    return short_name_extension(name)
 
 
 def _short_name_carries_pinned_suffix(name: str, suffixes: tuple[str, ...]) -> bool:
@@ -1648,19 +943,12 @@ def _short_name_carries_pinned_suffix(name: str, suffixes: tuple[str, ...]) -> b
     suffix here exactly as they are there.
     """
 
-    capable = [suffix for suffix in suffixes if _alias_capable_suffix(suffix)]
-    if not capable:
-        return False
-    extension = _short_name_extension(name)
-    if extension is None:
-        # No extension, so 8.3 generation produces a short name with none
-        # either, and a pinned suffix always begins with a dot.
-        return False
-    alias = "." + extension
-    return any(_path_fold(alias) == _path_fold(suffix) for suffix in capable)
+    return short_name_carries_pinned_suffix(name, suffixes)
 
 
-def _validate_relative_path(value: Any, label: str) -> str:
+def _validate_relative_path(
+    value: Any, label: str, *, repertoire: str = "portable"
+) -> str:
     """Reject anything that could escape the root or mean two things at once.
 
     Four shape rules and then the name screen. The shape rules are about the
@@ -1696,7 +984,26 @@ def _validate_relative_path(value: Any, label: str) -> str:
             raise CorpusError(f"{label} has an empty path segment: {_quoted(value)}")
         if segment in (".", ".."):
             raise CorpusError(f"{label} contains a relative segment: {_quoted(value)}")
-    _assert_portable_name(value, label)
+    try:
+        selected_repertoire = validate_repertoire(repertoire)
+    except NamePolicyError as exc:
+        raise CorpusError(str(exc)) from exc
+    if selected_repertoire == "portable":
+        _assert_portable_name(value, label)
+    else:
+        for segment in value.split("/"):
+            try:
+                validate_component_text(
+                    segment,
+                    repertoire=selected_repertoire,
+                    label=label,
+                )
+                # Every path enters an ASCII-fold index later. This strict
+                # boundary refuses surrogateescaped, non-UTF-8 tree bytes
+                # before the value can be quoted in a verdict.
+                ascii_fold_text(segment)
+            except NamePolicyError as exc:
+                raise CorpusError(str(exc)) from exc
     return value
 
 
@@ -1989,7 +1296,11 @@ def parse_journal(
                 )
             continue
 
-        path = _validate_relative_path(row["path"], f"journal row {number} path")
+        path = _validate_relative_path(
+            row["path"],
+            f"journal row {number} path",
+            repertoire=spec.name_repertoire,
+        )
         digest = _sha256(row["sha256"], f"journal row {number} sha256")
         state = _string(row["state"], f"journal row {number} state")
         if state not in FILE_STATES:
@@ -2058,12 +1369,7 @@ def parse_journal(
 
 
 class _PathPrefixWork:
-    """The one budget the alias index and ancestor recorder share.
-
-    Both walks are driven by declared path components, and both used to do
-    work before any existing tree-walk budget applied. Charging the same
-    counter means parsing the path once in each role cannot multiply the
-    hard bound; see :data:`MAX_PATH_COMPONENTS_TOTAL` for the derivation.
+    """The bounded component work performed by the declared-path alias pass.
 
     Units are charged in batches of at most one path's depth, so that a
     2.1-million-visit walk does not pay 2.1 million calls to arrive at the
@@ -2082,7 +1388,7 @@ class _PathPrefixWork:
         return self._work
 
     def charge(self, units: int = 1) -> None:
-        """Charge path-prefix work before it allocates or stats."""
+        """Charge path-prefix work before it folds or allocates a key."""
 
         self._work += units
         if self._work > MAX_PATH_COMPONENTS_TOTAL:
@@ -2093,790 +1399,23 @@ class _PathPrefixWork:
             )
 
 
-class _SweepWork:
-    """The one budget both closed-world sweeps charge against.
-
-    A counter rather than an index: the sweep caches no listing, so there is
-    nothing here but the running total and the refusal it raises. See
-    :data:`MAX_SWEEP_WORK` for why the two sweeps and the root-component
-    checks share it.
-    """
-
-    def __init__(self) -> None:
-        self._work = 0
-
-    @property
-    def work(self) -> int:
-        """Entry visits charged so far, across both sweeps."""
-
-        return self._work
-
-    def charge(self) -> None:
-        """Charge one directory entry, refusing when the budget is spent."""
-
-        self._work += 1
-        if self._work > MAX_SWEEP_WORK:
-            raise CorpusError(
-                f"the closed-world sweep would read more than {MAX_SWEEP_WORK} "
-                "directory entries; the tree cannot be closed"
-            )
-
-
-def _list_directory(
-    directory: pathlib.Path,
-    relative: str,
-    *,
-    what: str = "a directory under a content root",
-    work: "_SweepWork",
-    generations: "_DirectoryGenerations",
-) -> list[pathlib.Path]:
-    """List one directory, refusing to continue if it cannot be read.
-
-    ``Path.rglob`` swallows ``PermissionError`` while descending, so a
-    directory that is searchable but not listable (mode 0111) silently
-    contributes nothing to a walk while its files stay readable by exact path.
-    A closed-world sweep built on that behaviour reports "no extra files"
-    when it simply could not look. Enumeration failure must be a refusal, not
-    an empty result. (Found by cross-family review.)
-
-    ``generations`` is told what this directory looked like an instant
-    before the listing, so the closing re-check can be asked whether it still
-    looks that way. It has no default: every read the run makes carries the
-    run's one recorder, and the earliest stamp of a directory is the one that
-    is kept. See :class:`_DirectoryGenerations`.
-
-    ``work`` is the verification's one sweep budget, charged one entry at a
-    time as the entry arrives. It has no default either: a listing nothing
-    pays for is a listing of any width. See :data:`MAX_SWEEP_WORK`.
-
-    The scan is ``os.scandir`` inside a ``with`` rather than
-    ``pathlib.Path.iterdir``, for the reason :class:`_TombstoneIndex` gives:
-    ``iterdir`` materialises the whole directory before it yields anything,
-    so a per-entry charge against it would bound what this module did with
-    the names and not the read that exhausts the verifier. ``scandir``
-    fetches in batches as they are consumed, and the refusal is raised from
-    inside the loop, so what is read past the charge is the batch in hand and
-    nothing more. The names are sorted afterwards — what is sorted is what
-    the budget allowed through — and the entries are rebuilt as
-    ``directory / name``, which is the same joining every refusal here quotes.
-
-    ``what`` names the thing that could not be enumerated, because this
-    function has two callers and they list different things. The sweep
-    descends *under* a content root; the aliasing root-component check walks
-    the tree root and every ancestor *above* one, so an unreadable repository
-    root refused as "a directory under a content root: '.'", which names the
-    tree root as something inside a subtree of it (peer review, Sol round 8).
-    The label is passed by the caller, as
-    :func:`_assert_no_symlinked_component` already takes one.
-    """
-
-    generations.record(directory, relative)
-    names: list[str] = []
-    try:
-        with os.scandir(directory) as entries:
-            for entry in entries:
-                work.charge()
-                names.append(entry.name)
-    except OSError as exc:
-        raise CorpusError(
-            f"cannot enumerate {what}, so the file set cannot be closed: "
-            f"{_quoted(relative or '.')} ({exc.strerror})"
-        ) from exc
-    return [directory / name for name in sorted(names)]
-
-
-def _assert_no_merging_entries(
-    entries: list[pathlib.Path], directory: str
-) -> None:
-    """Refuse a directory holding two entries a case-insensitive host merges.
-
-    Every entry the sweep meets is screened one at a time — for the portable
-    repertoire, for a symlink, for what kind of thing it is — and nothing
-    compared two of them to each other. Two entries whose fold keys agree are
-    two things on the auditor's volume and one on the consumer's, and it is
-    the *directory* that decides which: a declared ``rules/tax/x.yaml`` beside
-    an undeclared ``rules/TAX/notes.txt`` passes a case-sensitive sweep, which
-    walks two directories and finds one content file, while a case-insensitive
-    checkout holds one merged directory carrying both files and the closed
-    world the sweep just called closed is open (peer review, Sol round 4).
-
-    :func:`_reject_aliasing_paths` asks the same question of the *journal* and
-    cannot answer this one: only one of the two names is declared, so there is
-    no pair of declared paths to compare. Only the listing has both.
-
-    Directories and files alike, and before either is classified: what merges
-    on the consumer's volume is the name, whatever it names, and a collision
-    between a directory and a file is as ambiguous as one between two
-    directories.
-
-    Compared over the fold key, which under the portable-name policy is ASCII
-    case-insensitivity. The entries come sorted from :func:`_list_directory`,
-    so the pair a refusal names is a property of the directory rather than of
-    the order the host enumerated it in, and each name is quoted with the
-    directory it sits in so an auditor can go to it.
-    """
-
-    seen: dict[str, str] = {}
-    for entry in entries:
-        key = _path_fold(entry.name)
-        previous = seen.get(key)
-        if previous is not None:
-            raise CorpusError(
-                "directory holds two entries a case-insensitive filesystem "
-                f"would merge: {_quoted(_under(directory, previous))} and "
-                f"{_quoted(_under(directory, entry.name))}"
-            )
-        seen[key] = entry.name
-
-
 def _under(directory: str, name: str) -> str:
-    """One entry's path relative to the tree root, given its directory's."""
+    """Return an entry path from its tree-relative directory and local name."""
 
     return f"{directory}/{name}" if directory else name
 
 
-def _directory_generation(
-    directory: pathlib.Path,
-) -> tuple[int, int, int, int] | None:
-    """Identity and change stamps, or None if unreadable or not a directory.
-
-    ``st_mtime_ns`` moves when an entry is added, removed or renamed;
-    ``st_ctime_ns`` moves for those and for a metadata change as well, and
-    on POSIX nothing in userspace can set it backwards. Together with the
-    device and inode — which say it is still the same directory and not a new
-    one swapped in under the name — that is what "this directory has not
-    changed since I read it" means here.
-
-    Only ``st_ctime_ns`` makes that a claim rather than a courtesy: mtime is
-    a value ``os.utime`` restores. Windows fills the same field with the
-    creation time, which restores itself, so
-    :func:`verify_corpus_binding` refuses to run there at all rather than
-    compare a tuple a writer can reproduce.
-    """
+def _path_fold(relative: str) -> str:
+    """Fold ASCII letters component-wise and preserve every other code point."""
 
     try:
-        info = os.lstat(directory)
-    except OSError:
-        return None
-    if not stat.S_ISDIR(info.st_mode):
-        return None
-    return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
-
-
-class _AncestorPrefix:
-    """One directory prefix the by-name ancestor walk has already built.
-
-    A node holds what building the prefix cost — the ``pathlib.Path`` and the
-    root-relative spelling — so that the next declared path sharing it pays a
-    dictionary lookup instead. ``is_directory`` is what
-    :meth:`_DirectoryGenerations.record` answered when the prefix was
-    stamped, and it is what stops the walk: nothing below a prefix that is
-    not a directory can exist.
-    """
-
-    __slots__ = ("children", "directory", "is_directory", "relative")
-
-    def __init__(self, directory: pathlib.Path, relative: str) -> None:
-        self.directory = directory
-        self.relative = relative
-        self.is_directory = True
-        self.children: dict[str, _AncestorPrefix] = {}
-
-
-class _DirectoryGenerations:
-    """What every directory the run reads looked like the first time it read it.
-
-    The two re-checks answer for the sets they re-derive: membership is
-    re-swept and every bound file's identity is re-stated. Neither says
-    anything about a directory the *second tombstone pass* reads afterwards,
-    and that pass is a walk of the tree — the last window in the run, and one
-    nothing was watching. A content file inserted while it ran was never
-    enumerated again, and a bound file rewritten by rename while it ran kept
-    the identity the re-check had already accepted (peer review, round six).
-
-    So every directory the run lists is stamped an instant before the
-    listing, and every stamp is re-stated once the last pass has finished. A
-    directory whose generation moved refuses the verdict: an insertion, a
-    removal, a rename over an existing name — each of them moves the parent's
-    mtime and ctime, whatever it does to the file itself.
-
-    One recorder, from the run's first read. Building it after the opening
-    sweep, the first tombstone pass and the hashing left that whole half of
-    the run outside the window, and re-deriving membership does not cover it:
-    a content file created and then removed between the opening sweep and the
-    closing one leaves both membership snapshots equal, and the directory that
-    carried it was first stamped after the mutation, so its stamp matched too
-    (peer review, Sol round 5). Every read the run makes is handed this one
-    recorder — the opening sweep, the root-component checks, the first
-    tombstone pass, the parents the attested spelling walk drains, the closing
-    sweep and the second tombstone pass — and none of them can decline it by
-    omission: the parameter has no default anywhere it is taken, for the
-    reason the spelling budget has none.
-
-    What is stamped is not only what those passes *read*. Stamping the
-    directories the walks happened to enumerate left every ancestor of an
-    attested file unwatched, because attested paths sit outside the content
-    roots and a tombstone walk only descends toward a removed path: with
-    neither, nothing had ever looked at ``.axiom``, so replacing
-    ``.axiom/toolchain.toml`` by rename during the second tombstone pass
-    moved that directory's stamps and no stamp existed to notice (peer
-    review, round seven). So every ancestor of every bound path — from the
-    tree root down to the file's own parent — is stamped as well, before the
-    identity re-check re-states the files themselves.
-
-    The first reading of a directory wins. A directory listed repeatedly —
-    by the two membership sweeps, by the spelling walk's two passes, or by
-    the two tombstone passes — is therefore held against what it looked like
-    the first time anything in the run read it, not the last, so the window
-    the check closes is the widest one available rather than the narrowest.
-
-    A directory that could not be stat-ed is kept as ``None``, and the
-    re-check passes over it rather than reading it as a mutation. What a
-    ``None`` records is that this recorder never had a stamp to compare, not
-    that the tree moved, and treating it as movement refused runs where
-    nothing had: a tombstone search that reached a regular file where a
-    directory component was named recorded the file, and a legitimate
-    directory-to-file lifecycle — a tombstone for ``README.md/child`` with
-    ``README.md`` now an ordinary file — failed as "tree changed" on every
-    run, for ever (peer review, Sol round 7, round 3).
-
-    Nothing is lost by passing over it, because a ``None`` stamp is never the
-    only thing looking. Each recorder either lists the directory immediately
-    — :func:`_list_directory` refuses what it cannot enumerate and
-    :class:`_TombstoneIndex` refuses every failure that is not a plain
-    absence — or is an ancestor walk whose bound file is opened and re-hashed
-    afterwards, which is a stronger question than the stamp asked. And the
-    direction that matters is untouched: a directory stamped with a real
-    generation that *becomes* unreadable answers ``None`` at the re-check,
-    which does not equal the tuple it was stamped with, and refuses.
-
-    What the re-check can and cannot see is stated on
-    :meth:`assert_unchanged`, which re-reads the stamps in both directions
-    for the reason given there.
-    """
-
-    def __init__(self, prefix_work: _PathPrefixWork) -> None:
-        self._seen: dict[
-            str, tuple[pathlib.Path, tuple[int, int, int, int] | None]
-        ] = {}
-        self._prefix_work = prefix_work
-        self._ancestor_paths: set[str] = set()
-        self._ancestor_root: _AncestorPrefix | None = None
-
-    def record(self, directory: pathlib.Path, relative: str) -> bool:
-        """Stamp this directory once; return whether it is a directory."""
-
-        if relative in self._seen:
-            return self._seen[relative][1] is not None
-        generation = _directory_generation(directory)
-        self._seen[relative] = (directory, generation)
-        return generation is not None
-
-    def record_ancestors(self, root: pathlib.Path, relative: str) -> None:
-        """Stamp the tree root and every directory down to this path's parent.
-
-        A bound file's parent is not necessarily a directory any pass
-        enumerates — an attested path sits outside the content roots, the
-        tombstone walk descends only toward a removed path, and the spelling
-        walk is declined for content paths — so the directories that hold the
-        verdict's own subjects are stamped by name rather than by being
-        walked into. Kept even though the spelling walk now stamps the
-        parents it drains: what is stamped must not depend on which optional
-        pass ran.
-
-        The walk stops at the first absent or non-directory prefix. Such a
-        prefix has no listing to stamp, and no child below it can exist, so
-        continuing would spend one ``lstat`` and build one cumulative path
-        per remaining component only to reach the missing-file refusal. Each
-        non-root prefix is charged against the same budget as the alias
-        index. A path is walked at most once even though callers ask before
-        both identity passes; the earliest stamps remain in ``_seen``.
-
-        Prefixes are deduplicated *before* a string is built, which is where
-        the cost was. ``_seen`` deduplicates by the relative spelling, so
-        every prefix of every path had its ``pathlib.Path`` and its
-        ``"/".join`` built first and discarded after: 4,096 paths sharing 510
-        existing ancestors constructed about 2.09 million ``Path`` objects
-        and joined 1,065,369,600 characters to stamp 510 directories (peer
-        review, Sol round 7, round 3). The prefixes are a trie now — one node
-        per distinct ancestor, holding the ``Path`` and the relative spelling
-        it was built with once — so a prefix a previous path already walked
-        costs a dictionary lookup and nothing else, and the same layout joins
-        260,100 characters over 510 nodes.
-
-        The trie is keyed by the component's exact spelling rather than by
-        its fold key, although :func:`_reject_aliasing_paths` keys the
-        prefixes it counts by the fold. Within a verification the two
-        partition identically, because that function has already refused any
-        two declared paths whose prefixes fold equal and are spelled
-        differently. Keying by the spelling is what makes that a convenience
-        rather than a dependency — this walk is reachable from callers that
-        did not run the alias pass — and it saves folding every component of
-        every path a second time.
-
-        One recorder serves one tree root, which is what ``_seen``'s
-        root-relative keys already assume; the trie's root node is built from
-        the first ``root`` it is given.
-        """
-
-        if relative in self._ancestor_paths:
-            return
-        self._ancestor_paths.add(relative)
-        if not self.record(root, ""):
-            return
-        node = self._ancestor_root
-        if node is None:
-            node = self._ancestor_root = _AncestorPrefix(root, "")
-        for segment in relative.split("/")[:-1]:
-            self._prefix_work.charge()
-            child = node.children.get(segment)
-            if child is None:
-                # The one place a prefix's Path and spelling are built, and
-                # only for a prefix no earlier path reached.
-                directory = node.directory / segment
-                spelled = _under(node.relative, segment)
-                child = _AncestorPrefix(directory, spelled)
-                child.is_directory = self.record(directory, spelled)
-                node.children[segment] = child
-            if not child.is_directory:
-                break
-            node = child
-
-    def assert_unchanged(self) -> None:
-        """Refuse if any stamped directory is not what it was when it was read.
-
-        Every stamped directory is re-stated twice: once in sorted order and
-        once in reverse, refusing on the first mismatch of either pass.
-
-        The contract that gives is weaker than "one instant", and it is
-        stated rather than rounded up. A single ordered pass re-states each
-        directory once, so a writer who changes a directory the pass has
-        already re-read is never looked at again: with the stamps taken in
-        sorted order, changing the *first* while the pass is re-reading the
-        *last* went unnoticed, and the residual the module claimed was one
-        instant was really the span after each directory's own last re-read
-        (peer review, round eight). Reading the list back the other way
-        gives every directory a re-read that is late in the sequence as well
-        as one that is early, so a change landing anywhere before a
-        directory's final re-read is refused.
-
-        What that leaves is the span after each directory's last re-read.
-        No amount of re-read choreography removes it — a third pass and a
-        fourth only move which instant is last — and nothing weaker than
-        verifying an immutable snapshot can: receipt#44 tracks that.
-        """
-
-        for relative in sorted(self._seen):
-            self._assert_directory_unchanged(relative)
-        for relative in sorted(self._seen, reverse=True):
-            self._assert_directory_unchanged(relative)
-
-    def _assert_directory_unchanged(self, relative: str) -> None:
-        """Re-state one stamped directory, refusing if it moved."""
-
-        directory, generation = self._seen[relative]
-        if generation is None:
-            # Never stamped, so there is nothing to compare and no movement
-            # to claim; the class docstring says what looks instead.
-            return
-        if _directory_generation(directory) != generation:
-            raise CorpusError(
-                "the tree changed during verification; the closed-world "
-                "verdict is refused"
-            )
-
-
-class _TombstoneIndex:
-    """Every directory the tombstone pass reads, folded and indexed once.
-
-    One :func:`verify_corpus_binding` call may carry many removed paths, and
-    they overlap: each search starts at the tree root and most of them share
-    their leading components. Reading a directory per removed path made the
-    pass cost R×E for R tombstones over a root of E entries, and the budget
-    that was supposed to bound it counted listings *per removed path*, so it
-    bounded each search and nothing at all about the pass (peer review, round
-    three).
-
-    So a directory is listed once per verification and kept as
-    ``{fold key: [entries]}``, shared by every subsequent search, and the work
-    budget is a single running count of entries indexed for the whole pass.
-
-    Failure to list is a refusal, not an absence, for the reason
-    :func:`_list_directory` gives; a directory that is simply not there is an
-    absence, cached as one.
-
-    A listing is consumed one entry at a time and charged as it is consumed,
-    so a directory wider than the budget stops the pass part-way through
-    rather than being sorted and indexed whole first; each bucket is sorted
-    once, here, so a search that revisits it never sorts it again.
-
-    That is also why the listing comes from ``os.scandir`` and not from
-    ``pathlib.Path.iterdir``. ``iterdir`` materialises the whole directory
-    before it yields anything — 3.11 and 3.12 through ``os.listdir``, 3.13
-    and 3.14 by draining ``os.scandir`` into a list — so charging per entry
-    against it bounded only what this module did with the names afterwards,
-    and the widest directory an adversary could plant was still read whole
-    before the budget could say no (peer review, round five). ``scandir``
-    fetches entries from the operating system in batches as they are
-    consumed, and it is used here as a context manager, so the refusal
-    raised from inside the loop closes the iterator and the batches after the
-    one in hand are never asked for. What is read is bounded by the budget
-    plus the batch it stopped in; what this module then does per entry — the
-    sort, the screen, the fold, the index — is bounded by the budget alone.
-
-    The cache is keyed by the directory's exact spelling as the search walked
-    it — the ``/``-joined component names, ``""`` for the root — and never by
-    a :class:`pathlib.Path`. Path equality and hashing are case-insensitive on
-    Windows, so ``WindowsPath("A")`` and ``WindowsPath("a")`` are one key
-    there; with NTFS per-directory case sensitivity they are two directories,
-    and an empty ``A/`` cached under that shared key answered for a surviving
-    ``a/TARGET``, turning a tombstone this pass exists to refuse into a PASS
-    (peer review, round four). A string key means the cache distinguishes
-    exactly what the walk distinguishes, on every platform.
-
-    An index caches for one pass, not for one verification. The pass runs a
-    second time over a second index precisely so that nothing it concluded
-    from a cached listing goes unrechecked (peer review, round five), and the
-    work budget belongs to the verification rather than to the index, so the
-    second one is constructed with ``charged`` set to what the first spent.
-
-    Within a pass a directory is listed once and shared, in the second pass
-    as in the first, so a pass costs the tree it touches rather than the tree
-    times the tombstones. Listing it once per tombstone instead put the pass
-    back at the R×E the budget exists to refuse, and charged every re-read
-    against the same running total: a corpus of the reference consumer's own
-    shape — 1,692 files in one directory, 154 tombstones beside them, 2,004
-    journal rows, no writer anywhere near it — spent 1,848 units on the first
-    pass and 262,145 on the second and was refused as unverifiable (peer
-    review, Sol round 8). What the cap bounds is two passes over the
-    directories the tombstones touch.
-
-    What sharing a listing inside the second pass gives up is stated rather
-    than rounded up. One tombstone lists a shared parent, a survivor of the
-    next tombstone appears in it, and that next tombstone reads the listing
-    the first one left behind (peer review, round six). The survivor has to
-    arrive on disk to be a survivor, and arriving moves its parent's
-    ``st_mtime_ns`` and ``st_ctime_ns``; the parent is stamped an instant
-    before it is listed and re-stated after the pass, so
-    :class:`_DirectoryGenerations` refuses that verdict — under its own
-    message rather than by naming the path. The residual is the one that
-    stamp always carries and no re-listing choreography removes: a filesystem
-    whose directory timestamps are coarser than the interval between the
-    listing and the re-read. Closing it by re-listing costs the refusal
-    above, which a consumer of a wide and entirely static corpus pays on
-    every run.
-
-    ``generations`` is told what each directory looked like an instant
-    before it was listed, and both passes are given the run's recorder. See
-    :class:`_DirectoryGenerations`: the second pass is the last thing in the
-    run that reads the tree, so it is the one window nothing downstream can
-    close by re-deriving a set — and the first pass runs before the hashing,
-    so a directory it reads is stamped there rather than at whatever later
-    pass happens to reach it. ``None`` is accepted so a unit test can drive
-    the index alone; :func:`verify_corpus_binding` never passes it.
-    """
-
-    def __init__(
-        self,
-        root: pathlib.Path,
-        *,
-        charged: int = 0,
-        generations: "_DirectoryGenerations | None",
-    ) -> None:
-        self.root = root
-        self._directories: dict[str, dict[str, list[pathlib.Path]] | None] = {}
-        self._work = charged
-        self._generations = generations
-
-    @property
-    def work(self) -> int:
-        """Budget units charged so far, including whatever this index started at."""
-
-        return self._work
-
-    def charge(self, relative: str) -> None:
-        """Charge one directory entry against the pass budget.
-
-        Called for every entry consumed from a listing and for every candidate
-        a search visits. ``relative`` is the removed path whose search is being
-        charged, so the refusal names the tombstone that could not be checked.
-        """
-
-        self._work += 1
-        if self._work > MAX_TOMBSTONE_WORK:
-            raise CorpusError(
-                "cannot check whether a removed path is still in the tree, so "
-                f"the tombstone is unverifiable: {relative} (tombstone work "
-                f"budget of {MAX_TOMBSTONE_WORK} entries exceeded)"
-            )
-
-    def folded(
-        self, directory: pathlib.Path, key: str, relative: str
-    ) -> dict[str, list[pathlib.Path]] | None:
-        """This directory's entries by fold key, or None if it is not there.
-
-        ``key`` is the directory's exact spelling relative to the tree root,
-        which is what the cache is keyed by; ``relative`` is the removed path
-        whose search wanted the directory, and it names the tombstone in any
-        refusal this raises.
-        """
-
-        if key in self._directories:
-            return self._directories[key]
-        if self._generations is not None:
-            self._generations.record(directory, key)
-        names: list[str] = []
-        try:
-            # Scanned inside a ``with`` and charged as each name arrives, so
-            # the refusal below is raised from inside the loop and the
-            # iterator is closed on the way out. Both halves matter: sorting
-            # the listing first meant a directory of any width was sorted,
-            # screened and indexed in full before anything looked at the
-            # budget (peer review, round four), and reading it through
-            # ``iterdir`` meant the whole of it was fetched from the
-            # operating system first whatever the budget said (peer review,
-            # round five).
-            with os.scandir(directory) as entries:
-                for entry in entries:
-                    self.charge(relative)
-                    names.append(entry.name)
-        except (FileNotFoundError, NotADirectoryError):
-            self._directories[key] = None
-            return None
-        except OSError as exc:
-            raise CorpusError(
-                "cannot check whether a removed path is still in the tree, so "
-                f"the tombstone is unverifiable: {relative} ({exc.strerror})"
-            ) from exc
-        folded: dict[str, list[pathlib.Path]] = {}
-        # Sorted once, here, rather than in every search that reaches this
-        # directory: the order a bucket is tried in does not depend on which
-        # tombstone is asking, only which spelling comes first does.
-        for name in sorted(names):
-            # Screened before it is folded, for the reason
-            # _assert_portable_name gives: a name outside the portable
-            # repertoire lands in one bucket here and another on the
-            # filesystem that resolves it, which decides whether a tombstone
-            # is honoured. The trailing-period half of that screen is what
-            # answers the spelling no fold key can pair — a surviving
-            # "retired/gone." *is* the tombstoned "retired/gone" on Win32,
-            # while the exact lstat misses it on POSIX and its fold key
-            # differs, so both questions this pass asks used to answer
-            # "absent" with the file still openable (peer review, Sol
-            # round 2).
-            _assert_portable_name(name, "tree entry examined for a tombstone")
-            folded.setdefault(_path_fold(name), []).append(directory / name)
-        self._directories[key] = folded
-        return folded
-
-
-def _fold_survivor(index: _TombstoneIndex, relative: str) -> str | None:
-    """The spelling under which a tombstoned path still answers, if any.
-
-    The module's portability model is that two paths whose fold keys agree
-    are one file on some real filesystem; the sweep and the alias guard are
-    built on it, and a tombstone checked by exact-spelling lstat was not. On
-    a case-sensitive host a tombstone for ".axiom/apply-manifest.json" passed
-    while ".AXIOM/APPLY-MANIFEST.JSON" remained, and that survivor answers to
-    the tombstoned name on a case-insensitive consumer (peer review). So each
-    component is matched by fold key against a listing of its directory,
-    exact spelling first, every fold-equal branch explored. An intermediate
-    symlink refuses, as it does for every bound path, which also bounds the
-    walk by the tree; :class:`_TombstoneIndex` reads each directory once and
-    refuses a tree wider than its work budget.
-
-    What this search cannot see is a name the filesystem resolves but never
-    emits — Win32 strips trailing dots and spaces before a lookup, and NTFS
-    answers to 8.3 short names. Those are handled outside this function, from
-    three sides. A *declared* path spelled that way is refused at the schema
-    boundary by :func:`_assert_portable_name`, which admits neither a
-    trailing period nor a tilde, so no tombstone names one. A *tree entry*
-    that answers to the tombstoned spelling on the running host is caught by
-    the native ``os.lstat`` of the exact path in
-    :func:`verify_corpus_binding`, which runs before this search and lets the
-    host that is actually running decide what its own lookup resolves. And a
-    tree entry that would answer to it on a host that is *not* running is
-    refused outright where :class:`_TombstoneIndex` lists it: a POSIX
-    ``retired/gone.`` beside a tombstone for ``retired/gone`` is invisible
-    to both of the questions above and is the file itself on Win32.
-
-    That leaves one case modelled by neither, and it is deliberate: an entry
-    whose name aliases another *on Windows only*, examined on a POSIX host.
-    POSIX lstat will not resolve the alias and POSIX enumeration will not emit
-    it, so a tombstone can pass on Linux for a tree that would still hold the
-    file on Windows. Verifying on the filesystem you intend to use is the
-    remedy; this module refuses what it can see and does not pretend to model
-    a lookup it is not running.
-    """
-
-    def search(
-        directory: pathlib.Path, components: list[str], spelled: list[str]
-    ) -> str | None:
-        folded = index.folded(directory, "/".join(spelled), relative)
-        if folded is None:
-            return None
-        head, rest = components[0], components[1:]
-        # The bucket is re-ordered rather than re-sorted: the index sorted it
-        # by name when it read the directory, and only which spelling to try
-        # first depends on the component being matched. Sorting here instead
-        # meant every tombstone that reached this bucket paid to sort it
-        # again (peer review, round four).
-        bucket = folded.get(_path_fold(head), ())
-        matches = [entry for entry in bucket if entry.name == head]
-        matches += [entry for entry in bucket if entry.name != head]
-        for entry in matches:
-            # A visited candidate is a directory entry examined, so it is
-            # charged like an indexed one and against the same running total.
-            # Re-traversing a cached bucket was free before, so R tombstones
-            # over one collision bucket of K entries examined R×K candidates
-            # without the budget moving (peer review, round four).
-            index.charge(relative)
-            if not rest:
-                return "/".join([*spelled, entry.name])
-            # One lstat, inside the handler, answering both questions below.
-            # It sat outside: a listed entry deleted between the listing and
-            # the probe raised FileNotFoundError, and an entry in a directory
-            # that is readable but not searchable raised PermissionError, and
-            # neither is a CorpusError — the verifier crashed where it should
-            # have refused (peer review, round three). A vanished entry is not
-            # a survivor; any other error means the tombstone could not be
-            # checked, which is the same "failure to look is not an absence"
-            # rule _list_directory states.
-            try:
-                info = entry.lstat()
-            except (FileNotFoundError, NotADirectoryError):
-                continue
-            except OSError as exc:
-                raise CorpusError(
-                    "cannot check whether a removed path is still in the tree, so "
-                    f"the tombstone is unverifiable: {relative} ({exc.strerror})"
-                ) from exc
-            # An intermediate symlink is refused, as it is for every bound
-            # path: a journal path never traverses a link. Following it
-            # also made the walk unbounded, since case-varied links back
-            # into the same directory branch without end (peer review,
-            # round two). A link in the final position still counts as
-            # present: it answers to the name.
-            if stat.S_ISLNK(info.st_mode) or getattr(info, "st_reparse_tag", 0):
-                raise CorpusError(
-                    "removed path traverses a symlink or reparse point at "
-                    f"{_quoted('/'.join([*spelled, entry.name]))}: {relative}"
-                )
-            if not stat.S_ISDIR(info.st_mode):
-                # A regular file, a device, a socket: this branch of the
-                # search ends here. Descending anyway asked the index for a
-                # listing the entry cannot have, which cost a stamp the
-                # recorder could not take and then refused the whole verdict
-                # as "tree changed" — for a tombstone that had been honoured
-                # and a tree that had not moved (peer review, Sol round 7,
-                # round 3). A file has no listing to stamp and nothing can be
-                # under it, so it is neither recorded nor recursed into.
-                continue
-            found = search(entry, rest, [*spelled, entry.name])
-            if found is not None:
-                return found
-        return None
-
-    return search(index.root, relative.split("/"), [])
-
-
-def _assert_tombstones_absent(
-    root: pathlib.Path,
-    removed: tuple[str, ...],
-    index: _TombstoneIndex,
-    *,
-    appeared: bool = False,
-) -> None:
-    """Refuse any removed path still in the tree, under any spelling.
-
-    Two questions per tombstone, in this order. Ask the filesystem about the
-    tombstoned spelling itself, then ask the fold model whether a fold-equal
-    spelling survives in a listing. :func:`_fold_survivor` decides absence
-    from the names a scan emits, and Win32 lookup resolves names enumeration
-    never emits: a trailing dot or space is stripped before the lookup, and
-    an NTFS 8.3 short name answers for a long one. Both would be reported
-    absent by a search over the listing while the file opens under the
-    tombstoned name (peer review, round three). The host that is running
-    knows its own aliases; ask it first.
-
-    The index arrives as a parameter rather than being built here because
-    :func:`verify_corpus_binding` runs this twice over two of them, and the
-    whole point of the second is that it starts with nothing cached. One
-    function serves both calls so the two passes cannot drift apart.
-
-    ``appeared`` says which of them is speaking, and changes nothing but the
-    first clause of a refusal. On the second pass every path here was proven
-    absent earlier, so a survivor is news about the tree moving under the
-    verifier rather than about the journal disagreeing with the tree.
-    """
-
-    still = (
-        "removed path appeared during verification"
-        if appeared
-        else "removed path is still present in the tree"
-    )
-    for path in removed:
-        try:
-            os.lstat(root / path)
-        except (FileNotFoundError, NotADirectoryError):
-            pass
-        except OSError as exc:
-            raise CorpusError(
-                "cannot check whether a removed path is still in the tree, so "
-                f"the tombstone is unverifiable: {path} ({exc.strerror})"
-            ) from exc
-        else:
-            raise CorpusError(f"{still}: {path}")
-        survivor = _fold_survivor(index, path)
-        if survivor is None:
-            continue
-        if survivor == path:
-            raise CorpusError(f"{still}: {path}")
-        raise CorpusError(
-            f"{still} under a spelling that aliases it on a case- or "
-            f"normalization-insensitive filesystem: {path} ({_quoted(survivor)})"
-        )
-
-
-def _path_fold(relative: str) -> str:
-    """A filesystem-insensitivity-proof key for a relative path.
-
-    NFC folds NFD/NFC spellings of the same characters together; casefold folds
-    case together. Two distinct declared paths sharing a fold key would alias on
-    some real filesystem, so the fold key is what closed-world uniqueness is
-    checked over.
-
-    Over the portable repertoire this is exactly ASCII case-insensitivity:
-    NFC is the identity on ASCII, ``casefold`` lowercases the letters and
-    leaves the digits, ``.``, ``_`` and ``-`` alone, and the second NFC has
-    nothing to compose. It is written as the general fold rather than as
-    ``str.lower`` because it is also asked of names that have *not* been
-    screened — the siblings of an attested path's components, which are
-    someone else's files — and because what it means is "the same name on
-    some real filesystem", which is not a claim about ASCII.
-    """
-
-    # Normalized again after folding, deliberately: casefold itself can
-    # produce decomposed text (U+00DF followed by U+0301 folds to s, s,
-    # U+0301, whose composed form is s, U+015B), so a variant that differs
-    # in case AND normalization at once produced an unequal key and the
-    # suffix predicate let it out of the sweep (peer review). That pair is
-    # outside the portable repertoire now; the key is still computed this
-    # way because it is asked of unscreened names too.
-    return unicodedata.normalize(
-        "NFC", unicodedata.normalize("NFC", relative).casefold()
-    )
+        return "/".join(ascii_fold_text(component) for component in relative.split("/"))
+    except NamePolicyError as exc:
+        raise CorpusError(str(exc)) from exc
 
 
 def _has_pinned_suffix(relative: str, suffixes: tuple[str, ...]) -> bool:
-    """Whether a path ends in one of the pinned content suffixes, folded.
-
-    Both sides fold, for the reason _path_fold exists: on a case-insensitive
-    filesystem "rules/x.YAML" and "rules/x.yaml" are one file, so a byte-exact
-    suffix match would let a case-varied spelling be classified as not-content
-    and escape the sweep. The journal classifier and the tree sweep share this
-    one predicate; the bug it closes was the two of them disagreeing.
-    """
+    """Whether a path ends in a pinned suffix after the policy's ASCII fold."""
 
     folded = _path_fold(relative)
     return any(folded.endswith(_path_fold(suffix)) for suffix in suffixes)
@@ -2947,21 +1486,10 @@ def _reject_aliasing_paths(
     of a structure whose size is the adversary's to choose. The same 4,096
     maximum-depth paths now peak at 9.0 MB and 0.6 seconds.
 
-    Counting survives the index. The number of distinct folded prefixes is
-    the number of components the first path contributes plus, for every
-    later path, the components below what it shares with its predecessor —
-    exactly the node count the trie would have held, computed without
-    holding it. That count is what :data:`MAX_ALIAS_INDEX_NODES` bounds and
-    what this returns, because it is also the number of directories the
-    declared set names and therefore the number of stamps
-    :class:`_DirectoryGenerations` may end up holding.
-
-    Every ``(path, prefix)`` visit and every counted prefix charges ``work``,
-    a path's depth at a time and before the components it pays for are
-    folded or compared. The same counter is handed to
-    :meth:`_DirectoryGenerations.record_ancestors`; see
-    :data:`MAX_PATH_COMPONENTS_TOTAL` for why all three fit its derived
-    bound.
+    The number of distinct folded prefixes is the number of components the
+    first path contributes plus, for every later path, the components below
+    what it shares with its predecessor. Every component visit and every
+    counted prefix charges ``work`` before folding or comparison.
 
     The whole-path pass runs first and completely, so a journal with both
     kinds of collision keeps the message that names the more specific one.
@@ -3015,666 +1543,250 @@ def _reject_aliasing_paths(
     return nodes
 
 
-def _tree_content_paths(
-    root: pathlib.Path,
-    spec: CorpusSpec,
+_REGULAR_BLOB_MODES = frozenset({"100644", "100755"})
+_TREE_MODE = "040000"
+
+
+def _screen_tree_listing(
+    entries: Mapping[str, GitEntry],
+    by_directory: Mapping[str, Mapping[str, GitEntry]],
     *,
-    work: "_SweepWork",
-    generations: "_DirectoryGenerations",
-) -> dict[str, pathlib.Path]:
-    """Enumerate every regular file the spec calls content.
+    repertoire: str,
+) -> None:
+    """Validate every component and every tree directory's sibling set.
 
-    Walks explicitly rather than globbing: every directory is listed with
-    errors surfaced, every symlink or reparse point refuses, and every
-    non-regular entry refuses. What this returns is the complete set of
-    content files, or the call raises — there is no third outcome where it
-    returns a partial set.
-
-    Each entry is examined through a single ``lstat``, which is both what
-    makes the three questions consistent — the entry judged a directory is the
-    entry judged not a link — and what lets the link question be asked in the
-    form Windows answers it, since a junction there is a reparse point and not
-    a symlink.
-
-    Every path these refusals name is quoted through :func:`_quoted`, which
-    is not cosmetic. A journal path is control-screened at the schema
-    boundary; a *filesystem* name is not screened by anything, and the CLI
-    prints refusal text into its verdict. A file named
-    ``"\\x1b[2K\\rVERDICT: PASS"`` planted under a content root would have
-    redrawn the line the command was about to fail on — the same attack
-    :func:`_reject_control_characters` closes from the producer's side, open
-    from the tree's (peer review, round three).
-
-    ``generations`` is told what every directory this walk reads looked like
-    an instant before it read it — the root-component listings included,
-    since a new directory aliasing a root component appears in one of those
-    and nowhere else. Both sweeps pass the run's one recorder, so a directory
-    the opening sweep read is held against what it looked like *then* and not
-    against what the closing sweep found (peer review, Sol round 5);
-    :class:`_DirectoryGenerations` says what it is for.
-
-    ``work`` is the verification's sweep budget, charged by every listing
-    this walk and the root-component check beside it make. Both sweeps are
-    handed the same one, so the closing re-derivation is paid for out of what
-    the opening one left; see :data:`MAX_SWEEP_WORK`.
+    ``TreeListing.as_dict`` has already materialized each authenticated full
+    path exactly once.  Deriving local names from that flat view avoids a
+    second charged path traversal through ``TreeListing.children``.
     """
 
-    found: dict[str, pathlib.Path] = {}
+    for relative in sorted(entries):
+        name = relative.rpartition("/")[2]
+        if repertoire == "portable":
+            # The portable operation supplies the retained corpus diagnostic.
+            # Ask the strict fold first so undecodable surrogateescaped tree
+            # bytes are still refused as undecodable under both repertoires.
+            try:
+                ascii_fold_text(name)
+            except NamePolicyError as exc:
+                raise CorpusError(str(exc)) from exc
+            _assert_portable_name(name, f"tree entry {_quoted(relative)}")
+        else:
+            try:
+                validate_component_text(
+                    name,
+                    repertoire=repertoire,
+                    label=f"tree entry {_quoted(relative)}",
+                )
+                # Folding is required under both repertoires. In particular,
+                # this refuses surrogateescaped non-UTF-8 bytes before a
+                # verdict could quote or fold them.
+                ascii_fold_text(name)
+            except NamePolicyError as exc:
+                raise CorpusError(str(exc)) from exc
+
+    directories = {""}
+    directories.update(
+        path for path, entry in entries.items() if entry.mode == _TREE_MODE
+    )
+    for directory in sorted(directories):
+        names = tuple(sorted(by_directory.get(directory, {})))
+
+        # Keep the established corpus refusal text. The shared helper still
+        # runs for every directory; this pre-check only supplies the retained
+        # path-rich diagnostic when the sibling pair itself is the fault.
+        seen: dict[str, str] = {}
+        for name in names:
+            folded = _path_fold(name)
+            previous = seen.get(folded)
+            if previous is not None:
+                raise CorpusError(
+                    "directory holds two entries a case-insensitive filesystem "
+                    f"would merge: {_quoted(_under(directory, previous))} and "
+                    f"{_quoted(_under(directory, name))}"
+                )
+            seen[folded] = name
+        try:
+            assert_no_merging_tree_names(
+                names,
+                repertoire=repertoire,
+                label=f"tree directory {_quoted(directory or '.')}",
+            )
+        except NamePolicyError as exc:
+            raise CorpusError(str(exc)) from exc
+
+
+def _entries_by_directory(
+    entries: Mapping[str, GitEntry],
+) -> dict[str, dict[str, GitEntry]]:
+    """Index an authenticated flat listing by each entry's immediate parent."""
+
+    result: dict[str, dict[str, GitEntry]] = {}
+    for path, entry in entries.items():
+        parent, separator, name = path.rpartition("/")
+        if not separator:
+            parent, name = "", path
+        result.setdefault(parent, {})[name] = entry
+    return result
+
+
+def _assert_content_root_spellings(
+    entries: Mapping[str, GitEntry],
+    by_directory: Mapping[str, Mapping[str, GitEntry]],
+    spec: CorpusSpec,
+) -> None:
+    """Retain the pinned-root alias refusal over immutable listing names."""
+
+    for root in spec.content_roots:
+        relative = root.as_posix()
+        parent = ""
+        for component in relative.split("/"):
+            for name in sorted(by_directory.get(parent, {})):
+                if name != component and _path_fold(name) == _path_fold(component):
+                    raise CorpusError(
+                        f"tree entry {_quoted(name)} aliases the pinned content "
+                        f"root component {_quoted(component)} on a case- or "
+                        "normalization-insensitive filesystem"
+                    )
+            exact = _under(parent, component)
+            entry = entries.get(exact)
+            if entry is None or entry.mode != _TREE_MODE:
+                break
+            parent = exact
+
+
+def _content_entries_from_listing(
+    entries: Mapping[str, GitEntry], spec: CorpusSpec
+) -> dict[str, GitEntry]:
+    """Return the exact closed-world content set from one tree listing."""
+
+    found: dict[str, GitEntry] = {}
     for content_root in spec.content_roots:
         base_relative = content_root.as_posix()
-        # Guard every component of the root, not just its last segment: an
-        # empty or suffix-empty root behind a symlinked parent would enumerate
-        # nothing and silently pass. (Cross-family review finding.)
-        base = _assert_no_symlinked_component(
-            root,
-            base_relative,
-            what="pinned content root",
-            work=None,
-            generations=generations,
-        )
-        _assert_no_aliasing_root_component(
-            root, base_relative, work=work, generations=generations
-        )
-        if not base.exists():
+        root_entry = entries.get(base_relative)
+        if root_entry is None:
             raise CorpusError(
                 f"pinned content root is absent from the tree: {base_relative}"
             )
-        if not base.is_dir():
-            raise CorpusError(f"pinned content root is not a directory: {base_relative}")
-
-        pending: list[tuple[pathlib.Path, str]] = [(base, base_relative)]
-        while pending:
-            directory, directory_relative = pending.pop()
-            entries = _list_directory(
-                directory, directory_relative, work=work, generations=generations
+        if root_entry.mode != _TREE_MODE:
+            raise CorpusError(
+                f"pinned content root is not a directory: {base_relative}"
             )
-            # Before anything is classified, because what a case-insensitive
-            # volume merges is decided by the pair and not by either entry:
-            # every screen below judges one name at a time and none of them
-            # can see that two of them are one file somewhere else.
-            _assert_no_merging_entries(entries, directory_relative)
-            for candidate in entries:
-                relative = candidate.relative_to(root).as_posix()
-                # Before the suffix predicate folds this name, and before
-                # the 8.3 model below reads its extension, and before
-                # anything decides what kind of entry it is — a name whose
-                # equivalence class this module would have to guess at
-                # decides membership one way here and another on the host
-                # that resolves the tree, and it aliases a directory as
-                # readily as a file.
-                _assert_portable_name(
-                    candidate.name, f"tree entry {_quoted(relative)}"
+
+        prefix = base_relative + "/"
+        for relative in sorted(entries):
+            if not relative.startswith(prefix):
+                continue
+            entry = entries[relative]
+            if entry.mode == "160000":
+                raise CorpusError(
+                    f"content root contains a gitlink: {_quoted(relative)}"
                 )
-                try:
-                    info = candidate.lstat()
-                except OSError as exc:
-                    # pathlib's predicates swallow every OSError and answer
-                    # False, so an entry that vanished between the listing and
-                    # the probe already arrived at the non-regular refusal
-                    # below. It still does; the cause is chained rather than
-                    # discarded, and the text an auditor reads is unchanged.
+
+            carries_suffix = _has_pinned_suffix(relative, spec.content_suffixes)
+            if not carries_suffix:
+                if (
+                    spec.name_repertoire == "portable"
+                    and entry.mode in _REGULAR_BLOB_MODES
+                    and _short_name_carries_pinned_suffix(
+                        relative.rpartition("/")[2], spec.content_suffixes
+                    )
+                ):
                     raise CorpusError(
-                        f"content root contains a non-regular file: {_quoted(relative)}"
-                    ) from exc
-                # ANY symlink under a content root defeats the closed-world
-                # claim, whatever it is named: a walk does not descend
-                # symlinked directories, so a linked tree of suffix-named
-                # files would be invisible here while remaining reachable
-                # to any consumer that resolves links.
-                #
-                # is_symlink() answers that for POSIX only. A Windows junction
-                # — or any other directory reparse point — is not a symlink
-                # and was descended as an ordinary directory, so a content
-                # root could reach outside the clone entirely while the sweep
-                # reported it swept (peer review, round four). st_reparse_tag
-                # is how Windows reports one, and it is the same test
-                # _assert_no_symlinked_component already applies to a bound
-                # path's components. One lstat answers this and both questions
-                # below, so nothing here can see a different file than the
-                # symlink check did.
-                if stat.S_ISLNK(info.st_mode) or getattr(info, "st_reparse_tag", 0):
-                    raise CorpusError(
-                        "content root contains a symlink or reparse point: "
+                        "content root contains a file whose short-name alias "
+                        "would carry a pinned suffix: "
                         f"{_quoted(relative)}"
                     )
-                if stat.S_ISDIR(info.st_mode):
-                    pending.append((candidate, relative))
-                    continue
-                if not stat.S_ISREG(info.st_mode):
-                    # FIFOs, sockets, devices: not bindable, yet a reader could
-                    # still open them where a rule file is expected. Refuse.
-                    raise CorpusError(
-                        f"content root contains a non-regular file: {_quoted(relative)}"
-                    )
-                # The same predicate the journal classifier uses, so the sweep
-                # and the classifier cannot disagree about what is content.
-                if not _has_pinned_suffix(relative, spec.content_suffixes):
-                    # Not content under the name the listing emitted. On a
-                    # volume with 8.3 generation it may still be content
-                    # under the short name that opens the same bytes, and
-                    # that name no listing emits, so refuse rather than skip
-                    # (peer review, round six).
-                    if _short_name_carries_pinned_suffix(
-                        candidate.name, spec.content_suffixes
-                    ):
-                        raise CorpusError(
-                            "content root contains a file whose short-name alias "
-                            f"would carry a pinned suffix: {_quoted(relative)}"
-                        )
-                    continue
-                found[relative] = candidate
+                continue
+
+            if entry.mode == "120000":
+                raise CorpusError(
+                    "content root contains a symlink where a regular file was "
+                    f"recorded: {_quoted(relative)}"
+                )
+            if entry.mode not in _REGULAR_BLOB_MODES or entry.object_type != "blob":
+                raise CorpusError(
+                    f"content root contains a non-regular file: {_quoted(relative)}"
+                )
+            found[relative] = entry
     return found
 
 
-def _assert_no_aliasing_root_component(
-    root: pathlib.Path,
-    relative: str,
-    *,
-    work: "_SweepWork",
-    generations: "_DirectoryGenerations",
+def _assert_tombstones_absent_from_listing(
+    entries: Mapping[str, GitEntry], removed: tuple[str, ...]
 ) -> None:
-    """Refuse a tree entry that aliases a component of a pinned content root.
+    """Ask exact and ASCII-fold indexes once whether a removed path survives."""
 
-    :meth:`CorpusSpec.content_root_of` folds, so a path under "RULES/" is
-    classified as content wherever it is spelled. Classification is only half
-    of it: the *walk* still descends the pinned spelling, so on a
-    case-sensitive host "RULES/evil.yaml" is content the walk never visits,
-    and it would be reported missing from the tree rather than named for what
-    it is. Worse, an auditor on a case-insensitive host holds one merged
-    directory and an auditor on a case-sensitive host holds two, from the
-    same bytes.
-
-    So each component of each pinned root is checked against a listing of its
-    parent: an entry whose fold key matches the component but whose spelling
-    does not is refused by name. A parent that is not there is left to the
-    absent and not-a-directory refusals in :func:`_tree_content_paths`, which
-    say something more useful, and a symlinked parent has already been
-    refused by :func:`_assert_no_symlinked_component`.
-
-    Each of those listings is charged against the sweep's own budget, and
-    against the same running total the sweep proper charges. This walk reads
-    the repository root, which is the widest directory a consumer is likely
-    to have and the one an adversary can fill most easily, and it re-reads it
-    for every pinned content root; nothing counted any of that (peer review,
-    Sol round 5). See :data:`MAX_SWEEP_WORK`.
-    """
-
-    current = root
-    walked: list[str] = []
-    for component in relative.split("/"):
-        if current.is_symlink() or not current.is_dir():
-            return
-        walked_relative = "/".join(walked)
-        entries = _list_directory(
-            current,
-            walked_relative,
-            what="the tree root or an ancestor of a content root",
-            work=work,
-            generations=generations,
-        )
-        for entry in entries:
-            # Screened, and not only for the fold question below: an entry
-            # named "rules." beside the pinned "rules" is that root on
-            # Windows, holding whatever a producer put in it, while a POSIX
-            # verifier sweeps only the spelling the spec pinned — and the two
-            # names are not fold-equal, so the fold check cannot pair them
-            # (peer review, round six). The trailing-period half of the
-            # portable-name screen is what answers it.
-            _assert_portable_name(
-                entry.name, f"tree entry beside {_quoted(relative)}"
-            )
-            if entry.name != component and _path_fold(entry.name) == _path_fold(
-                component
-            ):
-                raise CorpusError(
-                    f"tree entry {_quoted(entry.name)} aliases the pinned content "
-                    f"root component {_quoted(component)} on a case- or "
-                    "normalization-insensitive filesystem"
-                )
-        # After that loop rather than before it, which is the one place the
-        # order of these two questions matters. An entry that folds onto the
-        # pinned component is a merging sibling too, and the refusal above
-        # names the component a consumer's spec pins — which is what the
-        # auditor has to act on — where this one could only name two entries.
-        _assert_no_merging_entries(entries, walked_relative)
-        current = current / component
-        walked.append(component)
-
-
-class _SpellingWork:
-    """The one budget both attested spelling passes charge against.
-
-    A counter rather than an index: unlike :class:`_TombstoneIndex` this
-    caches nothing, so there is nothing here but the running total and the
-    refusal it raises. See :data:`MAX_SPELLING_WORK` for why the two passes
-    share it and why nothing is cached.
-    """
-
-    def __init__(self) -> None:
-        self._work = 0
-
-    @property
-    def work(self) -> int:
-        """Entry visits charged so far, across both passes."""
-
-        return self._work
-
-    def charge(self) -> None:
-        """Charge one directory entry, refusing when the budget is spent."""
-
-        self._work += 1
-        if self._work > MAX_SPELLING_WORK:
+    folded: dict[str, str] = {}
+    for path in sorted(entries):
+        folded.setdefault(_path_fold(path), path)
+    for path in removed:
+        if path in entries:
+            raise CorpusError(f"removed path is still present in the tree: {path}")
+        survivor = folded.get(_path_fold(path))
+        if survivor is not None:
             raise CorpusError(
-                "the attested spelling check would read more than "
-                f"{MAX_SPELLING_WORK} directory entries; the tree cannot be "
-                "bound"
+                "removed path is still present in the tree under a spelling "
+                "that aliases it on a case- or normalization-insensitive "
+                f"filesystem: {path} ({_quoted(survivor)})"
             )
 
 
-def _assert_spelled_by_its_directory(
-    parent: pathlib.Path,
-    component: str,
-    relative: str,
-    *,
-    parent_relative: str,
-    work: _SpellingWork,
-    generations: "_DirectoryGenerations",
-) -> None:
-    """Refuse a component the filesystem resolves but its directory does not emit.
+def _attested_entries_from_snapshot(
+    snapshot: TreeSnapshot, attested: Mapping[str, FileBinding]
+) -> dict[str, GitEntry]:
+    """Resolve every attested path exactly and require a regular blob."""
 
-    A bound path is opened by the spelling the journal declares, and on a
-    case-insensitive volume that spelling need not be the one on disk: a
-    spec and a journal attesting ``readme.md`` verified against a
-    ``README.md`` the auditor's clone actually holds, hashed it, and passed
-    — while a case-sensitive clone of the very same corpus has no
-    ``readme.md`` at all and refuses. Which host the auditor cloned onto
-    decided whether the corpus verified, which is the defect
-    :meth:`CorpusSpec.content_root_of` closed for classification and this
-    closes for binding (peer review, Sol round 2).
-
-    So the on-disk spelling is bound, not merely the resolution: at every
-    level the exact component must appear in a listing of its parent. A
-    filesystem that resolves ``readme.md`` to ``README.md`` is caught by the
-    listing rather than by the resolution, because the listing emits the one
-    spelling the volume actually stores.
-
-    The whole listing is consumed, not the first matching entry, because
-    the exact spelling being present does not mean it is the only one. A
-    case-sensitive tree can hold ``.axiom/toolchain.toml`` and
-    ``.axiom/TOOLCHAIN.TOML`` side by side; this check saw the first, said
-    the component was spelled, and stopped — while a case-insensitive
-    consumer collapses the two into one file and cannot say which of them
-    the digest covers. So a sibling that folds onto the component without
-    being it refuses, by name. Under the portable-name policy that is the
-    only fold class left, and the component itself is ASCII, so what the
-    fold key is asking here is whether some other spelling differs from the
-    bound one only in case (S5R3-F3).
-
-    Every entry the listing yields is screened before it is compared, which
-    is the standing rule everywhere else this module reads a directory and
-    was missing only here. The fold key pairs two spellings that differ in
-    case; it cannot pair a spelling a *lookup* collapses onto the bound name
-    without collapsing under the fold. A POSIX tree holding both
-    ``.axiom/toolchain.toml`` and ``.axiom/toolchain.toml.`` passed this
-    check — the exact spelling is present, and the trailing-period sibling
-    folds to a different key — while Win32 strips the trailing period before
-    the lookup and resolves the sibling to the bound name, so the digest
-    covers whichever of the two that host hands back (peer review, Sol
-    round 4). :func:`_assert_portable_name` is what answers that class, here
-    as it does beside a pinned content root, and it answers a trailing space
-    the same way.
-
-    The screen refuses ahead of both questions below, including the
-    missing-spelling one. That is deliberate: those two ask which of the
-    spellings in a directory the bound path names, and a directory holding a
-    name this module cannot say the meaning of cannot answer either — the
-    tree is unbindable rather than mis-spelled, and the refusal says so in
-    the policy's own words.
-
-    Asked only of a component that resolves. Where nothing answers to the
-    spelling there is no resolution to disagree with, and the caller's own
-    refusal — a missing bound file, an absent content root — says something
-    more useful than this one could. That is also why the same corpus is
-    refused on both kinds of host for different reasons: the case-sensitive
-    clone never resolves ``readme.md``, so it refuses as a missing file.
-
-    Failure to list is a refusal and not an absence, which is this module's
-    standing rule (see :func:`_list_directory`): a parent that resolves the
-    component but cannot be enumerated leaves the question unanswered.
-
-    The parent is stamped an instant before it is drained, under
-    ``parent_relative`` — its own spelling relative to the tree root, which
-    is the key :class:`_DirectoryGenerations` uses. That overlaps the
-    ancestors :func:`verify_corpus_binding` stamps by name just before this
-    walk, and the overlap is deliberate: the earliest stamp wins, so a second
-    recording costs nothing, and what a directory is watched from must not
-    depend on some other call site naming it (peer review, Sol round 5). The
-    stamp is taken after the resolution check above, because a component
-    nothing answers to is a directory this function never reads.
-
-    The cost is one listing per component, and it is asked once per
-    *attested* path only. Asking it of content paths as well answered a
-    question the sweep had already answered — every content path that
-    survives the membership comparison came verbatim out of an
-    ``os.scandir`` listing — at a price of one listing per component per
-    file, which for a wide content directory is quadratic in the files it
-    holds and unbudgeted, in a module that budgets its other walks
-    (adversarial review of the Sol round 2 fix). Nothing is cached between
-    paths: a cached listing would answer a later question with an earlier
-    look, which is the staleness the second tombstone pass exists to
-    avoid.
-    """
-
-    try:
-        os.lstat(parent / component)
-    except (FileNotFoundError, NotADirectoryError):
-        return
-    except OSError as exc:
-        raise CorpusError(
-            "cannot check the spelling a bound path component resolves "
-            f"under: {relative} ({exc.strerror})"
-        ) from exc
-    generations.record(parent, parent_relative)
-    folded = _path_fold(component)
-    spelled = False
-    # Only the first fold-equal sibling is kept: it is what the refusal
-    # names, and a directory an adversary has filled with case variants of
-    # one component must not make this loop hold all of them.
-    other: str | None = None
-    try:
-        with os.scandir(parent) as entries:
-            for entry in entries:
-                # Charged as the entry arrives and before anything is done
-                # with it, so a directory wider than what is left of the
-                # budget is abandoned part-way rather than drained, screened
-                # and compared first. ``scandir`` fetches in batches and this
-                # runs inside its ``with``, so what is read past the refusal
-                # is the batch in hand and nothing more — the same shape the
-                # tombstone index uses, for the same reason.
-                work.charge()
-                _assert_portable_name(
-                    entry.name, f"tree entry beside {_quoted(relative)}"
-                )
-                if entry.name == component:
-                    spelled = True
-                elif other is None and _path_fold(entry.name) == folded:
-                    other = entry.name
-    except OSError as exc:
-        raise CorpusError(
-            "cannot enumerate the directory that would spell a bound path "
-            f"component, so the path cannot be bound: {relative} "
-            f"({exc.strerror})"
-        ) from exc
-    if not spelled:
-        # First, so that a volume which resolved the declared spelling to the
-        # one it stores keeps the refusal that says exactly that. The check
-        # below is about two spellings coexisting, which is a different tree
-        # and a different thing to tell an auditor.
-        raise CorpusError(
-            f"path component {_quoted(component)} is not spelled by its "
-            f"directory: {relative}"
-        )
-    if other is not None:
-        raise CorpusError(
-            "directory holds another spelling of a bound path component: "
-            f"{_quoted(other)} beside {_quoted(component)}"
-        )
-
-
-def _assert_no_symlinked_component(
-    root: pathlib.Path,
-    relative: str,
-    *,
-    what: str = "bound path",
-    work: _SpellingWork | None,
-    generations: "_DirectoryGenerations",
-) -> pathlib.Path:
-    """Walk every component, refusing if any of them is a symlink or reparse.
-
-    Checking only the final component lets an intermediate directory symlink
-    put a bound file outside the clone entirely: replace ``.axiom/`` with a
-    link to an ambient directory and ``.axiom/toolchain.toml`` still looks like
-    a regular file and still matches its digest, while not being part of what
-    the auditor cloned. (Found by cross-family review.)
-
-    The same hole exists one level up for a content root: an empty or
-    suffix-empty root behind a symlinked *parent* would enumerate no files and
-    silently pass, so this guards content roots too.
-
-    The same walk binds each component's *spelling* to the one its directory
-    emits — see :func:`_assert_spelled_by_its_directory`, which every level
-    passes through after the symlink question has been answered for it. The
-    symlink question comes first because it is the more urgent one and
-    because it is the reason the walk exists.
-
-    ``work`` decides both halves of that, and has no default. It is the
-    budget the spelling walk charges against — one budget for the two passes
-    of a whole verification, see :data:`MAX_SPELLING_WORK` — and passing
-    ``None`` is what turns the spelling half off, so the switch and the
-    budget cannot disagree: there is no way to ask for the walk without
-    paying for it, and no way to forget the budget by omission.
-
-    ``generations`` is the run's directory recorder, carried through to the
-    spelling walk so that a parent it drains is stamped where it is read. It
-    has no default for the reason ``work`` has none, and it is taken even
-    when ``work`` is ``None``: a directory read that stamps nothing is what
-    S6-F1 was, and the way to make one unwritable is to leave the caller no
-    way to omit the recorder.
-
-    The symlink question is one ``lstat`` inside a ``try``, and that is the
-    whole of it. It was ``exists()``, then ``lstat()``, then ``is_symlink()``
-    — three syscalls on one name, of which only the middle raises, because
-    :meth:`pathlib.Path.exists` and :meth:`pathlib.Path.is_symlink` swallow
-    ``OSError`` and :meth:`pathlib.Path.lstat` does not. An entry unlinked
-    between the first two, or a parent that stopped being searchable, put a
-    bare ``FileNotFoundError`` or ``PermissionError`` through the
-    content-root walk and through :func:`_regular_file_digest` — fail-closed
-    at ``receipt.verify``'s boundary, and nameless (peer review, Sol
-    round 8). A vanished name is an absence the caller refuses better; any
-    other failure is a refusal here, by name, as it already is everywhere
-    else this module looks at the tree.
-
-    ``None`` has two callers. The content-root walk passes it because its
-    components are checked a line later by
-    :func:`_assert_no_aliasing_root_component`, which asks the same question
-    and answers it better — it names the entry that aliases the pinned
-    spelling — so letting the generic refusal preempt it would trade a
-    refusal an auditor can act on for one they cannot (adversarial review of
-    the Sol round 2 fix). The content hashing passes it because the sweep has
-    already proved every content path is spelled the way a listing emits it.
-    """
-
-    current = root
-    walked: list[str] = []
-    for segment in relative.split("/"):
-        parent = current
-        parent_relative = "/".join(walked)
-        current = current / segment
-        # One lstat, inside a try, answering both questions. It was three
-        # calls — exists(), lstat(), is_symlink() — and only the middle one
-        # raises: Path.exists() and Path.is_symlink() swallow OSError, so an
-        # entry unlinked between exists() and lstat() left a bare
-        # FileNotFoundError to come out of the content-root walk and out of
-        # _regular_file_digest instead of a CorpusError. Fail-closed but
-        # nameless, which is the class the round-three tombstone fix closed
-        # elsewhere (peer review, Sol round 8). st_mode says symlink where
-        # is_symlink() did; on Windows a junction is not a symlink and is
-        # reported by st_reparse_tag, so any reparse point refuses too.
+    result: dict[str, GitEntry] = {}
+    for path in sorted(attested):
         try:
-            info = current.lstat()
-        except (FileNotFoundError, NotADirectoryError):
-            # Nothing answers to this name, so it is not a link and there is
-            # nothing here to refuse. The caller's own refusal — a missing
-            # bound file, an absent content root — says more than this one
-            # could, which is the same reason the spelling walk below is
-            # asked only of a component that resolves.
-            info = None
-        except OSError as exc:
+            entry = snapshot.entry(path)
+        except SnapshotError as exc:
             raise CorpusError(
-                f"cannot check whether {what} traverses a symlink at "
-                f"{_quoted(current.relative_to(root).as_posix())}: "
-                f"{relative} ({exc.strerror})"
+                f"bound file is missing or not a regular file: {path}"
             ) from exc
-        if info is not None and (
-            stat.S_ISLNK(info.st_mode) or getattr(info, "st_reparse_tag", 0)
-        ):
-            raise CorpusError(
-                f"{what} traverses a symlink or reparse point at "
-                f"{_quoted(current.relative_to(root).as_posix())}: {relative}"
-            )
-        if work is not None:
-            _assert_spelled_by_its_directory(
-                parent,
-                segment,
-                relative,
-                parent_relative=parent_relative,
-                work=work,
-                generations=generations,
-            )
-        walked.append(segment)
-    return current
+        if entry.mode not in _REGULAR_BLOB_MODES or entry.object_type != "blob":
+            raise CorpusError(f"bound file is not a regular file: {path}")
+        result[path] = entry
+    return result
 
 
-class _FileIdentity(NamedTuple):
-    """What the descriptor said about a file at the moment it was hashed.
+def _verify_binding_digests(
+    snapshot: TreeSnapshot,
+    content: Mapping[str, FileBinding],
+    content_entries: Mapping[str, GitEntry],
+    attested: Mapping[str, FileBinding],
+    attested_entries: Mapping[str, GitEntry],
+) -> None:
+    """Stream every authenticated bound blob once, in retained pass order."""
 
-    ``ctime_ns`` is here for the reason :func:`_directory_generation` gives
-    about directories: ``mtime`` is a value a writer sets with ``os.utime``,
-    and on POSIX the inode change time is not. Without it a bound file could
-    be rewritten in place through the same inode at the same size with its
-    mtime restored afterwards, and the identity re-check — device, inode,
-    size, mtime — saw exactly what it had seen before (peer review, round
-    seven). That the module can rely on this at all is why
-    :func:`verify_corpus_binding` refuses to run off POSIX.
-    """
-
-    device: int
-    inode: int
-    size: int
-    mtime_ns: int
-    ctime_ns: int
-
-
-def _regular_file_digest(
-    root: pathlib.Path,
-    relative: str,
-    *,
-    work: _SpellingWork | None,
-    generations: "_DirectoryGenerations",
-) -> tuple[str, _FileIdentity]:
-    """Hash a bound file, closing the check/open race at the final component.
-
-    Validating the path then opening it by name leaves a window in which a
-    symlink is swapped in between the check and the read. Three layers close
-    it portably (cross-family review findings, two rounds):
-
-    - ``os.lstat`` of the final component must show a regular file before the
-      open — a symlink, FIFO, or device reachable by the name refuses without
-      ever being opened, on every platform.
-    - The open adds ``O_NOFOLLOW`` where the platform provides it and
-      ``O_NONBLOCK`` unconditionally, so a FIFO raced into place between the
-      ``lstat`` and the open cannot block the verifier (a read-only
-      non-blocking FIFO open returns immediately; regular-file reads ignore
-      the flag).
-    - ``os.fstat`` of the open descriptor must agree with the ``lstat`` on
-      device and inode and show a regular file — so even without
-      ``O_NOFOLLOW``, a name swapped between the two calls resolves to a
-      different inode and refuses.
-
-    That ``fstat`` fixes a hard read horizon as well. Exactly its ``st_size``
-    bytes are hashed in chunks: EOF before the horizon means the file shrank,
-    and one byte available in a final probe means it grew. The probe is not
-    hashed. Reading to the descriptor's live EOF let a writer sparsely extend
-    the file into arbitrary work or append forever, so the post-read identity
-    check was never reached. This change closes the bound — the reader always
-    terminates after ``st_size`` bytes plus one probe — while correctness
-    against a writer active during verification remains in the residual class
-    recorded on receipt#44.
-
-    Residual, bounded: an intermediate directory swapped to a symlink
-    *between* the component guard and this open is not caught here. Closing
-    that fully needs descent by ``dir_fd``; it is left because the
-    precondition is an adversary with write access to the auditor's clone
-    *during* verification, who can already defeat a local check by other
-    means. The post-hash sweeps in :func:`verify_corpus_binding` (membership
-    re-enumeration plus per-file identity re-check) catch a resulting set
-    change or file swap after the fact. A same-inode rewrite is caught there
-    too, by the ``ctime_ns`` this identity carries: restoring size and
-    ``mtime_ns`` afterwards is a writer's prerogative and restoring the inode
-    change time is not. What stays beneath their resolution is a rewrite
-    landing after that re-check has already run, which is one reason the
-    verdict speaks of the bytes as they existed when hashed.
-
-    ``work`` says whether the component walk should also bind each component
-    to the spelling its directory emits, and pays for it when it does.
-    Content paths pass ``None``, and not to save work alone: the closed-world
-    sweep built the tree set out of ``os.scandir`` names and the membership
-    comparison proved the journal's set equal to it, so every content path
-    here was *already* emitted by a listing under exactly this spelling, and
-    asking again would answer a question already answered — at a cost of one
-    listing per component per file, which for a wide content directory is
-    quadratic. Attested paths pass the verification's budget, because nothing
-    enumerates them — and for the same reason
-    :func:`verify_corpus_binding` asks the question a second time in its
-    closing identity loop, where a content path again passes ``None``.
-
-    ``generations`` is the run's directory recorder, passed straight through
-    to the component walk; see :class:`_DirectoryGenerations`.
-    """
-
-    path = _assert_no_symlinked_component(
-        root, relative, work=work, generations=generations
-    )
+    ordered = [content_entries[path] for path in sorted(content)]
+    ordered.extend(attested_entries[path] for path in sorted(attested))
     try:
-        before = os.lstat(path)
-    except OSError as exc:
-        raise CorpusError(
-            f"bound file is missing or not a regular file: {relative}"
-        ) from exc
-    if not stat.S_ISREG(before.st_mode):
-        raise CorpusError(f"bound file is not a regular file: {relative}")
-    flags = (
-        os.O_RDONLY
-        | os.O_NONBLOCK
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_BINARY", 0)
-    )
-    try:
-        fd = os.open(path, flags)
-    except OSError as exc:
-        raise CorpusError(
-            f"bound file is missing or not a regular file: {relative}"
-        ) from exc
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
-            raise CorpusError(f"bound file is not a regular file: {relative}")
-        if (info.st_dev, info.st_ino) != (before.st_dev, before.st_ino):
-            raise CorpusError(
-                f"bound file changed identity while being opened: {relative}"
-            )
-        digest = hashlib.sha256()
-        remaining = info.st_size
-        while remaining:
-            chunk = os.read(fd, min(1 << 20, remaining))
-            if not chunk:
-                raise CorpusError(
-                    f"bound file shrank while being read: {relative}"
-                )
-            digest.update(chunk)
-            remaining -= len(chunk)
-        if os.read(fd, 1):
-            raise CorpusError(f"bound file grew while being read: {relative}")
-        identity = _FileIdentity(
-            info.st_dev,
-            info.st_ino,
-            info.st_size,
-            info.st_mtime_ns,
-            info.st_ctime_ns,
+        digests = snapshot.digests(
+            ordered,
+            per_blob=MAX_CONTENT_BLOB_BYTES,
+            total=MAX_CONTENT_BYTES_TOTAL,
         )
-    finally:
-        os.close(fd)
-    return digest.hexdigest(), identity
+        for entry, digest in digests:
+            if entry.path in content:
+                expected = content[entry.path].sha256
+                if digest != expected:
+                    raise CorpusError(
+                        f"content file {_quoted(entry.path)} does not match its "
+                        f"witnessed digest: tree has {digest}, journal binds "
+                        f"{expected}"
+                    )
+            else:
+                expected = attested[entry.path].sha256
+                if digest != expected:
+                    raise CorpusError(
+                        f"attested file {_quoted(entry.path)} does not match its "
+                        f"witnessed digest: tree has {digest}, journal binds "
+                        f"{expected}"
+                    )
+    except SnapshotError as exc:
+        raise CorpusError(str(exc)) from exc
 
 
 def verify_declarations(
@@ -3699,79 +1811,50 @@ def verify_declarations(
 
 
 def verify_corpus_binding(
-    root: pathlib.Path,
+    snapshot: TreeSnapshot,
     journal_bytes: bytes,
     *,
     spec: CorpusSpec,
 ) -> CorpusVerification:
-    """Prove the witnessed journal describes exactly this working tree.
+    """Prove the journal describes the immutable tree selected by ``snapshot``.
 
-    ``journal_bytes`` must be the same bytes the release chain verified — pass
-    them through rather than re-reading the file, so nothing can change between
-    the custody proof and the binding proof.
-
-    Refuses at entry on any platform that is not POSIX. Everything this
-    module claims about a tree being written to while it is read rests on
-    ``st_ctime`` meaning the inode change time, which no userspace call can
-    set; on Windows every supported CPython reports the file's *creation*
-    time there instead, so a writer can add, remove or rename an entry, put
-    the directory's mtime back with ``os.utime``, and leave the whole
-    recorded tuple identical. The same holds for the ctime term in the
-    bound-file identity. Refusing is the fail-closed answer; trusting a
-    stamp a writer can restore would let the module's central claim be false
-    while every check reported it true (peer review, round seven).
+    ``journal_bytes`` are the bytes already authenticated by the custody pass.
+    The tree is listed once as an immutable object; membership, tombstones,
+    exact attested lookups, and streamed digests are all derived from that
+    object. Checkout fidelity is outside this binding claim.
     """
 
-    if os.name != "posix":
+    if not isinstance(snapshot, TreeSnapshot):
         raise CorpusError(
-            "corpus verification requires POSIX change-time semantics "
-            "(st_ctime as the inode change time) to detect a tree changing "
-            "under it; on this platform the verifier refuses rather than "
-            "trusting a stamp a writer can restore"
+            "verify_corpus_binding requires a TreeSnapshot; select one with "
+            "TreeSnapshot.select"
         )
 
-    root = root.resolve()
-    # One recorder, built before anything reads the tree and handed to every
-    # directory read that follows, so each directory's stamp is the run's
-    # earliest look at it. Building it after the opening sweep, the first
-    # tombstone pass and the hashing left that half of the run unwatched, and
-    # re-deriving membership does not cover it: a content file created and
-    # then removed between the two sweeps leaves both snapshots equal, while
-    # the directory that carried it was first stamped after the mutation, so
-    # its stamp matched too (peer review, Sol round 5).
-    # One component-prefix budget for both consumers of declared path depth:
-    # the alias index and the by-name ancestor stamps. For a path with ``n``
-    # components they charge ``n`` visits, at most ``n`` counted prefixes and
-    # at most ``n - 1`` ancestor visits, which is why the shared bound is
-    # derived from the journal and path-text caps — and why what it bounds is
-    # what the run holds and not only what it walks.
-    prefix_work = _PathPrefixWork()
-    generations = _DirectoryGenerations(prefix_work)
-    # One sweep budget for the whole verification, charged by both membership
-    # sweeps and by every root-component listing beside them. The sweep read
-    # a directory of any width into a sorted list and descended into every
-    # directory it found, with nothing counting any of it (peer review, Sol
-    # round 5); every other walk here has been budgeted for rounds.
-    sweep = _SweepWork()
     content, attested, gates, removed = parse_journal(journal_bytes, spec=spec)
 
-    # Two declared paths that a case- or normalization-insensitive filesystem
-    # would treat as one make the closed-world claim ambiguous: which file did
-    # the auditor actually get? Detect the collision host-independently — under
-    # Unicode NFC plus case folding — and refuse. Deliberately conservative: a
-    # case-sensitive filesystem can hold two genuinely distinct files whose
-    # names collide only after folding, and such a corpus is refused by design,
-    # because its closed-world claim would depend on which filesystem the
-    # auditor cloned onto. Compared at every component prefix and not only
-    # whole, because the collision can be a directory: "rules/A/x.yaml" and
-    # "rules/a/y.yaml" are two distinct paths that an insensitive clone holds
-    # in one merged directory (peer review, Sol round 3).
+    prefix_work = _PathPrefixWork()
     _reject_aliasing_paths(list(content) + list(attested), work=prefix_work)
 
-    tree = _tree_content_paths(root, spec, work=sweep, generations=generations)
+    try:
+        listing = snapshot.entries("")
+    except SnapshotError as exc:
+        raise CorpusError(str(exc)) from exc
+    try:
+        entries = listing.as_dict(include_trees=True)
+    except SnapshotError as exc:
+        raise CorpusError(str(exc)) from exc
+
+    by_directory = _entries_by_directory(entries)
+    _screen_tree_listing(
+        entries,
+        by_directory,
+        repertoire=spec.name_repertoire,
+    )
+    _assert_content_root_spellings(entries, by_directory, spec)
+    tree = _content_entries_from_listing(entries, spec)
+
     journal_paths = set(content)
     tree_paths = set(tree)
-
     unlisted = sorted(tree_paths - journal_paths)
     if unlisted:
         raise CorpusError(
@@ -3785,51 +1868,7 @@ def verify_corpus_binding(
             f"from the tree, starting with {_quoted(absent[0])}"
         )
 
-    # A tombstone is a claim about the tree, not only about the journal, and
-    # the verdict repeats it as removedPaths. For a content path the sweep
-    # above already catches a file that outlived its removal row — it is
-    # unlisted. For an attested path nothing else looks: attested paths sit
-    # outside the content roots, so a retired toolchain pin or apply manifest
-    # could sit on disk bound by no row, reported as removed, and be read as
-    # current by every consumer. Look for both kinds, by fold key so an
-    # aliasing spelling counts, and refuse what is still there. One index
-    # serves the whole pass: the searches overlap, and re-reading a directory
-    # per removed path was what made the pass quadratic.
-    #
-    # Placed here, before the hashing, rather than at the end of the pass.
-    # This is the longest walk of the tree the verifier does, and it used to
-    # run after the only checks that look at the tree a second time, so
-    # anything that changed the tree while it ran was never rechecked: a
-    # content file inserted during the tombstone walk was unlisted and
-    # unnoticed, and a bound file rewritten during it kept the verdict of the
-    # bytes that were there before (peer review, round four). Everything that
-    # follows this point re-reads the tree, so the membership re-sweep and the
-    # identity re-check cover the tombstone walk too.
-    #
-    # This is the first of two runs. The second, at the end of the function,
-    # is what re-establishes absence; this one is what makes an ordinary
-    # unhonoured tombstone refuse before the verifier spends any IO hashing a
-    # tree it is going to refuse anyway.
-    tombstones = _TombstoneIndex(root, generations=generations)
-    _assert_tombstones_absent(root, removed, tombstones)
-
-    hashed: dict[str, _FileIdentity] = {}
-
-    for path in sorted(journal_paths):
-        # work=None: the sweep above built its set from listing names and the
-        # membership comparison proved the two sets equal, so each of these
-        # paths is already known to be spelled the way a listing emits it, and
-        # asking again would spend a budget on an answer already in hand. See
-        # _regular_file_digest.
-        digest, identity = _regular_file_digest(
-            root, path, work=None, generations=generations
-        )
-        if digest != content[path].sha256:
-            raise CorpusError(
-                f"content file {_quoted(path)} does not match its witnessed digest: "
-                f"tree has {digest}, journal binds {content[path].sha256}"
-            )
-        hashed[path] = identity
+    _assert_tombstones_absent_from_listing(entries, removed)
 
     missing_required = sorted(spec.required_attested_paths - set(attested))
     if missing_required:
@@ -3837,168 +1876,20 @@ def verify_corpus_binding(
             "the witnessed journal does not attest a path the pinned spec "
             f"requires: {_quoted(missing_required[0])}"
         )
-    # Stamped before the first spelling walk, not after the hashing, because
-    # the walk and the hash are two separate lookups of the same name and a
-    # case-only rename between them resolves through the declared spelling on
-    # the volume this check is about. The walk passed, the hash captured the
-    # renamed entry, and the ancestor stamps taken afterwards recorded the
-    # tree as the rename had left it — so nothing downstream could see it
-    # (peer review, Sol round 3). ``.axiom`` is stamped before anything reads
-    # it, and the walk's own listing is inside the window the stamps close.
-    #
-    # By name, and kept although the walk below now stamps each parent it
-    # drains: what is watched must not depend on which optional pass ran.
-    for path in sorted(attested):
-        generations.record_ancestors(root, path)
-    # One budget for both spelling passes, constructed here and carried into
-    # the closing identity loop. The walk drains a parent's whole listing per
-    # component and runs twice per attested path, so R rows over a wide
-    # parent cost about 2×R×E entry visits with nothing to stop it (peer
-    # review, Sol round 4); every other walk in this module is budgeted and
-    # this one is now too.
-    spelling = _SpellingWork()
-    for path in sorted(attested):
-        digest, identity = _regular_file_digest(
-            root, path, work=spelling, generations=generations
-        )
-        if digest != attested[path].sha256:
-            raise CorpusError(
-                f"attested file {_quoted(path)} does not match its witnessed digest: "
-                f"tree has {digest}, journal binds {attested[path].sha256}"
-            )
-        hashed[path] = identity
+    attested_entries = _attested_entries_from_snapshot(snapshot, attested)
 
-    # Closed-world means the set proven equal to the journal must not have
-    # changed while it was being proven. Two sweeps after hashing, because
-    # they catch different things (cross-family review findings, two rounds):
-    # membership re-enumeration catches a file unlisted-and-inserted or a
-    # bound file deleted after the first walk; the per-file identity re-check
-    # catches a hashed file replaced or rewritten in place afterwards — for
-    # every bound file, content and attested alike, the path must still be a
-    # regular file with the device, inode, size, mtime and ctime the hashing
-    # descriptor saw. The ctime term is what makes a rewrite through the same
-    # inode visible: size and mtime are both values the writer restores, and
-    # on POSIX the inode change time is not (peer review, round seven).
-    # Re-reading every byte would be the only stronger check, and it would
-    # double the verifier's IO to move the last-look boundary rather than
-    # remove it. They come after every pass that reads the tree except the
-    # second tombstone pass below, deliberately: every earlier pass, the
-    # first tombstone walk included, is inside the window they close.
-    #
-    # What the second tombstone pass then does to the tree is watched by
-    # generation instead of by re-derivation. Every directory this sweep
-    # reads is stamped an instant before it is read, and the stamps are
-    # re-stated after that pass has finished, so an insertion or a
-    # rewrite-by-rename that lands while it walks moves its parent's mtime
-    # and ctime and is refused — the check no third re-sweep could give,
-    # because a third re-sweep would only move the boundary again (peer
-    # review, round six).
-    if (
-        set(_tree_content_paths(root, spec, work=sweep, generations=generations))
-        != tree_paths
-    ):
-        raise CorpusError(
-            "the content tree changed during verification; the closed-world "
-            "set is not stable and the verdict is refused"
-        )
-    # Stamped before the identities are re-stated, not after, so the stamps
-    # predate everything the loop below concludes. Every ancestor of every
-    # bound path is taken, because the two walks stamp only what they read
-    # and neither of them reads the directory holding an attested file: with
-    # ``.axiom`` unstamped, replacing ``.axiom/toolchain.toml`` by rename
-    # during the second tombstone pass moved that directory's mtime and
-    # ctime with nothing recorded to compare them against, and the verdict
-    # returned the digest of bytes the tree no longer held (peer review,
-    # round seven).
-    for path in sorted(hashed):
-        generations.record_ancestors(root, path)
-
-    for path in sorted(hashed):
-        try:
-            # The spelling question is re-asked for attested paths and not
-            # for content ones — the budget is what carries it, and passing
-            # None is what declines it — which is the same split the hashing
-            # made and
-            # for the same two reasons. A content path's spelling was proved
-            # by the membership comparison against a set the sweep built out
-            # of listing names, and the closing sweep above has just proved
-            # it again; asking here would cost a listing per component of
-            # every content file for an answer already in hand. An attested
-            # path is enumerated by nothing, so its only proof was the walk
-            # that ran before it was hashed — and a case-only rename landing
-            # between that walk and the hash left the walk's answer stale
-            # with nothing after it to notice (peer review, Sol round 3).
-            after = os.lstat(
-                _assert_no_symlinked_component(
-                    root,
-                    path,
-                    work=spelling if path in attested else None,
-                    generations=generations,
-                )
-            )
-        except OSError as exc:
-            raise CorpusError(
-                f"bound file {_quoted(path)} disappeared during verification; the "
-                "verdict is refused"
-            ) from exc
-        seen = hashed[path]
-        if not stat.S_ISREG(after.st_mode) or (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-            after.st_ctime_ns,
-        ) != (seen.device, seen.inode, seen.size, seen.mtime_ns, seen.ctime_ns):
-            raise CorpusError(
-                f"bound file {_quoted(path)} changed during verification; the "
-                "verdict is refused"
-            )
-
-    # And the tombstones once more, over an index that has cached nothing yet.
-    # Absence was the one claim in the verdict that nothing re-established:
-    # the re-checks above close their window over content membership and over
-    # the bound bytes, and neither looks at a removed path. The first pass
-    # decided absence from listings it cached and never re-read, so a
-    # survivor that appeared after its parent directory had been listed was
-    # missed by every later search in that pass — two tombstones sharing a
-    # parent is enough — and the verdict named the path under removedPaths
-    # while the file sat on disk (peer review, round five). A fresh index
-    # asks the host and the listings again, after everything else has
-    # finished touching the tree.
-    #
-    # Charged against the same budget, carried across from the first pass, so
-    # a tree cannot be walked twice for the price of the cap once.
-    #
-    # Fresh, but not listing-per-tombstone. Re-reading each directory once
-    # per removed path made this pass cost R×E and charged all of it here,
-    # which refused a completely static corpus of the shape the reference
-    # consumer has (peer review, Sol round 8). What remains open inside the
-    # pass — a survivor arriving in a parent this pass has already listed —
-    # arrives on disk, so it moves that parent's stamps and ``generations``
-    # below refuses it. :class:`_TombstoneIndex` states both halves.
-    _assert_tombstones_absent(
-        root,
-        removed,
-        _TombstoneIndex(root, charged=tombstones.work, generations=generations),
-        appeared=True,
+    _verify_binding_digests(
+        snapshot,
+        content,
+        tree,
+        attested,
+        attested_entries,
     )
-
-    # Last, because it is the only check that can speak for the walk above.
-    # Every directory the closing sweep and that walk read is re-stated
-    # here; one whose generation moved means the tree changed under a pass
-    # that had nothing downstream to re-derive its claim.
-    #
-    # Stated exactly, because the check cannot promise what a single ordered
-    # pass was described as promising. Every stamp is re-read forwards and
-    # then backwards, so a change is caught if it lands before that
-    # directory's final re-read; what is left is the span after each
-    # directory's last re-read, and only verifying an immutable snapshot
-    # removes it (receipt#44).
-    generations.assert_unchanged()
 
     return CorpusVerification(
         content=tuple(content[path] for path in sorted(content)),
         attested=tuple(attested[path] for path in sorted(attested)),
         gates=gates,
         removed_paths=removed,
+        name_repertoire=spec.name_repertoire,
     )

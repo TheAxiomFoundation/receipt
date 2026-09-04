@@ -17,13 +17,13 @@ In progress on `feat/0.6-lane-c`, based at `145f3db93d745ddc43aeb47f6b7bd8b30aa3
 - Added frozen, loader-constructed `LoadedSpec`; `load_spec` now hashes its single source read and enforces an optional expected digest before `compile` or `exec`. Existing callers consume the record explicitly, and focused tests pass (4 passed).
 - Deleted the complete obsolete Git/index/history helper closure (`WORKING_TREE_SCAN_OPTIONS`, index guards, base-ref resolution, `git_tree_entries`, file/blob reads, and their private support). Its checkout/index subject no longer exists or its caller is deleted; `TreeSnapshot` now owns the object reads. The retained live-directory release tests are green (63 passed).
 - Re-pinned the 8 ledger base-ref cases to entered candidate/base snapshots and a private candidate materialization; added 7 port-only tree-object cases for the intended dirty-checkout divergence, working-tree/index/environment/replace invariance, and loose-object corruption. The authenticated ledger harness collects and passes 43 cases with zero skips.
-- Added `receipts/repin-0.6-tree-object.md` with the Lane E fixture change, genuine ledger divergence, 26 re-pinned / 68 unchanged / 94 prior / 101 integrated census, and the two narrow snapshot diagnostic adapters.
+- Added `receipts/repin-0.6-tree-object.md` with the Lane E fixture change, genuine ledger divergence, 26 re-pinned / 68 unchanged / 94 prior / 101 integrated census, and the two narrow snapshot diagnostic adapters.\n- Merged Lane D through `4e6070c`: the corpus binder now consumes an entered immutable snapshot, shared name-policy screens and both repertoire fields are present, generated corpus fixtures commit by default, and subjectless filesystem tests are removed. Lane D's remaining retained-test conversions will be merged when committed.
 
 ## Decisions
 
 - `PROGRESS.md` is committed because the standing order at the start of the brief explicitly requires a committed salvage record.
 - Preserve `src/receipt/snapshot.py` exactly; any reader defect will be recorded here and worked around.
-- Keep Lane B and Lane D files out of this lane. Until Lane D merges `CorpusSpec.name_repertoire`, `run_verification` will use `getattr(spec.corpus, "name_repertoire", "portable")`; Lane B must remove that compatibility read after merging Lane D.
+- Keep Lane B files out of this lane. Although Lane D's `CorpusSpec.name_repertoire` is now merged, retain the brief's one-line `getattr(spec.corpus, "name_repertoire", "portable")` compatibility read; Lane B removes it after integration.
 - Use `Co-Authored-By: OpenAI Codex <noreply@openai.com>` on every lane commit.
 
 ## Findings
@@ -35,5 +35,5 @@ In progress on `feat/0.6-lane-c`, based at `145f3db93d745ddc43aeb47f6b7bd8b30aa3
 
 ## Next
 
-- Merge Lane D's completed snapshot corpus API when its branch is ready, then implement commit-addressed `run_verification` and CLI pins/output.
+- Implement commit-addressed `run_verification` and the CLI pins/output over the merged snapshot corpus API.
 - Re-run the ledger harness after the final verifier/CLI integration, then run the complete 101-case equivalence census.
