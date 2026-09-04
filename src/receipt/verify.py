@@ -469,6 +469,11 @@ def run_verification(
     violations are different: comparing history without pinning the candidate,
     presenting an anchor pin without first pinning the executable spec, or
     declaring two name repertoires raises :class:`ValueError`.
+
+    The 0.5.2 refusal of redirecting Git environment variables is deliberately
+    retained before snapshot selection. The underlying ``TreeSnapshot`` reader
+    remains invariant under those variables through its frozen Git environment
+    and explicit repository selection.
     """
 
     if not isinstance(spec, LoadedSpec):
