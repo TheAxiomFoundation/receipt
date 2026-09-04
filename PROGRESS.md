@@ -2,115 +2,151 @@
 
 ## State
 
-In progress on `feat/0.6-lane-c`, based at `145f3db93d745ddc43aeb47f6b7bd8b30aa331a3`.
+Implementation is complete on `feat/0.6-lane-c`. All Lane C unit surfaces, the authenticated ledger harness, every equivalence module that does not depend on Lane B, and the independently collectable offline suite are green. The exact integrated equivalence/offline commands cannot collect until Lane B replaces the 0.5.2 append gate's imports and calls to release-chain helpers this lane was required to delete.
+
+The sandbox has no network access. The branch remains local and no PR has been opened. Even with network, the standing push gate would remain closed until Lane B is merged and the complete 101-case equivalence plus exact offline commands pass.
 
 ## Done
 
-- Read PLAN-0.6 sections 3.1, 3.3, 3.5, 3.7, 3.8 step two, 3.9, 4, and section 5's final paragraph in the required order.
-- Read the `receipt.snapshot` module contract and the complete `TreeSnapshot` and `Materialization` implementations without changing them.
-- Confirmed the branch is clean and starts at the requested Lane E merge.
-- Added and validated the defaulted `ChainSpec.name_repertoire` and `VerificationSpec.anchor_set_sha256` fields; focused tests pass (2 passed).
-- Wired the cached OpenSSL 3.0 preflight into `verify_release_chain` and made every RFC 3161 `-CAfile` a 0600 private byte-for-byte copy, including unpinned/unobserved calls; focused tests pass (2 passed).
-- Reworked `verify_release_chain` as a directory-as-read verifier: argument validation and OpenSSL preflight precede the anchor/path/manifest-shape/enumeration ladder, every input routes through the bounded lstat-plus-`O_NOFOLLOW` reader, and the docstring states the breaking concurrent-writer precondition. `tests/test_release_chain.py` is green (61 passed).
-- Replaced release-history inspection with a comparison of two entered `TreeSnapshot`s, re-exported `snapshot.GitEntry`, and made base-chain verification materialize its entered base. The three existing immutability messages remain exact and candidate links retain the live-directory refusal. `tests/test_release_chain.py` is green (67 passed).
-- Deleted the descriptor-holding and cross-run root/state race helpers. Their working-tree race subject no longer exists for commit-addressed callers; their private support functions' callers are deleted. The directory verifier retains its one bounded `O_NOFOLLOW` read.
-- Added frozen, loader-constructed `LoadedSpec`; `load_spec` now hashes its single source read and enforces an optional expected digest before `compile` or `exec`. Existing callers consume the record explicitly, and focused tests pass (4 passed).
-- Deleted the complete obsolete Git/index/history helper closure (`WORKING_TREE_SCAN_OPTIONS`, index guards, base-ref resolution, `git_tree_entries`, file/blob reads, and their private support). Its checkout/index subject no longer exists or its caller is deleted; `TreeSnapshot` now owns the object reads. The retained live-directory release tests are green (63 passed).
-- Re-pinned the 8 ledger base-ref cases to entered candidate/base snapshots and a private candidate materialization; added 7 port-only tree-object cases for the intended dirty-checkout divergence, working-tree/index/environment/replace invariance, and loose-object corruption. The authenticated ledger harness collects and passes 43 cases with zero skips.
-- Added `receipts/repin-0.6-tree-object.md` with the Lane E fixture change, genuine ledger divergence, 26 re-pinned / 68 unchanged / 94 prior / 101 integrated census, and the two narrow snapshot diagnostic adapters.
-- Merged Lane D through `4e6070c`: the corpus binder now consumes an entered immutable snapshot, shared name-policy screens and both repertoire fields are present, generated corpus fixtures commit by default, and subjectless filesystem tests are removed. Lane D's remaining retained-test conversions will be merged when committed.
-- Corrected the OpenSSL preflight cache so an unsupported-version refusal, as well as an acceptance, executes `openssl version` only once per process; the focused 11-case version-gate slice passes.
-- Extended that cache to retain the missing/failing-command refusal as well; repeated unsupported and missing-binary preflights each execute the version command once (2 focused cases pass).
-- Adapted the release-tree test commit helper to Lane D's now-committed corpus fixture; the six history/base materialization tests pass without manufacturing an empty commit.
-- Added an exact-filename fast path so `run_verification` can hand the same normalized `ChainSpec` object to materialization and the directory verifier without a second normalization; stateful direct-caller filenames still normalize once (4 focused cases pass).
-- Implemented commit-addressed `run_verification` over entered candidate/base snapshots, exact candidate expectations and ancestry, optional object-store verification, private five-prefix materialization, anchor-set pinning before OpenSSL, the mandatory journal rehash, snapshot corpus binding, and declaration verification. `VerifyResult` and JSON carry the selected/base identities, object format, repertoire, object-store report, dynamic custody/binding claims, checkout limitation, and spec/anchor trust limitations; all 17 focused verifier tests pass.
-- Removed the module-level `LoadedSpec` construction helper and validate expected spec digests as exact lowercase SHA-256 strings before comparison, closing callable/equality-object forge paths found in peer review.
-- Corrected the port-only deliberate divergence to authenticate and invoke the pinned append oracle from the ledger harness itself: its exact `change rewrites existing line 129 ...` refusal now contrasts with acceptance of the unchanged selected commit (1 focused case passes), without editing Lane B's append harness or either oracle.
-- Closed runner peer-review gaps: redirecting Git environment keeps priority over a simultaneous pin conflict; the post-crypto anchor equality, commit-before-tree expectation ladder, object-store failure/report state, and repertoire mismatch now have focused coverage; trust/declaration docstrings no longer call an unpinned producer policy auditor-pinned. `tests/test_verify.py` passes all 20 cases.
-- Implemented the complete CLI flag surface, pre-load parser dependency rules, top-level root/default walk, LoadedSpec forwarding, selected/base/name/object text lines, new JSON identity/store fields, and trust-sensitive PASS prose. The re-pinned tree-addressed CLI battery now has 158 passing cases, including real object-store reporting, requested-failure wording, exact expectation refusals, root shape, output fields, checkout/index invariance, and a real coordinated anchors/signed-content/spec substitution ladder.
-- Merged Lane D through `40fa646`: all retained corpus tests now target committed trees, checkout independence and the complete name/mode matrix are covered, portable short-name screening applies to every entry kind, and fixture commit-return semantics are final.
-- Final merged corpus suite: 227 passed. Final authenticated ledger harness: 43 passed in 19.56 seconds with zero skips.
-- Authenticated equivalence modules independent of Lane B pass 80/80: ledger 43 and Brier/attest 37 (using the parent checkout's authenticated local Brier extraction because sandboxed DNS prevents a clone).
-- The first non-append offline run reached 1,158 passed and one stale Lane C test calling the removed `run_verification(spec_path=..., spec_sha256=...)` API; that call now supplies its `LoadedSpec` and passes focused. The exact offline command remains uncollectible only because the unmerged append module imports the deleted helper.
+- Read the governing plan sections and the immutable snapshot contract in the required order; kept `src/receipt/snapshot.py` unchanged.
+- Added the defaulted `ChainSpec.name_repertoire` and `VerificationSpec.anchor_set_sha256` policy fields.
+- Made `verify_release_chain` a documented directory-as-read verifier with the required validation/preflight/path/manifest/enumeration order, all external file reads through the bounded `lstat` plus one `O_NOFOLLOW` open, and the retained live-directory symlink refusal.
+- Added the cached OpenSSL 3.0 preflight at the public verifier boundary. Successful, unsupported-version, and command-failure outcomes each run `openssl version` once per process.
+- Made every release-chain OpenSSL `-CAfile` a private mode-0600, `O_EXCL`, byte-for-byte copy.
+- Replaced checkout/index/base Git inspection with entered `TreeSnapshot` comparisons and private materializations. `verify_base_release_chain` includes anchors even when `anchor_relative` is outside `release_root_relative`; `GitEntry` is re-exported from `release_chain`.
+- Added frozen, loader-owned `LoadedSpec`; `load_spec` reads and hashes source once and rejects a mismatching expectation before compile or exec.
+- Implemented commit-addressed `run_verification`, including exact candidate/base identities, expectation ladder, object-store option, one normalized chain spec, pre-crypto and post-crypto anchor equality, mandatory journal rehash, immutable corpus binding, narrowed trust claims, and the expanded `VerifyResult`.
+- Required direct anchor expectations to be exact lowercase SHA-256 values and selected them by presence, so an explicitly empty pin cannot be ignored.
+- Implemented the complete `receipt verify` flag surface, dependency parser errors, top-level root enforcement, and text/JSON identity, repertoire, base, and object-store reporting.
+- Re-pinned the eight ledger base-ref cases to entered snapshots and a candidate materialization. Added seven port-only cases: deliberate dirty-checkout divergence, later worktree/index invariance, foreign Git environment invariance, replace-ref invariance, and loose-object corruption refusal.
+- Added `receipts/repin-0.6-tree-object.md` with the fixture change, intended divergence, diagnostic adapters, and 94-to-101 census.
+- Merged Lane D's immutable corpus work through `40fa646`; retained the requested one-line `getattr` compatibility note for Lane B to remove.
+- Completed three independent read-only peer audits and fixed every in-scope finding.
 
 ## Decisions
 
-- `PROGRESS.md` is committed because the standing order at the start of the brief explicitly requires a committed salvage record.
-- Preserve `src/receipt/snapshot.py` exactly; any reader defect will be recorded here and worked around.
-- Keep Lane B files out of this lane. Although Lane D's `CorpusSpec.name_repertoire` is now merged, retain the brief's one-line `getattr(spec.corpus, "name_repertoire", "portable")` compatibility read; Lane B removes it after integration.
-- Use `Co-Authored-By: OpenAI Codex <noreply@openai.com>` on every lane commit.
-
-## Lane D integration record
-
-- Branch: `feat/0.6-lane-d` at baseline `145f3db93d745ddc43aeb47f6b7bd8b30aa331a3`.
-- Phase: Lane D implementation and focused acceptance coverage are complete; integration/offline gates are next.
-- Scope: immutable-tree corpus verification, shared name-policy additions, corpus fixture commit helpers, and focused tests.
-- Network is sandbox-disabled; local work, tests, commits, and a complete draft PR body remain possible. Push/PR creation will be attempted only after all gates pass.
-
-### Lane D work completed
-
-- Read PLAN-0.6 sections 3.1, 2, 3.3, 3.6, 3.9, 4, and section 5's final paragraph in the required order.
-- Read `receipt.snapshot`'s contract and the required `TreeSnapshot` APIs.
-- Read `receipt._names`; the Win32 reserved-device table is already present and exported, while the 8.3 extension screen still needs a stable shared export.
-- Confirmed the worktree is clean and starts at the requested merged Lane A/Lane E baseline.
-- Recorded the non-negotiable implementation shape: one whole-tree listing, per-directory ASCII-fold screens, listing-derived membership/tombstones, exact attested entry lookups, and `TreeSnapshot.digests` for every content digest.
-- Baseline focused suite: 272 passed (`tests/test_corpus.py` plus `tests/test_snapshot_names.py`).
-- Added stable `_names.py` exports for the established 8.3 extension operation: `ALIAS_CAPABLE_SUFFIX_RE`, `SHORT_NAME_PUNCTUATION`, `short_name_extension`, and `short_name_carries_pinned_suffix`.
-- Added focused tests freezing operation order and alias-capable-pin filtering; name suite: 68 passed.
-- Added defaulted `CorpusSpec.name_repertoire` and `CorpusVerification.name_repertoire`, with closed-value and `posix-bytes` spec coverage.
-- Changed the public corpus binding API to require an entered `TreeSnapshot`; a `Path` now refuses with explicit `TreeSnapshot.select` guidance.
-- Implemented the required pass order over one whole-tree listing: shared per-directory name screens, listing-derived content and tombstone indexes, exact attested lookups, then one streamed `snapshot.digests` pass.
-- Preserved the content membership, digest, required-attested, tombstone, root-alias, and 8.3 refusal texts in the new path; added explicit symlink and gitlink diagnostics for tree modes.
-- Snapshot smoke battery: 7 targeted corpus cases passed (happy path, Path refusal, digest/membership failures, and repertoire construction).
-- Deleted the private worktree verifier and all subjectless filesystem machinery: directory listing/generations, sweep/spelling/tombstone work indexes, symlink component walks, file identity/digest reads, closing re-sweep/re-checks, the POSIX ctime precondition, and their three superseded tree-work constants.
-- Replaced the 485-line filesystem/pass-order module narrative with the immutable-tree claim and checkout-fidelity boundary.
-- Production source now has no worktree read, stat call, per-blob process, or second tree pass; 75 targeted corpus/name cases pass after the deletion.
-- Added default-on commits to `build_corpus` and `append_release`, with bounded Git setup, validated returned OIDs, and an explicit `commit=False` opt-out. `BuiltCorpus.commit_oid` adds the build OID without moving its existing spec/path positions.
-- Corrected the immutable listing screen to flatten the authenticated `TreeListing` exactly once before validating entry names and directory sibling sets. This avoids charging every full path twice against the reader's shared path-byte budget and keeps snapshot failures translated to `CorpusError`.
-- Restored the pre-existing `CorpusSpec content root` portable-name diagnostic while allowing `posix-bytes` roots through the general repertoire-aware path screen.
-- Production review smoke: five focused binding/spec cases pass after the single-flattening correction.
-- Deleted exactly 58 tests whose host-filesystem, platform, race, re-sweep, ctime, identity, or superseded work-index subject no longer exists, plus four fake-directory-listing collision tests that the committed-tree shape matrix replaces. Nineteen test-only filesystem scaffolds went with them.
-- Retained focused battery after that deletion: 198 passing cases and 18 expected migration failures. Those failures are confined to stale Unicode-normalization assertions, host-conditional spelling assertions, fake `os.scandir` entries, and removed private instrumentation; no parser, digest, membership, or declaration regression appears.
-- Converted all 18 retained migration failures to immutable-tree semantics. Raw index fixtures now express names the checkout cannot, exact attested and membership spelling no longer branches on host case behavior, and tests explicitly freeze ASCII-only folding rather than the deleted Unicode normalization/casefold model.
-- Retained corpus plus shared-name battery: 216 passed.
-- Added the required committed-tree matrix: gitlink, `120000`, non-UTF-8 component, and fold-equal siblings, each under `portable` and `posix-bytes`.
-- Added #44's working-tree-independence property across two content roots and `.axiom`: rewrite, insert, and rename mutations leave the verified verdict, commit OID, and tree OID unchanged.
-- Added a path-work regression proving the whole-tree flat listing charges each path once, with only the required exact attested lookup adding its own charge.
-- Focused corpus plus shared-name battery with replacements: 227 passed.
-- Final review found and closed one entry-kind gap: the portable 8.3 suffix screen now runs before mode classification, so a suffix-bearing alias cannot hide behind a symlink or directory; four portable/`posix-bytes` mode cases cover the boundary.
-- `build_corpus` now follows the plan literally by returning its commit OID directly (`str | None` with `commit=False`), matching `append_release`; a default build-plus-append smoke returned two distinct OIDs.
-- Added end-to-end fixture coverage: both default returns equal `HEAD`, the two release OIDs differ, `append_release(commit=False)` leaves `HEAD` unchanged and the tree dirty, and `build_corpus(commit=False)` creates no repository.
+- `PROGRESS.md` is committed because the brief explicitly requires a committed salvage record.
+- No compatibility stubs remain for deleted checkout/index helpers: their subjects no longer exist or their callers are deleted. Keeping them only to make the old append gate import would violate the lane contract.
+- The ledger deliberate-divergence test authenticates the pinned append oracle for that one input class; ordinary ledger cases retain the authenticated release-verifier oracle.
+- The local Brier extraction at `/Users/maxghenis/TheAxiomFoundation/receipt/.extraction/brier-4b9e7be` was used because sandboxed DNS prevents cloning. Its authenticated pins still gate the harness.
 
 ## Findings
 
-- `tsa._require_supported_openssl()` was already present and cached on the starting head; Lane C only needs to wire it into `verify_release_chain` and map its refusal into `ReleaseChainError`.
-- Integration dependency: the 0.5.2 `append_gate.py` imports most release-chain guards section 3.5 requires Lane C to delete. The standalone Lane C tree cannot both remove them and collect the append-gate suite until Lane B replaces those callers; keep this visible rather than silently retaining dead compatibility code.
-- Final full-equivalence attempt stops at collection in `tests/test_append_gate_equivalence.py`: the unmerged 0.5.2 `append_gate.py` imports deleted `release_chain._git_environment`. Lane B owns that required caller replacement; no Lane B branch is present locally yet. This is the predicted integration dependency, not a verifier/oracle divergence.
-- Snapshot diagnostic surface: `TreeSnapshot.select` reports an unresolvable base as `cannot resolve commit ...` without the old Git stderr, and `assert_ancestor` names an explicit candidate OID rather than `HEAD`. The ledger differential wrapper uses narrow message adapters so the pre-existing moved-case outputs stay pinned; `snapshot.py` remains unchanged.
-- The exact append-only deliberate-divergence refusal belongs to the append oracle rather than the ledger release oracle. The ledger harness now authenticates that pinned script separately for this single port-only input-class test; its ordinary differential baseline remains the release verifier.
-- Peer review of the release-chain and loader surface found three implementation gaps (unsupported OpenSSL exceptions were not cached, `LoadedSpec` had a callable forge helper/non-exact expectation, and an exact normalized spec was replaced again); each is now fixed with focused regression coverage. The rest of the release-chain deletion, refusal-order, regular-read, CA-copy, and tree-history contract reviewed clean.
+- No defect was found in `snapshot.py`; it is unchanged from the lane baseline.
+- The two narrow snapshot diagnostic adapters remain necessary: an unresolvable ref is reported by `TreeSnapshot.select` without Git's old stderr, and explicit candidate ancestry names the candidate OID instead of `HEAD`.
+- Integration blocker: `src/receipt/append_gate.py` on the lane baseline imports deleted `release_chain._git_environment` first, then other deleted helpers, and calls the old history/base signatures. The exact full equivalence and exact `-k "not equivalence"` commands therefore stop during append-gate collection. Lane B owns those files and the caller migration; this lane did not edit them.
+- Final review found and closed two edge cases: a malformed direct anchor pin could be ignored through truthiness, and standalone base anchors were omitted from base materialization.
 
-### Lane D recorded integration actions
+## Test record
 
-1. Run formatting/static checks, the full offline suite, and the 94-case equivalence gate.
-2. Resolve in-scope failures; record Lane C/B integration points separately.
-3. Prepare the required PR body and final report with exact totals and OIDs.
-
-## Next
-
-- Merge Lane D's final three commits, then run the ledger, full equivalence, and offline suites.
-- Re-run the ledger harness after the final verifier/CLI integration, then run the complete 101-case equivalence census.
-
-## Lane D handoff findings
-
-- No defect found in `snapshot.py`; it remains out of scope and unchanged.
-- `src/receipt/verify.py` still passes a `Path` to the intentionally breaking API. Lane C owns and is concurrently changing that caller; this branch's full offline suite will retain that expected integration failure until Lane C is merged or its change is available.
-- `tests/test_cli.py` has one `committed_repo` fixture that initializes and commits a second time; default fixture commits make that second commit empty. The CLI file belongs to Lane C, so this lane records the integration point and does not edit it.
-- Section 3.6's final `verify_declarations` step remains the separate pass that `run_verification` already performs after binding. Calling it inside `verify_corpus_binding` would collapse the public binding/declaration pass boundary and make Lane C's unchanged call duplicate the check.
-- The stable pre-review offline run reached 1,315 passes with 94 equivalence cases deselected; its 44 failures are all the expected Lane C `verify.py` Path caller, and its 9 setup errors are the Lane C-owned CLI fixture's now-redundant second commit. A post-review focused/full rerun remains required for final totals.
-- Baseline census: 199 corpus test functions / 206 collected cases. Exactly 57 current functions have vanished filesystem/race/index subjects (43 host/race, 14 obsolete budget/index); replacement tree-shape/property cases will restore the required coverage, not those subjects.
+- Lane C direct surfaces: `408 passed in 85.57s` (`test_release_chain.py`, `test_tsa.py`, `test_verify.py`, `test_cli.py`).
+- Authenticated ledger command exactly as briefed: `43 passed in 15.75s`, zero skips.
+- CLI collection: 158; verify collection: 24.
+- Immutable corpus and shared name-policy suite: 231 passed (163 corpus plus 68 shared-name cases).
+- Authenticated non-Lane-B equivalence: 80/80 passed, zero skips (ledger 43, attest 20, Brier witness 17).
+- Independently collectable offline suite (the three Lane B append modules excluded): `1164 passed, 80 deselected in 168.93s`.
+- Baseline equivalence census: 94 = 26 re-pinned + 68 unchanged. Lane C adds seven, so the integrated target is 101; the 21 Lane B append cases are the unavailable part of the current collection.
+- `python -m compileall -q src tests` passes; `git diff --check` passes.
+- The protected boundaries are clean relative to `145f3db9`: no diff in `src/receipt/snapshot.py`, `src/receipt/append_gate.py`, or any append-gate test.
 
 ## Next
 
-- Run the non-append equivalence modules and offline suite while waiting for Lane B's caller migration; merge it if it becomes available, then rerun the complete census.
-- Resolve only in-scope failures, then prepare the draft PR body and final report.
+1. Merge Lane B's append-gate caller migration.
+2. Run the exact complete `tests/test_*_equivalence.py` census and require 101/101 with zero skips; stop and record any forbidden oracle/port divergence.
+3. Run the exact offline `-k "not equivalence"` command without exclusions.
+4. If both are green, push `feat/0.6-lane-c` and open the requested draft PR from the body preserved below.
+
+## Draft PR body
+
+| Row | PLAN-0.6 residual (verbatim) | What Lane C does |
+| --- | --- | --- |
+| 3 | A writer during the run — CLOSE for the commit-addressed entry points (`verify_append_gate`, `run_verification`, `verify_corpus_binding`) against any writer outside this process's ownership: objects are content-addressed and rehashed, and the only pathname read is the private materialization, which carries row 15's same-uid assumption; STATE for a same-owner writer to the repository's configuration files, which every git process re-reads — detected by the closing re-audit (3.2), not excluded; STATE for a direct `verify_release_chain` caller on a live directory (section 3.5) | `run_verification` selects entered immutable candidate/base snapshots, rehashes selected objects including the journal, and verifies a private five-prefix materialization with pre/post anchor equality. Checkout and index writers are irrelevant. `verify_release_chain` deliberately remains directory-as-read and states the concurrent-writer residual as a breaking precondition. The snapshot's closing config re-audit retains the same-owner configuration boundary. |
+| 9 | Attributes and filters — CLOSE for the commit-addressed entry points (they read raw blob bytes; `filter`, `ident`, `working-tree-encoding` refused on protected paths); STATE for checkouts and for a direct `verify_release_chain` caller (`text`, `eol`, `core.autocrlf`, LFS pointers, whatever the checkout applied) | The commit path reads raw blobs and calls `candidate.refuse_transforming_attributes(materialized.entries.values())`. Protected `filter`, `ident`, and `working-tree-encoding` attributes refuse; `text` and `eol` remain accepted. The stated checkout/direct-caller residual remains. |
+| 11 | Symlinked components — CLOSE for the commit-addressed entry points: `120000` is an entry, not a redirection; for a direct `verify_release_chain` caller the retained component walks refuse a link as today (section 3.5) | The commit path treats `120000` as a tree entry and prevents materialization redirection. The public directory verifier walks all three configured paths, binds exact leaf spelling, and reads with `O_NOFOLLOW`. A retained live test pins `release root path traverses a symlink at 'releases/journal': releases/journal/manifests`. |
+| 13 | Snapshot identity — CLOSE naming (commit, tree, object format printed; `--expect-commit` and `--expect-tree`); STATE binding (the journal cannot bind the tree that holds the manifest; #35 is the later closure); collision substitution, STATE by default and CLOSE to the reach of git's own detector under `--verify-objects`: the rehash is `hashlib.sha1`, plain SHA-1, and would accept a colliding pair substituted under one OID; `--verify-objects` runs the store-wide `fsck` of 3.3 step 4b (heads given, `--full`, no refs, no index, no commit graph, alternates refused at entry, object and byte counts, output and wall-clock bounds, the configuration boundary with `fsck.*` keys refused, and a preflight that the build's SHA-1 is `SHA1_DC` — measured on this build with `git version --build-options`; `fsck --full` over rulespec-us, 79,890 objects, takes 6.4 seconds, measured), which detects objects produced by the known SHA-1 collision constructions; it is off by default because its subject is the store, not the tree (3.1). What its test can be is stated plainly and put to the peer: a known-collision fixture cannot exist as git objects (the SHAttered pair collide on their raw bytes, and git's `blob <size>\0` header precedes them, so as objects they hash apart; and git's own single-file detection fixture does not fire through an object read either, because the object header shifts the block alignment the detector keys on — measured by the peer in round 3 — which is why the build-options preflight is the only attestation the option has), so the option's test corrupts one byte inside a pack after `git repack`, past the first packed object, and shows the option refuses on `fsck`'s nonzero exit (measured this session), which exercises the integrity path every SHA-1 build shares and not SHA1DC's detection itself — that detection is git's, attested only by the build-options preflight; the plan asks the peer to accept that test and that preflight in place of a collision test, and to accept the default as a stated residual; SHA-256 repositories are refused at `select()` with a stated message until a SHA-256 fixture covering commit, tree and blob parsing and corruption exists, at which point the refusal is lifted in its own gated change | Results, text, and JSON name the full candidate commit, root tree, object format, optional base commit/tree, and repertoire; `--expect-commit` and `--expect-tree` bind them. `--verify-objects` verifies exactly the selected heads and returns an `ObjectStoreReport`. The default collision residual and the journal's inability to bind its containing tree remain exactly as stated. |
+| 16 | Trusted anchors — Append gate: STATE, `trusted_code_root` unchanged, at the trust level of the gate's own imported code; a commit-addressed `trusted_anchor_commit` is a later non-breaking addition. `receipt verify`: CLOSE when the pin is the auditor's — `--expect-anchor-set`, or the spec field under a matching `--expect-spec-sha256` — since the candidate's anchors are then compared to it before any OpenSSL call; STATE otherwise (a spec field alone is the producer's proposal), with the custody claim narrowed to "under the anchor set the verified tree carries" and `notEstablished` saying trust in that set is not established (section 3.7) | One normalized `ChainSpec` feeds both the materialized anchor digest and release crypto. `--expect-anchor-set`, or the spec field only under a pinned `LoadedSpec`, compares before OpenSSL. An unpinned spec field is only a producer proposal; custody says `custody under the anchor set {digest} the verified tree carries`, and `notEstablished` adds `that the anchor set is one the auditor trusts`. |
+| 17 | git and OpenSSL version semantics — CLOSE by preflight, floors measured and pinned by test: the git floor at the reader's entry, the OpenSSL floor at the top of `verify_release_chain` itself (Lane C carries #47's preflight there, so a direct caller gets it too) | Lane C calls cached `tsa._require_supported_openssl()` after argument validation and before path access. Acceptance, unsupported version, and missing/failing command are cached once per process with the existing OpenSSL 3.0 refusal. The Git floor remains at snapshot entry. |
+| 18 | OpenSSL pathname reads — CLOSE for the commit-addressed entry points: manifests, signatures and receipts are read from the materialization, `-CAfile` from the private copy per #47; STATE for a direct `verify_release_chain` caller on a live directory, where OpenSSL still reads receipt paths in that directory (section 3.5) | Commit verification invokes the directory verifier only over a private materialization. Every `-CAfile` is a private mode-0600, `O_EXCL`, byte-for-byte copy even when pinning/observation are off. The direct-live-directory residual remains; #40's receipt snapshots are retained. |
+| 19 | Producer-controlled spec code — STATE unless the spec is pinned: `load_spec` executes the spec module (`verify.py` lines 216 to 222 on main) before any check, so without `--expect-spec-sha256` arbitrary code from the verified repository runs inside the verifier and can defeat every other row; under a pin a mismatching spec never runs; the verdict carries `LoadedSpec.pinned`, and an unpinned run's `notEstablished` says that the spec's code was trusted | `load_spec` reads once, hashes once, and validates/compares an expected lowercase digest before compile/exec. Frozen loader-owned `LoadedSpec` carries verification, path, SHA-256, and pinned status. An unpinned verdict adds exact text `that the spec's code was trusted` to `notEstablished`. |
+| 20 | Release identity — CLOSE by tagging the reviewed head OID itself under a merge-commit merge (criterion (g)); STATE that the exact-target checks are recorded evidence in the release notes, reviewed by the release peer rather than re-run by it | Tagging is outside Lane C. This lane emits and pins commit/tree identities so the exact-target evidence can be recorded; exact-head tag/merge closure remains the release peer's criterion-(g) action. |
+
+### Deletions and why
+
+Deleted because their working-tree/descriptor subject no longer exists: `assert_secure_descent_supported`, `hold_release_root`, `assert_release_root_unchanged`, `confined_state_descriptor`, `read_state_descriptor`, `_working_release_files`, `assert_file_modes_authoritative`, `WORKING_TREE_SCAN_OPTIONS`, `assert_index_carries_no_protected_alias`, `assert_index_hides_no_working_tree_change`, `assert_state_path_tracked`, `assert_index_agrees_with_tree`, `assert_release_file_still_indexed`, `assert_index_content_bound`, `assert_release_root_index_regular`, and `git_tree_entries`.
+
+Deleted because their callers are deleted: `_blob_id`, `resolve_base_commit`, `materialize_base_tree`, `git_file_entry`, `git_blob_bytes`, `SEARCH_ONLY_DIRECTORY_FLAG`, `DIRECTORY_OPEN_FLAGS`, `DESCENT_REQUIRES_DIRECTORY_READ`, `unreadable_directory_error`, `_is_symlink_at`, `ConfinedState`, `PATHSPEC_ENVIRONMENT`, release-chain `_git_environment`/`_git_run`, `_git_bool`, `_observed_git_category`, `CE_INTENT_TO_ADD`, `CE_VALID`, `CE_SKIP_WORKTREE`, `INDEX_DEBUG_LINES`, `_IndexRecord`, `_split_index_debug`, `_parse_index_records`, `_index_entries`, `_all_index_entries`, `_fold_component`, `_folded_parts`, `_surface_alias_paths`, `_exact_relative`, and `_assert_no_symlinked_release_component`.
+
+`GitEntry` moved to `snapshot.py` in Lane A and is re-exported from `release_chain`; it was not removed.
+
+### Retained refusal messages
+
+Release-history and live-directory forms retained exactly (braces identify the runtime value):
+
+- `existing release file was deleted relative to {base_commit}: {path}`
+- `existing release file mode changed relative to {base_commit}: {path} ({old_mode} -> {new_mode})`
+- `existing release file bytes changed relative to {base_commit}: {path}`
+- `release path is a symlink: {path}`
+- `base release entry has non-regular git mode {mode}: {path}`
+- `releases must be a real directory, not a symlink`
+- `release root path traverses a symlink at 'releases/journal': releases/journal/manifests`
+- `path component releases/manifests is not spelled by its directory: releases/manifests`
+- `state path traverses a symlink at {component!r}: {relative}`
+- `required state file is missing or non-regular: {path}`
+- `state files cannot be read with secure descent on this platform (os.open lacks dir_fd support); receipt requires a POSIX platform`
+- `{GIT_*} is set in the environment and would redirect git reads; unset it`
+
+The two narrow diagnostic adapters preserve the baseline's exact forms `cannot resolve base ref 'no-such-ref' to a commit: fatal: Needed a single revision` and `base commit {oid} is not an ancestor of HEAD` while leaving `snapshot.py` unchanged.
+
+The authenticated 26-case `--full` battery still compares complete normalized messages byte-for-byte (only the documented OpenSSL error-queue token is masked). Its retained branches/messages are:
+
+- `producer keys are not closed-world`
+- `state keys are not closed-world`
+- `producer Ed25519 signature verification failed for {stem}.producer.sig`
+- `producer signature for {stem}.producer.sig must be exactly 64 raw bytes; found=63`
+- `producer public-key SPKI is not code-pinned: {digest}`
+- `cannot decode producer Ed25519 public key: {detail}`
+- `producer public key is not Ed25519: {type}`
+- `manifest {stem}.json is missing its producer signature {stem}.producer.sig`
+- `orphan producer signatures for manifest stems: ['9999-deadbeefdeadbeef']`
+- `cannot inspect RFC 3161 receipt {path} (exit {status}): {detail}`
+- `RFC 3161 verification failed for {stem}.digicert.tsr (exit {status}): {detail}`
+- `manifest {stem}.json must have exactly freetsa and digicert receipts; found=['digicert']`
+- `orphan release receipts for manifest stems: ['9999-deadbeefdeadbeef']`
+- `unknown file in closed release manifest directory: junk.txt`
+- `unknown file in closed release manifest directory: {stem}.real` or `release manifest directory contains a non-regular entry` (filesystem enumeration order; both legs must still match in full)
+- `release manifest directory contains a non-regular entry`
+- `duplicate release index 1: {first}, {second}`
+- `release indices are not contiguous from 0: expected 0002, found 0003`
+- `manifest filename hash does not match exact file bytes: 0001-0000000000000000.json`
+- `manifest releaseIndex 2 does not match filename index 1`
+- `manifest releaseIndex 1 does not match filename index 2`
+- `release 1 previousManifestSha256 does not match the previous manifest file bytes`
+- `release 0 state.jsonlSha256 does not match the exact historical JSONL prefix`
+- `HEAD release lineCount 147 does not match working-tree line count 148`
+- `release 0 immutablePrefixSha256 does not match ledger/immutable_prefix.json`
+- `production TSA anchor bytes are not code-pinned for freetsa: {digest}`
+
+New ladder messages (not described as retained) are `spec {digest} is not the expected spec {expected}`, `base_ref requires expect_commit`, `an anchor pin requires a pinned spec`, `spec declares two name repertoires`, `expected anchor-set SHA-256 must be a lowercase 64-character hex digest`, `anchor pins disagree: command expects {direct}, spec expects {declared}`, `anchor set {actual} is not the pinned anchor set {expected}`, `verified anchor set {verified} is not the materialized anchor set {materialized}`, `commit {actual} is not the expected commit {expected}`, and `tree {actual} is not the expected tree {expected}`. CLI dependency errors are `--base-ref requires --expect-commit` and `--expect-anchor-set requires --expect-spec-sha256`.
+
+### API and CLI
+
+- `ChainSpec.name_repertoire: Literal["portable", "posix-bytes"] = "portable"`; `VerificationSpec.anchor_set_sha256: str | None = None`.
+- `load_spec(path, *, expect_sha256=None) -> LoadedSpec`; loader-owned frozen fields: `verification`, `path`, `sha256`, `pinned`.
+- `run_verification(root, spec: LoadedSpec, *, base_ref=None, commit="HEAD", expect_commit=None, expect_tree=None, expect_anchor_set=None, verify_objects=False) -> VerifyResult`; the old split `spec_path`/`spec_sha256` inputs are removed.
+- `VerifyResult` adds `commit`, `tree`, `object_format`, `base_commit`, `base_tree`, `name_repertoire`, and `object_store`.
+- `verify_release_history_immutable(spec, *, candidate, base)` compares two entered snapshots; `verify_base_release_chain(spec, *, base)` materializes an entered base.
+- CLI adds `--expect-spec-sha256`, `--commit`, `--expect-commit`, `--expect-tree`, `--expect-anchor-set`, and `--verify-objects`; root resolves to the repository top level. Text/JSON now report candidate/base identity, repertoire, and object-store state. Binding says `binding of the witnessed journal to tree {tree[:12]}`.
+
+### Harness census and suites
+
+- Before: 94 equivalence cases. Re-pinned: 26 (8 ledger and 18 append). Unchanged: 68.
+- Added here: seven port-only tree-object cases. Integrated target: 101.
+- Current authenticated ledger: 43/43, zero skips. Current non-Lane-B equivalence: 80/80, zero skips.
+- Lane C direct surfaces: 408 passed. Corpus/shared-name suite: 231 passed.
+- The independently collectable offline suite passes 1,164 cases with 80 equivalence cases deselected; it excludes only the three Lane B append modules that cannot import yet.
+- The 21 append cases cannot collect until Lane B migrates its callers; consequently neither the complete 101-case command nor the exact offline command is reported green here.
+- Source/test compilation and whitespace checks pass; no protected Lane A/B file changed.
+
+Network is sandbox-disabled, so the branch is committed locally and this complete draft body is the handoff. Push and draft PR creation remain gated on the Lane B merge and the two complete green commands.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
