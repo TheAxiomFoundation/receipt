@@ -551,6 +551,40 @@ def test_base_release_chain_uses_callers_trusted_anchor_directory(
     }
 
 
+@pytest.mark.parametrize("caller_trust", [True, False], ids=["caller-trust", "tree-trust"])
+def test_base_release_chain_ignores_disjoint_tree_anchors_only_with_caller_trust(
+    repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    caller_trust: bool,
+) -> None:
+    chain = load_spec(repo / "verification/spec.py").verification.chain
+    separate = repo / "separate-anchors"
+    shutil.move(repo / chain.anchor_relative, separate)
+    external = tmp_path / "trusted-anchors"
+    shutil.copytree(separate, external)
+    (separate / "unused-symlink").symlink_to("unused-target")
+    chain = replace(
+        chain,
+        anchor_relative=pathlib.PurePosixPath("separate-anchors"),
+    )
+    base_oid = commit_snapshot(repo, "base with disjoint unused anchor symlink")
+
+    with TreeSnapshot.select(repo, base_oid) as base:
+        assert base.entry("separate-anchors/unused-symlink").mode == "120000"
+        if caller_trust:
+            verification = verify_base_release_chain(
+                chain, base=base, anchor_dir=external
+            )
+            assert verification.head is not None
+        else:
+            with pytest.raises(SnapshotError) as caught:
+                verify_base_release_chain(chain, base=base)
+            assert str(caught.value) == (
+                "base tree entry has non-regular mode 120000: "
+                "separate-anchors/unused-symlink"
+            )
+
+
 def test_base_release_chain_forwards_pin_and_clock_options(repo: pathlib.Path) -> None:
     chain = load_spec(repo / "verification/spec.py").verification.chain
     base_oid = commit_snapshot(repo, "base with matching anchors")

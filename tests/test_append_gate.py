@@ -2407,3 +2407,32 @@ def test_a_custom_anchor_directory_remains_the_post_genesis_trust_source(
         "thesis-facts append check OK: 2 rows, immutable prefix 1, "
         "+0 appended vs base, release 0"
     )
+
+
+def test_disjoint_unused_tree_anchors_agree_on_push_and_base_paths(
+    tmp_path: pathlib.Path, witnesses: Witnesses
+) -> None:
+    """Caller-owned trust makes a disjoint committed anchor symlink unused."""
+
+    candidate, anchors, _stem = genesis_proposal(tmp_path, witnesses)
+    separate = candidate.root / "separate-anchors"
+    separate.mkdir()
+    (separate / "unused-symlink").symlink_to("unused-target")
+    spec = replace(
+        GATE_SPEC,
+        chain=replace(
+            CHAIN_SPEC,
+            anchor_relative=pathlib.PurePosixPath("separate-anchors"),
+        ),
+    )
+    oid = commit_candidate(candidate, "settled genesis with unused disjoint anchors")
+    settled = replace(candidate, base=oid)
+    assert git(candidate.root, "status", "--porcelain") == ""
+
+    assert run_push_gate_with_anchors(settled, anchors, spec=spec, commit=oid) == (
+        "thesis-facts append check OK: 2 rows, immutable prefix 1, release 0"
+    )
+    assert run_gate_with_anchors(settled, anchors, spec=spec, commit=oid) == (
+        "thesis-facts append check OK: 2 rows, immutable prefix 1, "
+        "+0 appended vs base, release 0"
+    )
