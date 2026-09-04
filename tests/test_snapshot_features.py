@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import pathlib
+import re
 import stat
 import subprocess
 from collections.abc import Iterable
@@ -133,6 +134,52 @@ def _raw_attribute_snapshot(root: pathlib.Path, attributes: bytes) -> TreeSnapsh
     return TreeSnapshot.select(root, _commit_object(root, tree))
 
 
+def _cached_attribute_value(
+    root: pathlib.Path,
+    tmp_path: pathlib.Path,
+    attribute: str,
+    protected_path: str,
+) -> bytes:
+    """Return one hermetic ``check-attr --cached`` oracle value."""
+
+    assert not (root / ".git" / "info" / "attributes").exists()
+    empty_global = tmp_path / "empty-global.gitconfig"
+    empty_global.write_bytes(b"")
+    empty_attributes = tmp_path / "empty-global-attributes"
+    empty_attributes.write_bytes(b"")
+    environment = snapshot_module._git_environment(empty_global)
+    system = subprocess.run(
+        ["git", "var", "GIT_ATTR_SYSTEM"],
+        cwd=root,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert system.returncode == 0, system.stderr.decode(errors="replace")
+    system_path = system.stdout.decode(errors="surrogateescape").strip()
+    if system_path and pathlib.Path(system_path).exists():
+        pytest.skip(f"Git system attributes file exists: {system_path}")
+    assert not system_path or not pathlib.Path(system_path).exists()
+
+    oracle = _git(
+        root,
+        "-c",
+        f"core.attributesFile={empty_attributes}",
+        "check-attr",
+        "--cached",
+        "-z",
+        attribute,
+        "--",
+        protected_path,
+        environment=environment,
+    )
+    fields = oracle.stdout.split(b"\0")
+    assert fields[-1] == b""
+    assert fields[1] == attribute.encode("ascii")
+    return fields[2]
+
+
 def _chain_spec(
     *, producer: object = "producer.pem", anchors: Iterable[object] = ("root.pem",)
 ) -> SimpleNamespace:
@@ -185,7 +232,7 @@ def test_attribute_parser_accepts_leading_comments_and_a_blank_line(
 ) -> None:
     attributes = (
         b"# Committed attribute policy.\n"
-        b"   # An indented comment is ignored too, including opaque \x00 bytes.\n"
+        b"   # An indented comment is ignored too, including opaque words.\n"
         b"\n"
         b"protected.txt text eol=lf\n"
     )
@@ -404,43 +451,9 @@ def test_accepted_attribute_patterns_match_hermetic_git_oracle(
     _write(git_repo, ".gitattributes", f"{pattern} filter=reader-test\n".encode())
     _write(git_repo, protected_path, b"protected\n")
     commit = _commit(git_repo)
-    assert not (git_repo / ".git" / "info" / "attributes").exists()
-
-    empty_global = tmp_path / "empty-global.gitconfig"
-    empty_global.write_bytes(b"")
-    empty_attributes = tmp_path / "empty-global-attributes"
-    empty_attributes.write_bytes(b"")
-    environment = snapshot_module._git_environment(empty_global)
-    system = subprocess.run(
-        ["git", "var", "GIT_ATTR_SYSTEM"],
-        cwd=git_repo,
-        env=environment,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    assert system.returncode == 0, system.stderr.decode(errors="replace")
-    system_path = system.stdout.decode(errors="surrogateescape").strip()
-    if system_path and pathlib.Path(system_path).exists():
-        pytest.skip(f"Git system attributes file exists: {system_path}")
-    assert not system_path or not pathlib.Path(system_path).exists()
-
-    oracle = _git(
-        git_repo,
-        "-c",
-        f"core.attributesFile={empty_attributes}",
-        "check-attr",
-        "--cached",
-        "-z",
-        "filter",
-        "--",
-        protected_path,
-        environment=environment,
-    )
-    fields = oracle.stdout.split(b"\0")
-    assert fields[-1] == b""
-    assert fields[1] == b"filter"
-    git_applies_filter = fields[2] != b"unspecified"
+    git_applies_filter = _cached_attribute_value(
+        git_repo, tmp_path, "filter", protected_path
+    ) != b"unspecified"
 
     reader_refused = False
     with TreeSnapshot.select(git_repo, commit) as selected:
@@ -450,6 +463,107 @@ def test_accepted_attribute_patterns_match_hermetic_git_oracle(
             assert "transforming attribute filter applies" in str(exc)
             reader_refused = True
     assert reader_refused is git_applies_filter
+
+
+@pytest.mark.parametrize(
+    "neutralizing_line",
+    [
+        b"releases/*.json !filter -bogus",
+        b"releases/*.json !filter".ljust(2047, b" "),
+    ],
+    ids=["valid-name", "largest-git-parsed-line"],
+)
+def test_attribute_line_boundaries_match_hermetic_git_oracle(
+    git_repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    neutralizing_line: bytes,
+) -> None:
+    protected_path = "releases/release.json"
+    attributes = (
+        b"releases/*.json filter=evil\n" + neutralizing_line + b"\n"
+    )
+    _write(git_repo, ".gitattributes", attributes)
+    _write(git_repo, protected_path, b"{}\n")
+    commit = _commit(git_repo)
+    assert _cached_attribute_value(
+        git_repo, tmp_path, "filter", protected_path
+    ) == b"unspecified"
+
+    with TreeSnapshot.select(git_repo, commit) as selected:
+        selected.refuse_transforming_attributes((protected_path,))
+
+
+@pytest.mark.parametrize(
+    ("neutralizing_line", "construct"),
+    [
+        (
+            b"releases/*.json !filter --bogus",
+            "attribute name '-bogus'",
+        ),
+        (
+            b"releases/*.json !filter builtin_probe",
+            "attribute name 'builtin_probe'",
+        ),
+        (
+            b"releases/*.json !filter".ljust(2048, b" "),
+            "line longer than 2048 bytes",
+        ),
+    ],
+    ids=["invalid-name", "reserved-name", "git-discarded-line"],
+)
+def test_attribute_lines_git_discards_refuse_fail_closed(
+    git_repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    neutralizing_line: bytes,
+    construct: str,
+) -> None:
+    protected_path = "releases/release.json"
+    attributes = (
+        b"releases/*.json filter=evil\n" + neutralizing_line + b"\n"
+    )
+    _write(git_repo, ".gitattributes", attributes)
+    _write(git_repo, protected_path, b"{}\n")
+    commit = _commit(git_repo)
+    assert _cached_attribute_value(
+        git_repo, tmp_path, "filter", protected_path
+    ) == b"evil"
+
+    with TreeSnapshot.select(git_repo, commit) as selected, pytest.raises(
+        SnapshotError,
+        match=(
+            r"^unsupported \.gitattributes construct at \.gitattributes:2: "
+            + re.escape(construct)
+            + r"$"
+        ),
+    ):
+        selected.refuse_transforming_attributes((protected_path,))
+
+
+def test_attribute_blob_nul_that_stops_git_refuses_fail_closed(
+    git_repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+) -> None:
+    protected_path = "releases/release.json"
+    attributes = (
+        b"releases/*.json filter=evil\n"
+        b"   # Git stops here\0\n"
+        b"releases/*.json !filter\n"
+    )
+    _write(git_repo, ".gitattributes", attributes)
+    _write(git_repo, protected_path, b"{}\n")
+    commit = _commit(git_repo)
+    assert _cached_attribute_value(
+        git_repo, tmp_path, "filter", protected_path
+    ) == b"evil"
+
+    with TreeSnapshot.select(git_repo, commit) as selected, pytest.raises(
+        SnapshotError,
+        match=(
+            r"^unsupported \.gitattributes construct at \.gitattributes:2: "
+            r"control byte$"
+        ),
+    ):
+        selected.refuse_transforming_attributes((protected_path,))
 
 
 def test_materialization_selects_and_deduplicates_nested_prefixes(

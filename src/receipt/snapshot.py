@@ -62,6 +62,10 @@ materialization totals are then enforced across both snapshots together.
   ``MAX_ATTRIBUTE_RULES_TOTAL`` is 65,536 per verification.
   ``MAX_ATTRIBUTE_MATCH_WORK`` is 67,108,864 matcher transitions. Checks cover
   protected paths only, making this generous for Chronicle's small surface.
+  Git 2.53.0 discards physical attribute lines at least 2,048 bytes long and
+  lines containing invalid or reserved attribute names, and stops a blob at
+  embedded NUL; this reader refuses each case so discarded input cannot
+  silently change rule precedence.
 * ``MAX_CONTENT_BLOB_BYTES`` is 256 MiB per streamed content object and
   ``MAX_CONTENT_BYTES_TOTAL`` is 16 GiB. The largest measured rulespec-us blob
   is 6,550,684 bytes and all 15,216 blobs total 107,132,889 bytes.
@@ -964,10 +968,19 @@ def _parse_attribute_file(
             original = payload[position:]
         else:
             original = payload[position:line_end]
+        # Git 2.53.0 attr.h fixes ATTR_MAX_LINE_LENGTH at 2048; attr.c's
+        # parse_attr_line() drops strlen(line) >= that limit; parse_attr()
+        # drops the whole rule when attr_name_valid() or attr_name_reserved()
+        # rejects one state name; and read_attr_from_buf() stops at embedded
+        # NUL. Refuse these cases rather than disagreeing about precedence.
+        if len(original) >= 2048:
+            raise _unsupported_attribute(
+                path, line_number, "line longer than 2048 bytes"
+            )
+        if any(byte < 0x20 and byte != 0x09 for byte in original):
+            raise _unsupported_attribute(path, line_number, "control byte")
         line = original.strip(b" \t")
         if line and not line.startswith(b"#"):
-            if any(byte < 0x20 and byte != 0x09 for byte in original):
-                raise _unsupported_attribute(path, line_number, "control byte")
             fields = re.split(rb"[ \t]+", line)
             if len(fields) < 2:
                 raise _unsupported_attribute(
@@ -1006,9 +1019,11 @@ def _parse_attribute_file(
                 elif "=" in state:
                     name, value = state.split("=", 1)
                     disposition = "value"
-                if re.fullmatch(r"[A-Za-z0-9_.-]+", name) is None:
+                if name.startswith(("-", "builtin_")) or re.fullmatch(
+                    r"[A-Za-z0-9_.-]+", name
+                ) is None:
                     raise _unsupported_attribute(
-                        path, line_number, f"state {state!r}"
+                        path, line_number, f"attribute name {name!r}"
                     )
                 states.append((name, disposition))
             trailing_globstars = 0
