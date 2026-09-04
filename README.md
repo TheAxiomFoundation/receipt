@@ -17,6 +17,7 @@ Shipped:
 - `receipt.canonical` — one byte stream per value: canonical JSON with UTF-16 code-unit key order and ECMAScript number formatting
 - `receipt.append_gate` — a candidate change to an append-only ledger must extend the trusted base exactly: prefix retained, rows valid, releases untouched
 - `receipt.corpus` — closed-world binding of a witnessed journal to a working tree: every content file bound, every bound file present, every digest exact, and per-gate reproducibility tiers so a declaration is never mistaken for a verification
+- `receipt.evidence` — non-authorizing, emission-time evidence records beside a release chain: a manifest-shaped record signed under its own domain, binding a domain event by digest, stored outside the closed release directory, and refused by the authorizing verifier by construction
 - `receipt verify` — the outside auditor's command: a clone, commodity tools, one offline fail-closed verdict
 
 Arriving:
@@ -25,6 +26,8 @@ Arriving:
 - `receipt.chronology` — record-vs-event ordering tiers: does witnessed time prove the record existed *ante quem* — before the event it predicts or observes?
 
 `receipt.corpus` and `receipt verify` are composition over the extracted modules rather than a fourth extraction: they add no cryptography and no trust anchors, and every cryptographic verdict they report comes from a module that passed its own differential gate. Their gate is a refusal battery — each way a published corpus can fail to be what it claims, exercised against a real chain with real signatures and configured RFC 3161 authorities.
+
+`receipt.evidence` is composition in the same sense, and adds one property of its own: its records are non-authorizing by construction rather than by convention. An evidence record's top-level keys are not a manifest's, so `validate_manifest_schema` refuses it at the closed-world check; and it is signed over a domain string, so it fails the no-domain signature check the authorizing verifier uses. `verify_evidence_records` is deliberately not wired into `receipt verify`, and no verdict depends on it. Its gate is the refusal battery in tests/test_evidence.py.
 
 ## Using it
 
