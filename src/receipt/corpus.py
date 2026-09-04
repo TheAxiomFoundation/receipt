@@ -896,9 +896,10 @@ def _short_name_carries_pinned_suffix(name: str, suffixes: tuple[str, ...]) -> b
     and keeps the two halves in the order they belong: where no pin can be
     carried by an alias there is no question, and no name is asked one.
 
-    Compared through :func:`_path_fold`, the key by which membership is
-    decided everywhere else in this module, so ``.YML`` and ``.yml`` are one
-    suffix here exactly as they are there.
+    The delegated helper compares the alias and pins after translating ASCII
+    bytes directly to lowercase. It performs no Unicode normalization or
+    casefolding, so ``.YML`` and ``.yml`` are one suffix by the same narrow
+    ASCII rule used for membership.
     """
 
     return short_name_carries_pinned_suffix(name, suffixes)

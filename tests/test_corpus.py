@@ -3223,16 +3223,14 @@ def test_refuses_a_tree_entry_whose_name_windows_would_strip(
     ``rules/tax/notes.yaml.`` opens ``rules/tax/notes.yaml`` there. The two
     spellings are not fold-equal, so no fold key pairs them, and a declared
     path spelled either way has been refused since round three — but the
-    entry the *tree* carries was never asked. A file emitted under the dotted
-    spelling is not content by suffix, is skipped by the sweep, and answers
-    to a content name on the filesystem this module's whole portability model
-    is about.
+    entry the *tree* carries was never asked. A blob committed under the
+    dotted spelling is not content by suffix, is omitted from the derived
+    content set, and answers to a content name on the checkout filesystem
+    this module's portability claim is about.
 
-    The name is injected through the sweep's listing rather than written:
-    what the verifier has to hold against is a filesystem that emits the
-    name, and injecting it makes the test say the same thing on every host.
-    Without the screen the entry falls through to the ``lstat``, which fails,
-    and the refusal is the non-regular-file one instead.
+    The name is committed through a raw index entry, so the authenticated
+    listing contains it even when the host checkout cannot. Without the
+    screen it remains an ordinary non-content blob and verification passes.
 
     Binds the policy for the message: the trailing period is the one Win32
     alias rule the portable repertoire does not subsume, so it is one of the
@@ -3735,16 +3733,15 @@ def test_refuses_a_tombstone_listing_entry_a_filesystem_may_ignore(
 
     A tombstone is honoured when no fold-equal spelling survives in a
     listing. ``apply-manifest.jso\\u200dn`` is not fold-equal to
-    ``apply-manifest.json`` here — the joiner survives NFC and case folding
-    — so the bucket lookup misses it and the verdict names the path as
+    ``apply-manifest.json`` here — the joiner survives the ASCII-only fold —
+    so the bucket lookup misses it and the verdict names the path as
     removed. On HFS+ that entry *is* the removed path: the file the journal
     says is gone still answers to the name it was retired under.
 
-    The entry is injected into the listing rather than written, for the
-    reason ``_late_survivor_scandir`` gives: what has to be held against is
-    a filesystem that emits the name, and injecting it says the same thing
-    on every host. Without the screen this verification passes and reports
-    ``retired/apply-manifest.json`` under removedPaths.
+    The survivor is written and committed before selecting the snapshot, so
+    the tombstone index reads it from the authenticated flat tree listing.
+    Without the repertoire screen this verification passes and reports
+    ``retired/apply-manifest.json`` under ``removed_paths``.
 
     Binds the policy for the message: the tombstone listing is screened by
     the same one screen every other listing is.
@@ -4295,29 +4292,17 @@ def test_refuses_an_unscreened_sibling_of_a_bound_component(
     sibling: str,
     why: str,
 ) -> None:
-    """Binds S5R4-F1: the sibling scan compared names it never screened.
+    """Binds S5R4-F1: every name in the committed listing is screened.
 
-    S5R3-F3 made this check consume the whole listing and refuse a sibling
-    that folds onto the bound component. What it did not do is screen the
-    entries it was handed, and the fold key answers exactly one class of
-    equivalence — two spellings that differ in case. A spelling a *lookup*
-    collapses onto the bound name without collapsing under the fold walked
-    straight through: a POSIX tree holding both ``.axiom/toolchain.toml``
-    and ``.axiom/toolchain.toml.`` passes, because the exact spelling is
-    present and the sibling's fold key differs, while Win32 strips the
-    trailing period before it resolves the name and hands back whichever of
-    the two it stores — so the witnessed digest covers a file the auditor
-    cannot identify. A trailing space is the same story with the other
-    character Win32 strips.
+    The raw tree holds both ``.axiom/toolchain.toml`` and a sibling ending in
+    a period or space. Their ASCII fold keys differ, but Win32 collapses the
+    sibling onto the attested spelling before lookup, so an exact attested
+    lookup alone cannot make the checkout unambiguous.
 
-    The portable-name screen is what answers both, and it is the screen
-    every other listing in this module already runs. Without it this
-    verification returns a CorpusVerification over the corpus, on the host
-    where the two names coexist and on the host where they do not.
-
-    The sibling is injected into the listing rather than written, so the
-    test says the same thing wherever it runs — including on a host whose
-    filesystem refuses to store the name at all.
+    The sibling is committed through a raw index entry, so the authenticated
+    listing contains it even on a host that cannot check the name out. The
+    portable repertoire screens it before attested lookup; without that
+    screen the extra non-content blob is ignored and verification passes.
     """
 
     write_tree(tmp_path)
@@ -4373,18 +4358,13 @@ def test_refuses_a_required_attested_path_the_directory_does_not_spell(
 def test_a_content_file_found_by_its_spelled_name_still_verifies(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds S5R2-F1, the other side: the sweep already spells its own names.
+    """Binds S5R2-F1: exact committed tree keys decide content membership.
 
-    Every content path in the journal is compared against a set the walk
-    built out of ``os.scandir`` names, so a content file that verifies is one
-    the listing emitted under exactly that spelling. That is why the spelling
-    check is asked of attested paths only: asking it of content too would
-    answer a question already answered, at one listing per component per
-    file, which for a wide content directory is quadratic and unbudgeted.
-
-    Both halves are asserted — an ordinary corpus verifies, and a content
-    file whose on-disk spelling differs from the bound one is refused by the
-    sweep itself, on any host, with the spelling walk never consulted.
+    Every journal content path is compared with the content set derived from
+    one authenticated flat tree listing. An ordinary corpus therefore passes
+    with its exact keys, while replacing one committed key by a case-varied
+    raw index entry leaves that entry unbound and refuses it during membership
+    equality; no host directory walk or separate spelling pass participates.
 
     This test passes with the fix disabled, which is the point.
     """
@@ -5062,22 +5042,14 @@ def test_the_device_table_is_exactly_what_its_two_sources_say() -> None:
 def test_a_real_aliasing_root_spelling_keeps_the_root_component_refusal(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds S5R2-F1, adversarially: the generic refusal must not preempt.
+    """A committed root alias keeps the path-rich component refusal.
 
-    S5R2-F1 binds every bound path component to the spelling its directory
-    emits, and the pinned content root's own components pass through the
-    same walk. On a case-insensitive host that made the generic "not spelled
-    by its directory" refusal fire for a tree holding ``RULES/`` under a
-    ``rules`` pin — preempting ``_assert_no_aliasing_root_component``, which
-    asks the same question a line later and names the entry that aliases the
-    pinned spelling. The existing test for that wording injects a phantom
-    entry into the listing and so never exercised the real case.
-
-    The content-root walk asks the symlink question and not the spelling
-    one, because the check a line later says more. This asserts the refusal
-    an auditor actually gets, following the host: where the pinned spelling
-    resolves to the differently-spelled directory, the aliasing refusal
-    names it; where it does not, the root is simply absent.
+    The fixture commits the spelling produced by renaming ``rules`` to
+    ``RULES``. ``_assert_content_root_spellings`` reads the authenticated root
+    listing before content membership: when the listing carries ``RULES`` it
+    names that fold-equal entry, and when the host did not record the distinct
+    spelling the pinned root is absent. No live host resolution or separate
+    component-spelling walk participates in the verdict.
     """
 
     write_tree(tmp_path)
