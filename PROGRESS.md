@@ -83,6 +83,7 @@ In progress on `feat/0.6-lane-c`, based at `145f3db93d745ddc43aeb47f6b7bd8b30aa3
 
 - `tsa._require_supported_openssl()` was already present and cached on the starting head; Lane C only needs to wire it into `verify_release_chain` and map its refusal into `ReleaseChainError`.
 - Integration dependency: the 0.5.2 `append_gate.py` imports most release-chain guards section 3.5 requires Lane C to delete. The standalone Lane C tree cannot both remove them and collect the append-gate suite until Lane B replaces those callers; keep this visible rather than silently retaining dead compatibility code.
+- Final full-equivalence attempt stops at collection in `tests/test_append_gate_equivalence.py`: the unmerged 0.5.2 `append_gate.py` imports deleted `release_chain._git_environment`. Lane B owns that required caller replacement; no Lane B branch is present locally yet. This is the predicted integration dependency, not a verifier/oracle divergence.
 - Snapshot diagnostic surface: `TreeSnapshot.select` reports an unresolvable base as `cannot resolve commit ...` without the old Git stderr, and `assert_ancestor` names an explicit candidate OID rather than `HEAD`. The ledger differential wrapper uses narrow message adapters so the pre-existing moved-case outputs stay pinned; `snapshot.py` remains unchanged.
 - The exact append-only deliberate-divergence refusal belongs to the append oracle rather than the ledger release oracle. The ledger harness now authenticates that pinned script separately for this single port-only input-class test; its ordinary differential baseline remains the release verifier.
 - Peer review of the release-chain and loader surface found three implementation gaps (unsupported OpenSSL exceptions were not cached, `LoadedSpec` had a callable forge helper/non-exact expectation, and an exact normalized spec was replaced again); each is now fixed with focused regression coverage. The rest of the release-chain deletion, refusal-order, regular-read, CA-copy, and tree-history contract reviewed clean.
@@ -109,5 +110,5 @@ In progress on `feat/0.6-lane-c`, based at `145f3db93d745ddc43aeb47f6b7bd8b30aa3
 
 ## Next
 
-- Run the complete equivalence census and offline suite.
+- Run the non-append equivalence modules and offline suite while waiting for Lane B's caller migration; merge it if it becomes available, then rerun the complete census.
 - Resolve only in-scope failures, then prepare the draft PR body and final report.
