@@ -955,6 +955,38 @@ def detached_oracle_checkout(
         _git(root, "worktree", "remove", "--force", str(destination))
 
 
+# Memoizes the filesystem probe below. Both harnesses request the session
+# fixture, and requesting it from two modules ran the fixture body twice —
+# two probe directories, counted under a fixed --basetemp, not assumed. The
+# probe is the part that must not repeat, so it is cached here and the answer
+# is reused; "once per session" is then a fact about this module rather than
+# about how pytest happens to cache a fixture.
+_UNSUPPORTED_GIT_CAPABILITIES: list[str] | None = None
+
+
+def _unsupported_git_capabilities(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> list[str]:
+    """Which of core.fileMode and core.symlinks git reports false here.
+
+    Probed once per session in a throwaway repository under pytest's own base
+    temporary directory, which is the filesystem every fixture root is built
+    on, so the answer is about the filesystem under test.
+    """
+
+    global _UNSUPPORTED_GIT_CAPABILITIES
+    if _UNSUPPORTED_GIT_CAPABILITIES is None:
+        probe = tmp_path_factory.mktemp("git-capability-probe")
+        _git(probe, "init", "--quiet")
+        _UNSUPPORTED_GIT_CAPABILITIES = [
+            key
+            for key in ("core.fileMode", "core.symlinks")
+            if _git(probe, "config", "--type=bool", "--default", "true", "--get", key)
+            == "false"
+        ]
+    return _UNSUPPORTED_GIT_CAPABILITIES
+
+
 @pytest.fixture(scope="session")
 def committed_fixture_filesystem(
     tmp_path_factory: pytest.TempPathFactory,
@@ -963,9 +995,7 @@ def committed_fixture_filesystem(
 
     The committed-fixture contract needs both: ``base_mode_change`` is only a
     mode change if ``git add`` records ``100755``, and ``base_worktree_symlink``
-    only a symlink if it records ``120000``. Probed in a throwaway repository
-    under pytest's own base temporary directory, which is the filesystem every
-    fixture root is built on, so the answer is about the filesystem under test.
+    only a symlink if it records ``120000``.
 
     Where either is false the moved cases skip rather than fail: the port
     refuses such a checkout in words of its own
@@ -974,14 +1004,7 @@ def committed_fixture_filesystem(
     about the port.
     """
 
-    probe = tmp_path_factory.mktemp("git-capability-probe")
-    _git(probe, "init", "--quiet")
-    unsupported = [
-        key
-        for key in ("core.fileMode", "core.symlinks")
-        if _git(probe, "config", "--type=bool", "--default", "true", "--get", key)
-        == "false"
-    ]
+    unsupported = _unsupported_git_capabilities(tmp_path_factory)
     if unsupported:
         pytest.skip(
             "the committed-fixture contract needs a filesystem where git "
