@@ -31,8 +31,357 @@ Deliberately outside the mutation contract:
 
 - witness objects are open-world in the oracle; an unknown top-level field is
   accepted, so there is no refusal branch to bind;
-- the v1 unavailable genesis witness accepts token-looking fields; the fatal
-  token-evidence rule is specifically the v2 per-anchor outcome contract;
+- the baseline's unavailable path, v1 and the v2 witness level alike, tests
+  ``reason`` for truth and nothing else, so it accepts a non-string reason
+  and any token-looking field beside it; the port refuses both at every
+  level, which is what the v2 per-anchor outcome contract has always
+  required.  The genesis witness (the tree's only unavailable one, and v1)
+  carries neither, so every case below still agrees byte for byte; a
+  mutation introducing one would assert only that the port is deliberately
+  stricter, which belongs in ``tests/test_tsa.py`` and not in a
+  differential contract;
+- the baseline verifies exactly one token for a v1 witness whatever the
+  bundle configures; the port refuses a v1 witness over a bundle that
+  configures more than one anchor.  The pinned v1 bundle configures one, so
+  no case here can reach the refusal, and a future tree that adds an anchor
+  to ``tsa-anchors-v1.json`` will fail this harness by design;
+- the baseline identity-checks only the anchor a witness selects; the port
+  requires a code identity for every anchor a bundle configures, at load.
+  Every pinned bundle anchor has one, and a mutation that adds an anchor
+  changes the bundle bytes and trips the commitment mismatch first, so the
+  battery executes the check on every case and can fire it on none;
+- the baseline compares an anchor's root SPKI and allowed signers with its
+  code identity only when a witness selects that anchor; the port compares
+  every anchor's declared values with its identity at bundle load, and
+  validates every anchor's root material there too, carrying the ported
+  material refusals inside a new load-time message.  Every pinned bundle
+  agrees with its identities and its roots verify, so no case here reaches
+  either;
+- the baseline pins a root PEM by its hash, its certificate hash and its
+  SPKI -- the last two describing the file's first certificate only -- and
+  then hands the whole file to ``openssl ts -verify -CAfile``, which trusts
+  every certificate in it; the port refuses a pinned root PEM unless
+  ``openssl storeutl -noout -certs`` counts exactly one certificate in it.
+  ``storeutl`` counts one in each pinned root
+  (``records/trust/freetsa-root-2016.pem`` and
+  ``records/trust/digicert-trusted-root-g4.pem``), so the refusal -- which
+  precedes the ported PEM-hash refusal, and the further refusal for a root
+  whose certificates ``storeutl`` cannot count at all -- fires on no case
+  here;
+- the baseline opens a pinned root five times to validate it and twice more
+  as a ``-CAfile``; the port reads it once and judges and trusts a private
+  byte-for-byte copy of those bytes, so the count, the hashes, the
+  certificate identity and the two ``-CAfile`` verifications are all about
+  one instant of one file.  Nothing is re-encoded (a re-encoding through
+  ``openssl x509`` was tried and withdrawn: it dropped X509_AUX settings),
+  and each pinned root's one certificate is the certificate its own
+  ``certificateSha256`` already pins (``a6379e7c...`` and ``552f7bdc...``),
+  so the copy carries the same trust anchor the baseline passed, byte for
+  byte, and no case's outcome moves.  Only the ``-CAfile`` argument's spelling
+  changes, and no compared message quotes it: every mutation here that reaches
+  OpenSSL either succeeds or is caught by the deterministic token-hash refusal
+  first, and none mutates a root PEM.  The port also walks the root's path
+  from the records root down and refuses a symlinked component (sixth gate
+  round one); both pinned roots sit directly in ``records/trust`` and neither
+  ``trust`` nor either file is a link, so no case here reaches it;
+- the baseline opens the record under witness four times -- to hash it for the
+  digest claim, to read the trust-bundle updates it carries, to read its
+  creation claims, and once more through ``openssl ts -verify -data`` -- and
+  the port reads it once and hands ``-data`` a private byte-for-byte copy of
+  those bytes.  OpenSSL computes the same imprint over the same content, so no
+  case's outcome moves; only the ``-data`` argument's spelling changes, and by
+  the paragraph above no compared message quotes an OpenSSL command line.  The
+  port also refuses a record that is not a readable regular file, where the
+  baseline let the hash raise ``OSError``, and refuses one whose path reaches
+  it through a symlinked component below the records root (sixth gate round
+  one); the chain walk enumerates the records it goes on to verify, and the
+  53 record paths in this tree pass through no link, so no case here presents
+  either.  The parse of
+  those bytes goes through the same ``TextIOWrapper`` ``Path.read_text``
+  builds -- same locale encoding, same universal-newline translation -- so
+  ``load_json``'s two refusals render byte for byte as the baseline renders
+  them, offsets included;
+- the baseline hashes a claimed ``TimeStampResp`` through one open of its
+  pathname and then lets ``openssl ts -reply`` and ``openssl ts -verify`` open
+  it twice more; the port reads it once and gives both of them a private
+  byte-for-byte copy.  The bytes are the same bytes, so every case's outcome
+  is unchanged; only the ``-in`` argument's spelling changes, and again no
+  compared message quotes an OpenSSL command line -- the flip and truncation
+  mutations retain the committed hash on purpose and bind the deterministic
+  token-hash refusal before OpenSSL is reached.  Its path is walked component
+  by component too, and the 91 declared token paths reach their files through
+  no link either -- across all three walked kinds this tree presents 161
+  distinct components below the records root and not one of them is a symlink
+  (sixth gate round one);
+- the baseline opens all three of those files by name and waits on the open;
+  the port opens each with ``O_NONBLOCK`` where the platform has the flag and
+  clears it again once ``fstat`` has judged the descriptor, so a file replaced
+  by a FIFO between a path-level check and the open is refused rather than
+  waited on indefinitely (peer review, fifth gate round one).  The flag
+  changes nothing about reading a regular file, and every file the harness
+  reads is one, so no case here moves;
+- the port also sets ``O_BINARY`` on those three opens and on the write of the
+  pinned root's private copy, where the platform has the flag (peer review,
+  fifth gate round two).  POSIX does not, so it is zero wherever this harness
+  runs and no case here can move on it; on Windows it is what keeps a ``\r\n``
+  or a ``0x1A`` in a record, a response or a root PEM from being translated
+  between the disk and the digest;
+- the component walk in front of those same three reads answered about
+  pathnames and the read then opened the whole path again, which recreated the
+  race the walk closed; the port now holds the records root open and opens
+  each checked interior component relative to the descriptor above it with
+  ``O_DIRECTORY | O_NOFOLLOW``, the leaf relative to the last of them, closing
+  every descriptor in a ``finally`` (sixth gate round two).  A component
+  exchanged for a link between the check and the descent keeps the walk's own
+  traversal words; one exchanged for a regular file is named by a message of
+  its own, ``{subject} component is not a directory at {component}: {path}``.
+  Nothing rewrites this tree under a running verification, so every descent
+  here reaches the object the walk checked and neither message fires.  The
+  records root itself is the boundary the caller named and may be a link, so
+  its own descriptor is the one open here without ``O_NOFOLLOW``, and the walk
+  ends at the root under the caller's spelling as well as under its resolution
+  (first Opus round); the harness resolves the records root before it starts,
+  and no case here spells one path through two sides of a link.  The bound
+  the walk is asked about is enforced rather than assumed in the same round: a
+  record path a consumer spells with a ``..`` that leaves the tree, or one the
+  walk never meets the root on at all, is refused with ``witnessed record path
+  is not below the records root`` in front of every open, the walk being
+  lexical and ``lstat`` blind to a component that is the root under another
+  name.  Every record path here comes from ``snapshot_paths``'s glob under the
+  resolved records root, or through ``physical_path``, which refuses ``..``
+  itself, so all 53 of them are below the root and no case reaches the
+  refusal;
+- the baseline reads the trust-bundle updates a record carries out of a
+  fresh open of that record whenever the chain walk hands them in; the port
+  derives them from the one read it hashed and verified, and requires a
+  supplied list to be *exactly* that derived set.  The rule was one-way when
+  it arrived -- every derived update had to appear in the supplied list, and
+  the list could hold more (peer review, fifth gate round two) -- and both
+  directions are checked now: an entry the call did not derive is refused by
+  name rather than evaluated, because a superset is precisely what made a
+  stale extra indistinguishable from an honest one (sixth gate round two).
+  ``verify_candidate`` below supplies ``[*pending, *current_updates]``, the
+  accumulated pending updates of earlier records plus this record's own,
+  parsed from the same payload the walk verified.  What makes that equal the
+  derived set at every step is not that it is a superset -- a superset is now
+  what is refused -- but that the walk clears ``pending`` at every available
+  witness, and the one record in this tree carrying a ``trustBundleUpdates``
+  entry has an available witness: ``pending`` is therefore empty at every one
+  of the 53 calls and the supplied list is this record's own updates and
+  nothing else.  A tree whose update arrived on a record with an *unavailable*
+  witness would reach the refusal here, by design, and the shape for it is the
+  step API below.  The derivation itself now
+  runs on every call rather than only when no list is supplied, so the ported
+  ``trustBundleUpdates`` refusals could in principle fire inside
+  ``verify_witness`` where they did not before; the walk runs
+  ``trust_bundle_updates`` on the same payload before the call, so any such
+  refusal still arrives from there first, in the same words.  The port also
+  offers a second public entry point, ``verify_witness_step``, which takes the
+  pending updates of *earlier* records as ``prior_pending_updates``, combines
+  them with the snapshot's own itself, and returns the snapshot-derived list
+  beside the evidence, so that no entry in the transition is one the
+  verification did not either derive or attribute to an earlier record (fifth
+  gate round three, made public in the sixth gate's round two).
+  ``verify_candidate`` keeps the supplied-list shape,
+  because that shape is the upstream's and this file mirrors the upstream; on
+  this tree the two evaluate the same transition, since the walk parses
+  ``current_updates`` from the payload it verified and the port derives the
+  same references from its own read of the same file, and what separates them
+  is only a record rewritten under the walk, which no case here does;
+- the port reads the three JSON inputs the verification depends on -- the
+  trust bundle, the witness sidecar, and the chain genesis -- through one
+  non-blocking ``fstat``-judged descriptor apiece rather than through
+  ``load_json``'s check-then-blocking-open, so all six files it both checks
+  and acts on are read the same way -- one descriptor, ``O_NONBLOCK``,
+  ``O_NOFOLLOW`` and ``O_BINARY`` where the platform has them, and the regular-
+  file rule decided by the ``fstat`` of that descriptor (fifth gate round
+  three).
+  ``load_json``'s own two parse refusals are produced over those bytes and
+  render byte for byte, as the record's already do; what changes is
+  ``load_json``'s ``OSError`` branch, which becomes the caller's own
+  path-level words, and a symlink at the final component, which
+  ``O_NOFOLLOW`` refuses where ``read_text`` followed it.  Genesis had no
+  path-level check at all and gains one in the same form.  All 56 of those
+  files in the pinned tree -- the genesis file, both trust bundles and all 53
+  sidecars -- are regular files and none is a symlink, and no mutation here
+  replaces one with anything else, so no case reaches any of it.  The bundle
+  asks three further questions of its file -- whether the bytes are the
+  canonical encoding of the payload, their SHA-256, and their size -- and the
+  port now answers all three from the one read rather than from a
+  ``read_bytes``, a ``sha256_file`` and a ``stat`` of the path (sixth gate
+  round one).  The values are the same values for a file nothing rewrites
+  between them, which is every case here, so no comparison moves; what moves
+  is that a bundle replaced mid-load can no longer make the anchors and their
+  commitments describe two different instants.  The component walk does not
+  cover these three: each refuses a link at its own final component, the
+  sidecars' other components are the records' and are ``lstat``-ed during the
+  records' own reads rather than at the sidecars' opens, and
+  genesis sits directly under the records root, which leaves ``records/trust``
+  -- not a link here -- read through no walk, and a bundle's bytes are pinned
+  entire in any case;
+- the baseline compares a bundle's anchors with the code identities in one
+  direction only, so an identity scoped to a bundle whose anchors do not
+  include it is ignored; the port requires the two sets to be equal at load.
+  The pinned ``tsa-anchors-v1`` configures ``freetsa-root-2016`` and the spec
+  above pins exactly that identity for it, and ``tsa-anchors-v2`` configures
+  ``freetsa-root-2016`` and ``digicert-trusted-root-g4`` and the spec pins
+  exactly those two, so no case here reaches the refusal;
+- the baseline runs against whatever ``openssl`` is on the path; the port
+  refuses one that is not OpenSSL 3.0 or newer, once per process and before
+  any bundle is read, because it counts a pinned root's certificates with
+  ``storeutl`` and verifies an available token with ``-no-CAstore``: LibreSSL
+  has neither at any version, and an OpenSSL before 3.0 has not the option.
+  Both sides of every comparison here run under the same interpreter and the
+  same ``openssl``, and a machine that fails the check runs neither, so no
+  case here can differ on it;
+- the baseline lets two anchors of one bundle allow the same signer; the port
+  refuses that bundle at load, because one authority under two anchor ids is
+  satisfied twice by one response.  ``tsa-anchors-v1`` configures one anchor,
+  and ``tsa-anchors-v2``'s two anchors declare disjoint allowed signers
+  (``fa02bd55...`` for ``freetsa-root-2016``, ``7abda95e...`` for
+  ``digicert-trusted-root-g4``), so no case here reaches the refusal;
+- the baseline de-duplicates a v2 witness's anchor outcomes by anchor id and
+  leaves the response free; the port additionally requires every verified
+  response to be distinct across the witness's primary and supplemental
+  outcomes together, by four rules: the physical path an outcome points at,
+  keyed on a portable fold of it (NFC then ``casefold``, component by
+  component), refused before that outcome's response is read; the file digest
+  it declares, refused ahead of the ported refusals inside the token verifier;
+  the object that outcome's read opened, as ``(st_dev, st_ino)`` off the
+  descriptor the bytes came out of, refused at the read; and the ``TSTInfo``
+  an authority signed paired with the certificate that signed it, refused
+  where that verifier returns.  Each reaches what the one
+  before it cannot.  Two outcomes naming
+  one path may declare two digests, and each outcome reads the path itself,
+  so a writer serving a different response to each read satisfies both from a
+  repository that held neither state twice (peer review, fifth gate round
+  one).  Two outcomes may spell one directory entry two ways -- one case, one
+  normalisation -- which such a writer turns into the same evidence by
+  *replacing* the entry between the two reads, so that the object behind the
+  name is two as well and every identity behind the name is blind; the fold
+  is what makes the first rule about the entry and not about the spelling,
+  and it deliberately refuses two genuinely distinct files whose names fold
+  together on the filesystems that keep them apart, because a witness whose
+  meaning depends on which filesystem an auditor cloned onto is not one an
+  auditor can act on (fifth gate round three).  Two outcomes may also name one
+  file under two paths that do not fold together -- a symlinked parent
+  directory or a second hard link -- which no comparison of names separates,
+  and which the same writer turns into the same evidence (fifth gate round
+  two).  Those two shapes compose, and composed they defeat all four rules:
+  a direct path and an alias of the token's *directory* fold apart, and with
+  the entry replaced between the reads the object rule sees two inodes, the
+  digest rule two true digests and the timestamp rule two genuine issuances.
+  So the port walks every component of a token path from the records root
+  down and refuses a link at any of them, upstream of all four (sixth gate
+  round one); the object rule is kept because a second hard link needs no
+  link anywhere.  And the ``PKIStatusInfo`` wrapper around a token is
+  unsigned, as are
+  a ``SignedData``'s ``certificates``, ``crls`` and ``unsignedAttrs``, so one
+  issuance has many valid encodings with different file digests.  The signer
+  is half of that last identity because a ``TSTInfo`` need not name its
+  authority -- RFC 3161 makes its serial unique within one TSA only, and its
+  nonce and ``tsa`` name optional -- so two pinned authorities can sign
+  identical ``TSTInfo``s legitimately, and counting the signed bytes alone
+  refused the second of two valid outcomes (same round).  The 53 pinned
+  witnesses declare 91 tokens between them, at most two per witness, at 91
+  distinct physical paths with 91 distinct fold keys, naming 91 distinct
+  ``(st_dev, st_ino)`` objects with 91 distinct file digests and 91 distinct
+  signed ``TSTInfo``s -- distinct before the signer qualifies them, so
+  distinct after -- and no witness names one path twice or spells one path
+  two ways, so none of the four refusals fires on any case here;
+- the baseline takes an anchor ID alone for the active identity when deciding
+  which anchors of a pending bundle need a supplemental outcome, so a pending
+  anchor reusing an active ID under a different root is skipped, while one
+  renaming an active authority is not; the port keys the active set by ID and
+  declared root SPKI together, which makes the first a candidate and so
+  brings it under the ported supplemental-outcome refusal, and skips a
+  pending anchor whose allowed signers are exactly one active anchor's,
+  which is the active authority under a new name and has nothing to
+  prove by stamping again (peer review, fifth gate round one).  A pending
+  anchor allowing an active signer beside a new one is refused instead of
+  skipped, being neither a rename nor a new authority (fifth gate round two);
+  so is one carrying part of an active authority and not the whole of it --
+  a piece of one active class's signers, or the signers of two classes
+  together -- which the flattened set of active signers could not tell from a
+  rename, since flattening is exactly what loses whose key is whose (fifth
+  gate round three).  The classes are the connected components of the active
+  anchors, joined wherever two carry one ``(ID, root SPKI)`` or share a
+  signing key, because an activated rename made two anchors one authority and
+  a rotation under either name extended that one authority's keys: grouping
+  per anchor instead left an authority that had been renamed and then rotated
+  holding a key under each of its names, so a further rename carrying the
+  whole of it equalled neither and was refused, and that transition could not
+  be witnessed at all (sixth gate round one).  The grouping only ever turns a
+  refusal into a skip -- a component is connected through shared keys, so
+  where every touched anchor's own set equalled the pending signers the class
+  does too.  The refusal of two pending bundles introducing one authority
+  under two anchors, which this list stated in the present tense for a round
+  after it was gone, is withdrawn: it is the port's only withdrawal.  Pending
+  history was a rolling set of current candidates, so a skipped rename or
+  rotation contributed no edge and reversing an anchor array could change the
+  verdict; one persistent component graph is built instead, from every active
+  and pending anchor the verification sees, and each pending-only class
+  contributes exactly one candidate -- its newest occurrence -- however many
+  names it has been filed under.  What stopped one new authority being counted
+  twice was the count and not the refusal (round two).  The comparison a
+  rename is measured against is the class's *live era* -- the union over its
+  active occurrences in its newest active era -- and not the union over its
+  whole history, which refused an honest rename written after an activated
+  rotation; and the rule is asked only of an anchor whose owned keys resolve
+  to a class that holds an active anchor, since a pending-only class has one
+  candidate whichever of its names is elected (first Opus round).
+  ``tsa-anchors-v2`` reuses ``freetsa-root-2016`` under the same root SPKI as
+  ``tsa-anchors-v1`` (``52c54ba3...``) and the same allowed signer
+  (``fa02bd55...``), so the ``(ID, root SPKI)`` half skips it before the
+  signers are looked at, and introduces
+  ``digicert-trusted-root-g4`` under a new ID, a new root and a signer
+  (``7abda95e...``) no active anchor allows, so neither half skips it and its
+  signer set touches no active authority's.  The pinned chain carries one
+  pending bundle at a time -- exactly one of its 53 records carries a
+  ``trustBundleUpdates`` entry at all -- so no two pending anchors of one
+  class are ever walked together here, and neither succession nor the alias
+  rule can fire.
+  The candidate set at the pinned transition is therefore identical under
+  every keying this branch has had, and no refusal here changes;
+- three further refusals guard the same pending-anchor machinery, and none of
+  them is reachable in this tree.  A pending bundle may present at most one
+  anchor per historical class: two aliases can rotate to disjoint current
+  signers and pass the bundle-local shared-signer rule while still naming one
+  authority twice, so the completed graph is asked of every pending batch and
+  refuses two anchors resolving to one class, naming both slots and the class
+  (sixth gate round two).  An anchor whose ``(ID, root SPKI)`` the history
+  already holds is a rotation and is asked for no supplemental outcome, but it
+  is asked whose keys it may hold: adopting a second class's signer is refused
+  in a verdict naming its own authority and every class whose key it took
+  (round three).  And a pending anchor's verdict is raised at the bundle it
+  belongs to, after that bundle's own class question and before the next
+  bundle is walked, so a later bundle honestly carrying both authorities an
+  earlier one merged is not convicted of the earlier one's merge (round
+  three).  ``tsa-anchors-v2`` presents two anchors of two distinct classes,
+  neither of which the history already holds, so no case here reaches any of
+  the three;
+- the port refuses a bundle anchor whose ``allowedSigners`` holds an entry
+  that is not an object carrying a 64-character lowercase hexadecimal
+  ``spkiSha256``, asked of each entry in the bundle's own order and before any
+  set is built, and names the entry's index (sixth gate round two).  The
+  comparison just above it hashed those values into a set first, so an
+  unhashable one raised ``TypeError`` out of the set rather than a refusal.
+  Every ``allowedSigners`` entry in both pinned bundles is such an object, and
+  a mutation that changes one changes the bundle bytes and trips the
+  commitment mismatch first, so no case here reaches it;
+- the port refuses an anchored TSA read on a platform whose ``os.open`` lacks
+  ``dir_fd`` support, with the package's POSIX-platform sentence, rather than
+  falling back to a whole-path open that would restore the race the descent
+  closes (sixth gate round two).  CPython offers descriptor-relative
+  ``os.open`` on every POSIX platform this harness runs on, and both sides of
+  every comparison here run under the same interpreter, so no case can differ
+  on it;
+- the baseline ignores bundle-claim fields on an unavailable v1 witness;
+  the port resolves and counts a named bundle.  The genesis witness names
+  none;
+- the baseline decodes a policy OID's first subidentifier from one octet;
+  the port decodes it in full.  Every pinned policy OID's first
+  subidentifier fits one octet, so both decode the same here;
 - a true ``genTime``-after-wall-clock mutation is no longer reachable through
   the CLI because every pinned signed token is now in the past and the CLI has
   no ``--now`` input.  Editing only the declared time reaches the later claim
