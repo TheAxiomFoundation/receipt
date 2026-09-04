@@ -44,13 +44,13 @@ import re
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from receipt._names import (
     ALIAS_CAPABLE_SUFFIX_RE,
-    PORTABLE_NAME_RE,
-    SHORT_NAME_PUNCTUATION,
-    WIN32_RESERVED_DEVICE_NAMES,
+    PORTABLE_NAME_RE as PORTABLE_NAME_RE,
+    SHORT_NAME_PUNCTUATION as SHORT_NAME_PUNCTUATION,
+    WIN32_RESERVED_DEVICE_NAMES as WIN32_RESERVED_DEVICE_NAMES,
     NamePolicyError,
     ascii_fold_text,
     assert_no_merging_entries as assert_no_merging_tree_names,
@@ -72,53 +72,10 @@ from receipt.snapshot import (
 
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 GATE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._/-]{0,127}\Z")
-#: The punctuation an 8.3 short name may carry unchanged. An ASCII character
-#: outside this set, the ASCII letters and the ASCII digits is replaced by an
-#: underscore when Win32 derives a short name — except a space, which is
-#: removed rather than replaced, and which is why
-#: :func:`_short_name_extension` strips spaces before it maps anything.
-#: Every name this module screens, as one path component. The whole of the
-#: portability model is here: ASCII letters, digits, ``.``, ``_`` and ``-``.
-#: :func:`_assert_portable_name` asks two more questions of a component that
-#: matches — that it does not end in a period, and that it does not present a
-#: Win32 device basename — and the module docstring says why the three
-#: together replaced five filesystem models.
-#:
-#: The pattern admits a leading period, because ``.axiom`` is the directory
-#: every consumer corpus keeps its attested toolchain pin in and a rule that
-#: refused it would refuse every corpus this package exists to verify. It
-#: does not admit an empty component, nor ``.`` or ``..``, both of which end
-#: in a period.
 #: A pinned content suffix: a period, then one or more characters of the
 #: portable repertoire, refused by :class:`CorpusSpec` at construction if it
-#: is anything else. What it adds to :data:`PORTABLE_NAME_RE` is the leading
-#: period and nothing else — a suffix is compared against names that have
-#: passed that screen, so a character outside the repertoire could never
-#: match one, and a character inside it always can.
-#:
-#: The released ``CorpusSpec`` accepted any dot-prefixed portable suffix, and
-#: a grammar of one to sixteen ASCII letters or digits was a compatibility
-#: break for no gain: it refused ``.tar.gz``, ``.ssxx``, ``.a-b`` and ``._``
-#: and capped a length nothing about this module depends on (peer review, Sol
-#: round 4). All four are content-suffix syntax. Alias capability is the
-#: separate regex below: ``.a-b`` and ``._`` are structurally 8.3 extensions
-#: and are screened, while ``.ssxx`` and ``.tar.gz`` are not (peer review,
-#: Sol round 7).
-#:
-#: The two questions asked of a pin stay separate, and the separation is
-#: where the old grammar was trying to help. ``_has_pinned_suffix`` asks
-#: whether a path *ends in* the pin, which is well defined for any suffix;
-#: :func:`_short_name_carries_pinned_suffix` asks whether an alias's
-#: three-character extension *is* the pin, which is well defined only for a
-#: pin that is structurally an 8.3 extension. So the second question is
-#: asked of those pins alone — see :data:`ALIAS_CAPABLE_SUFFIX_RE` — rather
-#: than being made safe by refusing every other pin at construction.
+#: is anything else. Alias capability remains the separate shared 8.3 screen.
 CONTENT_SUFFIX_RE = re.compile(r"\.[A-Za-z0-9._-]+\Z")
-#: A pin that is structurally an 8.3 extension: a single period followed by
-#: one to three repertoire characters, which is what an alias's extension can
-#: be. A pin carrying a second period, or more than three characters after
-#: the period, is the extension of no short name and
-#: :func:`_short_name_carries_pinned_suffix` ignores it.
 
 CONTENT_KIND = "content"
 ATTESTED_KIND = "attested"
@@ -409,9 +366,9 @@ class CorpusSpec:
     The producer chooses what to write into the journal. The consumer chooses
     what the journal must cover before a verdict is allowed to pass. Every
     field here is the second kind of choice. Trust anchors have no package
-    defaults. ``journal_row_capacity`` is the resource pin and alone defaults
-    to :data:`MAX_JOURNAL_ROWS`, preserving every existing consumer spec while
-    letting one with a longer append-only history raise its own capacity.
+    defaults. ``journal_row_capacity`` defaults to :data:`MAX_JOURNAL_ROWS` and
+    ``name_repertoire`` defaults to ``portable``, preserving existing consumer
+    specs while letting a longer history or a byte-oriented corpus opt in.
     """
 
     schema_version: str
@@ -421,7 +378,7 @@ class CorpusSpec:
     accepted_gate_tiers: frozenset[str]
     required_gates: frozenset[str]
     journal_row_capacity: int = MAX_JOURNAL_ROWS
-    name_repertoire: str = "portable"
+    name_repertoire: Literal["portable", "posix-bytes"] = "portable"
 
     def __post_init__(self) -> None:
         try:
@@ -498,18 +455,7 @@ class CorpusSpec:
                 )
 
     def content_root_of(self, path: str) -> pathlib.PurePosixPath | None:
-        """The pinned root this path sits under, compared by fold key.
-
-        Byte-exact membership contradicted the rest of the module. The suffix
-        predicate folds, the alias guard folds, and the tombstone search
-        folds — but a path's *root* was matched byte for byte, so on a
-        case-sensitive host "RULES/evil.yaml" sat outside the pinned "rules/"
-        root, was not content, and was never swept; on a case-insensitive
-        host the same bytes are inside it. Which host the auditor cloned onto
-        decided whether the closed world contained the file (peer review,
-        round three). Folded, both hosts agree it is content, and the tree
-        walk below refuses the aliasing spelling outright.
-        """
+        """Return the pinned root prefix after component-wise ASCII folding."""
 
         folded = _path_fold(path)
         for root in self.content_roots:
@@ -559,7 +505,7 @@ class CorpusVerification:
     attested: tuple[FileBinding, ...]
     gates: tuple[GateDeclaration, ...]
     removed_paths: tuple[str, ...]
-    name_repertoire: str
+    name_repertoire: Literal["portable", "posix-bytes"]
 
     def gates_in_tier(self, tier: str) -> tuple[GateDeclaration, ...]:
         return tuple(gate for gate in self.gates if gate.tier == tier)
@@ -645,10 +591,7 @@ def _reject_control_characters(value: str, label: str) -> str:
       renderer that honours them.
     - Every code point in category Cs, a lone surrogate. JSON spells one as
       ``\\ud800`` inside otherwise valid UTF-8, so it survives the decode, and
-      no legitimate reason carries one. The other half of why it was refused
-      belonged to paths — ``os.lstat`` raises ``UnicodeEncodeError`` on one,
-      a ``ValueError`` no ``OSError`` handler sees — and that half is the
-      portable-name screen's now.
+      no legitimate reason carries one.
 
     Taking the Cf class whole has a cost, accepted deliberately: U+200C and
     U+200D are required spelling in Persian, Hindi and Sinhala, and U+061C
@@ -951,21 +894,14 @@ def _validate_relative_path(
 ) -> str:
     """Reject anything that could escape the root or mean two things at once.
 
-    Four shape rules and then the name screen. The shape rules are about the
+    Four shape rules and then the selected repertoire screen. The shape rules are about the
     path — it must be a bounded non-empty string, relative, with no empty
     and no ``.``/``..`` segment — and they run first so that a path with one
     of those faults is told what is wrong with it as a path.
 
-    :func:`_assert_portable_name` is the rest, and it is now the whole of the
-    rest. It subsumes four screens this function used to carry separately: a
-    backslash (not in the repertoire), a colon (not in the repertoire, which
-    is what kept ``C:/x`` from joining drive-absolute under ``pathlib``), the
-    control, format-control, surrogate and line-separator classes
-    :func:`_reject_control_characters` refuses in producer text (none of them
-    in the repertoire), and the two Win32 alias shapes — a trailing dot or
-    space, and the 8.3 tilde grammar — which the repertoire and the
-    trailing-period rule between them make unspellable. One screen and one
-    message in place of five, and the module docstring says why.
+    ``portable`` applies :func:`_assert_portable_name`. ``posix-bytes`` keeps
+    any otherwise valid text component, but still requires strict UTF-8 before
+    the path enters the ASCII-fold indexes used by both repertoires.
     """
 
     if type(value) is not str or not value:
@@ -1170,8 +1106,8 @@ def parse_journal(
     append-only journal records a corrected encoding without rewriting
     history. A ``removed`` row drops the path from the present view, and it
     is a claim about the tree as well as the journal: verification refuses a
-    tombstoned path that is still on disk. A file that stays in the
-    repository stays bound; the only way to stop binding it is to remove it.
+    tombstoned path that remains in the selected tree. A file that stays in
+    the repository stays bound; the only way to stop binding it is to remove it.
 
     Row capacity is the consumer's committed resource pin, not a process-wide
     corpus limit. It defaults to :data:`MAX_JOURNAL_ROWS` and is validated
