@@ -360,7 +360,22 @@ def run_port_base_ref(
     production pins enforced (no anchor override). The port selects the two
     commits once, compares their entered snapshots, and runs the unchanged
     directory verifier only over a private materialization of the candidate.
+
+    The two legacy-diagnostic adapters accept only the reader's exact message
+    shape. The ancestry form deliberately removes the candidate OID by calling
+    it ``HEAD``, so a wrongly selected candidate OID would still be adapted; a
+    wrong base OID remains in the adapted text and would not match the oracle.
     """
+
+    def legacy_error(
+        error: SnapshotError,
+        expected: str,
+        message: str,
+    ) -> ReleaseChainError:
+        assert str(error) == expected, (
+            f"snapshot diagnostic changed shape: {error}"
+        )
+        return ReleaseChainError(message)
 
     try:
         with TreeSnapshot.select(
@@ -373,12 +388,14 @@ def run_port_base_ref(
                 # authenticated legacy oracle pins the one missing-ref message,
                 # so adapt only that exact reader diagnostic without resolving
                 # the ref a second time.
-                if str(exc) == f"cannot resolve commit {base_ref!r}":
-                    raise ReleaseChainError(
+                raise legacy_error(
+                    exc,
+                    f"cannot resolve commit {base_ref!r}",
+                    (
                         f"cannot resolve base ref {base_ref!r} to a commit: "
                         "fatal: Needed a single revision"
-                    ) from exc
-                raise
+                    ),
+                ) from exc
             with selected_base as base:
                 try:
                     candidate.assert_ancestor(base)
@@ -390,11 +407,11 @@ def run_port_base_ref(
                         f"base commit {base.commit} is not an ancestor of "
                         f"candidate commit {candidate.commit}"
                     )
-                    if str(exc) == candidate_message:
-                        raise ReleaseChainError(
-                            f"base commit {base.commit} is not an ancestor of HEAD"
-                        ) from exc
-                    raise
+                    raise legacy_error(
+                        exc,
+                        candidate_message,
+                        f"base commit {base.commit} is not an ancestor of HEAD",
+                    ) from exc
                 if verify_objects:
                     candidate.verify_object_store((candidate.commit, base.commit))
                 verify_release_history_immutable(
