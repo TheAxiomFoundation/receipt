@@ -120,6 +120,7 @@ class VerificationSpec:
     name: str
     chain: ChainSpec
     corpus: CorpusSpec
+    anchor_set_sha256: str | None = None
     # Derived, never supplied: init=False so a consumer cannot even appear to
     # set it. See __post_init__ for why it is not a choice.
     journal_relative: pathlib.PurePosixPath = field(init=False, default=None)  # type: ignore[assignment]
@@ -131,6 +132,15 @@ class VerificationSpec:
             raise VerifySpecError("VerificationSpec chain must be a ChainSpec")
         if not isinstance(self.corpus, CorpusSpec):
             raise VerifySpecError("VerificationSpec corpus must be a CorpusSpec")
+        if self.anchor_set_sha256 is not None and (
+            type(self.anchor_set_sha256) is not str
+            or len(self.anchor_set_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in self.anchor_set_sha256)
+        ):
+            raise VerifySpecError(
+                "VerificationSpec anchor_set_sha256 must be a lowercase SHA-256 "
+                f"digest or None: {self.anchor_set_sha256!r}"
+            )
         # The journal the corpus binds IS the state file the chain witnesses.
         # Allowing them to differ would let a repository witness one file and
         # bind another, which is precisely the substitution the chain exists to

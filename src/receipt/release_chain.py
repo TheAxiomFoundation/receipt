@@ -185,9 +185,10 @@ import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 
 from receipt import sign as _sign
+from receipt._names import NamePolicyError, validate_repertoire
 from receipt.canonical import canonical_bytes, canonical_sha256
 
 # One availability gate for the whole package: producer-signature verification
@@ -310,6 +311,7 @@ class ChainSpec:
     producer_public_key_filename: str
     producer_spki_sha256: str
     anchors: Mapping[str, AnchorSpec]
+    name_repertoire: Literal["portable", "posix-bytes"] = "portable"
 
     def __post_init__(self) -> None:
         """Refuse a spec that cannot pin what it claims to pin.
@@ -335,6 +337,10 @@ class ChainSpec:
             "release_root_relative",
         ):
             _spec_relative_path(getattr(self, name), f"ChainSpec {name}")
+        try:
+            validate_repertoire(self.name_repertoire)
+        except NamePolicyError as exc:
+            raise ReleaseChainError(str(exc)) from exc
         _sha256(self.producer_spki_sha256, "ChainSpec producer_spki_sha256")
         if not isinstance(self.anchors, Mapping) or not self.anchors:
             raise ReleaseChainError(

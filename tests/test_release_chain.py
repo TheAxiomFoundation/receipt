@@ -130,6 +130,36 @@ def test_by_default_no_digest_is_computed(repo: pathlib.Path) -> None:
     assert verification.anchor_file_sha256s == ()
 
 
+def test_chain_spec_defaults_to_the_portable_name_repertoire(
+    repo: pathlib.Path,
+) -> None:
+    spec, _ = load_spec(repo / "verification/spec.py")
+
+    assert spec.chain.name_repertoire == "portable"
+    assert replace(spec.chain, name_repertoire="posix-bytes").name_repertoire == (
+        "posix-bytes"
+    )
+    with pytest.raises(
+        ReleaseChainError,
+        match="name repertoire must be 'portable' or 'posix-bytes'",
+    ):
+        replace(spec.chain, name_repertoire="unknown")
+
+
+def test_verification_spec_anchor_set_pin_is_defaulted_and_validated(
+    repo: pathlib.Path,
+) -> None:
+    spec, _ = load_spec(repo / "verification/spec.py")
+
+    assert spec.anchor_set_sha256 is None
+    assert replace(spec, anchor_set_sha256="0" * 64).anchor_set_sha256 == "0" * 64
+    with pytest.raises(
+        ValueError,
+        match="VerificationSpec anchor_set_sha256 must be a lowercase SHA-256 digest",
+    ):
+        replace(spec, anchor_set_sha256="A" * 64)
+
+
 def test_observing_adds_no_anchor_reads(built: pathlib.Path, tmp_path: pathlib.Path) -> None:
     """Default mode reads each anchor exactly as 0.5.0 did (producer key once
     per release for the signature, each TSA anchor once per receipt for the
