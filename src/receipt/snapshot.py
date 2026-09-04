@@ -69,10 +69,11 @@ materialization totals are then enforced across both snapshots together.
   ``MAX_ATTRIBUTE_MATCH_WORK`` is 67,108,864 matcher transitions and applied
   states. Checks cover protected paths only, making this generous for
   Chronicle's small surface.
-  Git 2.53.0 discards physical attribute lines at least 2,048 bytes long and
-  lines containing invalid or reserved attribute names, and stops a blob at
-  embedded NUL; this reader refuses each case so discarded input cannot
-  silently change rule precedence.
+  Git 2.53.0 skips blank and comment lines before any other test, discards
+  rule lines at least 2,048 bytes long and rules naming an invalid or
+  reserved attribute, and stops reading a blob at an embedded NUL; this
+  reader skips the same lines and refuses each discarding case and the NUL,
+  so discarded input cannot silently change rule precedence.
 * ``MAX_CONTENT_BLOB_BYTES`` is 256 MiB per streamed content object and
   ``MAX_CONTENT_BYTES_TOTAL`` is 16 GiB. The largest measured rulespec-us blob
   is 6,550,684 bytes and all 15,216 blobs total 107,132,889 bytes.
@@ -696,18 +697,21 @@ def _parse_config(output: bytes) -> tuple[tuple[str, str, str], ...]:
 
 
 def _config_bool(key: str, value: str) -> bool:
-    """Read a configuration value the way ``git_config_bool`` does.
+    """Classify a boolean configuration value as git 2.53.0 does.
 
-    ``true``, ``yes``, ``on``, ``1`` and the empty (valueless) form are true;
-    ``false``, ``no``, ``off`` and ``0`` are false; git dies on anything else,
-    and so does this reader, because a value it cannot classify is one it
-    cannot apply the same way git will.
+    ``true``, ``yes``, ``on`` and ``1`` are true, and so is the valueless
+    form, which ``_parse_config`` already spells ``true``; ``false``, ``no``,
+    ``off``, ``0`` and an explicitly empty value (``ignorecase =``) are false,
+    as ``git config --type=bool`` reports them (peer review, round 4). Git
+    reads any other integer as true when it is non-zero and dies on other
+    text; this reader refuses both, deliberately narrower than git, because a
+    value outside that closed set is one it will not apply on git's behalf.
     """
 
     lowered = value.strip().lower()
-    if lowered in {"", "true", "yes", "on", "1"}:
+    if lowered in {"true", "yes", "on", "1"}:
         return True
-    if lowered in {"false", "no", "off", "0"}:
+    if lowered in {"", "false", "no", "off", "0"}:
         return False
     raise SnapshotError(f"repository configuration key {key!r} has a non-boolean value {value!r}")
 
@@ -1019,19 +1023,30 @@ def _parse_attribute_file(
             original = payload[position:]
         else:
             original = payload[position:line_end]
-        # Git 2.53.0 attr.h fixes ATTR_MAX_LINE_LENGTH at 2048; attr.c's
-        # parse_attr_line() drops strlen(line) >= that limit; parse_attr()
-        # drops the whole rule when attr_name_valid() or attr_name_reserved()
-        # rejects one state name; and read_attr_from_buf() stops at embedded
-        # NUL. Refuse these cases rather than disagreeing about precedence.
-        if len(original) >= 2048:
-            raise _unsupported_attribute(
-                path, line_number, "line longer than 2048 bytes"
-            )
-        if any(byte < 0x20 and byte != 0x09 for byte in original):
+        # Git 2.53.0's read_attr_from_buf() stops reading the blob at an
+        # embedded NUL, so every rule after one is unseen by git: refuse the
+        # blob on any line rather than honour rules git never reads.
+        if b"\0" in original:
             raise _unsupported_attribute(path, line_number, "control byte")
-        line = original.strip(b" \t")
+        # attr.c's parse_attr_line() skips leading blanks (space, tab and CR,
+        # measured on git 2.53.0) and returns before any other test on an
+        # empty line or a '#' comment, whatever the line's length or contents;
+        # the reader skips those lines the same way (peer review, round 4).
+        line = original.strip(b" \t\r")
         if line and not line.startswith(b"#"):
+            # attr.h fixes ATTR_MAX_LINE_LENGTH at 2048 and parse_attr_line()
+            # drops a rule line whose strlen(), leading blanks included, is at
+            # least that; parse_attr() drops the whole rule when
+            # attr_name_valid() or attr_name_reserved() rejects one state
+            # name; and git splits fields at CR as well as at space and tab
+            # (measured). Refuse these cases rather than disagreeing about
+            # precedence.
+            if len(original) >= 2048:
+                raise _unsupported_attribute(
+                    path, line_number, "line longer than 2048 bytes"
+                )
+            if any(byte < 0x20 and byte != 0x09 for byte in original):
+                raise _unsupported_attribute(path, line_number, "control byte")
             fields = re.split(rb"[ \t]+", line)
             if len(fields) < 2:
                 raise _unsupported_attribute(
@@ -3019,13 +3034,14 @@ class TreeSnapshot:
         """Evaluate the fail-closed committed-attribute subset over paths.
 
         Only ``filter``, ``ident`` and ``working-tree-encoding`` transform raw
-        blob bytes. Under ``core.ignoreCase`` in the repository's own scopes
-        the patterns and the paths are compared after an ASCII case fold, as
-        git's ``WM_CASEFOLD`` does; a value of that key git could not classify
-        as a boolean is refused at selection. Their set and valued states refuse; unset, absent, and an
-        explicit unspecified state are harmless. ``text`` and ``eol`` are
-        accepted in every state, and the built-in ``binary`` macro expands to
-        ``-diff -merge -text``. No non-tree attribute source is consulted.
+        blob bytes: their set and valued states refuse, while unset, absent
+        and an explicit unspecified state are harmless. ``text`` and ``eol``
+        are accepted in every state, and the built-in ``binary`` macro expands
+        to ``-diff -merge -text``. Under ``core.ignoreCase`` in the
+        repository's own scopes the patterns and the paths are compared after
+        an ASCII case fold, as git's ``WM_CASEFOLD`` does; a value of that key
+        git could not classify as a boolean is refused at selection. No
+        non-tree attribute source is consulted.
         """
 
         self._batch()

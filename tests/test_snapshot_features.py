@@ -578,6 +578,60 @@ def test_attribute_blob_nul_that_stops_git_refuses_fail_closed(
         selected.refuse_transforming_attributes((protected_path,))
 
 
+@pytest.mark.parametrize(
+    "skipped_line",
+    [
+        b"#" + b"x" * 2100,
+        b" " * 2100,
+        b"# carriage\rreturn",
+        b"\r# comment after a carriage return",
+        b"\r",
+    ],
+    ids=["long-comment", "long-blank", "cr-in-comment", "cr-led-comment", "cr-only"],
+)
+@pytest.mark.parametrize(
+    ("rule", "oracle", "refuses"),
+    [
+        (b"releases/*.json filter=evil", b"evil", True),
+        (b"releases/*.json -filter", b"unset", False),
+    ],
+    ids=["transforming-rule", "harmless-rule"],
+)
+def test_blank_and_comment_lines_git_skips_are_skipped_not_refused(
+    git_repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    skipped_line: bytes,
+    rule: bytes,
+    oracle: bytes,
+    refuses: bool,
+) -> None:
+    """git skips blank and comment lines before its length and content tests.
+
+    Measured on git 2.53.0: a 2,101-byte comment, a 2,100-byte blank line, a
+    comment holding a carriage return and a line led by one are all skipped
+    without a warning, and the rule on the next line applies. The reader once
+    refused each of them at line 1 (peer review, round 4); it now reaches the
+    rule and refuses or accepts on the rule alone, as the oracle does.
+    """
+
+    protected_path = "releases/release.json"
+    _write(git_repo, ".gitattributes", skipped_line + b"\n" + rule + b"\n")
+    _write(git_repo, protected_path, b"{}\n")
+    commit = _commit(git_repo)
+    assert _cached_attribute_value(
+        git_repo, tmp_path, "filter", protected_path
+    ) == oracle
+
+    with TreeSnapshot.select(git_repo, commit) as selected:
+        if refuses:
+            with pytest.raises(
+                SnapshotError, match="transforming attribute filter applies"
+            ):
+                selected.refuse_transforming_attributes((protected_path,))
+        else:
+            selected.refuse_transforming_attributes((protected_path,))
+
+
 def test_materialization_selects_and_deduplicates_nested_prefixes(
     git_repo: pathlib.Path, tmp_path: pathlib.Path
 ) -> None:
@@ -1446,7 +1500,9 @@ def test_a_non_boolean_ignorecase_value_refuses_at_selection(
 ) -> None:
     """git dies on ``core.ignoreCase=maybe`` during discovery, so selection
     refuses before any read; the reader's own classifier refuses the same
-    value if a record ever reaches it."""
+    value if a record ever reaches it. It also refuses the integer ``2``,
+    which git reads as true (measured on git 2.53.0), a deliberate narrowing;
+    an explicitly empty value is false, as git reads it."""
 
     root = tmp_path / "repo"
     _init(root)
@@ -1457,6 +1513,51 @@ def test_a_non_boolean_ignorecase_value_refuses_at_selection(
         TreeSnapshot.select(root, commit)
     with pytest.raises(SnapshotError, match="non-boolean value 'maybe'"):
         snapshot_module._config_ignorecase((("local", "core.ignorecase", "maybe"),))
-    assert snapshot_module._config_ignorecase((("local", "core.ignorecase", ""),)) is True
+    assert snapshot_module._config_ignorecase((("local", "core.ignorecase", ""),)) is False
+    with pytest.raises(SnapshotError, match="non-boolean value '2'"):
+        snapshot_module._config_ignorecase((("local", "core.ignorecase", "2"),))
     assert snapshot_module._config_ignorecase((("local", "core.ignorecase", "Off"),)) is False
     assert snapshot_module._config_ignorecase((("global", "core.ignorecase", "true"),)) is False
+
+
+def test_an_explicitly_empty_ignorecase_value_is_false_like_git(
+    tmp_path: pathlib.Path,
+) -> None:
+    """``ignorecase =`` is false to git, unlike the valueless ``ignorecase``.
+
+    ``git config --type=bool`` reports the explicitly empty value as false and
+    ``check-attr`` leaves a case-differing pattern unapplied under it, while
+    the reader once read it as true and folded case (peer review, round 4).
+    """
+
+    root = tmp_path / "repo"
+    _init(root)
+    config = root / ".git" / "config"
+    config.write_bytes(config.read_bytes() + b"\n[core]\n\tignorecase =\n")
+    (tmp_path / "empty-global").write_bytes(b"")
+    environment = snapshot_module._git_environment(tmp_path / "empty-global")
+    reported = _git(
+        root, "config", "--type=bool", "core.ignorecase", environment=environment
+    )
+    assert reported.stdout.strip() == b"false"
+    snapshot = _snapshot_with_attributes(
+        root, b"RELEASES/manifests/x.json filter=evil\n", ["releases/manifests/x.json"]
+    )
+    (tmp_path / "empty").write_bytes(b"")
+    oracle = _git(
+        root,
+        "-c",
+        f"core.attributesFile={tmp_path / 'empty'}",
+        "check-attr",
+        "--cached",
+        "-z",
+        "filter",
+        "--",
+        "releases/manifests/x.json",
+        environment=environment,
+    ).stdout.split(b"\0")
+    assert oracle[2] == b"unspecified", oracle
+    assert ("local", "core.ignorecase", "") in snapshot._state.config_records
+    assert snapshot_module._config_ignorecase(snapshot._state.config_records) is False
+    with snapshot:
+        snapshot.refuse_transforming_attributes(["releases/manifests/x.json"])
