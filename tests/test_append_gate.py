@@ -124,6 +124,7 @@ import pathlib
 import shutil
 import signal
 import subprocess
+from types import SimpleNamespace
 import unicodedata
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
@@ -135,6 +136,7 @@ from receipt import append_gate, release_chain
 from receipt.append_gate import (
     AppendError,
     AppendGateSpec,
+    _assert_release_paths_are_subdirectories,
     expected_assertion_version_id,
     verify_append_gate,
 )
@@ -5699,7 +5701,9 @@ def test_a_release_path_spelled_as_the_candidate_root_is_refused(
     with the candidate root — which answered the ``AssertionError`` an earlier
     draft raised, and left every read above still disagreeing. The seeding is
     gone and the spec is refused at the gate's entry instead, before the tree
-    is touched.
+    is touched — and, since spec validation landed (#41), by ``ChainSpec``
+    itself at construction, so the gate's check is reached only by a chain
+    that was never built through the constructor.
 
     Measured at de1dbe4 with the refusal removed, for both spellings. A
     release root of ``.``: the push path accepts it outright, as
@@ -5719,26 +5723,34 @@ def test_a_release_path_spelled_as_the_candidate_root_is_refused(
     No consumer pins such a spec and no fixture here builds one; the point is
     that a verifier answers rather than asserting or half-reading."""
 
-    candidate = base_repository(tmp_path)
-    chain = replace(
-        CHAIN_SPEC, **{field: pathlib.PurePosixPath(spelling)}
+    # ``ChainSpec`` refuses both spellings at construction (spec validation,
+    # #41), so no gate ever meets such a spec through the public constructor.
+    with pytest.raises(ReleaseChainError) as constructed:
+        replace(CHAIN_SPEC, **{field: pathlib.PurePosixPath(spelling)})
+    assert str(constructed.value) == (
+        f"ChainSpec {field} must be a relative path naming at least one "
+        f"component, with no '..': {pathlib.PurePosixPath(spelling).as_posix()!r}"
     )
-    spec = replace(GATE_SPEC, chain=chain)
+
+    # The gate's own entry check stays, in its own words, for a spec that did
+    # not come through ``ChainSpec.__post_init__``: it is asked of the chain
+    # the gate is handed, whatever built it.
     label = {
         "release_root_relative": "release root",
         "manifest_relative": "release manifest path",
         "anchor_relative": "release anchor path",
     }[field]
-
+    fields = {
+        name: getattr(CHAIN_SPEC, name)
+        for name in ("release_root_relative", "manifest_relative", "anchor_relative")
+    }
+    fields[field] = pathlib.PurePosixPath(spelling)
+    bypassed = SimpleNamespace(chain=SimpleNamespace(**fields))
     with pytest.raises(AppendError) as refusal:
-        run_push_gate(candidate, spec=spec)
+        _assert_release_paths_are_subdirectories(bypassed)  # type: ignore[arg-type]
     assert str(refusal.value) == (
         f"{label} must be a subdirectory of the candidate root"
     )
-
-    with pytest.raises(AppendError) as with_base:
-        run_gate(candidate, spec=spec)
-    assert str(with_base.value) == str(refusal.value)
 
 
 def test_an_ordinary_spec_names_a_subdirectory_for_every_release_path(

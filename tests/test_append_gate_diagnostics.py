@@ -26,7 +26,9 @@ import pytest
 from receipt.append_gate import (
     AppendError,
     AppendGateSpec,
+    _BaseCommit,
     _manifest_at_ref,
+    _resolve_base_commit,
     _set_root,
     check_append_only,
 )
@@ -94,11 +96,26 @@ def base_without_the_ledger(tmp_path: pathlib.Path) -> pathlib.Path:
     return root
 
 
+def _head(candidate: object) -> _BaseCommit:
+    """The base as the gate carries it: named ``HEAD``, resolved to its OID once."""
+
+    return _BaseCommit(
+        ref="HEAD",
+        commit=_resolve_base_commit("HEAD", candidate),  # type: ignore[arg-type]
+    )
+
+
 @pytest.mark.parametrize(
     ("call", "relative"),
     [
-        (lambda candidate: check_append_only("HEAD", [], candidate), LEDGER_RELATIVE),
-        (lambda candidate: _manifest_at_ref("HEAD", candidate), PREFIX_RELATIVE),
+        (
+            lambda candidate: check_append_only(_head(candidate), [], candidate),
+            LEDGER_RELATIVE,
+        ),
+        (
+            lambda candidate: _manifest_at_ref(_head(candidate), candidate),
+            PREFIX_RELATIVE,
+        ),
     ],
     ids=["check_append_only", "manifest_at_ref"],
 )

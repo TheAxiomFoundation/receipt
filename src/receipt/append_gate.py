@@ -670,11 +670,11 @@ def _assert_release_paths_are_subdirectories(spec: AppendGateSpec) -> None:
     and ``hold_release_root`` has no component to walk or hold.
 
     So it is refused here, at the gate's entry, rather than left to whichever
-    of those the run reaches first. It belongs to the gate rather than to
-    ``ChainSpec`` — a spec is the consumer's committed code, and validating it
-    is #41's subject — and it is a statement about the configuration rather
-    than about a tree, like the platform refusals below it: the gate declining
-    to answer.
+    of those the run reaches first. ``ChainSpec`` refuses both spellings at
+    construction as well (spec validation, #41), so a spec built through its
+    constructor never reaches this check; it is kept because it is the gate's
+    own statement about the configuration it was handed, whatever built it —
+    like the platform refusals below it, the gate declining to answer.
     """
 
     for label, relative in (
