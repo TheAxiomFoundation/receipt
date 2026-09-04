@@ -64,13 +64,24 @@
   `refs/replace` immunity; and an exact rehash refusal after a logical byte
   flip in a loose candidate-tree object. The append differential is now 28/28
   green against the pinned tree with zero skips.
+- Ran all four authenticated harnesses in one offline process with explicit
+  Ledger and Brier extraction paths: exactly 108 cases collected and 108/108
+  passed with zero skips in 235.98 seconds. A prior diagnostic run used an
+  uninstalled cached interpreter, causing only the Brier oracle subprocess to
+  report that `receipt` was unavailable; the project venv supplies the package
+  to that subprocess while pytest still prepends this worktree's `src`.
+- Re-ran the #38-body port-only production differential using the authenticated
+  `9dafe81` tree and a new committed scratch repository per input: both exact
+  acceptance texts and all 15 retained mutation markers matched, 17/17 with
+  zero skips. Recorded the fixture shape, deliberate divergence, 26 re-pinned
+  + 68 unchanged + 14 additions = 108 census, commands, and outcomes in
+  `receipts/repin-0.6-tree-object.md`.
 
 ## Next
 
-- Run the four-harness 108-case equivalence census and the full offline suite;
-  perform the separate pinned production-tree 17/17 differential.
-- Write `receipts/repin-0.6-tree-object.md` with the fixture change, deliberate
-  divergence, and 26/68/94-plus-additions census.
+- Run the full offline suite and repository-wide static checks.
+- Audit retained refusal strings and obsolete-private-helper references for the
+  PR handoff.
 - Prepare the complete no-network PR handoff; pushing and opening the draft PR
   will require a networked environment unless connectivity becomes available.
 
