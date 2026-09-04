@@ -6,6 +6,8 @@ Implementation is complete on `feat/0.6-lane-c`. All Lane C unit surfaces, the a
 
 The sandbox has no network access. The branch remains local and no PR has been opened. Even with network, the standing push gate would remain closed until Lane B is merged and the complete 101-case equivalence plus exact offline commands pass.
 
+Planned draft PR title: **Verify the release chain over trees; LoadedSpec, run_verification pins and the CLI (0.6 Lane C)**.
+
 ## Done
 
 - Read the governing plan sections and the immutable snapshot contract in the required order; kept `src/receipt/snapshot.py` unchanged.
