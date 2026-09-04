@@ -124,7 +124,8 @@ The 44 full-suite failures are 43 `tests/test_cli.py` cases and `tests/test_rele
 - Branch: `feat/0.6-lane-d`, based exactly on `145f3db93d745ddc43aeb47f6b7bd8b30aa331a3`.
 - Phase: implementation, focused acceptance, static review, exact equivalence census, and full-suite diagnosis are complete.
 - Draft PR title: `Verify the corpus from the tree snapshot; name repertoire (0.6 Lane D)`.
-- Network: `CODEX_SANDBOX_NETWORK_DISABLED=1`; the complete draft body is this committed file.
+- Network: `CODEX_SANDBOX_NETWORK_DISABLED=1`; `git ls-remote origin HEAD` fails with `Could not resolve host: github.com`. The branch is local-only and the complete draft body is this committed file.
+- Draft PR URL: unavailable in this sandbox. Push/creation remain for the integrated, networked handoff.
 
 ### Done
 
@@ -133,6 +134,7 @@ The 44 full-suite failures are 43 `tests/test_cli.py` cases and `tests/test_rele
 - Completed independent final code review with no remaining in-scope blocker.
 - Kept `src/receipt/snapshot.py` unchanged and did not touch any Lane B/C/F-owned production file.
 - Ran the requested focused, static, full, and exact 94-case equivalence gates and recorded exact results above.
+- Confirmed the remote is unreachable without mutating it; no push or draft PR was attempted after the full gate exposed the expected Lane C integration cluster.
 
 ### Next
 
@@ -146,5 +148,6 @@ The 44 full-suite failures are 43 `tests/test_cli.py` cases and `tests/test_rele
 - `verify_declarations` remains deliberately separate and unchanged; the caller-level pass order is binding then declaration, matching the existing result-stage boundary.
 - A normal `uv run` cannot sync here because the inherited `UV_FROZEN=1` requires a missing `uv.lock`, and the default uv cache is outside the writable sandbox. The recorded combined command used `UV_NO_SYNC=1`, the existing project test environment, and a writable temporary cache while still invoking `uv run pytest -q`.
 - Network-disabled fixture resolution was closed by authenticated local extraction overrides, not by skipping equivalence cases.
+- The offline stop rule applies: all work and the draft body are committed locally, while GitHub DNS resolution is unavailable.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
