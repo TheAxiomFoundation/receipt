@@ -3,7 +3,7 @@
 ## State
 
 - Branch: `feat/0.6-lane-d` at baseline `145f3db93d745ddc43aeb47f6b7bd8b30aa331a3`.
-- Phase: fixture commits landed; corpus test migration and replacement cases are in progress.
+- Phase: subjectless corpus tests removed; retained-test conversion and replacement cases are in progress.
 - Scope: immutable-tree corpus verification, shared name-policy additions, corpus fixture commit helpers, and focused tests.
 - Network is sandbox-disabled; local work, tests, commits, and a complete draft PR body remain possible. Push/PR creation will be attempted only after all gates pass.
 
@@ -29,10 +29,12 @@
 - Corrected the immutable listing screen to flatten the authenticated `TreeListing` exactly once before validating entry names and directory sibling sets. This avoids charging every full path twice against the reader's shared path-byte budget and keeps snapshot failures translated to `CorpusError`.
 - Restored the pre-existing `CorpusSpec content root` portable-name diagnostic while allowing `posix-bytes` roots through the general repertoire-aware path screen.
 - Production review smoke: five focused binding/spec cases pass after the single-flattening correction.
+- Deleted exactly 57 tests whose host-filesystem, race, re-sweep, ctime, identity, or superseded work-index subject no longer exists, plus four fake-directory-listing collision tests that the committed-tree shape matrix replaces. Nineteen test-only filesystem scaffolds went with them.
+- Retained focused battery after that deletion: 198 passing cases and 18 expected migration failures. Those failures are confined to stale Unicode-normalization assertions, host-conditional spelling assertions, fake `os.scandir` entries, and removed private instrumentation; no parser, digest, membership, or declaration regression appears.
 
 ## Next
 
-1. Finish deleting the 57 subjectless host/race/budget tests and convert retained tests to committed snapshots.
+1. Convert the 18 retained host-shaped assertions to immutable committed-tree assertions.
 2. Add repertoire/tree-shape/property coverage.
 3. Run focused, offline, and equivalence gates; prepare the required PR body and final report with exact totals and OIDs.
 
