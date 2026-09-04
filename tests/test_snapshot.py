@@ -457,6 +457,32 @@ def test_selection_failure_reaps_its_short_lived_batch(
     monkeypatch.setattr(_BatchReader, "consume", original_consume)
 
 
+def test_enter_failure_explicitly_removes_its_private_directory(
+    git_repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected = TreeSnapshot.select(git_repo)
+    temporary_root = tmp_path / "temporary"
+    temporary_root.mkdir()
+    monkeypatch.setattr(snapshot_module.tempfile, "tempdir", os.fspath(temporary_root))
+
+    def fail_batch_start(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("injected batch startup failure")
+
+    monkeypatch.setattr(snapshot_module, "_BatchReader", fail_batch_start)
+    retained: RuntimeError | None = None
+    try:
+        selected.__enter__()
+    except RuntimeError as exc:
+        retained = exc
+    else:
+        pytest.fail("injected batch startup failure did not propagate")
+
+    assert str(retained) == "injected batch startup failure"
+    assert tuple(temporary_root.iterdir()) == ()
+
+
 @pytest.mark.parametrize("batch", [False, True], ids=["bounded-call", "batch"])
 def test_thread_start_failure_reaps_a_spawned_git_child(
     git_repo: pathlib.Path,
@@ -785,6 +811,23 @@ def test_nested_tree_walk_covers_all_five_raw_modes(
         assert digests == {
             "plain.txt": hashlib.sha256(b"plain\n").hexdigest(),
             "releases/manifests/release.json": hashlib.sha256(b"{}\n").hexdigest(),
+        }
+
+
+def test_directory_lookup_uses_git_directory_sort_suffix(
+    git_repo: pathlib.Path,
+) -> None:
+    (git_repo / "releases.bak").write_bytes(b"sibling\n")
+    manifest = git_repo / "releases" / "manifests" / "release.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_bytes(b"{}\n")
+    commit = _commit_worktree(git_repo, "directory sort boundary")
+
+    with TreeSnapshot.select(git_repo, commit) as selected:
+        entry = selected.entry("releases/manifests/release.json")
+        assert entry.path == "releases/manifests/release.json"
+        assert set(selected.entries("releases").as_dict()) == {
+            "releases/manifests/release.json"
         }
 
 
@@ -1144,6 +1187,29 @@ def test_canonical_commit_refuses_every_malformed_shape(payload: bytes) -> None:
         _canonical_commit(oid, payload, object_format="sha1")
 
 
+@pytest.mark.parametrize("continued_header", ("tree", "parent"))
+def test_canonical_commit_rejoins_oid_header_continuations(
+    continued_header: str,
+) -> None:
+    if continued_header == "tree":
+        headers = b"tree " + ONE_OID.encode() + b"\n continued\n"
+    else:
+        headers = (
+            b"tree "
+            + ONE_OID.encode()
+            + b"\nparent "
+            + ZERO_OID.encode()
+            + b"\n continued\n"
+        )
+    payload = headers + b"author A\ncommitter C\n\nmessage\n"
+    oid = "f" * 40
+
+    with pytest.raises(
+        SnapshotError, match=rf"^commit {oid} is not a canonical commit object$"
+    ):
+        _canonical_commit(oid, payload, object_format="sha1")
+
+
 def test_raw_tree_parser_accepts_five_modes_and_git_directory_sort_rule() -> None:
     payload = b"".join(
         [
@@ -1264,6 +1330,19 @@ def test_batch_consume_uses_info_then_contents_protocol() -> None:
     assert reader._stdin.getvalue() == (
         f"info {oid}\ncontents {oid}\n".encode("ascii")
     )
+
+
+def test_batch_contents_header_must_equal_the_info_header() -> None:
+    payload = b"payload"
+    oid = _object_oid("blob", payload)
+    info_header = f"{oid} blob {len(payload)}\n".encode("ascii")
+    contents_header = f"{oid} tree {len(payload)}\n".encode("ascii")
+    reader = _fake_batch(info_header + contents_header + payload + b"\n")
+
+    with pytest.raises(SnapshotError, match=r"^batch stream out of frame$"):
+        reader.consume(oid, role="blob", limit=100, hold=True)
+
+    assert reader.abandoned
 
 
 def test_abandoned_digest_iterator_blocks_later_requests_but_is_reaped(

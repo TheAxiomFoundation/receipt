@@ -1220,6 +1220,23 @@ def test_digest_per_blob_and_cumulative_budgets(
             list(selected.digests(entries, per_blob=3, total=5))
 
 
+def test_digests_refuses_a_symlink_entry_before_reading_its_target(
+    git_repo: pathlib.Path,
+) -> None:
+    target = b"../../outside/secret"
+    target_blob = _hash_object(git_repo, "blob", target)
+    tree = _tree_object(git_repo, ((b"120000", b"link", target_blob),))
+
+    with TreeSnapshot.select(git_repo, _commit_object(git_repo, tree)) as selected:
+        entry = selected.entry("link")
+        with pytest.raises(
+            SnapshotError,
+            match=r"^tree entry has non-regular mode 120000: link$",
+        ):
+            next(selected.digests((entry,)))
+        assert selected.work.content_bytes == 0
+
+
 @pytest.mark.parametrize(
     ("constant", "value", "message"),
     [
@@ -1285,6 +1302,56 @@ def test_verify_object_store_happy_path_and_scalar_guards(
         assert report.seconds >= 0
         with pytest.raises(SnapshotError, match="may be run only once"):
             selected.verify_object_store((selected.commit,))
+
+
+@pytest.mark.parametrize(
+    "head_shape",
+    ("unproven-base", "missing-proven-base", "different-second-head"),
+)
+def test_verify_object_store_requires_the_exact_authenticated_heads(
+    git_repo: pathlib.Path,
+    head_shape: str,
+) -> None:
+    _require_store_verification_support()
+    _write(git_repo, "base.txt", b"base\n")
+    base = _commit(git_repo, "base")
+    _write(git_repo, "candidate.txt", b"candidate\n")
+    candidate = _commit(git_repo, "candidate")
+    candidate_tree = (
+        _git(git_repo, "rev-parse", f"{candidate}^{{tree}}")
+        .stdout.decode("ascii")
+        .strip()
+    )
+    different = _commit_object(git_repo, candidate_tree)
+
+    with TreeSnapshot.select(
+        git_repo, candidate, verify_objects=True
+    ) as selected:
+        if head_shape == "unproven-base":
+            with pytest.raises(
+                SnapshotError,
+                match=(
+                    r"^verify_object_store heads must be exactly the resolved "
+                    r"candidate and base$"
+                ),
+            ):
+                selected.verify_object_store((candidate, base))
+        else:
+            with TreeSnapshot.select(git_repo, base) as prior:
+                assert selected.assert_ancestor(prior) == base
+                supplied = (
+                    (candidate,)
+                    if head_shape == "missing-proven-base"
+                    else (candidate, different)
+                )
+                with pytest.raises(
+                    SnapshotError,
+                    match=(
+                        r"^verify_object_store heads must be exactly the resolved "
+                        r"candidate and base$"
+                    ),
+                ):
+                    selected.verify_object_store(supplied)
 
 
 @pytest.mark.parametrize(
