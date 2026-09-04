@@ -602,15 +602,45 @@ def verify_evidence_records(
     caller needs to refuse a mistyped `records_relative` on its own terms.
     """
 
+    key_spec = _sign.ProducerKeySpec(
+        public_key_filename=spec.producer_public_key_filename,
+        spki_sha256=spec.producer_spki_sha256,
+    )
+    return _verify_records(
+        root,
+        spec,
+        _sign.read_producer_public_key(anchor_dir, key_spec),
+        public_key_filename=str(anchor_dir / key_spec.public_key_filename),
+    )
+
+
+def _verify_records(
+    root: pathlib.Path,
+    spec: EvidenceSpec,
+    public_key_pem: bytes,
+    *,
+    public_key_filename: str,
+) -> EvidenceVerification:
+    """Verify one records directory against one already-read producer key.
+
+    The loop `verify_evidence_records` held inline. It is separated from where
+    the key comes from because that is the only thing its two callers differ
+    on: a consumer reads the pinned public key out of its anchor directory,
+    and the producer already holds the private half of it at emission time.
+    Everything after that is one implementation, so the producer refuses to
+    extend a directory for exactly the reasons, and in exactly the words, an
+    auditor would refuse to accept it.
+
+    ``public_key_filename`` names the key in the two refusals that can only
+    come from an unreadable one. It is a path for the consumer and a
+    description for the producer, which has no file to name.
+    """
+
     # Asked before enumeration, which cannot answer it: enumeration returns
     # the empty list for an absent directory and for an existing empty one
     # alike. The confinement check runs first either way, so a linked
     # component still refuses here in the same words it refuses there.
     directory_present = _assert_records_directory_is_confined(root, spec).is_dir()
-    key_spec = _sign.ProducerKeySpec(
-        public_key_filename=spec.producer_public_key_filename,
-        spki_sha256=spec.producer_spki_sha256,
-    )
     records: list[EvidenceRecord] = []
     previous_sha256: str | None = None
     for position, (path, body_path, signature_path) in enumerate(
@@ -657,7 +687,6 @@ def verify_evidence_records(
                 f"producer signature is not a regular file: {signature_path}"
             )
         signature = signature_path.read_bytes()
-        public_key_pem = _sign.read_producer_public_key(anchor_dir, key_spec)
         try:
             # The domain is what makes this signature unusable as a manifest
             # signature: the authorizing verifier checks exact bytes with no
@@ -666,8 +695,8 @@ def verify_evidence_records(
                 spec.domain + raw,
                 signature,
                 public_key_pem,
-                public_key_filename=str(anchor_dir / key_spec.public_key_filename),
-                spki_sha256=key_spec.spki_sha256,
+                public_key_filename=public_key_filename,
+                spki_sha256=spec.producer_spki_sha256,
                 label=f"evidence record {path.name}",
             )
         except SignError as exc:
@@ -690,12 +719,18 @@ def verify_evidence_records(
     )
 
 
-def _signing_key_spki_sha256(private_key_pem: bytes) -> str:
-    """Return the SPKI digest of the public half of a signing key.
+def _signing_key_public_pem(private_key_pem: bytes) -> bytes:
+    """Return the public half of a signing key, in PEM.
 
     Reached through `receipt.sign`'s own loader rather than a second import of
     the signing library, so emission depends on exactly what `sign_payload`
     depends on and refuses in the same words when it is absent.
+
+    Split out from `_signing_key_spki_sha256`, which used to be the only
+    caller that wanted it. Emission now verifies the records already in the
+    directory before it appends to them, and the key it has to verify them
+    under is the public half of the one it is about to sign with — which the
+    producer holds already, so it needs no anchor directory to ask.
     """
 
     if type(private_key_pem) is not bytes:
@@ -708,12 +743,17 @@ def _signing_key_spki_sha256(private_key_pem: bytes) -> str:
         raise EvidenceRecordError("cannot decode Ed25519 private key") from exc
     if not isinstance(private_key, _sign.Ed25519PrivateKey):
         raise EvidenceRecordError("private key is not Ed25519")
-    public_key_pem = private_key.public_key().public_bytes(
+    return private_key.public_key().public_bytes(
         _sign.Encoding.PEM,
         _sign.PublicFormat.SubjectPublicKeyInfo,
     )
+
+
+def _signing_key_spki_sha256(private_key_pem: bytes) -> str:
+    """Return the SPKI digest of the public half of a signing key."""
+
     try:
-        return _sign.spki_sha256(public_key_pem)
+        return _sign.spki_sha256(_signing_key_public_pem(private_key_pem))
     except SignError as exc:
         raise EvidenceRecordError(str(exc)) from exc
 
@@ -787,6 +827,21 @@ def emit_evidence_record(
     held exclusively from enumeration through the last write, so the index
     this emission claims is still free when it claims it.
 
+    A fourth is settled inside that lock, before the index is: every record
+    already in the directory is verified exactly as `verify_evidence_records`
+    verifies it — the chain, canonical bytes for each record and its body, the
+    body digest, the filename, and every signature under the pin — through the
+    same `_verify_records` the consumer runs, under the public half of the key
+    this emission signs with, so no anchor directory is needed. Only the last
+    record was read before, and only far enough to take its index and digest.
+    The producer is the one party that can refuse to sign a
+    `previousRecordSha256` it has not checked: signing one lifted out of a
+    record whose own signature nobody verified extends a chain this producer
+    cannot vouch for, and every later reader inherits that. A directory that
+    does not verify is refused in the verifier's own words and nothing is
+    written. The cost is one signature verification per record already there,
+    bounded by the four-digit filename limit.
+
     The record is created exclusively and written last: a record on disk
     therefore implies its body and signature are already there, which is the
     order enumeration reads them in.
@@ -826,7 +881,7 @@ def _write_evidence_record(
     producer: dict[str, Any],
     emitted_at_utc: str,
 ) -> pathlib.Path:
-    """The emitter's critical section: enumerate, decide the index, write.
+    """The emitter's critical section: verify, decide the index, write.
 
     The caller's refs are checked entry by entry before they are sorted. The
     sort below reads ``kind`` and ``sha256`` out of every entry to build its
@@ -837,16 +892,23 @@ def _write_evidence_record(
     the sort is what establishes it.
     """
 
-    existing = _enumerate_record_files(root, spec)
-    if existing:
-        previous_path = existing[-1][0]
-        previous_payload, previous_raw, previous_sha256 = load_evidence_record(
-            previous_path, spec
-        )
-        index = int(previous_payload["recordIndex"]) + 1
-    else:
+    # Everything already in the directory is verified before the index is
+    # decided. The index and the digest this record will link to are then the
+    # verifier's own answer about the head, rather than a schema check of
+    # whichever file happened to sort last.
+    verification = _verify_records(
+        root,
+        spec,
+        _signing_key_public_pem(private_key_pem),
+        public_key_filename="<the signing key handed to emit_evidence_record>",
+    )
+    head = verification.head
+    if head is None:
         index = 0
         previous_sha256 = None
+    else:
+        index = head.record_index + 1
+        previous_sha256 = head.sha256
 
     _validate_ref_entries(refs)
     body_raw = canonical_document_bytes(body)

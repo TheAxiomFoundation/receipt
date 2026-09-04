@@ -1210,6 +1210,106 @@ def test_a_repeat_emission_of_the_same_record_does_not_overwrite_it(
     assert [record.record_index for record in verification.records] == [0]
 
 
+def test_emission_refuses_to_extend_a_directory_with_a_broken_signature(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+    emitted: pathlib.Path,
+) -> None:
+    """Emission read the last record's index and digest and nothing else.
+
+    That record's signature was never checked, so the producer signed a
+    `previousRecordSha256` taken out of a record it had not verified — and
+    the directory then carried a fresh, valid signature over a link to a
+    record nobody could vouch for.
+    """
+
+    private_pem, _ = keys
+    signature_path = emitted.with_name(f"{emitted.stem}.producer.sig")
+    signature_path.write_bytes(b"\x00" * len(signature_path.read_bytes()))
+    with pytest.raises(EvidenceRecordError) as refusal:
+        emit_evidence_record(
+            tmp_path,
+            spec=spec,
+            private_key_pem=private_pem,
+            body={"event": "generation", "generation": 8},
+            body_schema=BODY_SCHEMA,
+            refs=[],
+            producer=PRODUCER,
+            emitted_at_utc="2026-08-27T15:05:00Z",
+        )
+    assert "signature verification failed" in str(refusal.value)
+    assert emitted.name in str(refusal.value)
+    assert not list((tmp_path / RECORDS).glob("0001-*"))
+
+
+def test_emission_refuses_to_extend_a_directory_with_a_tampered_body(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+    emitted: pathlib.Path,
+) -> None:
+    """The bodies beside the existing records were never opened either."""
+
+    private_pem, _ = keys
+    body_path = emitted.with_name(f"{emitted.stem}.body.json")
+    body_path.write_bytes(canonical_document_bytes({"event": "tampered"}))
+    with pytest.raises(EvidenceRecordError, match="body digest mismatch"):
+        emit_evidence_record(
+            tmp_path,
+            spec=spec,
+            private_key_pem=private_pem,
+            body={"event": "generation", "generation": 8},
+            body_schema=BODY_SCHEMA,
+            refs=[],
+            producer=PRODUCER,
+            emitted_at_utc="2026-08-27T15:05:00Z",
+        )
+    assert not list((tmp_path / RECORDS).glob("0001-*"))
+
+
+def test_a_directory_that_verifies_still_takes_the_next_record(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+    emitted: pathlib.Path,
+    anchor_dir: pathlib.Path,
+) -> None:
+    """The green path, held.
+
+    This one passes before the change as well as after, and is here for that
+    reason: verifying before appending is only worth having if a genuine
+    directory still extends, and a producer that cannot write is a worse
+    failure than the one being closed.
+    """
+
+    private_pem, _ = keys
+    second = emit_evidence_record(
+        tmp_path,
+        spec=spec,
+        private_key_pem=private_pem,
+        body={"event": "generation", "generation": 8},
+        body_schema=BODY_SCHEMA,
+        refs=[],
+        producer=PRODUCER,
+        emitted_at_utc="2026-08-27T15:05:00Z",
+    )
+    third = emit_evidence_record(
+        tmp_path,
+        spec=spec,
+        private_key_pem=private_pem,
+        body={"event": "generation", "generation": 9},
+        body_schema=BODY_SCHEMA,
+        refs=[],
+        producer=PRODUCER,
+        emitted_at_utc="2026-08-27T16:05:00Z",
+    )
+    assert second.name.startswith("0001-")
+    assert third.name.startswith("0002-")
+    result = verify_evidence_records(tmp_path, spec=spec, anchor_dir=anchor_dir)
+    assert [record.record_index for record in result.records] == [0, 1, 2]
+
+
 # --------------------------------------------------------------------------
 # Spec construction.
 # --------------------------------------------------------------------------
