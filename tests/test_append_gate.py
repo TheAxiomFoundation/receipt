@@ -221,6 +221,31 @@ def git(root: pathlib.Path, *arguments: str, stdin: str | None = None) -> str:
     return completed.stdout.strip()
 
 
+def git_bytes(
+    root: pathlib.Path,
+    *arguments: str,
+    stdin: bytes | None = None,
+) -> bytes:
+    """Run fixture Git plumbing whose input may contain arbitrary tree bytes."""
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+    )
+    completed = subprocess.run(
+        ["git", "-C", os.fspath(root), *arguments],
+        check=True,
+        capture_output=True,
+        env=environment,
+        input=stdin,
+    )
+    return completed.stdout.strip()
+
+
 def spec_with_release_root(release_root: str) -> AppendGateSpec:
     """The fixture spec with its release directory named some other way.
 
@@ -274,7 +299,7 @@ def base_repository(
 
 
 def append_one_row(candidate: Candidate, **overrides: Any) -> None:
-    """The ordinary data proposal: one more row in the working tree."""
+    """Write the ordinary one-row proposal before committing its tree."""
 
     rows = [observation_row(number) for number in range(1, BASE_ROW_COUNT + 1)]
     rows.append(observation_row(BASE_ROW_COUNT + 1, **overrides))
@@ -282,15 +307,7 @@ def append_one_row(candidate: Candidate, **overrides: Any) -> None:
 
 
 def stage(candidate: Candidate) -> None:
-    """Record the working tree in the candidate's index, as a proposal does.
-
-    A pull request is reviewed from a checkout whose index git wrote from the
-    commit under review, so a mode the proposal changed is in the index too. A
-    test that only chmods the working tree leaves the index disagreeing with
-    it, which is now refused in its own words before any base comparison, so
-    every mode-change case below stages first and the base comparison is what
-    fires.
-    """
+    """Stage fixture changes that a later helper commits as one candidate tree."""
 
     git(candidate.root, "add", "-A")
 
@@ -480,19 +497,128 @@ def test_a_clean_gate_only_proposal_keeps_its_baseline_verdict(
     )
 
 
+def test_transforming_attributes_refuse_before_a_gate_only_verdict(
+    tmp_path: pathlib.Path,
+) -> None:
+    candidate = base_repository(tmp_path)
+    add_gate_file(candidate)
+    (candidate.root / ".gitattributes").write_text(
+        "ledger/** filter=evil\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+
+    assert str(refusal.value) == (
+        "transforming attribute filter applies to protected path "
+        "ledger/immutable_prefix.json"
+    )
+
+
+def test_state_attributes_are_screened_even_outside_declared_surfaces(
+    tmp_path: pathlib.Path,
+) -> None:
+    candidate = base_repository(tmp_path)
+    (candidate.root / ".gitattributes").write_text(
+        "ledger/** filter=evil\n",
+        encoding="utf-8",
+    )
+    spec = replace(GATE_SPEC, data_surface=frozenset())
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate, spec=spec)
+
+    assert str(refusal.value) == (
+        "transforming attribute filter applies to protected path "
+        "ledger/immutable_prefix.json"
+    )
+
+
+def test_a_tree_alias_of_the_gate_path_refuses_before_classification(
+    tmp_path: pathlib.Path,
+) -> None:
+    candidate = base_repository(tmp_path)
+    alias = candidate.root / "Scripts" / "check_append.py"
+    alias.parent.mkdir(parents=True)
+    alias.write_text("# alias\n", encoding="utf-8")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+
+    assert str(refusal.value) == (
+        "index carries an alias of a protected path: Scripts/check_append.py "
+        f"(for {GATE_FILE} at scripts)"
+    )
+
+
+def test_an_unfoldable_tree_name_is_an_append_refusal(
+    tmp_path: pathlib.Path,
+) -> None:
+    candidate = base_repository(tmp_path)
+    blob = git(candidate.root, "hash-object", "-w", "--stdin", stdin="bad\n")
+    records = git_bytes(candidate.root, "ls-tree", "-z", candidate.base).split(b"\0")
+    records = [record for record in records if record]
+    records.append(b"100644 blob " + blob.encode("ascii") + b"\tbad-\xff")
+    tree = git_bytes(
+        candidate.root,
+        "mktree",
+        "-z",
+        stdin=b"\0".join(records) + b"\0",
+    ).decode("ascii")
+    oid = git(
+        candidate.root,
+        "commit-tree",
+        tree,
+        "-p",
+        candidate.base,
+        "-m",
+        "invalid utf8 name",
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate, commit=oid)
+
+    assert str(refusal.value) == "tree entry name is not valid UTF-8 for folding"
+
+
+def test_a_blob_at_a_gate_surface_ancestor_is_a_reader_shape_refusal(
+    tmp_path: pathlib.Path,
+) -> None:
+    candidate = base_repository(tmp_path)
+    (candidate.root / "scripts").write_text("not a directory\n", encoding="utf-8")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+
+    assert str(refusal.value) == "tree path ancestor is not a directory: scripts"
+
+
+def test_state_shape_refuses_before_a_gate_only_verdict(
+    tmp_path: pathlib.Path,
+) -> None:
+    candidate = base_repository(tmp_path)
+    add_gate_file(candidate)
+    state = candidate.root / CHAIN_SPEC.state_relative
+    state.unlink()
+    state.symlink_to(candidate.root / CHAIN_SPEC.prefix_relative)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+
+    assert str(refusal.value) == (
+        "state file is a symlink: ledger/official_observations.jsonl"
+    )
+
+
 def moving_base_repository(
     tmp_path: pathlib.Path,
 ) -> tuple[Candidate, str, str]:
-    """A branch on an early commit, a later commit, and a four-row worktree.
+    """A branch on an early commit and a candidate descended from a later one.
 
-    The two commits give different verdicts for the same working tree — two
-    appended rows against the first, one against the second — so the verdict
-    text alone says which commit the whole run measured against. The later
-    commit also differs in the frozen prefix manifest and in the release
-    tree, so a consumer that read either at the moved ref would refuse
-    outright: the prefix anchor compares manifest fields and the release
-    history compares README bytes. That binds every base consumer, not only
-    the append count (peer review, round three).
+    The final candidate is two rows ahead of the early commit and one row ahead
+    of the later commit. The later commit also differs in the frozen prefix and
+    release tree, so the verdict binds every base consumer to one resolution.
     """
 
     first = base_repository(tmp_path)
@@ -517,11 +643,8 @@ def moving_base_repository(
     manifest.write_bytes(kept_manifest)
     rows.append(observation_row(BASE_ROW_COUNT + 2))
     write_ledger(first.root, rows)
-    # The proposal is staged, as a reviewed checkout's is. Without this the
-    # index still holds the later commit's README while the working tree
-    # holds the base's, which is a staged rewrite of a base release file with
-    # the disk restored — exactly what S4R3-F1 refuses, and nothing this
-    # fixture is about.
+    # Put the restored base files and final row into the candidate commit built
+    # by ``run_gate``.
     git(first.root, "add", "-A")
     return Candidate(root=first.root, base="moving"), first.base, later
 
@@ -555,11 +678,7 @@ def test_a_base_named_by_its_own_commit_keeps_the_baseline_text(
 def test_the_moved_branch_alone_would_change_the_verdict(
     tmp_path: pathlib.Path,
 ) -> None:
-    """The control: the two commits really do disagree about this worktree,
-    and not only in the append count. Against the later commit the same tree
-    is refused by the prefix anchor or the release history, so the mid-run
-    test below proves every base consumer read the first commit (peer
-    review, round three)."""
+    """The control: the two candidate/base pairs produce different verdicts."""
 
     moving, _first, later = moving_base_repository(tmp_path)
     git(moving.root, "branch", "-f", "moving", later)
@@ -993,15 +1112,7 @@ def test_forms_the_rfc_permits_but_the_profile_does_not_are_refused(
 def test_a_replacement_object_cannot_change_what_the_base_commit_reads_as(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds F4: every git read in the gate disables ``refs/replace``.
-
-    A replacement rewrites what git returns for an object while every command
-    still prints the original OID, so a base commit replaced by a later one is
-    shown, diffed, and enumerated as that later commit behind the name the
-    verdict prints. Without ``GIT_NO_REPLACE_OBJECTS`` this run reads the
-    later commit — which differs in the ledger, the frozen prefix manifest,
-    and the release tree — and refuses; the control below shows exactly that.
-    """
+    """The snapshot reader disables replacement refs for every object read."""
 
     moving, first, later = moving_base_repository(tmp_path)
     git(moving.root, "replace", first, later)
@@ -1129,17 +1240,7 @@ def test_the_push_path_hands_the_release_verification_its_snapshots(
 def test_a_gitlink_over_the_ledger_directory_is_refused(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds R5-F3: nothing looked at a state path's ancestors.
-
-    A directory reaches the index only as a gitlink, and a 160000 entry at
-    ``ledger`` is a submodule boundary: what lies beneath it belongs to
-    another repository and is no part of this commit's content, while
-    arriving in the working tree as ordinary regular files that hash, parse,
-    and satisfy every byte comparison the gate makes. The index check that
-    existed returned on a path the index does not hold — which is exactly
-    what a gitlink over it produces — so the whole append ran on files git
-    never recorded here.
-    """
+    """A 160000 ancestor cannot contain this commit's state blobs."""
 
     candidate = base_repository(tmp_path)
     append_one_row(candidate)
@@ -1159,12 +1260,7 @@ def test_a_gitlink_over_the_ledger_directory_is_refused(
 
 
 def commit_release_gitlink(candidate: Candidate) -> str:
-    """Commit a gitlink under ``releases/`` that nothing has checked out.
-
-    An empty or uninitialised submodule directory is the ordinary state of a
-    fresh checkout, and it is the case the filesystem walk cannot see at all:
-    there is no directory on disk to skip, and no file to enumerate.
-    """
+    """Commit a 160000 entry under the protected release tree."""
 
     git(candidate.root, "add", "-A")
     git(
@@ -1181,24 +1277,11 @@ def commit_release_gitlink(candidate: Candidate) -> str:
 def test_a_gitlink_under_the_release_root_is_refused_against_a_base(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds R5-F4: the release root's content was taken from a walk.
-
-    ``_working_release_files`` enumerates the release tree from the
-    filesystem and skips directories, so an uninitialised gitlink under
-    ``releases/`` is in neither the current files nor the new files. The
-    release-proposal rules assert the release root holds exactly what that
-    walk found, while the index records a boundary into another repository
-    inside it — and on the data path no refusal spoke for the difference.
-    The base-tree scan refuses a non-regular mode only once such an entry is
-    in the base; this is the same entry, in the candidate.
-    """
+    """A candidate release gitlink is a non-regular committed entry."""
 
     candidate = base_repository(tmp_path)
     append_one_row(candidate)
     oid = commit_release_gitlink(candidate)
-    # The walk really is blind to it: nothing exists at that path on disk.
-    assert not (candidate.root / "releases" / "vendor").exists()
-
     with pytest.raises(AppendError) as refusal:
         run_gate(candidate, commit=oid)
     assert str(refusal.value) == "release path is not regular: releases/vendor"
@@ -1220,12 +1303,7 @@ def test_a_gitlink_under_the_release_root_is_refused_on_the_push_path(
 
 
 def replace_release_root_with_a_tracked_file(candidate: Candidate) -> None:
-    """Stage a regular file where ``releases/`` stood, as a commit may do.
-
-    Git records this perfectly happily: one blob at ``releases``, and every
-    path that was under it gone from the index. The working tree then has no
-    release directory at all.
-    """
+    """Prepare a candidate blob where the release-root tree stood."""
 
     releases = candidate.root / CHAIN_SPEC.release_root_relative
     shutil.rmtree(releases)
@@ -1236,29 +1314,7 @@ def replace_release_root_with_a_tracked_file(candidate: Candidate) -> None:
 def test_the_push_path_refuses_a_tracked_file_standing_for_the_release_root(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds R6-F1: the release-root scan returned when the root was not a
-    directory, and every other release check on the push path is reached
-    through the manifest directory. A commit that replaces ``releases/`` with
-    a tracked regular file therefore makes chain initialisation false — there
-    is no ``releases/manifests`` to find — and the gate accepted the tree with
-    the whole chain gone, naming no release. The index says otherwise, and is
-    now read against the filesystem: an entry under the root with no
-    directory to hold it refuses.
-
-    S5-R2-F2 answers the same tree one step earlier, and both are asserted
-    here the way the base-ref sibling below asserts both of its. The manifest
-    path's own type is decided before ``initialized`` asks the filesystem
-    whether there is a chain, and with the components walked rather than
-    ``lstat``-ed whole, a regular file standing at ``releases`` is a
-    non-directory ancestor rather than an ``ENOTDIR`` read as absence.
-    Measured at this round's head with ``assert_manifest_directory_regular``
-    put back to its single ``lstat`` and bare ``except OSError``: ``release
-    root is not a directory while the index records 1 entry under it`` — the
-    scan's own sentence, which the scan still gives for this tree and which is
-    asserted directly below, so the order between the two is pinned rather
-    than assumed. R6-F1's finding is untouched: this pre-emption needs a
-    *tracked* entry under the root, and the tree S5-R2-F2 is actually about
-    leaves the scan nothing to say at all."""
+    """A blob cannot be the tree ancestor of the configured manifest path."""
 
     candidate = base_repository(tmp_path)
     replace_release_root_with_a_tracked_file(candidate)
@@ -1274,26 +1330,18 @@ def test_the_push_path_refuses_a_tracked_file_standing_for_the_release_root(
 def test_a_tracked_file_standing_for_the_release_root_is_refused_with_a_base(
     tmp_path: pathlib.Path,
 ) -> None:
-    """R6-F1 on the base-ref path, where a pre-existing refusal gets there
-    first and must keep doing so: ``_working_release_files`` enumerates the
-    release tree before any of this PR's checks and refuses a root that is
-    not a real directory in the words the extraction gave it. The reconciled
-    scan is asserted directly on the same tree, so both are bound and the
-    order between them is pinned."""
+    """Reader shape preflight precedes release-history comparisons."""
 
     candidate = base_repository(tmp_path)
     replace_release_root_with_a_tracked_file(candidate)
 
     with pytest.raises(AppendError) as refusal:
         run_gate(candidate)
-    assert str(refusal.value) == (
-        f"existing release file was deleted relative to {candidate.base}: "
-        "releases/README.md"
-    )
+    assert str(refusal.value) == "tree path ancestor is not a directory: releases"
 
 
 def commit_all(candidate: Candidate, message: str) -> Candidate:
-    """Commit the working tree and return the candidate rebased on it."""
+    """Commit all fixture changes and use that commit as the next base."""
 
     git(candidate.root, "add", "-A")
     git(candidate.root, "commit", "--quiet", "-m", message)
@@ -1306,22 +1354,7 @@ MAGIC_STATE_PATH = ":odd/official_observations.jsonl"
 def test_a_release_root_beginning_with_a_colon_is_enumerated_at_the_base(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds S4R2-F4: the base tree was enumerated by handing the configured
-    release root to ``git ls-tree`` as a bare pathspec, and a pathspec
-    beginning with ``:`` is magic. The magic is stripped and what is left is
-    the path git looks for, so a spec whose root is ``:releases`` asks about
-    ``releases``, which this tree does not have: the enumeration comes back
-    empty and exits zero. Every release file the base carries is then outside
-    the comparison — the history pass has nothing to hold immutable, the whole
-    root classifies as newly added files, and a rewritten release file rides
-    through as a legacy pre-genesis proposal instead of being refused for the
-    bytes it changed.
-
-    With the root named literally the base entries are found and the rewrite
-    gets the refusal it has always had. Without the fix this fails with
-    ``legacy pre-genesis proposal must not change releases/`` — a message
-    about a root the spec never named, for a file whose immutability was
-    never checked."""
+    """Tree lookup treats a leading colon as a literal path byte."""
 
     spec = spec_with_release_root(":releases")
     candidate = base_repository(tmp_path, ":releases")
@@ -1354,28 +1387,7 @@ def a_nested_base_with_no_release_tree(tmp_path: pathlib.Path) -> Candidate:
 def test_a_file_standing_where_a_nested_release_root_lives_is_not_gate_only(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds S5-G1-F1. The gate-only exit claims a confinement over the
-    release root, and every check that could make that claim good — the root's
-    component walk, the working-tree enumeration, the index scan — is
-    downstream of it. What the confinement itself asked was whether an
-    unclassified change was *at* the root or under it, so with a root of
-    ``data/releases`` a proposal replacing ``data`` was neither: ``data``
-    matches no surface pattern, is not the release root and is not inside it.
-    It classified as an ordinary unclassified change and the verdict named it
-    beside ``DATA_SURFACE unchanged``, over a tree whose release root had
-    stopped being a directory at all.
-
-    The release root's ancestors are on the release surface for the reason the
-    root is: the root's existence as a real directory is the premise of every
-    release-root check, and a proposal that changes that premise is not
-    gate-only.
-
-    Measured at 427e08d: ``thesis-facts append check OK: gate-only proposal;
-    DATA_SURFACE unchanged; GATE_SURFACE changes=['scripts/check_append.py'];
-    unclassified changes=['data']``. The walk has nothing to say about this
-    tree — ``data`` is a regular file, not a link, and a listing of it fails
-    with ``ENOTDIR``, which is the absence answer both walks pass on — so what
-    refuses is the confinement, in its own words."""
+    """A changed ancestor of a nested release root is on its surface."""
 
     spec = spec_with_release_root("data/releases")
     candidate = a_nested_base_with_no_release_tree(tmp_path)
@@ -1384,21 +1396,13 @@ def test_a_file_standing_where_a_nested_release_root_lives_is_not_gate_only(
 
     with pytest.raises(AppendError) as refusal:
         run_gate(candidate, spec=spec)
-    assert str(refusal.value) == (
-        "gate-only proposal changes unclassified release path(s): ['data']"
-    )
+    assert str(refusal.value) == "tree path ancestor is not a directory: data"
 
 
 def test_an_untouched_nested_release_root_still_returns_gate_only(
     tmp_path: pathlib.Path,
 ) -> None:
-    """S5-G1-F1's other side. Neither half of the fix costs a legitimate
-    proposal anything: a nested release root that is a real directory the
-    proposal does not touch is walked, found to be what the spec names, and
-    the gate-only verdict is exactly the one it always was. The ancestor
-    ``data`` is on the release surface, and no change is proposed at it.
-
-    The same verdict with and without the fix, which is the binding."""
+    """A valid untouched nested release tree preserves gate-only success."""
 
     spec = spec_with_release_root("data/releases")
     candidate = base_repository(tmp_path, "data/releases")
@@ -1419,42 +1423,7 @@ def test_an_untouched_nested_release_root_still_returns_gate_only(
 def test_a_release_path_spelled_as_the_candidate_root_is_refused(
     tmp_path: pathlib.Path, field: str, spelling: str
 ) -> None:
-    """Binds S4R4-F8. A configured release path with no components at all —
-    ``.`` and the empty path both give that — names the candidate root itself,
-    and the gate's own reads disagree about what is inside such a root.
-    ``git ls-tree`` lists the entries under ``.`` with no prefix (``a/f.txt``,
-    not ``./a/f.txt``, checked on the git this repository is verified with),
-    so ``git_tree_entries`` refuses the first of them as a path outside the
-    root it asked about and the base enumeration never returns; the gate-only
-    confinement asks whether a changed path is ``.`` or begins with ``./`` and
-    finds nothing inside the release root, so that confinement is silently a
-    no-op; and the release root's hold has no component to walk.
-
-    Only the descriptor holder ever supported such a spec, by seeding its walk
-    with the candidate root — which answered the ``AssertionError`` an earlier
-    draft raised, and left every read above still disagreeing. The seeding is
-    gone and the spec is refused at the gate's entry instead, before the tree
-    is touched — and, since spec validation landed (#41), by ``ChainSpec``
-    itself at construction, so the gate's check is reached only by a chain
-    that was never built through the constructor.
-
-    Measured at de1dbe4 with the refusal removed, for both spellings. A
-    release root of ``.``: the push path accepts it outright, as
-    ``thesis-facts append check OK: 2 rows, immutable prefix 1``, having
-    walked, held and scanned nothing; against a base it is refused as ``git
-    tree enumeration returned a path outside .:
-    ledger/immutable_prefix.json`` — the enumeration meeting the tree's own
-    first file. A manifest path of ``.``: the push path refuses as ``release
-    manifest directory contains a non-regular entry: <root>/releases``, the
-    enumeration having taken the whole checkout for a manifest directory,
-    while against a base the tree is accepted, since no ``*.json`` sits at the
-    root and the run decides there is no chain. An anchor path of ``.`` is
-    accepted on both paths, because the gate reads the anchors it is handed
-    rather than the candidate's. Three configurations, five different
-    answers, none of them about this proposal.
-
-    No consumer pins such a spec and no fixture here builds one; the point is
-    that a verifier answers rather than asserting or half-reading."""
+    """A zero-component value cannot identify a release subtree."""
 
     # ``ChainSpec`` refuses both spellings at construction (spec validation,
     # #41), so no gate ever meets such a spec through the public constructor.
@@ -1508,16 +1477,9 @@ def test_an_ordinary_spec_names_a_subdirectory_for_every_release_path(
     )
 
 
-# The environment that can redirect a git read this gate makes (#45, the
-# cheap half). GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY
-# and GIT_ALTERNATE_OBJECT_DIRECTORIES can each decide which repository,
-# working tree, index or object store some read resolves in, rather than the
-# checkout `root` names (not every read moves under every variable; see
-# release_chain.assert_no_redirecting_git_environment), while the verdict
-# still speaks of the checkout named — and this gate reads the candidate tree directly as well, so under any of
-# them the two halves of one verdict are about two trees. They are refused
-# rather than dropped for the child processes: dropping them would leave the
-# verifier's own environment redirected while its children's was not.
+# The public gate retains the existing refusal for redirecting Git variables
+# present at entry. Separate invariance cases inject them after that guard and
+# bind the snapshot reader's own scrubbed child environment.
 def redirecting_refusal(name: str) -> str:
     return f"{name} is set in the environment and would redirect git reads; unset it"
 
@@ -1613,15 +1575,8 @@ def test_the_redirecting_refusal_names_the_first_variable_set(
     assert str(second.value) == redirecting_refusal("GIT_OBJECT_DIRECTORY")
 
 
-# The candidate root that is not there to be opened (#46). ``_set_root``
-# recorded the root's identity with an unguarded open, so a ``--root`` naming
-# nothing, or naming a regular file, escaped as the OS's own ``OSError``
-# rather than as the ``AppendError`` every other refusal in this module
-# raises. The consumer command that reaches this code catches ``AppendError``
-# alone, so the bare exception ended that run non-zero with a traceback and
-# nothing was ever accepted that should not have been; a library caller got an
-# exception from outside this module's vocabulary, with the OS's message and
-# no mention of the root it was asked about.
+# The retained #46 public refusal covers both an absent root and a regular file
+# where the repository top level was expected.
 MISSING_ROOT_REFUSAL = "candidate repository is missing or not a git repository: "
 
 
@@ -1663,7 +1618,7 @@ def test_a_regular_file_named_as_the_root_refuses_in_the_same_words(
 
     candidate = base_repository(tmp_path)
     file_root = tmp_path / "not-a-tree"
-    file_root.write_text("this is a file, not a checkout\n", encoding="utf-8")
+    file_root.write_text("this is a file, not a repository\n", encoding="utf-8")
     named = replace(candidate, root=file_root)
 
     with pytest.raises(AppendError) as refusal:
@@ -1702,12 +1657,7 @@ def test_a_root_reached_through_a_regular_file_refuses_in_the_same_words(
 def test_an_ordinary_root_is_unaffected_by_the_missing_root_refusal(
     tmp_path: pathlib.Path,
 ) -> None:
-    """The refusal's negative side: a root that is there still verifies.
-
-    The check is the one ``os.open`` already made; only the two errnos that
-    mean "no tree here" are answered differently, so every accepting input
-    reaches exactly what it reached before.
-    """
+    """The refusal's negative side: a repository top level still verifies."""
 
     candidate = base_repository(tmp_path)
     append_one_row(candidate)
@@ -1719,14 +1669,10 @@ def test_an_ordinary_root_is_unaffected_by_the_missing_root_refusal(
     )
 
 
-def test_the_chain_inside_a_walked_root_is_what_the_verdict_reads(
+def test_the_chain_inside_the_selected_tree_is_what_the_verdict_reads(
     tmp_path: pathlib.Path, witnesses: Witnesses
 ) -> None:
-    """S4R3-F3's control, and the half of the case the swap test asserts by
-    contradiction: the in-tree chain those parameters plant really is one this
-    verifier refuses, so an acceptance there could only have been the outside
-    one. Left unswapped, this tree is refused for the state its own manifest
-    claims."""
+    """The selected tree's manifest is checked against its selected state."""
 
     candidate = base_repository(tmp_path)
     shutil.rmtree(candidate.root / "releases")
@@ -1752,9 +1698,8 @@ def spec_with_nested_manifests(release_root: str = "releases") -> AppendGateSpec
     """The fixture spec with its manifest directory one component deeper.
 
     ``releases/journal/manifests`` is a layout a ``ChainSpec`` permits and the
-    pinned consumer does not use: the manifest directory is no longer the
-    release root's own child, so ``journal`` is a component of a configured
-    path that walking the release root alone never looks at.
+    pinned consumer does not use. It exercises configured-path ancestors below
+    the release root.
     """
 
     chain = replace(
@@ -1776,10 +1721,7 @@ def spec_with_nested_manifests(release_root: str = "releases") -> AppendGateSpec
 def test_a_nested_manifest_directory_in_the_tree_is_accepted(
     tmp_path: pathlib.Path, witnesses: Witnesses
 ) -> None:
-    """S4R3-F4's other side: the extension refuses links, not depth. The same
-    spec with its chain really inside ``releases/journal/manifests`` is
-    verified and accepted, so the walk added here costs a legitimate nested
-    layout nothing."""
+    """A regular manifest tree remains valid at a deeper configured path."""
 
     spec = spec_with_nested_manifests()
     candidate = base_repository(tmp_path)
@@ -1799,15 +1741,79 @@ def test_a_nested_manifest_directory_in_the_tree_is_accepted(
     )
 
 
+def test_a_symlinked_manifest_ancestor_is_a_reader_shape_refusal_on_push(
+    tmp_path: pathlib.Path,
+) -> None:
+    spec = spec_with_nested_manifests()
+    candidate = base_repository(tmp_path)
+    (candidate.root / "releases" / "journal").symlink_to(
+        tmp_path / "outside-release-tree"
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate, spec=spec)
+
+    assert str(refusal.value) == (
+        "state path has a symlinked component: releases/journal"
+    )
+
+
+def test_an_empty_manifest_subtree_does_not_initialize_a_chain(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The specified listing predicate counts manifest files, not empty trees."""
+
+    candidate = base_repository(tmp_path)
+    empty_tree = git(candidate.root, "mktree", stdin="")
+    manifest_tree = git(
+        candidate.root,
+        "mktree",
+        stdin=f"040000 tree {empty_tree}\tempty\n",
+    )
+    release_lines = git(
+        candidate.root,
+        "ls-tree",
+        f"{candidate.base}:releases",
+    ).splitlines()
+    release_lines.append(f"040000 tree {manifest_tree}\tmanifests")
+    release_tree = git(
+        candidate.root,
+        "mktree",
+        stdin="\n".join(release_lines) + "\n",
+    )
+    root_lines = git(candidate.root, "ls-tree", candidate.base).splitlines()
+    root_lines = [
+        (
+            f"040000 tree {release_tree}\treleases"
+            if line.endswith("\treleases")
+            else line
+        )
+        for line in root_lines
+    ]
+    root_tree = git(
+        candidate.root,
+        "mktree",
+        stdin="\n".join(root_lines) + "\n",
+    )
+    candidate_oid = git(
+        candidate.root,
+        "commit-tree",
+        root_tree,
+        "-p",
+        candidate.base,
+        "-m",
+        "empty manifest subtree",
+    )
+
+    assert run_push_gate(candidate, commit=candidate_oid) == (
+        "thesis-facts append check OK: 2 rows, immutable prefix 1"
+    )
+
+
 def a_manifest_path_that_is_not_a_directory(
     candidate: Candidate, tmp_path: pathlib.Path, shape: str
 ) -> None:
-    """Put one of the three non-directories at the manifest path.
-
-    Each is a thing ``manifest_directory.is_dir() and any(iterdir())`` reads as
-    "this tree has no chain": a tracked regular file, a link to an empty
-    directory, and a link to nothing at all.
-    """
+    """Put a committed blob or symlink at the configured manifest path."""
 
     manifests = candidate.root / CHAIN_SPEC.manifest_relative
     if shape == "tracked-blob":
@@ -1830,27 +1836,7 @@ def a_manifest_path_that_is_not_a_directory(
 def test_the_push_path_decides_the_manifest_paths_type_before_its_chain(
     tmp_path: pathlib.Path, shape: str
 ) -> None:
-    """Binds S4R4-F3. On the push path there is no base to compare against, so
-    whether this tree has a chain at all is decided by asking the filesystem:
-    ``initialized`` is ``manifest_directory.is_dir() and any(iterdir())``. All
-    three shapes here answer that question ``False`` — a tracked 100644 blob
-    standing where the manifest directory was is not a directory, a link to an
-    empty directory has nothing in it, a dangling link resolves to nothing —
-    and ``False`` means "no chain", which is an acceptance with no manifest,
-    no signature and no receipt verified.
-
-    Nothing else on this path says otherwise. The release root's walk stops one
-    component short of this leaf, deliberately, because the leaf has the
-    enumeration's own refusal — but the enumeration only runs once something
-    has decided to enumerate, and this is the decision. The root's index scan
-    that follows reconciles the tracked blob with the regular file the
-    traversal finds, which is exactly what it is, and holds no entry at all for
-    either untracked link.
-
-    Measured at 22da6c4 with the type decision removed: all three return
-    ``thesis-facts append check OK: 2 rows, immutable prefix 1``. Refused now
-    in ``_enumerate_manifest_files``'s own words, which is what a link to a
-    *populated* directory here has always been refused with."""
+    """A non-tree manifest entry keeps the directory verifier's wording."""
 
     candidate = base_repository(tmp_path)
     a_manifest_path_that_is_not_a_directory(candidate, tmp_path, shape)
@@ -1883,11 +1869,7 @@ def test_a_base_ref_blob_at_the_manifest_path_keeps_the_legacy_refusal(
 def test_a_manifest_path_that_is_absent_is_still_no_chain(
     tmp_path: pathlib.Path,
 ) -> None:
-    """S4R4-F3's other side: an absent chain is legal and stays legal. The
-    fixture carries no manifest directory at all, which is the ordinary
-    pre-genesis tree, and the type decision returns for it exactly as
-    ``_enumerate_manifest_files``'s own ``exists()`` does — the push path's
-    acceptance for such a tree is unchanged."""
+    """An absent manifest subtree remains a legal pre-genesis tree."""
 
     candidate = base_repository(tmp_path)
     assert not (candidate.root / CHAIN_SPEC.manifest_relative).exists()
@@ -1900,17 +1882,7 @@ def test_a_manifest_path_that_is_absent_is_still_no_chain(
 def test_a_file_above_a_nested_manifest_path_is_not_no_chain(
     tmp_path: pathlib.Path,
 ) -> None:
-    """S5-R2-F2 one component further down, which is the shape S4R3-F4 named
-    for the walk and this decision had the same gap in. A spec whose manifest
-    directory sits below an interior component — ``releases/journal/manifests``
-    — reads ``ENOTDIR`` for a regular file at *any* ancestor, and the single
-    ``lstat`` could not tell which component it was about or that it was a
-    type answer at all.
-
-    Measured at this round's head with the single ``lstat`` and bare
-    ``except OSError`` put back: ``thesis-facts append check OK: 2 rows,
-    immutable prefix 1``. The component walk names the ancestor it refused
-    for."""
+    """Reader shape preflight names a regular manifest ancestor."""
 
     spec = spec_with_release_root("releases/journal")
     candidate = base_repository(tmp_path, "releases/journal")
@@ -1926,11 +1898,7 @@ def test_a_file_above_a_nested_manifest_path_is_not_no_chain(
 def test_an_absent_ancestor_of_a_nested_manifest_path_is_still_no_chain(
     tmp_path: pathlib.Path,
 ) -> None:
-    """S5-R2-F2's other side, beside the single-component case
-    ``test_a_manifest_path_that_is_absent_is_still_no_chain`` already binds.
-    ``FileNotFoundError`` at any component is absence: nothing stands there,
-    so nothing stands at the leaf either, and an absent chain is legal. Only
-    the two facts that are not absence changed answers."""
+    """An absent manifest ancestor still means that no chain is initialized."""
 
     spec = spec_with_release_root("releases/journal")
     candidate = base_repository(tmp_path, "releases/journal")
@@ -1946,18 +1914,7 @@ def test_an_absent_ancestor_of_a_nested_manifest_path_is_still_no_chain(
 def test_an_anchor_path_that_is_not_a_directory_keeps_its_own_refusal(
     tmp_path: pathlib.Path, witnesses: Witnesses
 ) -> None:
-    """S4R4-F3's boundary, which is why only the manifest leaf gets a type
-    decision. The release root's walk stops one component short of the anchor
-    path too, on the same reasoning — the leaf has a refusal of its own — and
-    unlike the manifest path nothing here decides whether the anchors are
-    read. The first read through that path meets them, and a path that is not
-    a directory is refused in words the extraction gave: the producer key's,
-    and past it the TSA anchor's. Adding a check ahead of them would replace
-    those sentences for every tree they answer.
-
-    The anchor directory the gate reads is the one it is handed — the trusted
-    code root's, or this override — so this drives it through the same
-    ``release_anchor_dir`` the fixtures use. Passes either way by design."""
+    """A malformed caller-owned anchor directory keeps its verifier wording."""
 
     candidate, _anchors, _stem = genesis_proposal(tmp_path, witnesses)
     not_a_directory = tmp_path / "anchors-as-a-file"
@@ -1974,18 +1931,7 @@ def test_an_anchor_path_that_is_not_a_directory_keeps_its_own_refusal(
 def test_the_manifest_leaf_keeps_its_own_type_refusal(
     tmp_path: pathlib.Path,
 ) -> None:
-    """S5-F3's other side: what the walk binds at a leaf is its spelling, not
-    its type. A manifest directory spelled exactly as the spec names it and
-    standing over a symlink is still refused by
-    ``assert_manifest_directory_regular`` in the enumeration's own words, and a
-    regular file there likewise, because the walk asks the directory's listing
-    about the name and leaves what the name resolves to alone. The two
-    questions are separable because they are asked of different things.
-
-    ``test_a_manifest_directory_that_is_itself_a_link_keeps_its_own_refusal``
-    and ``test_the_push_path_decides_the_manifest_paths_type_before_its_chain``
-    bind the same boundary from the other direction; this one states it for
-    the leaf the walk now visits."""
+    """The exact manifest leaf keeps its directory-verifier type refusal."""
 
     candidate = base_repository(tmp_path)
     release_root = candidate.root / CHAIN_SPEC.release_root_relative
@@ -2000,21 +1946,10 @@ def test_the_manifest_leaf_keeps_its_own_type_refusal(
     )
 
 
-def test_the_anchor_leaf_is_spelled_but_not_typed_by_the_walk(
+def test_the_candidate_anchor_leaf_is_not_a_trust_source(
     tmp_path: pathlib.Path,
 ) -> None:
-    """S5-F3 for the other leaf the walk now visits, which is where the
-    separation of the two questions earns its keep. A regular file standing at
-    the candidate's own ``releases/anchors`` is spelled exactly as the spec
-    names it, so the walk passes it — and nothing here reads that path at all:
-    the anchors this gate reads come from the trusted code root or from a
-    caller's override, never from the candidate. Judging the leaf's type in the
-    walk would refuse this tree over a directory the verdict never opens.
-
-    ``test_an_anchor_path_that_is_not_a_directory_keeps_its_own_refusal`` binds
-    the sentence for the anchor path that *is* read; this binds that the walk
-    does not take it over, and that visiting the leaf for its spelling costs
-    the tree nothing."""
+    """Candidate anchor shape does not replace the caller-owned trust source."""
 
     candidate = base_repository(tmp_path)
     release_root = candidate.root / CHAIN_SPEC.release_root_relative
@@ -2028,25 +1963,10 @@ def test_the_anchor_leaf_is_spelled_but_not_typed_by_the_walk(
     )
 
 
-def test_a_dangling_release_root_link_is_named_as_a_link(
+def test_a_dangling_release_root_link_is_a_reader_shape_refusal(
     tmp_path: pathlib.Path,
 ) -> None:
-    """S4R2-F1's one pre-emption, pinned rather than left incidental. A link
-    at the release root that points nowhere is the one link
-    ``_working_release_files`` never met: ``exists()`` follows it, finds
-    nothing, and the enumeration returns an empty mapping, so against a base
-    this tree was refused a file later — ``existing release file was deleted
-    relative to <commit>: releases/README.md`` — for the consequence rather
-    than for the link. Verified by running this tree with the walk removed.
-
-    The walk refuses it as the link it is, which changes that refusal. Of the
-    links the walk meets it is the only one whose refusal moves — a link the
-    enumeration does reach still gets the enumeration's own sentence, which
-    the test above pins — and this test is what holds it to that one case. It
-    is not the only pre-existing refusal this round pre-empts: the spelling
-    check inside both walks pre-empts whatever the content behind a folded
-    name would have been refused for, which ``append_gate``'s module docstring
-    states with both cases measured."""
+    """A 120000 protected ancestor uses the reader's shape vocabulary."""
 
     candidate = base_repository(tmp_path)
     append_one_row(candidate)
@@ -2057,10 +1977,10 @@ def test_a_dangling_release_root_link_is_named_as_a_link(
 
     with pytest.raises(AppendError) as refusal:
         run_gate(candidate)
-    assert str(refusal.value) == "release path is a symlink: releases"
+    assert str(refusal.value) == "state path has a symlinked component: releases"
 
 
-def test_a_release_root_symlink_keeps_its_release_refusal_on_push(
+def test_a_release_root_symlink_is_a_reader_shape_refusal_on_push(
     tmp_path: pathlib.Path,
 ) -> None:
     candidate = base_repository(tmp_path)
@@ -2071,7 +1991,7 @@ def test_a_release_root_symlink_keeps_its_release_refusal_on_push(
     with pytest.raises(AppendError) as refusal:
         run_push_gate(candidate)
 
-    assert str(refusal.value) == "release path is a symlink: releases"
+    assert str(refusal.value) == "state path has a symlinked component: releases"
 
 
 @dataclass(frozen=True)
@@ -2164,7 +2084,7 @@ def state_bytes_of(
 def genesis_proposal(
     tmp_path: pathlib.Path, witnesses: Witnesses
 ) -> tuple[Candidate, pathlib.Path, str]:
-    """A base with no chain, and a working tree carrying a valid genesis one.
+    """A base with no chain and a candidate tree carrying valid genesis.
 
     The anchors live outside the candidate deliberately: ``releases/anchors``
     is GATE_SURFACE here, so a proposal that wrote them into the tree would be

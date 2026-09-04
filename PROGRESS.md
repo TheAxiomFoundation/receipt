@@ -94,18 +94,30 @@
   whether to switch trust sources, so a corrupt unrelated anchor cannot mask
   its original snapshot error. Added a post-genesis chain test where committed
   anchor bytes equal the custom trusted directory but production pins differ.
-- Restored the push path's established `release path is a symlink` (and
-  gitlink `release path is not regular`) vocabulary when the release root
-  itself is a Git-only entry. The manifest leaf still reaches its own
-  `_enumerate_manifest_files` wording, while an ordinary blob ancestor keeps
-  the reader's distinct non-directory refusal. Added the missing push
-  regression for a committed release-root symlink.
+- Kept `release path is a symlink` / `release path is not regular` for
+  non-regular release leaves. A release root or interior manifest ancestor is
+  instead a mandated section 3.3 reader-shape refusal, while the exact manifest
+  leaf still reaches `_enumerate_manifest_files`'s wording. Added regressions
+  for each boundary on the push and base paths.
 - Kept the base-ref path's pre-genesis chain predicate distinct from the new
   push predicate: only a direct `*.json` child marks the candidate chain as
   initialized. A committed blob at the manifest path therefore retains the
   legacy `legacy pre-genesis proposal must not change releases/` refusal;
   added an exact-message regression.
+- Kept the push manifest probe's specified `bool(TreeListing)` semantics: only
+  non-tree manifest entries initialize a chain, while a canonical empty
+  subtree remains pre-genesis. A non-tree exact manifest leaf remains truthy
+  and reaches its established directory-verifier refusal.
 - Re-ran the complete append unit module after the audit fixes: 91/91 passed.
+- Completed the reader-preflight audit. State entry shapes, release entry
+  modes, every protected ancestor, whole-tree folded aliases, and transforming
+  attributes now run before surface classification without fetching state or
+  release payloads. Release history still precedes candidate materialization.
+- Added regressions for gate-only transforming attributes, state paths omitted
+  from declared surfaces, a folded gate alias, a blob at a gate-path ancestor,
+  state-shape ordering, and an invalid UTF-8 tree name translated into the
+  append gate's exception vocabulary. The focused append module is now 99/99
+  green.
 
 ## Next
 
@@ -124,16 +136,22 @@
   the retained append harness case
   `test_candidate_base_anchor_bytes_do_not_replace_trusted_anchors` requires
   both legs to accept with `thesis-facts append check OK: 147 rows, immutable
-  prefix 128, +2 appended vs base, release 2`. The append gate will work
-  around this out-of-scope helper defect by materializing the entered base
+  prefix 128, +2 appended vs base, release 2`. The append gate works around
+  this out-of-scope helper defect by materializing the entered base
   itself and supplying the trusted anchor directory; `release_chain.py` will
   not be changed.
 - The brief simultaneously requires keeping
   `assert_no_redirecting_git_environment` at public entry and invariance under
   foreign `GIT_DIR`/`GIT_INDEX_FILE`. The retained helper necessarily refuses
-  variables present at entry. The new invariance tests will inject them only
+  variables present at entry. The new invariance tests inject them only
   after that guard runs, proving the snapshot's Git children remain bound to
   the selected repository without weakening the retained entry refusal.
+- `TreeSnapshot.select` intentionally normalizes every revision-resolution
+  failure to `cannot resolve commit`. Lane B's narrow adapter restores the
+  retained nonexistent-base diagnostic, but cannot reconstruct Git's
+  additional first line when an existing blob OID is supplied as `base_ref`
+  without an out-of-scope second Git resolution. The common harness text is
+  exact; this rarer diagnostic remains a Lane C API limitation.
 - The required candidate materialization prefix set includes
   `release_root_relative`; Chronicle's anchors are descendants of that root,
   so `TreeSnapshot.materialize` deduplicates the nested prefixes and

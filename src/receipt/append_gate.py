@@ -2,10 +2,10 @@
 
 What this verdict speaks for
 
-The subject is tree T of commit C.
+Subject is tree T of commit C.
 Every byte comes from an object rehashed against its name.
-The base, when supplied, is a second tree.
-Anchors belong to the verifier, never the candidate.
+The base is a second tree.
+Anchors are the verifier's.
 The working tree is not read.
 """
 
@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from receipt._names import NamePolicyError, ascii_fold_text
 from receipt.canonical import canonical_sha256
 from receipt.corpus import MAX_JOURNAL_BYTES
 from receipt.release_chain import (
@@ -92,24 +93,11 @@ def _assert_release_paths_are_subdirectories(spec: AppendGateSpec) -> None:
     """Refuse a spec whose release paths name the candidate root itself.
 
     ``PurePosixPath('.')`` and the empty path both report no components at
-    all, and a release root spelled either way is the candidate root. Nothing
-    here can speak for such a spec, because this gate's own reads disagree
-    about what is inside it. ``git ls-tree`` names the entries under ``.``
-    without any prefix — ``a/f.txt``, not ``./a/f.txt``, checked on the git
-    this repository is verified with — so ``git_tree_entries`` refuses the
-    first of them as a path outside the root it asked about, and the base
-    enumeration the release-history pass is built on never returns. From the
-    other side, ``check_gate_only_confinement`` asks whether a changed path is
-    ``.`` or begins with ``./`` and finds nothing inside the release root at
-    all, so the confinement a gate-only verdict rests on is silently a no-op;
-    and ``hold_release_root`` has no component to walk or hold.
-
-    So it is refused here, at the gate's entry, rather than left to whichever
-    of those the run reaches first. ``ChainSpec`` refuses both spellings at
-    construction as well (spec validation, #41), so a spec built through its
-    constructor never reaches this check; it is kept because it is the gate's
-    own statement about the configuration it was handed, whatever built it —
-    like the platform refusals below it, the gate declining to answer.
+    all. Such a value cannot define a release subtree or its proper ancestors,
+    so surface confinement and subtree enumeration would not describe the
+    same subject. ``ChainSpec`` also refuses both spellings at construction;
+    this entry check preserves the gate's own refusal for any object that did
+    not come through that constructor.
     """
 
     for label, relative in (
@@ -134,12 +122,7 @@ def _matches_surface(path: str, surface: frozenset[str]) -> bool:
 def _classify_surfaces(
     changed: set[str], candidate: _CandidateTree
 ) -> tuple[set[str], set[str], set[str]]:
-    """Split one changed set into DATA, GATE, and everything else.
-
-    Classification is per path, so classifying a union is the same as taking
-    the union of the classifications — which is how the gate-only decision
-    below folds the index's changed set into the working tree's.
-    """
+    """Split authenticated tree changes into DATA, GATE, and everything else."""
 
     data_changes = {
         path for path in changed if _matches_surface(path, candidate.spec.data_surface)
@@ -171,18 +154,10 @@ def _is_protected(path: str, candidate: _CandidateTree) -> bool:
     same and is the one place ``check_gate_only_confinement`` refuses an
     unclassified change.
 
-    And the release root's own ancestors, which are on that surface for the
-    reason the root is: the root's existence as a real directory is the
-    premise of every check made about the release tree, and a path above it
-    decides that premise. With a root of ``data/releases``, replacing ``data``
-    with a regular file or with a link to a tree outside the checkout changes
-    what ``data/releases`` is or where it lives, while ``data`` itself matched
-    no surface pattern, was not the root and was not under it — so it
-    classified as an ordinary unclassified change, and a proposal carrying it
-    beside a gate file was told ``DATA_SURFACE unchanged`` with the release
-    root's own walk, the enumeration and the index scan all skipped. A change
-    there is a change on the release surface, and a proposal making one is not
-    gate-only.
+    The release root's proper ancestors are included because their entry modes
+    determine whether the configured subtree exists. For a root of
+    ``data/releases``, changing ``data`` changes the release surface even
+    though that shorter path matches neither configured surface pattern.
     """
 
     release_root = candidate.spec.chain.release_root_relative.as_posix()
@@ -230,10 +205,8 @@ def check_gate_only_confinement(
     The surface is ``_is_protected``'s, which is the release root, everything
     under it, and every proper ancestor of it. The last is what a nested root
     needs: with ``data/releases`` configured, a proposal replacing ``data``
-    changes what the release root is — or moves it outside the checkout
-    entirely — while ``data`` is at the root and under it, and so was named in
-    the success text as an ordinary unclassified change beside ``DATA_SURFACE
-    unchanged``. An unclassified change everywhere else is still reported
+    changes whether the release root exists as a tree. An unclassified change
+    everywhere else is still reported
     rather than refused, because everywhere else is ground this verdict makes
     no claim about; on the release surface the verdict claims exactly this
     confinement. The two surfaces the spec names cannot appear here at all —
@@ -371,9 +344,8 @@ def effective_current_rows(
 def check_prefix(
     lines: list[str], prefix_text: str, candidate: _CandidateTree
 ) -> dict[str, Any]:
-    # The manifest text comes from the caller's one snapshot read of the
-    # prefix path, taken where this function used to walk and read it, so the
-    # refusals below fire in exactly the order they always did.
+    # The caller supplies the selected prefix blob once, so the refusals below
+    # retain their established order over authenticated bytes.
     prefix = json.loads(prefix_text)
     if prefix.get("schemaVersion") != candidate.spec.prefix_schema_version:
         raise AppendError(
@@ -635,12 +607,8 @@ def check_binding_shapes(lines: list[str], prefix_count: int) -> None:
     release proposal, the release history — so no pre-existing file-level
     refusal is pre-empted for an input that violates both. Two review rounds
     moved it here: first from ahead of the projection and supersession
-    checks, then from ahead of the release checks. The one refusal that does
-    run ahead of the pre-existing release checks is the checkout-level one
-    in release_chain.assert_file_modes_authoritative, deliberately: a
-    checkout that cannot be verified says so before any verdict about its
-    files. The rows were parsed and validated by check_rows already, so the
-    loads below cannot fail.
+    checks, then from ahead of the release checks. The rows were parsed and
+    validated by ``check_rows`` already, so the loads below cannot fail.
     """
 
     for number, line in enumerate(lines, start=1):
@@ -758,13 +726,10 @@ def _check_exact_byte_append(base_bytes: bytes, candidate_bytes: bytes) -> bytes
 def _state_snapshot_bytes(
     candidate: _CandidateTree, ledger_bytes: bytes, prefix_bytes: bytes
 ) -> dict[str, bytes]:
-    """The two state snapshots, keyed the way ``release_chain`` reads them.
+    """Pass the authenticated state blobs to the directory chain verifier.
 
-    The release verification used to open the ledger and the frozen prefix
-    by name, which is a second read of each file inside one verdict: an
-    A-to-B-to-A replacement showed the row checks one ledger, the release
-    chain another, and put the first back before the closing re-read. Handing
-    it these bytes means there is only ever one read of each file per run.
+    The semantic checks and release chain therefore consume the same selected
+    object bytes; the private materialization is not reopened for state.
     """
 
     return {
@@ -773,11 +738,11 @@ def _state_snapshot_bytes(
     }
 
 
-def _read_state_blob(
+def _state_entry(
     candidate: _CandidateTree,
     relative: pathlib.PurePosixPath,
-) -> tuple[GitEntry, bytes]:
-    """Read one regular state blob from the selected candidate tree."""
+) -> GitEntry:
+    """Select one regular state entry without fetching its payload."""
 
     display = relative.as_posix()
     try:
@@ -792,7 +757,19 @@ def _read_state_blob(
         raise AppendError(f"state file is a symlink: {display}")
     if entry.mode not in {"100644", "100755"}:
         raise AppendError(f"state file is not a regular file: {display}")
-    return entry, candidate.snapshot.blob(entry, limit=MAX_JOURNAL_BYTES)
+    return entry
+
+
+def _read_state_blob(
+    candidate: _CandidateTree,
+    relative: pathlib.PurePosixPath,
+    *,
+    entry: GitEntry | None = None,
+) -> tuple[GitEntry, bytes]:
+    """Fetch one already-shaped state entry's authenticated payload."""
+
+    selected = entry or _state_entry(candidate, relative)
+    return selected, candidate.snapshot.blob(selected, limit=MAX_JOURNAL_BYTES)
 
 
 def _materialization_prefixes(
@@ -807,13 +784,116 @@ def _materialization_prefixes(
     )
 
 
+def _surface_alias_paths(candidate: _CandidateTree) -> tuple[str, ...]:
+    """Return the exact paths named by the two configured surface forms."""
+
+    paths = set()
+    for pattern in candidate.spec.gate_surface | candidate.spec.data_surface:
+        named = pattern[: -len("/**")] if pattern.endswith("/**") else pattern
+        if named:
+            paths.add(named)
+    return tuple(sorted(paths))
+
+
+def _folded_parts(path: str) -> tuple[str, ...]:
+    try:
+        return tuple(ascii_fold_text(component) for component in path.split("/"))
+    except NamePolicyError as exc:
+        raise AppendError(str(exc)) from exc
+
+
+def _protected_paths(candidate: _CandidateTree) -> tuple[str, ...]:
+    chain = candidate.spec.chain
+    return tuple(
+        dict.fromkeys(
+            (
+                chain.release_root_relative.as_posix(),
+                chain.state_relative.as_posix(),
+                chain.prefix_relative.as_posix(),
+                chain.manifest_relative.as_posix(),
+                chain.anchor_relative.as_posix(),
+                *_surface_alias_paths(candidate),
+            )
+        )
+    )
+
+
+def _screen_candidate_tree_aliases(
+    candidate: _CandidateTree,
+) -> dict[str, GitEntry]:
+    """Screen protected ancestor shapes and aliases over the complete tree."""
+
+    entries = candidate.snapshot.entries("").as_dict(include_trees=True)
+    protected = _protected_paths(candidate)
+    for path in protected:
+        parts = path.split("/")
+        for depth in range(1, len(parts)):
+            prefix = "/".join(parts[:depth])
+            entry = entries.get(prefix)
+            if entry is None or entry.mode == "040000":
+                continue
+            if entry.mode == "120000":
+                raise SnapshotError(f"state path has a symlinked component: {prefix}")
+            raise SnapshotError(f"tree path ancestor is not a directory: {prefix}")
+
+    folded = {path: _folded_parts(path) for path in protected}
+    exact = {path: tuple(path.split("/")) for path in protected}
+    # A non-tree alias carries the legacy diagnostic's complete entry path.
+    # Empty tree aliases are still covered after all non-tree entries.
+    for listed in sorted(
+        entries,
+        key=lambda path: (entries[path].mode == "040000", path),
+    ):
+        parts = tuple(listed.split("/"))
+        listed_folded = _folded_parts(listed)
+        for path in protected:
+            for depth in range(1, len(folded[path]) + 1):
+                if len(parts) < depth or listed_folded[:depth] != folded[path][:depth]:
+                    break
+                if parts[:depth] == exact[path][:depth]:
+                    continue
+                prefix = "/".join(exact[path][:depth])
+                raise AppendError(
+                    f"index carries an alias of a protected path: {listed} "
+                    f"(for {path} at {prefix})"
+                )
+    return entries
+
+
+def _attribute_entries(
+    candidate: _CandidateTree,
+    entries: Mapping[str, GitEntry],
+) -> tuple[GitEntry, ...]:
+    """Return regular blobs on every explicit or configured protected path."""
+
+    materialized = tuple(
+        relative.as_posix() for relative in _materialization_prefixes(candidate)
+    )
+    return tuple(
+        entry
+        for path, entry in sorted(entries.items())
+        if entry.mode in {"100644", "100755"}
+        and (
+            _is_protected(path, candidate)
+            or any(
+                path == prefix or path.startswith(f"{prefix}/")
+                for prefix in materialized
+            )
+        )
+    )
+
+
 def _candidate_release_entries_regular(candidate: _CandidateTree) -> None:
     """Preserve the release-leaf shape refusals on the push path."""
 
     release_root = candidate.spec.chain.release_root_relative.as_posix()
+    manifest = candidate.spec.chain.manifest_relative.as_posix()
     for relative, entry in sorted(
         candidate.snapshot.entries(release_root).as_dict().items()
     ):
+        # The manifest leaf has its own established directory diagnostic.
+        if relative == manifest:
+            continue
         if entry.mode == "120000":
             raise AppendError(f"release path is a symlink: {relative}")
         if entry.mode not in {"100644", "100755"}:
@@ -821,18 +901,15 @@ def _candidate_release_entries_regular(candidate: _CandidateTree) -> None:
 
 
 def _screen_candidate_materialization(candidate: _CandidateTree) -> None:
-    """Rehash and attribute-screen protected candidate blobs without a chain."""
+    """Rehash every protected candidate blob when no chain is present."""
 
-    _candidate_release_entries_regular(candidate)
     with tempfile.TemporaryDirectory(prefix="receipt-append-candidate-") as directory:
         with candidate.snapshot.materialize(
             _materialization_prefixes(candidate),
             pathlib.Path(directory),
             repertoire=candidate.spec.chain.name_repertoire,
-        ) as materialized:
-            candidate.snapshot.refuse_transforming_attributes(
-                materialized.entries.values()
-            )
+        ):
+            pass
 
 
 def _verify_candidate_release_chain(
@@ -845,16 +922,12 @@ def _verify_candidate_release_chain(
 ) -> ChainVerification:
     """Verify the selected candidate chain through a private materialization."""
 
-    _candidate_release_entries_regular(candidate)
     with tempfile.TemporaryDirectory(prefix="receipt-append-candidate-") as directory:
         with candidate.snapshot.materialize(
             _materialization_prefixes(candidate),
             pathlib.Path(directory),
             repertoire=candidate.spec.chain.name_repertoire,
         ) as materialized:
-            candidate.snapshot.refuse_transforming_attributes(
-                materialized.entries.values()
-            )
             return verify_release_chain(
                 materialized.path,
                 spec=candidate.spec.chain,
@@ -924,9 +997,12 @@ def check_release_proposal(
         for relative in base_release_entries
     )
     manifest_relative = candidate.spec.chain.manifest_relative.as_posix()
+    manifest_children = candidate.snapshot.entries(manifest_relative).children
     candidate_has_chain = any(
         name.endswith(".json")
-        for name in candidate.snapshot.entries(manifest_relative).children
+        and isinstance(child, GitEntry)
+        and child.mode in {"100644", "100755"}
+        for name, child in manifest_children.items()
     )
     base_bytes = _base_ledger_bytes(base, candidate)
     appended_bytes = _check_exact_byte_append(base_bytes, ledger_bytes)
@@ -1016,27 +1092,10 @@ def check_release_chain_without_base(
     """Verify an initialized chain from the selected pushed commit."""
 
     manifest_relative = candidate.spec.chain.manifest_relative.as_posix()
-    release_root = candidate.spec.chain.release_root_relative.as_posix()
-    try:
-        initialized = bool(candidate.snapshot.entries(manifest_relative))
-    except SnapshotError as exc:
-        # ``entries(manifest)`` encounters a non-tree release root as an
-        # ancestor. Preserve the release enumeration's established leaf-mode
-        # wording for the two Git-only entry kinds; ordinary blobs keep the
-        # reader's distinct non-directory-ancestor refusal.
-        if str(exc) in {
-            f"state path has a symlinked component: {release_root}",
-            f"tree path ancestor is not a directory: {release_root}",
-        }:
-            root_entry = candidate.snapshot.entry(release_root)
-            if root_entry.mode == "120000":
-                raise AppendError(f"release path is a symlink: {release_root}") from exc
-            if root_entry.mode == "160000":
-                raise AppendError(
-                    f"release path is not regular: {release_root}"
-                ) from exc
-        raise
+    manifest_listing = candidate.snapshot.entries(manifest_relative)
+    initialized = bool(manifest_listing)
     if not initialized:
+        _candidate_release_entries_regular(candidate)
         _screen_candidate_materialization(candidate)
         return None
     manifest_entry = candidate.snapshot.entry(manifest_relative)
@@ -1045,6 +1104,7 @@ def check_release_chain_without_base(
             "release manifest path is not a regular directory: "
             f"{candidate.snapshot.root / candidate.spec.chain.manifest_relative}"
         )
+    _candidate_release_entries_regular(candidate)
     try:
         verification = _verify_candidate_release_chain(
             candidate=candidate,
@@ -1066,9 +1126,15 @@ def _verify_selected_tree(
     trusted_code_root: pathlib.Path,
     release_anchor_dir: pathlib.Path | None,
 ) -> str:
-    """Run the retained append checks over already-entered snapshots."""
+    """Run reader preflights, then retained checks, over entered snapshots."""
 
     spec = candidate.spec
+    ledger_entry = _state_entry(candidate, spec.chain.state_relative)
+    prefix_entry = _state_entry(candidate, spec.chain.prefix_relative)
+    tree_entries = _screen_candidate_tree_aliases(candidate)
+    candidate.snapshot.refuse_transforming_attributes(
+        _attribute_entries(candidate, tree_entries)
+    )
     if base is not None:
         _data_changes, gate_changes, unclassified = check_surface_separation(
             base,
@@ -1088,18 +1154,21 @@ def _verify_selected_tree(
                 f"{sorted(gate_changes)}{unclassified_suffix}{base_suffix}"
             )
 
-    ledger_entry, ledger_bytes = _read_state_blob(
+    _, ledger_bytes = _read_state_blob(
         candidate,
         spec.chain.state_relative,
+        entry=ledger_entry,
     )
+    _, prefix_bytes = _read_state_blob(
+        candidate,
+        spec.chain.prefix_relative,
+        entry=prefix_entry,
+    )
+
     text = _as_text(ledger_bytes, "utf-8")
     reject_non_append_bytes(text)
     lines = _lines(text)
 
-    prefix_entry, prefix_bytes = _read_state_blob(
-        candidate,
-        spec.chain.prefix_relative,
-    )
     prefix = check_prefix(lines, _as_text(prefix_bytes), candidate)
     binding_boundary = int(prefix["prefixLineCount"])
     appended = None
