@@ -760,6 +760,64 @@ def test_missing_trailing_newline_is_refused(
         verify_evidence_records(tmp_path, spec=spec, anchor_dir=anchor_dir)
 
 
+def test_a_reserialized_body_is_refused(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+    emitted: pathlib.Path,
+    anchor_dir: pathlib.Path,
+) -> None:
+    """The body was only ever hashed, never held to the rule it is stored by.
+
+    A digest binds a byte stream, and any byte stream that hashes to it
+    satisfies the record — so a body reserialized with different whitespace,
+    with its digest recomputed into the record and the record re-signed,
+    verified green while being bytes no emission of this module could have
+    written. The record's own bytes have always been checked this way.
+    """
+
+    private_pem, _ = keys
+    body_path = emitted.with_name(f"{emitted.stem}.body.json")
+    parsed = json.loads(body_path.read_text())
+    loose = json.dumps(parsed, indent=2).encode("utf-8") + b"\n"
+    body_path.write_bytes(loose)
+    _resign_in_place(
+        emitted,
+        spec,
+        private_pem,
+        lambda payload: payload["body"].__setitem__("sha256", sha256_bytes(loose)),
+    )
+    with pytest.raises(
+        EvidenceRecordError, match="evidence-body bytes are not canonical"
+    ):
+        verify_evidence_records(tmp_path, spec=spec, anchor_dir=anchor_dir)
+
+
+def test_a_body_missing_its_trailing_newline_is_refused(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+    emitted: pathlib.Path,
+    anchor_dir: pathlib.Path,
+) -> None:
+    """One byte, and the same reasoning as the record's own refusal."""
+
+    private_pem, _ = keys
+    body_path = emitted.with_name(f"{emitted.stem}.body.json")
+    stripped = body_path.read_bytes().rstrip(b"\n")
+    body_path.write_bytes(stripped)
+    _resign_in_place(
+        emitted,
+        spec,
+        private_pem,
+        lambda payload: payload["body"].__setitem__("sha256", sha256_bytes(stripped)),
+    )
+    with pytest.raises(
+        EvidenceRecordError, match="evidence-body bytes are not canonical"
+    ):
+        verify_evidence_records(tmp_path, spec=spec, anchor_dir=anchor_dir)
+
+
 def test_duplicate_json_key_is_refused(
     tmp_path: pathlib.Path,
     spec: EvidenceSpec,

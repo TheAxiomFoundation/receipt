@@ -586,7 +586,9 @@ def verify_evidence_records(
     called by `receipt.verify.run_verification`, and `VerifyResult.verdict`
     does not depend on it. A green result here says the records are
     well-formed, chained, and signed by the pinned producer under this
-    module's domain — and says nothing about the custody of any release.
+    module's domain — and says nothing about the custody of any release. It
+    also says the body beside each record is canonical, not merely that those
+    bytes hash to what the record recorded.
 
     An absent records directory is the zero-record chain, not a refusal. This
     directory is closed-world, so a placeholder file cannot be put in it to
@@ -632,7 +634,17 @@ def verify_evidence_records(
                 f"evidence record {path.name} does not link to its predecessor"
             )
 
-        _, body_raw = _load_canonical_json(body_path, "evidence body")
+        parsed_body, body_raw = _load_canonical_json(body_path, "evidence body")
+        # The digest below binds a byte stream, and every stream that hashes
+        # to it satisfies the record. The rule the body is stored under is the
+        # record's own — canonical JSON plus one newline — and it has to be
+        # checked to hold, or a reserialized body with a recomputed digest is
+        # bytes no emission of this module could have written, verifying green.
+        if body_raw != canonical_document_bytes(parsed_body):
+            raise EvidenceRecordError(
+                "evidence-body bytes are not canonical JSON plus one newline: "
+                f"{body_path}"
+            )
         body_digest = sha256_bytes(body_raw)
         if body_digest != payload["body"]["sha256"]:
             raise EvidenceRecordError(
