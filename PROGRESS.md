@@ -13,6 +13,7 @@ In progress on `feat/0.6-lane-c`, based at `145f3db93d745ddc43aeb47f6b7bd8b30aa3
 - Wired the cached OpenSSL 3.0 preflight into `verify_release_chain` and made every RFC 3161 `-CAfile` a 0600 private byte-for-byte copy, including unpinned/unobserved calls; focused tests pass (2 passed).
 - Reworked `verify_release_chain` as a directory-as-read verifier: argument validation and OpenSSL preflight precede the anchor/path/manifest-shape/enumeration ladder, every input routes through the bounded lstat-plus-`O_NOFOLLOW` reader, and the docstring states the breaking concurrent-writer precondition. `tests/test_release_chain.py` is green (61 passed).
 - Replaced release-history inspection with a comparison of two entered `TreeSnapshot`s, re-exported `snapshot.GitEntry`, and made base-chain verification materialize its entered base. The three existing immutability messages remain exact and candidate links retain the live-directory refusal. `tests/test_release_chain.py` is green (67 passed).
+- Deleted the descriptor-holding and cross-run root/state race helpers. Their working-tree race subject no longer exists for commit-addressed callers; their private support functions' callers are deleted. The directory verifier retains its one bounded `O_NOFOLLOW` read.
 
 ## Decisions
 
