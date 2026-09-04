@@ -300,6 +300,100 @@ def test_an_unreadable_ancestor_of_a_pinned_root_is_named_as_an_ancestor(
     )
 
 
+def _lstat_raising_at(target: str, error: OSError, unlink: bool = False):
+    """A ``Path.lstat`` that fails for one relative spelling and no other.
+
+    The race S8-F10 names is the instant between two syscalls on one name, so
+    the second one is made to fail directly. With ``unlink`` the entry really
+    is removed first, which is the race rather than a simulation of it: the
+    walk's ``exists()`` said yes about a name that is gone by the time
+    ``lstat`` asks. ``target`` is matched on the path's tail so the fixture's
+    own temporary directory need not be known here.
+    """
+
+    real = pathlib.Path.lstat
+
+    def lstat(self, **keywords):
+        if self.as_posix().endswith(target):
+            if unlink:
+                self.unlink(missing_ok=True)
+            raise error
+        return real(self, **keywords)
+
+    return lstat
+
+
+def test_a_bound_path_unlinked_between_two_syscalls_refuses_by_name(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S8-F10: exists() then lstat() is two syscalls and one race.
+
+    ``_assert_no_symlinked_component`` asked ``current.exists()`` and then
+    ``current.lstat()`` about the same name. ``Path.exists`` swallows
+    ``OSError``; ``Path.lstat`` does not. So an entry unlinked between the
+    two raised a bare ``FileNotFoundError`` out of the content-root walk and
+    out of ``_regular_file_digest`` — fail-closed at ``receipt.verify``'s
+    boundary, and nameless, which is the class the round-three tombstone fix
+    closed elsewhere.
+
+    One ``lstat`` inside a ``try`` answers both questions now, and a vanished
+    name is an absence the caller refuses better than this walk could. The
+    entry here is really unlinked as the failing call is made, so what the
+    run reports is what a real race would leave behind: the attested file
+    refused by name, as a ``CorpusError``.
+
+    Without the fix this raises ``FileNotFoundError`` out of the walk.
+    """
+
+    write_tree(tmp_path)
+    monkeypatch.setattr(
+        pathlib.Path,
+        "lstat",
+        _lstat_raising_at(
+            ".axiom/toolchain.toml",
+            FileNotFoundError(2, "No such file or directory"),
+            unlink=True,
+        ),
+    )
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    assert ".axiom/toolchain.toml" in str(caught.value)
+
+
+def test_a_component_that_cannot_be_stat_ed_refuses_by_name(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binds S8-F10: any other failure to look is a refusal, and says so.
+
+    A vanished name is an absence. Everything else — a parent that stopped
+    being searchable while the walk was in it, a name the host will not
+    answer about — is a failure to look, which this module's standing rule
+    makes a refusal rather than an absence. It used to be a bare
+    ``PermissionError`` from the middle of three syscalls.
+
+    Without the fix this raises ``PermissionError``.
+    """
+
+    write_tree(tmp_path)
+    monkeypatch.setattr(
+        pathlib.Path,
+        "lstat",
+        _lstat_raising_at(
+            ".axiom/toolchain.toml", PermissionError(13, "Permission denied")
+        ),
+    )
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        )
+    assert str(caught.value) == (
+        "cannot check whether bound path traverses a symlink at "
+        "'.axiom/toolchain.toml': .axiom/toolchain.toml (Permission denied)"
+    )
+
+
 def test_refuses_a_bound_path_behind_a_symlinked_parent(
     tmp_path: pathlib.Path,
 ) -> None:

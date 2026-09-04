@@ -3457,6 +3457,19 @@ def _assert_no_symlinked_component(
     S6-F1 was, and the way to make one unwritable is to leave the caller no
     way to omit the recorder.
 
+    The symlink question is one ``lstat`` inside a ``try``, and that is the
+    whole of it. It was ``exists()``, then ``lstat()``, then ``is_symlink()``
+    — three syscalls on one name, of which only the middle raises, because
+    :meth:`pathlib.Path.exists` and :meth:`pathlib.Path.is_symlink` swallow
+    ``OSError`` and :meth:`pathlib.Path.lstat` does not. An entry unlinked
+    between the first two, or a parent that stopped being searchable, put a
+    bare ``FileNotFoundError`` or ``PermissionError`` through the
+    content-root walk and through :func:`_regular_file_digest` — fail-closed
+    at ``receipt.verify``'s boundary, and nameless (peer review, Sol
+    round 8). A vanished name is an absence the caller refuses better; any
+    other failure is a refusal here, by name, as it already is everywhere
+    else this module looks at the tree.
+
     ``None`` has two callers. The content-root walk passes it because its
     components are checked a line later by
     :func:`_assert_no_aliasing_root_component`, which asks the same question
@@ -3473,11 +3486,34 @@ def _assert_no_symlinked_component(
         parent = current
         parent_relative = "/".join(walked)
         current = current / segment
-        # is_symlink() catches POSIX symlinks; on Windows a junction/reparse
-        # point is not a symlink but is reported by st_reparse_tag, so refuse
-        # any reparse point as well.
-        reparse = getattr(current.lstat(), "st_reparse_tag", 0) if current.exists() else 0
-        if current.is_symlink() or reparse:
+        # One lstat, inside a try, answering both questions. It was three
+        # calls — exists(), lstat(), is_symlink() — and only the middle one
+        # raises: Path.exists() and Path.is_symlink() swallow OSError, so an
+        # entry unlinked between exists() and lstat() left a bare
+        # FileNotFoundError to come out of the content-root walk and out of
+        # _regular_file_digest instead of a CorpusError. Fail-closed but
+        # nameless, which is the class the round-three tombstone fix closed
+        # elsewhere (peer review, Sol round 8). st_mode says symlink where
+        # is_symlink() did; on Windows a junction is not a symlink and is
+        # reported by st_reparse_tag, so any reparse point refuses too.
+        try:
+            info = current.lstat()
+        except (FileNotFoundError, NotADirectoryError):
+            # Nothing answers to this name, so it is not a link and there is
+            # nothing here to refuse. The caller's own refusal — a missing
+            # bound file, an absent content root — says more than this one
+            # could, which is the same reason the spelling walk below is
+            # asked only of a component that resolves.
+            info = None
+        except OSError as exc:
+            raise CorpusError(
+                f"cannot check whether {what} traverses a symlink at "
+                f"{_quoted(current.relative_to(root).as_posix())}: "
+                f"{relative} ({exc.strerror})"
+            ) from exc
+        if info is not None and (
+            stat.S_ISLNK(info.st_mode) or getattr(info, "st_reparse_tag", 0)
+        ):
             raise CorpusError(
                 f"{what} traverses a symlink or reparse point at "
                 f"{_quoted(current.relative_to(root).as_posix())}: {relative}"
