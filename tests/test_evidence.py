@@ -50,6 +50,17 @@ BODY = {"event": "generation", "generation": 7, "populationRootSha256": "a" * 64
 BODY_SCHEMA = "example.org/generation-event/v1"
 PRODUCER = {"repo": "example/consumer", "branch": "main"}
 EMITTED = "2026-08-27T14:05:00Z"
+#: ChainSpec requires a configured witness, and these tests build one only to
+#: hand it to the authorizing verifier, which never reaches the anchor.
+CHAIN_ANCHORS = {
+    "alpha": AnchorSpec(
+        filename="alpha.pem",
+        pem_sha256="1" * 64,
+        policy_oid="1.2.3.4",
+        signer_certificate_sha256="2" * 64,
+        signer_spki_sha256="3" * 64,
+    )
+}
 
 
 @pytest.fixture
@@ -133,7 +144,7 @@ def test_an_evidence_record_is_refused_by_the_authorizing_verifier(
         schema_version="example.org/release-manifest/v1",
         producer_public_key_filename="producer.pem",
         producer_spki_sha256=spki_sha256(public_pem),
-        anchors={},
+        anchors=CHAIN_ANCHORS,
     )
 
     # (a) The schema refusal is structural: closed-world keys, so it lands
@@ -178,7 +189,7 @@ def _chain_spec(public_pem: bytes) -> ChainSpec:
         schema_version="example.org/release-manifest/v1",
         producer_public_key_filename="producer.pem",
         producer_spki_sha256=spki_sha256(public_pem),
-        anchors={},
+        anchors=CHAIN_ANCHORS,
     )
 
 
@@ -219,22 +230,43 @@ def test_planted_record_with_body_is_refused_at_enumeration(
         _enumerate_manifest_files(tmp_path, _chain_spec(public_pem))
 
 
-def test_planted_record_alone_is_refused_for_a_missing_signature(
+def test_planted_record_alone_is_refused_for_a_missing_receipt(
     tmp_path: pathlib.Path, emitted: pathlib.Path, keys: tuple[bytes, bytes]
 ) -> None:
+    """A record alone carries a manifest's filename and nothing else a closed
+    release directory holds. Enumeration wants a receipt for every configured
+    anchor, and asks for that before it looks for the producer signature, so
+    this is where a record alone now stops."""
+
     _, public_pem = keys
     _plant_in_release_directory(tmp_path, emitted, [".json"])
-    with pytest.raises(ReleaseChainError, match="producer signature"):
+    with pytest.raises(ReleaseChainError, match="must have exactly"):
         _enumerate_manifest_files(tmp_path, _chain_spec(public_pem))
 
 
-def test_planted_record_and_signature_pass_enumeration_and_die_at_the_schema(
+def test_planted_record_and_signature_are_refused_for_a_missing_receipt(
+    tmp_path: pathlib.Path, emitted: pathlib.Path, keys: tuple[bytes, bytes]
+) -> None:
+    """This module's producer signature is spelled exactly as a manifest's, so
+    the pair satisfies both filename patterns — and is still refused one
+    requirement earlier than the signature: the receipt set is checked
+    first."""
+
+    _, public_pem = keys
+    _plant_in_release_directory(tmp_path, emitted, [".json", ".producer.sig"])
+    with pytest.raises(ReleaseChainError, match="must have exactly"):
+        _enumerate_manifest_files(tmp_path, _chain_spec(public_pem))
+
+
+def test_planted_record_signature_and_receipt_die_at_the_schema(
     tmp_path: pathlib.Path, emitted: pathlib.Path, keys: tuple[bytes, bytes]
 ) -> None:
     """The arrangement that gets furthest — and where invariant 1 earns its keep.
 
-    Record plus signature carry manifest-shaped filenames, so enumeration
-    accepts the pair. Nothing about the filename grammar stops it; the
+    Record, signature and one receipt sidecar carry manifest-shaped filenames,
+    so enumeration accepts all three: the receipt is counted here and not
+    opened, which makes its grammar one more thing the filename layout does
+    not keep apart. Nothing about the filenames stops the arrangement; the
     closed-world schema check does.
     """
 
@@ -243,6 +275,7 @@ def test_planted_record_and_signature_pass_enumeration_and_die_at_the_schema(
     directory = _plant_in_release_directory(
         tmp_path, emitted, [".json", ".producer.sig"]
     )
+    (directory / f"{emitted.stem}.alpha.tsr").write_bytes(b"not a receipt")
     enumerated = _enumerate_manifest_files(tmp_path, chain_spec)
     assert len(enumerated) == 1
 
