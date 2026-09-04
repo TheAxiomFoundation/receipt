@@ -213,10 +213,10 @@ def test_commit_identity_distinguishes_commits_with_the_same_tree(
     assert len(
         {first_snapshot.commit, descendant_snapshot.commit, unrelated_snapshot.commit}
     ) == 3
-    with descendant_snapshot:
-        assert descendant_snapshot.assert_ancestor(first) == first
+    with descendant_snapshot, first_snapshot, unrelated_snapshot:
+        assert descendant_snapshot.assert_ancestor(first_snapshot) == first
         with pytest.raises(SnapshotError, match="is not an ancestor"):
-            descendant_snapshot.assert_ancestor(unrelated)
+            descendant_snapshot.assert_ancestor(unrelated_snapshot)
 
 
 def test_context_acquires_batch_lazily_and_reaps_it(
@@ -516,7 +516,7 @@ def test_every_git_child_receives_frozen_environment_and_allowed_command(
     with TreeSnapshot.select(git_repo) as selected:
         entry = selected.entry("tracked.txt")
         assert selected.blob(entry, limit=100) == b"committed bytes\n"
-        assert selected.assert_ancestor(selected.commit) == selected.commit
+        assert selected.assert_ancestor(selected) == selected.commit
 
     assert calls
     for argv, environment, cwd in calls:
@@ -959,13 +959,16 @@ def test_parents_and_ancestry_walk_cover_both_merge_parents(
         git_repo, tree, parents=(left, right), message=b"merge\n"
     )
 
-    with TreeSnapshot.select(git_repo, merge) as selected, TreeSnapshot.select(
-        git_repo, left
-    ) as left_snapshot:
+    with (
+        TreeSnapshot.select(git_repo, merge) as selected,
+        TreeSnapshot.select(git_repo, left) as left_snapshot,
+        TreeSnapshot.select(git_repo, right) as right_snapshot,
+        TreeSnapshot.select(git_repo, base) as base_snapshot,
+    ):
         assert selected.parents(merge) == (left, right)
         assert selected.assert_ancestor(left_snapshot) == left
-        assert selected.assert_ancestor(right) == right
-        assert selected.assert_ancestor(base) == base
+        assert selected.assert_ancestor(right_snapshot) == right
+        assert selected.assert_ancestor(base_snapshot) == base
         assert selected.work.ancestry_commits >= 6
 
 
@@ -975,12 +978,15 @@ def test_ancestry_refuses_nonancestor_with_head_wording(
     tree = _oid(git_repo, "HEAD^{tree}")
     unrelated = _commit_object(git_repo, tree, message=b"unrelated\n")
 
-    with TreeSnapshot.select(git_repo) as selected:
+    with (
+        TreeSnapshot.select(git_repo) as selected,
+        TreeSnapshot.select(git_repo, unrelated) as unrelated_snapshot,
+    ):
         with pytest.raises(
             SnapshotError,
             match=rf"^base commit {unrelated} is not an ancestor of HEAD$",
         ):
-            selected.assert_ancestor(unrelated)
+            selected.assert_ancestor(unrelated_snapshot)
 
 
 def test_ancestry_refuses_nonancestor_with_named_candidate_wording(
@@ -991,7 +997,10 @@ def test_ancestry_refuses_nonancestor_with_named_candidate_wording(
     candidate = _commit_object(git_repo, tree, parents=(base,))
     unrelated = _commit_object(git_repo, tree, message=b"unrelated\n")
 
-    with TreeSnapshot.select(git_repo, candidate) as selected:
+    with (
+        TreeSnapshot.select(git_repo, candidate) as selected,
+        TreeSnapshot.select(git_repo, unrelated) as unrelated_snapshot,
+    ):
         with pytest.raises(
             SnapshotError,
             match=(
@@ -999,7 +1008,7 @@ def test_ancestry_refuses_nonancestor_with_named_candidate_wording(
                 rf"commit {candidate}$"
             ),
         ):
-            selected.assert_ancestor(unrelated)
+            selected.assert_ancestor(unrelated_snapshot)
 
 
 def test_ancestry_walk_obeys_commit_budget(
@@ -1010,22 +1019,22 @@ def test_ancestry_walk_obeys_commit_budget(
     candidate = _commit_object(git_repo, tree, parents=(base,))
     monkeypatch.setattr(snapshot_module, "MAX_ANCESTRY_COMMITS", 1)
 
-    with TreeSnapshot.select(git_repo, candidate) as selected:
+    with (
+        TreeSnapshot.select(git_repo, candidate) as selected,
+        TreeSnapshot.select(git_repo, base) as base_snapshot,
+    ):
         with pytest.raises(
             SnapshotError, match="ancestry walk exceeds the budget of 1 commits"
         ):
-            selected.assert_ancestor(base)
+            selected.assert_ancestor(base_snapshot)
 
 
-def test_assert_ancestor_refuses_a_symbolic_name_without_resolving_it(
+def test_assert_ancestor_refuses_non_snapshot_without_resolving_it(
     git_repo: pathlib.Path,
 ) -> None:
     with TreeSnapshot.select(git_repo) as selected:
         with pytest.raises(
             SnapshotError,
-            match=(
-                "^object name is not full lowercase hexadecimal: "
-                "'does-not-exist'$"
-            ),
+            match="^assert_ancestor base must be a TreeSnapshot$",
         ):
             selected.assert_ancestor("does-not-exist")
