@@ -16,6 +16,8 @@ In progress on `feat/0.6-lane-c`, based at `145f3db93d745ddc43aeb47f6b7bd8b30aa3
 - Deleted the descriptor-holding and cross-run root/state race helpers. Their working-tree race subject no longer exists for commit-addressed callers; their private support functions' callers are deleted. The directory verifier retains its one bounded `O_NOFOLLOW` read.
 - Added frozen, loader-constructed `LoadedSpec`; `load_spec` now hashes its single source read and enforces an optional expected digest before `compile` or `exec`. Existing callers consume the record explicitly, and focused tests pass (4 passed).
 - Deleted the complete obsolete Git/index/history helper closure (`WORKING_TREE_SCAN_OPTIONS`, index guards, base-ref resolution, `git_tree_entries`, file/blob reads, and their private support). Its checkout/index subject no longer exists or its caller is deleted; `TreeSnapshot` now owns the object reads. The retained live-directory release tests are green (63 passed).
+- Re-pinned the 8 ledger base-ref cases to entered candidate/base snapshots and a private candidate materialization; added 7 port-only tree-object cases for the intended dirty-checkout divergence, working-tree/index/environment/replace invariance, and loose-object corruption. The authenticated ledger harness collects and passes 43 cases with zero skips.
+- Added `receipts/repin-0.6-tree-object.md` with the Lane E fixture change, genuine ledger divergence, 26 re-pinned / 68 unchanged / 94 prior / 101 integrated census, and the two narrow snapshot diagnostic adapters.
 
 ## Decisions
 
@@ -34,4 +36,4 @@ In progress on `feat/0.6-lane-c`, based at `145f3db93d745ddc43aeb47f6b7bd8b30aa3
 ## Next
 
 - Merge Lane D's completed snapshot corpus API when its branch is ready, then implement commit-addressed `run_verification` and CLI pins/output.
-- Finish and commit the ledger harness re-pin extras and census record.
+- Re-run the ledger harness after the final verifier/CLI integration, then run the complete 101-case equivalence census.
