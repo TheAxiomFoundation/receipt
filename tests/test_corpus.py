@@ -34,7 +34,7 @@ from receipt.corpus import (
     verify_corpus_binding as _verify_corpus_binding,
     verify_declarations,
 )
-from receipt.snapshot import TreeSnapshot
+from receipt.snapshot import SnapshotError, TreeSnapshot
 
 from corpus_fixture import (
     ATTESTED,
@@ -100,6 +100,14 @@ def _hash_blob(root: pathlib.Path, payload: bytes) -> str:
         .decode("ascii")
         .strip()
     )
+
+
+def _loose_object_path(root: pathlib.Path, object_id: str) -> pathlib.Path:
+    """Return an asserted loose-object path in one freshly initialized fixture."""
+
+    path = root / ".git" / "objects" / object_id[:2] / object_id[2:]
+    assert path.is_file(), f"fixture object is not loose: {object_id}"
+    return path
 
 
 def _commit_index_updates(
@@ -590,6 +598,100 @@ def test_binding_materializes_each_listing_path_once(tmp_path: pathlib.Path) -> 
     expected_listing = sum(len(path.encode()) for path in tree_paths)
     expected_attested_lookups = sum(len(path.encode()) for path in ATTESTED)
     assert charged == expected_listing + expected_attested_lookups
+
+
+def test_translates_a_snapshot_error_from_the_tree_listing(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A subtree lost after selection fails through the listing translation."""
+
+    write_tree(tmp_path)
+    oid = _commit_worktree(tmp_path)
+    rules_oid = _git(tmp_path, "rev-parse", f"{oid}:rules").decode("ascii").strip()
+
+    with TreeSnapshot.select(tmp_path, oid) as snapshot:
+        _loose_object_path(tmp_path, rules_oid).unlink()
+        with pytest.raises(CorpusError) as caught:
+            _verify_corpus_binding(
+                snapshot,
+                render_journal(journal_rows()),
+                spec=corpus_spec(),
+            )
+    assert str(caught.value) == f"object {rules_oid} is unavailable"
+    assert type(caught.value.__cause__) is SnapshotError
+
+
+def test_translates_a_snapshot_error_from_listing_materialization(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A charged full path fails through the TreeListing.as_dict translation."""
+
+    from receipt import snapshot as snapshot_module
+
+    write_tree(tmp_path)
+    oid = _commit_worktree(tmp_path)
+    monkeypatch.setattr(snapshot_module, "MAX_PATH_BYTES_TOTAL", 0)
+
+    with TreeSnapshot.select(tmp_path, oid) as snapshot:
+        with pytest.raises(CorpusError) as caught:
+            _verify_corpus_binding(
+                snapshot,
+                render_journal(journal_rows()),
+                spec=corpus_spec(),
+            )
+    assert str(caught.value) == "tree paths exceed the snapshot budget of 0 bytes"
+    assert type(caught.value.__cause__) is SnapshotError
+
+
+def test_translates_a_snapshot_error_from_the_attested_lookup(
+    tmp_path: pathlib.Path,
+) -> None:
+    """An absent exact attested entry retains the corpus-level diagnostic."""
+
+    write_tree(tmp_path)
+    (tmp_path / ".axiom/toolchain.toml").unlink()
+
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path,
+            render_journal(journal_rows()),
+            spec=corpus_spec(),
+        )
+    assert str(caught.value) == (
+        "bound file is missing or not a regular file: .axiom/toolchain.toml"
+    )
+    assert type(caught.value.__cause__) is SnapshotError
+
+
+def test_translates_a_snapshot_error_from_the_digest_stream(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bound blob lost after listing fails through the digest translation."""
+
+    write_tree(tmp_path)
+    oid = _commit_worktree(tmp_path)
+    blob_oid = (
+        _git(tmp_path, "rev-parse", f"{oid}:rules/tax/rate.yaml")
+        .decode("ascii")
+        .strip()
+    )
+    blob_path = _loose_object_path(tmp_path, blob_oid)
+    real_digests = TreeSnapshot.digests
+
+    def deleting_digests(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        blob_path.unlink()
+        return real_digests(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(TreeSnapshot, "digests", deleting_digests)
+    with TreeSnapshot.select(tmp_path, oid) as snapshot:
+        with pytest.raises(CorpusError) as caught:
+            _verify_corpus_binding(
+                snapshot,
+                render_journal(journal_rows()),
+                spec=corpus_spec(),
+            )
+    assert str(caught.value) == f"object {blob_oid} is unavailable"
+    assert type(caught.value.__cause__) is SnapshotError
 
 
 def test_corpus_fixture_commit_controls_return_the_selected_oid(
