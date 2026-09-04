@@ -622,8 +622,13 @@ MAX_EVIDENCE_ENTRIES = 64
 #: And the characters it declares are counted as the verdict renders them,
 #: not as Python holds them. ``json.dumps`` escapes with ``ensure_ascii``
 #: on, so one character outside the BMP leaves as twelve; 249 four-character
-#: evidence keys with 1024 of them per value is one legal gate charging
-#: 262,013 and rendering 3,065,876 (peer review, round six). See
+#: evidence keys with 1024 of them per value charged 262,013 and rendered
+#: 3,065,876 (peer review, round six). That row is not a legal gate under the
+#: caps this module now ships, and calling it one overstated what the charge
+#: is holding back: ``MAX_EVIDENCE_ENTRIES`` refuses it at its 65th key and
+#: ``MAX_JOURNAL_ROW_BYTES`` refuses its 3,062,821 bytes (peer review, Sol
+#: round 8). It is what the ratio between characters and rendered text looks
+#: like, which is why the charge is on the rendered text. See
 #: :func:`_rendered_length`.
 #:
 #: What is charged is now exactly what the JSON renderer emits for the
@@ -802,10 +807,14 @@ MAX_PATH_COMPONENTS = (MAX_PATH_TEXT + 1) // 2
 #: charges one unit per non-root prefix it visits. Charging only visits
 #: bounded the walking and not the holding: 4,096 portable 1,023-character
 #: paths with distinct first components visit 2,093,056 prefixes, half of this
-#: budget, and name 2,093,056 distinct directories — every one of which the
-#: generations recorder stamps with a ``pathlib.Path``, a relative spelling
-#: and a stat tuple that live until the verdict (peer review, Sol round 7,
-#: round 3). What is counted is now what is held.
+#: budget, and name 2,093,056 distinct prefixes — an upper bound on the
+#: directories the generations recorder stamps, each with a ``pathlib.Path``,
+#: a relative spelling and a stat tuple that live until the verdict (peer
+#: review, Sol round 7, round 3). An upper bound rather than the number: the
+#: count includes each declared path itself, and ``record_ancestors`` walks
+#: ``relative.split("/")[:-1]``, so a declared file is counted here and never
+#: stamped there (peer review, Sol round 8). What is counted is now at least
+#: what is held.
 #:
 #: Derived from the default journal capacity and the path-text bound rather
 #: than picked. A default journal contributes at most ``MAX_JOURNAL_ROWS``
@@ -814,8 +823,13 @@ MAX_PATH_COMPONENTS = (MAX_PATH_TEXT + 1) // 2
 #: of ``n`` components costs ``n`` visits, at most ``n`` counted prefixes and
 #: at most ``n - 1`` ancestor visits — about ``3n``, against the ``2n - 1``
 #: characters it must carry — so a 4,096-row journal at the maximum depth
-#: spends 6,275,072 units and is refused, deliberately, because that is the
-#: journal whose directory stamps would be counted in gibibytes. An ordinary
+#: spends 6,284,784 units and is refused, deliberately, because that is the
+#: journal whose directory stamps would be counted in gibibytes. The maximum
+#: depth is 512 and not 511: a path of 512 one-character components is 1,023
+#: characters, and one of its components may be two characters long. 4,096 of
+#: those visit 2,097,152 prefixes, count at most 2,094,576 of them and cost
+#: 2,093,056 ancestor visits (peer review, Sol round 8); the 6,275,072 this
+#: comment used to name was the 511-component fixture below. An ordinary
 #: corpus is nowhere near it: paths of four to eight components spend twelve
 #: to twenty-four units a row, so 4,096 rows spend under 100,000.
 #: A consumer that pins a larger journal capacity still meets this independent
@@ -829,10 +843,14 @@ MAX_PATH_COMPONENTS_TOTAL = MAX_JOURNAL_ROWS * MAX_PATH_TEXT
 #: which is the most distinct directories the declared set may name.
 #:
 #: The index itself no longer allocates per prefix — see
-#: :func:`_reject_aliasing_paths` — but what it counts is what the rest of the
-#: run allocates for: every distinct declared prefix that exists on disk
-#: becomes one entry in :class:`_DirectoryGenerations`, held from the first
-#: read to ``assert_unchanged``. So the cardinality is bounded here, once,
+#: :func:`_reject_aliasing_paths` — but what it counts is an upper bound on
+#: what the rest of the run allocates for: every distinct declared prefix that
+#: exists on disk and is a *directory* becomes one entry in
+#: :class:`_DirectoryGenerations`, held from the first read to
+#: ``assert_unchanged``. The count is above that because it includes each
+#: declared path itself, which ``record_ancestors`` never stamps (peer
+#: review, Sol round 8) — conservative in the direction a ceiling should
+#: be. So the cardinality is bounded here, once,
 #: before any of it is stat-ed.
 #:
 #: Derived, not picked: no path within ``MAX_PATH_TEXT`` has more than
@@ -1291,11 +1309,14 @@ def _rendered_length(text: str) -> int:
     every non-ASCII character a producer writes leaves this module as an
     escape: three ASCII characters become six for a BMP character, and a
     character outside the BMP becomes a surrogate pair spelled as twelve
-    (peer review, round six). Charging Python characters let one legal gate
-    with 249 four-character keys and 1024 U+1F600 characters per value charge
-    262,013 against a budget of 262,144 and render 3,065,876 characters of
-    JSON — the flood the budget exists to stop, a factor of twelve under the
-    cap.
+    (peer review, round six). Charging Python characters let a gate with 249
+    four-character keys and 1024 U+1F600 characters per value charge 262,013
+    against a budget of 262,144 and render 3,065,876 characters of JSON — the
+    flood the budget exists to stop, a factor of twelve under the cap. That
+    row is refused twice over by the caps this module now ships —
+    ``MAX_EVIDENCE_ENTRIES`` at its 65th key, ``MAX_JOURNAL_ROW_BYTES`` at
+    its 3,062,821 bytes — so it is the ratio it demonstrates and not a row a
+    producer could still send (peer review, Sol round 8).
 
     So the charge is what ``json.dumps`` makes of the string, quotes
     included — taken from the escaper ``json.dumps`` applies to a string

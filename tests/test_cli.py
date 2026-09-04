@@ -3117,6 +3117,66 @@ class _BufferlessStdout(io.TextIOWrapper):
         return len(text)
 
 
+def test_the_allow_list_property_is_the_ascii_decode_identity() -> None:
+    """Binds S8-F7: "a fixed 256-entry table" is not what the members have.
+
+    The list's comment named three properties: a fixed 256-entry table, no
+    shift state, and an ASCII-identical lower half. The first is false of 22
+    of the 61 — every page with undefined byte positions — and of ``ascii``
+    itself, which defines 128. Stating a property the members do not have
+    invites the next reader to admit a codec on it, or to strike a member
+    that fails it.
+
+    What the safety argument actually needs is that the bytes this module
+    writes come back as the characters it wrote, which is the 0x00-0x7F
+    decode identity, and all 61 have it. Both facts are measured here.
+    """
+
+    from receipt.cli import _ASCII_TRANSPARENT_CODECS
+
+    ascii_bytes = bytes(range(0x80))
+    ascii_text = "".join(chr(point) for point in range(0x80))
+    narrow = []
+    for name in sorted(_ASCII_TRANSPARENT_CODECS):
+        assert ascii_bytes.decode(name) == ascii_text, name
+        defined = 0
+        for byte in range(256):
+            try:
+                bytes([byte]).decode(name)
+            except UnicodeDecodeError:
+                continue
+            defined += 1
+        if defined < 256:
+            narrow.append(name)
+
+    assert len(_ASCII_TRANSPARENT_CODECS) == 61
+    assert len(narrow) == 22
+    assert "ascii" in narrow
+
+
+def test_no_printable_ascii_byte_survives_the_ebcdic_pages() -> None:
+    """Binds S8-F7: "not ASCII at any byte" is false as written.
+
+    cp037, cp273, cp424 and cp500 each agree with ASCII at 19 C0 control
+    positions — NUL, and the shared controls around it. What is true, and
+    stronger, is that none of 0x20 through 0x7E survives: every printable
+    character of a verdict written as ASCII arrives as something else, which
+    is the reason these pages are off the list.
+    """
+
+    for page in ("cp037", "cp273", "cp424", "cp500"):
+        agreeing = []
+        for byte in range(0x80):
+            try:
+                character = bytes([byte]).decode(page)
+            except UnicodeDecodeError:
+                continue
+            if character == chr(byte):
+                agreeing.append(byte)
+        assert len(agreeing) == 19, page
+        assert all(byte < 0x20 for byte in agreeing), page
+
+
 def test_an_allow_list_miss_is_refused_by_name_not_by_the_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

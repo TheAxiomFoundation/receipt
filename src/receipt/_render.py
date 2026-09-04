@@ -139,7 +139,8 @@ def bounded_key(key: str) -> str:
     2^32 trials by the birthday bound, which is minutes of ordinary
     computing, and what it buys is one evidence value silently replacing
     another in a verdict an auditor reads (peer review, Sol round 3). The
-    marker is thirty-two characters longer for it, against a bound of 4,096.
+    marker is forty-eight characters longer for it — sixteen hex characters
+    became sixty-four, not thirty-two — against a bound of 4,096.
 
     A digest is a distinguisher and not a proof, so the collision is checked
     for rather than argued away: ``receipt.cli._bounded_payload`` refuses a

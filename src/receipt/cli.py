@@ -780,12 +780,19 @@ _ASCII_LITERAL_BYTES = _ASCII_LITERAL_PROBE.encode("ascii")
 _STREAM_ENCODING_UNSET = object()
 
 #: The canonical names of the codecs this module will write ASCII bytes for a
-#: reader of. Each is a single-byte code page: a fixed 256-entry table, with no
-#: shift state, whose 0x00–0x7F half is the ASCII identity. Those three
-#: properties are what make raw ASCII bytes on the wire mean, to that reader,
-#: exactly the characters :func:`_terminal_safe` approved — no byte can join
-#: with a neighbour to become part of another character, and no byte this
-#: module did not write can change what its bytes mean.
+#: reader of. Each is a single-byte code page — one byte in, one character
+#: out, no shift state — and each decodes 0x00 through 0x7F to exactly those
+#: code points. Those properties are what make raw ASCII bytes on the wire
+#: mean, to that reader, exactly the characters :func:`_terminal_safe`
+#: approved — no byte can join with a neighbour to become part of another
+#: character, and no byte this module did not write can change what its bytes
+#: mean.
+#:
+#: The 0x00–0x7F decode identity is the property, rather than "a fixed
+#: 256-entry table": 22 of the 61 have byte positions their table leaves
+#: undefined, and ``ascii`` itself defines only 128 (peer review, Sol
+#: round 8). What the safety argument needs is that the bytes this module
+#: writes decode to the characters it wrote, and all 61 have that.
 #:
 #: An enumeration rather than a computed rule, which is the whole point. A
 #: runtime classification admits ``raw-unicode-escape``: it is stateless, its
@@ -802,8 +809,10 @@ _STREAM_ENCODING_UNSET = object()
 #: Deliberately absent, and each for its own reason. ``cp864`` is a single-byte
 #: page whose 0x25 is ARABIC PERCENT SIGN rather than ``%``, so it is not the
 #: ASCII identity and the belt refuses it as well. The EBCDIC pages —
-#: ``cp037``, ``cp273``, ``cp424``, ``cp500`` and their family — are not ASCII
-#: at any byte. ``charmap`` has no fixed table at all; its mapping is the
+#: ``cp037``, ``cp273``, ``cp424``, ``cp500`` and their family — survive no
+#: printable ASCII byte: each agrees with ASCII at 19 C0 control positions
+#: and at none of 0x20 through 0x7E, so every character of a verdict written
+#: as ASCII would arrive as something else (peer review, Sol round 8). ``charmap`` has no fixed table at all; its mapping is the
 #: caller's. Every multi-byte codec is absent even where ASCII survives it
 #: (``cp932``, ``gbk``, ``big5``, ``euc_jp``, ``euc_kr``, ``gb2312``), because
 #: a lead byte this command did not write can change what its first byte

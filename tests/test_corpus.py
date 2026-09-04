@@ -1273,6 +1273,64 @@ def test_the_alias_index_ceiling_cannot_be_reached() -> None:
     assert work.work <= MAX_PATH_COMPONENTS_TOTAL
 
 
+def test_the_maximum_depth_journal_spends_what_the_comment_says() -> None:
+    """Binds S8-F7: the maximum depth is 512, and the total was the 511 one.
+
+    ``MAX_PATH_COMPONENTS_TOTAL``'s comment said a 4,096-row journal at the
+    maximum depth spends 6,275,072 units. That is 4,096 x 511 x 3, the cost
+    of the root-divergent fixture two tests above, whose paths carry 511
+    components because spelling 4,096 distinct first components takes three
+    characters each. The maximum depth is 512 — 512 one-character components
+    are 1,023 characters, and one component may be two characters long — and
+    the journal that reaches it spends more.
+
+    Measured here in the three parts the comment names: one visit per
+    component, at most one counted prefix per component, and one ancestor
+    visit per component below the last. The ancestor recorder is driven over
+    a stand-in that answers "directory" without touching a filesystem,
+    because the point is the arithmetic and not two million real mkdirs.
+    """
+
+    from receipt.corpus import (
+        MAX_PATH_COMPONENTS,
+        MAX_PATH_COMPONENTS_TOTAL,
+        _DirectoryGenerations,
+        _PathPrefixWork,
+        _reject_aliasing_paths,
+    )
+
+    class _EverythingIsADirectory(_DirectoryGenerations):
+        """The ancestor walk's charging, with no filesystem under it."""
+
+        def record(self, directory: pathlib.Path, relative: str) -> bool:
+            self._seen.setdefault(relative, (directory, (0, 0, 0, 0)))
+            return True
+
+    paths = _widest_default_journal_paths()
+    assert all(path.count("/") + 1 == MAX_PATH_COMPONENTS for path in paths)
+
+    visits = MAX_JOURNAL_ROWS * MAX_PATH_COMPONENTS
+    ancestors = MAX_JOURNAL_ROWS * (MAX_PATH_COMPONENTS - 1)
+    assert visits == 2097152
+    assert ancestors == 2093056
+
+    work = _PathPrefixWork()
+    nodes = _reject_aliasing_paths(paths, work=work)
+    assert work.work == visits + nodes == 4191728
+    assert visits + nodes + ancestors == 6284784
+    assert 6284784 > MAX_PATH_COMPONENTS_TOTAL == 4194304
+
+    # And the budget is what stops it, part-way through the ancestor walk.
+    generations = _EverythingIsADirectory(work)
+    with pytest.raises(CorpusError) as caught:
+        for path in sorted(paths):
+            generations.record_ancestors(pathlib.Path("/root"), path)
+    assert str(caught.value) == (
+        f"declared paths visit more than {MAX_PATH_COMPONENTS_TOTAL} "
+        "prefixes; the corpus cannot be bound safely"
+    )
+
+
 def test_the_alias_index_refuses_more_prefixes_than_its_ceiling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
