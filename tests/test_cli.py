@@ -148,6 +148,16 @@ def test_refusal_writes_to_a_redirected_stringio_stderr(
     )
 
 
+#: What a codec outside ``_ASCII_TRANSPARENT_CODECS`` is refused with. Spelled
+#: once here, with the size written out rather than read off the module, so a
+#: change to the allow-list fails the table test rather than silently rewording
+#: every refusal below (S8-F5).
+NOT_ON_THE_ALLOW_LIST = (
+    "verdict stream codec {name} is not one of the 61 single-byte code pages "
+    "this command will write ASCII for; the verdict cannot be written safely"
+)
+
+
 def test_a_codecs_stream_writer_is_not_mistaken_for_a_unicode_sink(
     repo: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2678,10 +2688,7 @@ def test_a_codec_that_decodes_ascii_into_controls_is_refused(
     assert stream.written() == b""
     error = capsys.readouterr().err
     assert "verdict could not be rendered; treat the run as unverified" in error
-    assert (
-        f"OSError: verdict stream codec {canonical} does not carry ASCII "
-        "literally; the verdict cannot be written safely" in error
-    )
+    assert "OSError: " + NOT_ON_THE_ALLOW_LIST.format(name=canonical) in error
     assert error.rstrip("\n").endswith("receipt verify: FAIL")
 
 
@@ -2857,7 +2864,9 @@ def test_a_codec_that_decodes_printable_escapes_into_controls_is_refused(
 
     No probe over one fixed string can see this, because the hazard is a
     multi-character decode. The allow-list is what refuses it, before a byte
-    is written.
+    is written, and since S8-F5 the refusal says so rather than telling the
+    auditor that a codec ``_ascii_is_literal`` returns True for does not
+    carry ASCII literally.
 
     Without S7-R3-F3 the probe grants the ASCII fallback, the run reports
     PASS, and the stream holds bytes whose own decoder makes a control
@@ -2881,8 +2890,8 @@ def test_a_codec_that_decodes_printable_escapes_into_controls_is_refused(
     error = capsys.readouterr().err
     assert "verdict could not be rendered; treat the run as unverified" in error
     assert (
-        "OSError: verdict stream codec raw-unicode-escape does not carry "
-        "ASCII literally; the verdict cannot be written safely" in error
+        "OSError: " + NOT_ON_THE_ALLOW_LIST.format(name="raw-unicode-escape")
+        in error
     )
     assert error.rstrip("\n").endswith("receipt verify: FAIL")
 
@@ -2928,10 +2937,7 @@ def test_a_stateful_codec_is_refused_rather_than_written_to_shifted(
     assert stream.written() == shifted
     error = capsys.readouterr().err
     assert "verdict could not be rendered; treat the run as unverified" in error
-    assert (
-        "OSError: verdict stream codec iso2022_jp does not carry ASCII "
-        "literally; the verdict cannot be written safely" in error
-    )
+    assert "OSError: " + NOT_ON_THE_ALLOW_LIST.format(name="iso2022_jp") in error
 
 
 @pytest.mark.parametrize("encoding", ["utf-8", "UTF_8", "utf-8-sig"])
@@ -3011,9 +3017,8 @@ def test_a_wider_code_unit_cannot_carry_an_escape_sequence_either(
     stream = _CodecStdout(encoding)
     with pytest.raises(OSError) as caught:
         _byte_safe_encoding(stream)
-    assert str(caught.value) == (
-        f"verdict stream codec {codecs.lookup(encoding).name} does not carry "
-        "ASCII literally; the verdict cannot be written safely"
+    assert str(caught.value) == NOT_ON_THE_ALLOW_LIST.format(
+        name=codecs.lookup(encoding).name
     )
     assert stream.written() == b""
 
@@ -3112,6 +3117,87 @@ class _BufferlessStdout(io.TextIOWrapper):
         return len(text)
 
 
+def test_an_allow_list_miss_is_refused_by_name_not_by_the_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Binds S8-F5: one raise served both refusals and told the wrong story.
+
+    S7-R3-F3 made eligibility a matter of being named in
+    ``_ASCII_TRANSPARENT_CODECS``, with ``_ascii_is_literal`` kept as a belt,
+    precisely because no probe can prove the property. The single raise then
+    still said "does not carry ASCII literally" — which the module's own
+    probe says is false of 23 codecs the interpreter ships, big5, gbk,
+    cp932, euc_jp, shift_jis, raw-unicode-escape and iso2022_jp among them.
+    An auditor reading that of big5 is told something untrue and given
+    nothing to act on.
+
+    So the miss is named as a miss. Each codec checked here passes the probe
+    and is off the list, which is exactly the pair the old sentence
+    misdescribed.
+
+    Without S8-F5 every one of these carries the belt's sentence instead.
+    """
+
+    from receipt.cli import (
+        _ASCII_TRANSPARENT_CODECS,
+        _ascii_is_literal,
+        _byte_safe_encoding,
+    )
+
+    for encoding in ("big5", "gbk", "cp932", "euc_jp", "shift_jis"):
+        name = codecs.lookup(encoding).name
+        # Off the list, and the probe cannot tell you why.
+        assert name not in _ASCII_TRANSPARENT_CODECS
+        assert _ascii_is_literal(name)
+
+        stream = _CodecStdout(encoding)
+        with pytest.raises(OSError) as caught:
+            _byte_safe_encoding(stream)
+        assert str(caught.value) == NOT_ON_THE_ALLOW_LIST.format(name=name)
+        assert stream.written() == b""
+
+
+def test_a_listed_codec_the_belt_rejects_keeps_the_belt_sentence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Binds S8-F5: the belt still has its own sentence, and its own meaning.
+
+    The allow-list grants eligibility and ``_ascii_is_literal`` is the belt
+    over it: a listed codec whose runtime table does not carry ASCII after
+    all is the interpreter disagreeing with what this module recorded, which
+    is a different fact from "this codec is not one we write ASCII for" and
+    now says so.
+
+    Reaching it takes a listed name whose probe fails, which no shipped codec
+    is — that is the point of the list — so the probe is patched for one
+    member.
+
+    This is the control, and it passes with S8-F5 disabled: before the split
+    both branches raised this sentence, so nothing here can fail against the
+    old source. What it binds is the other direction — that splitting the
+    refusal did not take the belt's own sentence away from the belt — which
+    is what the sibling test above cannot see.
+    """
+
+    from receipt.cli import _ASCII_TRANSPARENT_CODECS, _byte_safe_encoding
+
+    listed = codecs.lookup("latin-1").name
+    assert listed in _ASCII_TRANSPARENT_CODECS
+    monkeypatch.setattr(
+        "receipt.cli._ascii_is_literal", lambda name: name != listed
+    )
+
+    stream = _CodecStdout("latin-1")
+    with pytest.raises(OSError) as caught:
+        _byte_safe_encoding(stream)
+    assert str(caught.value) == (
+        f"verdict stream codec {listed} does not carry ASCII literally; "
+        "the verdict cannot be written safely"
+    )
+    assert str(caught.value) != NOT_ON_THE_ALLOW_LIST.format(name=listed)
+    assert stream.written() == b""
+
+
 def test_a_bufferless_stream_of_an_untrusted_codec_is_refused(
     repo: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3140,10 +3226,7 @@ def test_a_bufferless_stream_of_an_untrusted_codec_is_refused(
     assert stream.text == []
     error = capsys.readouterr().err
     assert "verdict could not be rendered; treat the run as unverified" in error
-    assert (
-        "OSError: verdict stream codec cp037 does not carry ASCII literally; "
-        "the verdict cannot be written safely" in error
-    )
+    assert "OSError: " + NOT_ON_THE_ALLOW_LIST.format(name="cp037") in error
     assert error.rstrip("\n").endswith("receipt verify: FAIL")
 
 

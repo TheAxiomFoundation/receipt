@@ -755,8 +755,10 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
 #: falling back to ASCII: the codec whose bytes a reader decodes back to
 #: exactly the characters this module escaped, and which cannot spell a
 #: character it kept as a byte a terminal reads as a control. Another codec
-#: may receive only the ASCII fallback, and only when the runtime probe proves
-#: its reader decodes those bytes literally. The escaping
+#: may receive only the ASCII fallback, and only if it is named in
+#: :data:`_ASCII_TRANSPARENT_CODECS`; the runtime probe is a belt over that
+#: list and not the grant, because no probe can prove the property. The
+#: escaping
 #: :func:`_terminal_safe` performs is over *characters*, so anything weaker
 #: lets a codec defeat it after the fact. See :func:`_byte_safe_encoding`.
 #:
@@ -1158,8 +1160,17 @@ def _byte_safe_encoding(
         raise TypeError("stream encoding decision is not a string or None")
     if name in _UTF8_STREAM_ENCODINGS:
         return "utf-8"
-    if name in _ASCII_TRANSPARENT_CODECS and _ascii_is_literal(name):
-        return "ascii"
+    if name in _ASCII_TRANSPARENT_CODECS:
+        if _ascii_is_literal(name):
+            return "ascii"
+        # The belt failing on a name the allow-list admits. The list is the
+        # eligibility, so this is the interpreter's codec table disagreeing
+        # with what this module recorded about it, and the message says that
+        # rather than pretending a decision was taken here.
+        raise OSError(
+            f"verdict stream codec {name} does not carry ASCII literally; "
+            "the verdict cannot be written safely"
+        )
     if not name:
         # A stream that advertises no usable codec. The buffer question is
         # asked once more here, and only to choose which sentence the refusal
@@ -1171,9 +1182,14 @@ def _byte_safe_encoding(
             else "verdict stream advertises no usable codec; the verdict "
             "cannot be written safely"
         )
+    # An allow-list miss, which is most of what reaches here: 23 codecs the
+    # interpreter ships pass ``_ascii_is_literal`` and are deliberately not
+    # on the list, and telling their auditor that big5 "does not carry ASCII
+    # literally" is false and unactionable (peer review, Sol round 8).
     raise OSError(
-        f"verdict stream codec {name} does not carry ASCII literally; "
-        "the verdict cannot be written safely"
+        f"verdict stream codec {name} is not one of the "
+        f"{len(_ASCII_TRANSPARENT_CODECS)} single-byte code pages this "
+        "command will write ASCII for; the verdict cannot be written safely"
     )
 
 
@@ -1335,8 +1351,11 @@ def _emit(
 
     Which encoding that is, is :func:`_byte_safe_encoding`'s decision and
     not the stream's: UTF-8 is used only where the stream's own codec is one,
-    and another codec gets ASCII only where :func:`_ascii_is_literal` proves
-    its reader will see the same characters. Escaping code points and then
+    and another codec gets ASCII only if it is named in
+    :data:`_ASCII_TRANSPARENT_CODECS`, with :func:`_ascii_is_literal` kept as
+    a belt over that list rather than as the grant — ``raw-unicode-escape``
+    and ``iso2022_jp`` both pass the probe, so passing it proves nothing
+    (peer review, Sol round 8, S7-R3-F3). Escaping code points and then
     handing them to an arbitrary codec left the escaping to be undone —
     UTF-7 and ``unicode_escape`` can decode ASCII back into ESC, while
     UTF-16 does not decode raw ASCII bytes as one byte per character (peer
