@@ -1597,7 +1597,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     as_json = bool(args.json)
 
     try:
-        spec, spec_sha256 = load_spec(args.spec)
+        loaded_spec = load_spec(args.spec)
+        spec = loaded_spec.verification
+        spec_sha256 = loaded_spec.sha256
     except VerifySpecError as exc:
         return _refuse(as_json, "spec", str(exc), EXIT_USAGE)
     except KeyboardInterrupt:  # the operator's interrupt, never a verdict

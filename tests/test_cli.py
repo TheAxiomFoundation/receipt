@@ -540,7 +540,7 @@ def anchor_set_recomputed(repo: pathlib.Path) -> tuple[str, dict[str, str]]:
     sorted-key JSON of the mapping (receipt-canonical JSON for these
     ASCII filenames)."""
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     names = {
         spec.chain.producer_public_key_filename,
         *(anchor.filename for anchor in spec.chain.anchors.values()),
@@ -1235,21 +1235,21 @@ def test_the_spec_that_runs_is_always_the_spec_that_was_hashed(
     honest = SPEC_TEMPLATE.format(name="honest", spki="a" * 64)
     path.write_text(honest)
     os.utime(path, (FROZEN_MTIME, FROZEN_MTIME))
-    first, first_digest = load_spec(path)
-    assert first.chain.producer_spki_sha256 == "a" * 64
-    assert first_digest == hashlib.sha256(honest.encode()).hexdigest()
+    first = load_spec(path)
+    assert first.verification.chain.producer_spki_sha256 == "a" * 64
+    assert first.sha256 == hashlib.sha256(honest.encode()).hexdigest()
 
     weakened = SPEC_TEMPLATE.format(name="weaken", spki="0" * 64)
     assert len(weakened) == len(honest)
     path.write_text(weakened)
     os.utime(path, (FROZEN_MTIME, FROZEN_MTIME))
 
-    second, second_digest = load_spec(path)
-    assert second.chain.producer_spki_sha256 == "0" * 64, (
+    second = load_spec(path)
+    assert second.verification.chain.producer_spki_sha256 == "0" * 64, (
         "the loader executed stale bytecode instead of the file on disk"
     )
-    assert second_digest == hashlib.sha256(weakened.encode()).hexdigest()
-    assert second_digest != first_digest
+    assert second.sha256 == hashlib.sha256(weakened.encode()).hexdigest()
+    assert second.sha256 != first.sha256
 
 
 def test_loading_a_spec_leaves_no_bytecode_behind(tmp_path: pathlib.Path) -> None:
@@ -1428,7 +1428,7 @@ def test_pin_inference_yields_only_to_an_explicit_choice(repo: pathlib.Path) -> 
 
     from receipt.release_chain import ReleaseChainError, verify_release_chain
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     private_pem, public_pem = generate_signing_keypair()
     (repo / "releases/anchors/producer-ed25519.pub").write_bytes(public_pem)
     manifest = manifest_stem(repo)
@@ -1465,7 +1465,7 @@ def test_a_chain_resigned_under_a_substituted_key_refuses_by_spki_pin(
 
     from receipt.release_chain import ReleaseChainError, verify_release_chain
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     private_pem, public_pem = generate_signing_keypair()
     (repo / "releases/anchors/producer-ed25519.pub").write_bytes(public_pem)
     manifest = manifest_stem(repo)

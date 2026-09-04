@@ -148,6 +148,42 @@ class VerificationSpec:
         object.__setattr__(self, "journal_relative", self.chain.state_relative)
 
 
+@dataclass(frozen=True, init=False)
+class LoadedSpec:
+    """A validated spec together with the exact source bytes that selected it.
+
+    Instances come only from :func:`load_spec`: accepting arbitrary caller-built
+    instances would let ``pinned=True`` become an assertion instead of evidence
+    that this loader compared the source digest before executing the spec.
+    """
+
+    verification: VerificationSpec
+    path: pathlib.Path
+    sha256: str
+    pinned: bool
+
+    def __new__(cls, *args: object, **kwargs: object) -> LoadedSpec:
+        del args, kwargs
+        raise TypeError("LoadedSpec instances are created by load_spec")
+
+
+def _loaded_spec(
+    verification: VerificationSpec,
+    *,
+    path: pathlib.Path,
+    sha256: str,
+    pinned: bool,
+) -> LoadedSpec:
+    """Construct the loader's result without exposing a forgeable initializer."""
+
+    loaded = object.__new__(LoadedSpec)
+    object.__setattr__(loaded, "verification", verification)
+    object.__setattr__(loaded, "path", path)
+    object.__setattr__(loaded, "sha256", sha256)
+    object.__setattr__(loaded, "pinned", pinned)
+    return loaded
+
+
 @dataclass(frozen=True)
 class PassResult:
     name: str
@@ -227,8 +263,10 @@ class VerifyResult:
         return dict(self.chain.head.receipt_times)
 
 
-def load_spec(spec_path: pathlib.Path) -> tuple[VerificationSpec, str]:
-    """Load the consumer's committed spec module and return it with its digest.
+def load_spec(
+    spec_path: pathlib.Path, *, expect_sha256: str | None = None
+) -> LoadedSpec:
+    """Load a consumer spec, optionally requiring its exact source digest.
 
     The spec is Python because the package's trust anchors are Python objects;
     it is expected to be a short module of constants. Executing it is a
@@ -264,7 +302,9 @@ def load_spec(spec_path: pathlib.Path) -> tuple[VerificationSpec, str]:
     to a file of the same length, keeps executing the edited bytecode. The
     digest reported beside the verdict would then describe a file that was not
     the one used to verify. Compiling the hashed bytes makes the two identical
-    by construction.
+    by construction. When ``expect_sha256`` is supplied, its comparison happens
+    immediately after hashing and before either compiling or executing those
+    bytes; a mismatched spec therefore has no opportunity to run.
     """
 
     import types
@@ -287,6 +327,10 @@ def load_spec(spec_path: pathlib.Path) -> tuple[VerificationSpec, str]:
         raise VerifySpecError(f"spec is missing or not a regular file: {spec_path}")
     source = spec_path.read_bytes()
     digest = hashlib.sha256(source).hexdigest()
+    if expect_sha256 is not None and digest != expect_sha256:
+        raise VerifySpecError(
+            f"spec {digest} is not the expected spec {expect_sha256}"
+        )
 
     module = types.ModuleType("_receipt_consumer_spec")
     module.__file__ = str(spec_path)
@@ -317,7 +361,12 @@ def load_spec(spec_path: pathlib.Path) -> tuple[VerificationSpec, str]:
             f"SPEC is {type(candidate).__name__}, not a receipt.verify."
             f"VerificationSpec: {spec_path}"
         )
-    return candidate, digest
+    return _loaded_spec(
+        candidate,
+        path=spec_path,
+        sha256=digest,
+        pinned=expect_sha256 is not None,
+    )
 
 
 def _witness_time(value: datetime) -> str:

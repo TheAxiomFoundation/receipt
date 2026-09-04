@@ -132,7 +132,7 @@ def commit_snapshot(root: pathlib.Path, message: str) -> str:
 
 
 def configured_filenames(repo: pathlib.Path) -> set[str]:
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     return {
         spec.chain.producer_public_key_filename,
         *(anchor.filename for anchor in spec.chain.anchors.values()),
@@ -162,7 +162,7 @@ def test_a_verified_chain_names_the_consumed_anchor_set(
     # not to a directory listing.
     (repo / ANCHOR_DIR / "unrelated.pem").write_bytes(b"not part of the set\n")
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     verification = verify_release_chain(
         repo, spec=spec.chain, compute_anchor_set_digest=True
     )
@@ -177,7 +177,7 @@ def test_by_default_no_digest_is_computed(repo: pathlib.Path) -> None:
     """The invariant pre-existing callers rely on: without the flag, the
     fields stay unset and no anchor file is read beyond the old checks."""
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     verification = verify_release_chain(repo, spec=spec.chain)
     assert verification.anchor_set_sha256 is None
     assert verification.anchor_file_sha256s == ()
@@ -186,7 +186,7 @@ def test_by_default_no_digest_is_computed(repo: pathlib.Path) -> None:
 def test_chain_spec_defaults_to_the_portable_name_repertoire(
     repo: pathlib.Path,
 ) -> None:
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
 
     assert spec.chain.name_repertoire == "portable"
     assert replace(spec.chain, name_repertoire="posix-bytes").name_repertoire == (
@@ -202,7 +202,7 @@ def test_chain_spec_defaults_to_the_portable_name_repertoire(
 def test_verification_spec_anchor_set_pin_is_defaulted_and_validated(
     repo: pathlib.Path,
 ) -> None:
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
 
     assert spec.anchor_set_sha256 is None
     assert replace(spec, anchor_set_sha256="0" * 64).anchor_set_sha256 == "0" * 64
@@ -220,7 +220,7 @@ def test_release_chain_reexports_the_snapshot_git_entry() -> None:
 def test_release_history_compares_two_entered_trees_and_returns_new_files(
     repo: pathlib.Path,
 ) -> None:
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     base_oid = commit_snapshot(repo, "base")
     added = repo / "releases" / "new-note.txt"
     added.write_text("new release note\n", encoding="utf-8")
@@ -254,7 +254,7 @@ def test_release_history_retains_the_directory_verifier_refusals(
     mutation: str,
     message: str,
 ) -> None:
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     base_oid = commit_snapshot(repo, "base")
     manifest = next((repo / "releases/manifests").glob("*.json"))
     if mutation == "delete":
@@ -282,7 +282,7 @@ def test_release_history_retains_the_directory_verifier_refusals(
 def test_base_release_chain_materializes_the_entered_snapshot(
     repo: pathlib.Path,
 ) -> None:
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     base_oid = commit_snapshot(repo, "base")
     shutil.rmtree(repo / "releases")
     (repo / "receipt/corpus-journal.jsonl").write_text(
@@ -304,7 +304,7 @@ def test_observing_adds_no_anchor_reads(built: pathlib.Path, tmp_path: pathlib.P
     for mode, flag in (("default", False), ("observing", True)):
         repo = tmp_path / mode
         shutil.copytree(built, repo, symlinks=True)
-        spec, _ = load_spec(repo / "verification/spec.py")
+        spec = load_spec(repo / "verification/spec.py").verification
         reads = {"count": 0}
         original = release_chain._regular_file_bytes
 
@@ -354,7 +354,7 @@ def test_openssl_is_fed_the_digested_bytes(
         return real_run(arguments, *args, **kwargs)
 
     monkeypatch.setattr(module.subprocess, "run", spying_run)
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     verification = verify_release_chain(
         repo, spec=spec.chain, compute_anchor_set_digest=True
     )
@@ -413,7 +413,7 @@ def test_release_chain_runs_the_openssl_floor_preflight_before_paths(
         )
 
     monkeypatch.setattr(tsa, "_require_supported_openssl", refuse)
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     shutil.rmtree(repo / "releases")
 
     with pytest.raises(ReleaseChainError) as refusal:
@@ -431,7 +431,7 @@ def test_release_chain_validates_arguments_then_runs_its_path_guards(
 ) -> None:
     from receipt import tsa
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     events: list[str] = []
     monkeypatch.setattr(
         tsa, "_require_supported_openssl", lambda: events.append("openssl")
@@ -473,7 +473,7 @@ def test_release_chain_validates_arguments_then_runs_its_path_guards(
 def test_release_chain_routes_every_input_file_through_the_regular_reader(
     repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     original = release_chain._regular_file_bytes
     reads: list[str] = []
 
@@ -516,7 +516,7 @@ def test_the_producer_openssl_fallback_uses_a_private_leaf(
     import receipt.release_chain as module
     from receipt import sign as sign_module
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     absolute_name = str((repo / ANCHOR_DIR / "producer-ed25519.pub").resolve())
     chain = dataclasses.replace(
         spec.chain, producer_public_key_filename=absolute_name
@@ -574,7 +574,7 @@ def test_a_reserialized_producer_key_is_accepted_and_recorded(
     so a byte-different serialization of the same key verifies — and the
     verdict records the serialization that was actually consumed."""
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     key_name = spec.chain.producer_public_key_filename
     key_path = repo / ANCHOR_DIR / key_name
     original = key_path.read_bytes()
@@ -599,7 +599,7 @@ def test_the_producer_openssl_fallback_verifies_while_observing(
     import receipt.release_chain as module
 
     monkeypatch.setattr(module, "CRYPTOGRAPHY_AVAILABLE", False)
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     manifests = sorted((repo / "releases/manifests").glob("*.json"))
     manifest_bytes = manifests[0].read_bytes()
     signature = manifests[0].with_name(
@@ -649,7 +649,7 @@ def test_the_in_process_verifier_receives_the_observed_producer_bytes(
         return real_verify(payload, signature, public_key_pem, **kwargs)
 
     monkeypatch.setattr(module._sign, "verify_signature_bytes", spying_verify)
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     verification = verify_release_chain(
         repo, spec=spec.chain, compute_anchor_set_digest=True
     )
@@ -680,7 +680,7 @@ def test_pins_off_observing_accepts_a_substitute_producer_identity(
         )
     aside = tmp_path / "anchors-substitute"
     shutil.copytree(repo / ANCHOR_DIR, aside)
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     key_name = spec.chain.producer_public_key_filename
     (aside / key_name).write_bytes(public_pem)
 
@@ -700,7 +700,7 @@ def test_pathlike_configurations_traverse_end_to_end(
 
     import dataclasses
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     plain = verify_release_chain(
         repo, spec=spec.chain, compute_anchor_set_digest=True
     )
@@ -745,7 +745,7 @@ def test_a_stateful_pathlike_gets_exactly_one_pathname_call(
     corrected["rules/tax/rate.yaml"] = "name: rate\nvalue: 0.175\n"
     append_release(root, workspace, content=corrected)
 
-    spec, _ = load_spec(root / "verification/spec.py")
+    spec = load_spec(root / "verification/spec.py").verification
     real_name = spec.chain.producer_public_key_filename
     calls = {"count": 0}
 
@@ -773,7 +773,7 @@ def test_default_mode_resolves_each_anchor_filename_once_per_consumption(
 
     import dataclasses
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     counts: dict[str, int] = {}
 
     class Counting:
@@ -815,7 +815,7 @@ def test_standalone_receipts_shared_filename_divergence_refuses(
 
     import receipt.release_chain as module
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     first_role = sorted(spec.chain.anchors)[0]
     shared_name = spec.chain.anchors[first_role].filename
     calls = {"count": 0}
@@ -897,7 +897,7 @@ def test_a_receipt_swapped_mid_verification_cannot_mix_two_tokens(
     rules it out.
     """
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     manifests = repo / "releases/manifests"
     manifest_path = sorted(manifests.glob("*.json"))[0]
     digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
@@ -1061,7 +1061,7 @@ def test_default_mode_keeps_parts_based_purepath_joins(
 
     import dataclasses
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     key_name = spec.chain.producer_public_key_filename
     nested = repo / ANCHOR_DIR / "sub"
     nested.mkdir()
@@ -1099,7 +1099,7 @@ def test_a_filename_object_shared_across_roles_is_asked_once(
     import dataclasses
 
     shared = Shared()
-    base, _ = load_spec(repo / "verification/spec.py")
+    base = load_spec(repo / "verification/spec.py").verification
     base = base.chain
     chain = dataclasses.replace(
         base,
@@ -1124,7 +1124,7 @@ def test_a_caller_supplied_anchor_directory_still_gets_a_digest(
     and byte-identical anchor material yields the production digest, since
     the mapping commits to configured names and consumed bytes, not paths."""
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     production = verify_release_chain(
         repo, spec=spec.chain, compute_anchor_set_digest=True
     )
@@ -1143,7 +1143,7 @@ def test_the_reported_pairs_cannot_be_mutated(repo: pathlib.Path) -> None:
     """ChainVerification is frozen; mutable state inside it could drift
     from the combined digest it backs."""
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     verification = verify_release_chain(
         repo, spec=spec.chain, compute_anchor_set_digest=True
     )
@@ -1164,7 +1164,7 @@ def test_chain_verification_stays_reflection_safe(repo: pathlib.Path) -> None:
 
     from receipt.release_chain import ChainVerification
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     computed = verify_release_chain(
         repo, spec=spec.chain, compute_anchor_set_digest=True
     )
@@ -1233,7 +1233,7 @@ def test_a_mid_run_anchor_change_refuses_end_to_end(
     corrected["rules/tax/rate.yaml"] = "name: rate\nvalue: 0.175\n"
     append_release(root, workspace, content=corrected)
 
-    spec, _ = load_spec(root / "verification/spec.py")
+    spec = load_spec(root / "verification/spec.py").verification
     if role == "tsa-anchor":
         target = sorted(a.filename for a in spec.chain.anchors.values())[0]
     else:
@@ -1403,7 +1403,7 @@ def test_a_lazy_spec_mapping_cannot_alias_through_id_reuse(
 
     from receipt.release_chain import _normalized_spec
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     base_anchors = dict(spec.chain.anchors)
     roles = {f"role{i:03d}": f"anchor-{i:03d}.pem" for i in range(200)}
 
@@ -1465,7 +1465,7 @@ def test_an_empty_optional_chain_asks_no_pathnames(
 
     import dataclasses
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     calls = {"count": 0}
 
     class Counting:
@@ -1496,9 +1496,12 @@ def test_an_empty_optional_chain_asks_no_pathnames(
 
 def test_verify_result_exposes_the_anchor_set(repo: pathlib.Path) -> None:
     spec_path = repo / "verification/spec.py"
-    spec, spec_sha256 = load_spec(spec_path)
+    loaded = load_spec(spec_path)
     result = run_verification(
-        repo, spec, spec_path=spec_path, spec_sha256=spec_sha256
+        repo,
+        loaded.verification,
+        spec_path=loaded.path,
+        spec_sha256=loaded.sha256,
     )
     assert result.ok
     combined, per_file = independent_digests(repo)
@@ -1512,7 +1515,7 @@ def test_an_absent_chain_names_no_anchor_set(
     """No chain verified means no anchors consumed — the field must say so
     rather than digest anchor files nothing was checked against."""
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     empty = tmp_path / "empty"
     empty.mkdir()
     anchor_reads = {"count": 0}
@@ -1554,7 +1557,7 @@ def test_standalone_receipts_never_touch_the_producer_filename(
 
     import receipt.release_chain as module
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     chain = dataclasses.replace(
         spec.chain,
         producer_public_key_filename=b"not-in-domain",  # type: ignore[arg-type]
@@ -1667,7 +1670,7 @@ def test_pin_inference_follows_resolution_not_spelling(
     enforcement on — proven by the pin refusal firing through the alternate
     spelling once an anchor byte is flipped."""
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     spelled = repo / ANCHOR_DIR / ".." / "anchors"
     verification = verify_release_chain(
         repo, spec=spec.chain, anchor_dir=spelled, compute_anchor_set_digest=True
@@ -1692,7 +1695,7 @@ def state_paths(
 ) -> tuple[pathlib.Path, pathlib.Path, dict[str, bytes]]:
     """The two state files of a built chain, and their bytes keyed as supplied."""
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     ledger = repo / spec.chain.state_relative
     prefix = repo / spec.chain.prefix_relative
     return ledger, prefix, {
@@ -1716,7 +1719,7 @@ def test_supplied_state_bytes_are_used_instead_of_reading_the_state_paths(
     is left on disk for anything that resolves the name anyway.
     """
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     ledger, prefix, supplied = state_paths(repo)
     ledger.write_bytes(b'{"decoy":true}\n')
     prefix.write_bytes(b"{}\n")
@@ -1745,7 +1748,7 @@ def test_without_supplied_bytes_the_state_paths_are_read_exactly_as_before(
     nothing. The identical decoy is refused, because the reader that predates
     the parameter is the one that ran, on the same paths, in the same place."""
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     ledger, _prefix, _supplied = state_paths(repo)
     ledger.write_bytes(b'{"decoy":true}\n')
 
@@ -1762,7 +1765,7 @@ def test_state_bytes_must_map_exact_strings_to_exact_bytes(
     compare equal to a state path while rendering as something else, and a
     bytes-like view could change under the digests taken from it."""
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     _ledger, _prefix, supplied = state_paths(repo)
 
     with pytest.raises(ReleaseChainError) as not_a_mapping:
@@ -1806,7 +1809,7 @@ def test_the_custody_read_refuses_a_platform_without_no_follow(
     Without that sentence the message names only ``os.open`` and a reader is
     left to infer how far it reaches."""
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     without_no_follow(monkeypatch)
 
     with pytest.raises(ReleaseChainError) as refusal:
@@ -1866,7 +1869,7 @@ def test_a_symlinked_interior_manifest_component_is_refused(
     outside.mkdir()
     shutil.move(str(repo / "releases" / "manifests"), str(outside / "manifests"))
     (repo / "releases" / "journal").symlink_to(outside)
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     nested = replace(
         spec.chain,
         manifest_relative=pathlib.PurePosixPath("releases/journal/manifests"),
@@ -1906,7 +1909,7 @@ def test_a_folded_manifest_leaf_is_refused_by_the_public_verifier(
     removed from ``verify_release_chain``, under the same simulated listing:
     the chain verifies and the head manifest is returned as a pass."""
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     release_root = (repo / "releases").resolve()
     real_listdir = os.listdir
 
@@ -1975,7 +1978,7 @@ def test_the_alias_scan_covers_the_manifest_and_anchor_directories(
     their own now, so the alias is refused with no ``surfaces`` argument at
     all."""
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     for alias, protected in (
         ("releases/Manifests/0000-alias.json", "releases/manifests"),
         ("releases/Anchors/root.pem", "releases/anchors"),
