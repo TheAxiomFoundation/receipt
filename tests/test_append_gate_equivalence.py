@@ -22,6 +22,11 @@ Comparison contract, matching tests/test_ledger_equivalence.py:
   summary byte for byte, and the baseline must emit no stderr;
 - the port is a library and must write nothing to stdout or stderr.
 
+One recorded exception to exact refusal text lies outside this pinned battery:
+an existing blob OID supplied as ``base_ref`` loses Git's first diagnostic
+line in the append entrypoint's base-resolution adapter. Both versions refuse;
+``run_port`` below documents the accepted wording difference.
+
 Each mutation returns a marker for the exact refusal branch it is intended to
 bind. Full message equality is asserted before that marker, so a mutation that
 starts failing earlier cannot silently masquerade as equivalent coverage.
@@ -279,7 +284,17 @@ def run_port(
     *,
     commit: str,
 ) -> tuple[int, str]:
-    """Render the silent library entrypoint in the baseline CLI's shape."""
+    """Render the silent library entrypoint in the baseline CLI's shape.
+
+    The entrypoint's base-resolution adapter accepts ``TreeSnapshot.select``'s
+    normalized ``cannot resolve commit`` error and restores the pinned
+    missing-ref diagnostic without a second Git resolution. As an accepted
+    exception to exact refusal text, an existing blob OID used as ``base_ref``
+    therefore omits Git's first line, ``error: <oid>^{commit}: expected commit
+    type, but the object dereferences to blob type``. Both versions still
+    refuse and retain ``fatal: Needed a single revision``. This exception
+    changes no behavior and does not relax any pinned case's byte comparison.
+    """
 
     try:
         summary = verify_append_gate(

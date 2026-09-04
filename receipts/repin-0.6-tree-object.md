@@ -86,6 +86,17 @@ legacy messages. It does not run another Git command, resolve a ref again,
 weaken comparison, edit either oracle, or change `snapshot.py`. Any other
 reader diagnostic passes through unchanged and still fails byte comparison.
 
+Round 1 finding F3 records one accepted exception to the exact-refusal-text
+requirement: when `base_ref` is an existing blob OID, `TreeSnapshot.select`
+normalizes the resolution failure and the append entrypoint's adapter omits
+Git's first diagnostic line, `error: <oid>^{commit}: expected commit type, but
+the object dereferences to blob type`. A clean committed scratch fixture
+measured refusal status 1 from both the authenticated baseline and the port;
+removing only that first line made their messages identical, with `fatal:
+Needed a single revision` retained. This is a wording exception, with no
+behavior change or second Git resolution. It lies outside the pinned
+differential cases, whose exact comparisons remain unchanged.
+
 ## Verification
 
 Run from the current Lane B worktree with the authenticated local extraction at
