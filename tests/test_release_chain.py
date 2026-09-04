@@ -1524,12 +1524,7 @@ def test_an_empty_optional_chain_asks_no_pathnames(
 def test_verify_result_exposes_the_anchor_set(repo: pathlib.Path) -> None:
     spec_path = repo / "verification/spec.py"
     loaded = load_spec(spec_path)
-    result = run_verification(
-        repo,
-        loaded.verification,
-        spec_path=loaded.path,
-        spec_sha256=loaded.sha256,
-    )
+    result = run_verification(repo, loaded)
     assert result.ok
     combined, per_file = independent_digests(repo)
     assert result.anchor_set_sha256 == combined

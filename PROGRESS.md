@@ -30,6 +30,8 @@ In progress on `feat/0.6-lane-c`, based at `145f3db93d745ddc43aeb47f6b7bd8b30aa3
 - Implemented the complete CLI flag surface, pre-load parser dependency rules, top-level root/default walk, LoadedSpec forwarding, selected/base/name/object text lines, new JSON identity/store fields, and trust-sensitive PASS prose. The re-pinned tree-addressed CLI battery now has 158 passing cases, including real object-store reporting, requested-failure wording, exact expectation refusals, root shape, output fields, checkout/index invariance, and a real coordinated anchors/signed-content/spec substitution ladder.
 - Merged Lane D through `40fa646`: all retained corpus tests now target committed trees, checkout independence and the complete name/mode matrix are covered, portable short-name screening applies to every entry kind, and fixture commit-return semantics are final.
 - Final merged corpus suite: 227 passed. Final authenticated ledger harness: 43 passed in 19.56 seconds with zero skips.
+- Authenticated equivalence modules independent of Lane B pass 80/80: ledger 43 and Brier/attest 37 (using the parent checkout's authenticated local Brier extraction because sandboxed DNS prevents a clone).
+- The first non-append offline run reached 1,158 passed and one stale Lane C test calling the removed `run_verification(spec_path=..., spec_sha256=...)` API; that call now supplies its `LoadedSpec` and passes focused. The exact offline command remains uncollectible only because the unmerged append module imports the deleted helper.
 
 ## Decisions
 
