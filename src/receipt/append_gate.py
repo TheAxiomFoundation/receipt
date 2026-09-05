@@ -24,10 +24,6 @@ from typing import Any
 from receipt._names import (
     NamePolicyError,
     ascii_fold_text,
-    assert_no_merging_entries,
-    assert_portable_name,
-    short_name_carries_pinned_suffix,
-    validate_component_text,
 )
 from receipt.canonical import canonical_sha256
 from receipt.corpus import MAX_JOURNAL_BYTES
@@ -36,6 +32,7 @@ from receipt.release_chain import (
     ChainVerification,
     MANIFEST_RE,
     ReleaseChainError,
+    _screen_protected_tree_names,
     assert_no_redirecting_git_environment,
     verify_base_release_chain,
     verify_release_chain,
@@ -45,7 +42,6 @@ from receipt.snapshot import GitEntry, SnapshotError, TreeSnapshot
 
 
 CODE_ROOT = pathlib.Path(__file__).resolve().parents[2]
-_RELEASE_PINNED_SUFFIXES = (".json", ".sig", ".tsr")
 
 
 @dataclass(frozen=True)
@@ -872,75 +868,19 @@ def _screen_candidate_tree_aliases(
                     f"(for {path} at {prefix})"
                 )
 
-    # Screen the release and manifest subtrees and each state file's directory
-    # even when a gate-only proposal will return before materialization. Derive
-    # sibling sets from the already authenticated listing, never the checkout.
-    chain = candidate.spec.chain
-    release_directories = {
-        chain.release_root_relative.as_posix(),
-        chain.manifest_relative.as_posix(),
-    }
-    release_prefixes = tuple(f"{directory}/" for directory in release_directories)
-    state_directories = {
-        relative.parent.as_posix() if relative.parent.parts else ""
-        for relative in (chain.state_relative, chain.prefix_relative)
-    }
-    protected_components = {
-        "/".join(relative.parts[:depth])
-        for relative in (
-            chain.release_root_relative,
-            chain.manifest_relative,
-            chain.state_relative,
-            chain.prefix_relative,
-        )
-        for depth in range(1, len(relative.parts) + 1)
-    }
-    by_directory: dict[str, list[str]] = {}
+    # Gate-only proposals need the same listing screen before their early return.
     try:
-        for relative in sorted(entries):
-            directory, _, name = relative.rpartition("/")
-            if not (
-                relative in protected_components
-                or directory in state_directories
-                or directory in release_directories
-                or directory.startswith(release_prefixes)
-            ):
-                continue
-            ascii_fold_text(name)
-            if chain.name_repertoire == "portable":
-                assert_portable_name(name, f"tree entry {relative!r}")
-            else:
-                validate_component_text(
-                    name,
-                    repertoire=chain.name_repertoire,
-                    label=f"tree entry {relative!r}",
-                )
-            by_directory.setdefault(directory, []).append(name)
-        for directory, names in sorted(by_directory.items()):
-            assert_no_merging_entries(
-                names,
-                repertoire=chain.name_repertoire,
-                label=f"tree directory {directory or '.'!r}",
-            )
-    except NamePolicyError as exc:
+        _screen_protected_tree_names(
+            entries,
+            _materialization_prefixes(candidate),
+            repertoire=candidate.spec.chain.name_repertoire,
+            release_directories=(
+                candidate.spec.chain.release_root_relative,
+                candidate.spec.chain.manifest_relative,
+            ),
+        )
+    except ReleaseChainError as exc:
         raise AppendError(str(exc)) from exc
-
-    if chain.name_repertoire == "portable":
-        for relative in sorted(entries):
-            if not relative.startswith(release_prefixes):
-                continue
-            name = relative.rpartition("/")[2]
-            folded_name = ascii_fold_text(name)
-            if not any(
-                folded_name.endswith(suffix) for suffix in _RELEASE_PINNED_SUFFIXES
-            ) and short_name_carries_pinned_suffix(
-                name,
-                _RELEASE_PINNED_SUFFIXES,
-            ):
-                raise AppendError(
-                    "release root contains an entry whose short-name alias "
-                    f"would carry a pinned suffix: {relative}"
-                )
     return entries
 
 

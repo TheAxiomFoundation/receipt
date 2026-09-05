@@ -919,6 +919,22 @@ def test_portable_release_names_screen_short_aliases_for_every_entry_kind(
     )
 
 
+@pytest.mark.parametrize("relative", ["notes.signature", "ledger/notes.tsrx"])
+def test_release_suffix_screen_excludes_unrelated_ancestor_siblings(
+    tmp_path: pathlib.Path, relative: str,
+) -> None:
+    """Release suffix recognition does not classify ordinary ancestor siblings."""
+
+    candidate = base_repository(tmp_path)
+    (candidate.root / relative).write_text("ordinary text\n", encoding="utf-8")
+    candidate = replace(
+        candidate, base=commit_candidate(candidate, "unchanged ordinary sibling")
+    )
+    add_gate_file(candidate)
+
+    assert "gate-only proposal" in run_gate(candidate)
+
+
 def test_portable_release_short_aliases_are_screened_with_a_base(
     tmp_path: pathlib.Path,
 ) -> None:

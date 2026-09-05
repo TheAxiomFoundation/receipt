@@ -402,6 +402,103 @@ def test_release_history_classifies_tree_replacements_and_gitlinks(
     assert str(caught.value) == message.format(base=base_oid)
 
 
+def _commit_protected_tree_alias(
+    root: pathlib.Path, directory: str, *, empty: bool
+) -> str:
+    """Build file/tree siblings directly, including trees Git cannot stage."""
+
+    def git(*arguments: str, payload: bytes | None = None) -> bytes:
+        return subprocess.run(
+            ["git", "-C", str(root), *arguments], input=payload,
+            capture_output=True, check=True, timeout=30,
+        ).stdout
+
+    def entries(revision: str) -> list[tuple[bytes, bytes, bytes]]:
+        result = []
+        for record in git("ls-tree", "-z", revision).split(b"\0")[:-1]:
+            header, name = record.split(b"\t", 1)
+            mode, _kind, oid = header.split()
+            result.append((b"40000" if mode == b"040000" else mode, name, oid))
+        return result
+
+    def tree(items: list[tuple[bytes, bytes, bytes]]) -> bytes:
+        items = sorted(items, key=lambda item: item[1] + (
+            b"/" if item[0] == b"40000" else b""
+        ))
+        raw = b"".join(mode + b" " + name + b"\0" + bytes.fromhex(oid.decode())
+                       for mode, name, oid in items)
+        return git("hash-object", "-w", "-t", "tree", "--stdin", payload=raw).strip()
+
+    blob = git("hash-object", "-w", "--stdin", payload=b"extra\n").strip()
+    alias = tree([] if empty else [(b"100644", b"child", blob)])
+    additions = [(b"100644", b"extra", blob), (b"40000", b"EXTRA", alias)]
+    root_entries = entries("HEAD")
+    if directory:
+        subtree = tree(entries(f"HEAD:{directory}") + additions)
+        root_entries = [(mode, name, subtree if name == directory.encode() else oid)
+                        for mode, name, oid in root_entries]
+    else:
+        root_entries += additions
+    return git("-c", "commit.gpgSign=false", "commit-tree", tree(root_entries).decode(),
+               "-p", "HEAD", payload=b"protected alias\n").strip().decode()
+
+
+@pytest.mark.parametrize("repertoire", ["portable", "posix-bytes"])
+@pytest.mark.parametrize("empty", [True, False], ids=["empty", "nonempty"])
+@pytest.mark.parametrize("directory", ["releases", ""], ids=["protected", "ancestor"])
+def test_base_release_chain_screens_protected_siblings_before_materialization(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+    repertoire: str, empty: bool, directory: str,
+) -> None:
+    chain = replace(load_spec(repo / "verification/spec.py").verification.chain,
+                    name_repertoire=repertoire)
+    commit = _commit_protected_tree_alias(repo, directory, empty=empty)
+
+    def no_materialization(*args: object, **kwargs: object) -> None:
+        pytest.fail("protected listing screen must precede materialization")
+
+    monkeypatch.setattr(TreeSnapshot, "materialize", no_materialization)
+    with TreeSnapshot.select(repo, commit) as base:
+        with pytest.raises(ReleaseChainError) as caught:
+            verify_base_release_chain(chain, base=base)
+    assert str(caught.value) == (
+        f"tree directory {directory or '.'!r} contains names that merge under "
+        "ASCII case folding: 'EXTRA' and 'extra'"
+    )
+
+
+@pytest.mark.parametrize("repertoire", ["portable", "posix-bytes"])
+@pytest.mark.parametrize("empty", [True, False], ids=["empty", "nonempty"])
+@pytest.mark.parametrize("directory", ["releases", ""], ids=["protected", "ancestor"])
+def test_composed_custody_screens_protected_siblings_before_materialization(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+    repertoire: str, empty: bool, directory: str,
+) -> None:
+    spec_path = repo / "verification/spec.py"
+    spec_path.write_text(spec_path.read_text(encoding="utf-8") + (
+        "\nfrom dataclasses import replace\n"
+        f"SPEC = replace(SPEC, chain=replace(SPEC.chain, name_repertoire={repertoire!r}), "
+        f"corpus=replace(SPEC.corpus, name_repertoire={repertoire!r}))\n"
+    ), encoding="utf-8")
+    loaded = load_spec(spec_path, expect_sha256=hashlib.sha256(spec_path.read_bytes()).hexdigest())
+    commit = _commit_protected_tree_alias(repo, directory, empty=empty)
+
+    def no_materialization(*args: object, **kwargs: object) -> None:
+        pytest.fail("protected listing screen must precede materialization")
+
+    monkeypatch.setattr(TreeSnapshot, "materialize", no_materialization)
+    result = run_verification(repo, loaded, commit=commit, expect_commit=commit)
+    assert not result.ok
+    assert result.passes[0].name == "custody"
+    assert not result.passes[0].ok
+    assert result.passes[0].failure == (
+        f"tree directory {directory or '.'!r} contains names that merge under "
+        "ASCII case folding: 'EXTRA' and 'extra'"
+    )
+    assert result.passes[1].name == "binding"
+    assert result.passes[1].failure == "not reached"
+
+
 def test_base_release_chain_materializes_the_entered_snapshot(
     repo: pathlib.Path,
 ) -> None:

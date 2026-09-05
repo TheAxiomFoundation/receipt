@@ -289,6 +289,10 @@ def _install_verification_pipeline(
         def entry(self, path: str) -> types.SimpleNamespace:
             return types.SimpleNamespace(mode="100644", path=path)
 
+        def entries(self, prefix: str) -> types.SimpleNamespace:
+            assert prefix == ""
+            return types.SimpleNamespace(as_dict=lambda *, include_trees: {})
+
         def blob(
             self, entry: types.SimpleNamespace, *, limit: int
         ) -> bytes:

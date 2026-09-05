@@ -40,7 +40,15 @@ from typing import Any, Literal
 
 from receipt import sign as _sign
 from receipt import tsa as _tsa
-from receipt._names import NamePolicyError, validate_repertoire
+from receipt._names import (
+    NamePolicyError,
+    ascii_fold_text,
+    assert_no_merging_entries,
+    assert_portable_name,
+    short_name_carries_pinned_suffix,
+    validate_component_text,
+    validate_repertoire,
+)
 from receipt.canonical import canonical_bytes, canonical_sha256
 from receipt.snapshot import GitEntry, TreeSnapshot
 
@@ -2223,6 +2231,71 @@ def verify_release_history_immutable(
     )
 
 
+def _screen_protected_tree_names(
+    entries: Mapping[str, GitEntry],
+    prefixes: tuple[pathlib.PurePosixPath, ...],
+    *,
+    repertoire: str,
+    release_directories: tuple[pathlib.PurePosixPath, ...],
+) -> None:
+    """Screen protected listings and ancestor siblings before writing files.
+
+    The authenticated listing includes files and trees, including empty trees.
+    Only selected subtrees and the immediate listings of their ancestors are
+    screened; a disjoint unused trust subtree is not traversed by this policy.
+    The release-suffix screen applies only below release/manifest directories.
+    """
+
+    selected = tuple(relative.as_posix() for relative in prefixes)
+    descendants = tuple(f"{relative}/" for relative in selected)
+    ancestors = {
+        "/".join(relative.parts[:depth])
+        for relative in prefixes
+        for depth in range(len(relative.parts))
+    }
+    by_directory: dict[str, list[str]] = {}
+    screened: list[str] = []
+    try:
+        for relative in sorted(entries):
+            directory, _, name = relative.rpartition("/")
+            if not (
+                directory in ancestors
+                or relative in selected
+                or relative.startswith(descendants)
+            ):
+                continue
+            ascii_fold_text(name)
+            if repertoire == "portable":
+                assert_portable_name(name, f"tree entry {relative!r}")
+            else:
+                validate_component_text(
+                    name, repertoire=repertoire, label=f"tree entry {relative!r}"
+                )
+            by_directory.setdefault(directory, []).append(name)
+            screened.append(relative)
+        for directory, names in sorted(by_directory.items()):
+            assert_no_merging_entries(
+                names, repertoire=repertoire,
+                label=f"tree directory {directory or '.'!r}",
+            )
+        if repertoire == "portable":
+            suffixes = (".json", ".sig", ".tsr")
+            release_prefixes = tuple(f"{path.as_posix()}/" for path in release_directories)
+            for relative in screened:
+                if not relative.startswith(release_prefixes):
+                    continue
+                name = relative.rpartition("/")[2]
+                if not ascii_fold_text(name).endswith(suffixes) and (
+                    short_name_carries_pinned_suffix(name, suffixes)
+                ):
+                    raise ReleaseChainError(
+                        "release root contains an entry whose short-name alias "
+                        f"would carry a pinned suffix: {relative}"
+                    )
+    except NamePolicyError as exc:
+        raise ReleaseChainError(str(exc)) from exc
+
+
 def verify_base_release_chain(
     spec: ChainSpec,
     *,
@@ -2248,6 +2321,14 @@ def verify_base_release_chain(
     )
     if anchor_dir is None:
         prefixes += (normalized.anchor_relative,)
+    _screen_protected_tree_names(
+        base.entries("").as_dict(include_trees=True),
+        prefixes,
+        repertoire=normalized.name_repertoire,
+        release_directories=(
+            normalized.release_root_relative, normalized.manifest_relative
+        ),
+    )
     with tempfile.TemporaryDirectory(prefix="receipt-release-base-") as name:
         destination = pathlib.Path(name)
         with base.materialize(
