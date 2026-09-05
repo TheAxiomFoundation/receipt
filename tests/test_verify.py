@@ -289,6 +289,10 @@ def _install_verification_pipeline(
         def entry(self, path: str) -> types.SimpleNamespace:
             return types.SimpleNamespace(mode="100644", path=path)
 
+        def entries(self, prefix: str) -> types.SimpleNamespace:
+            assert prefix == ""
+            return types.SimpleNamespace(as_dict=lambda *, include_trees: {})
+
         def blob(
             self, entry: types.SimpleNamespace, *, limit: int
         ) -> bytes:
@@ -731,3 +735,50 @@ def test_redirecting_environment_keeps_custody_failure_shape(
         expect_anchor_set="7" * 64,
     )
     assert conflict.passes[0].failure == result.passes[0].failure
+
+
+def test_attribute_verdict_is_independent_of_ignorecase(
+    tmp_path: pathlib.Path,
+) -> None:
+    """One signed commit with all four pins refuses under either setting."""
+
+    from corpus_fixture import _commit_fixture, _git, build_corpus
+    from receipt.snapshot import TreeSnapshot
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    build_corpus(root, tmp_path / "keys")
+    (root / ".gitattributes").write_bytes(
+        b"releases/** filter=evil\nRELEASES/** -filter\n"
+    )
+    commit = _commit_fixture(root, "case-varied attribute reset", initialize=False)
+    tree = _git(root, "rev-parse", "HEAD^{tree}")
+    spec_path = root / "verification" / "spec.py"
+    loaded = load_spec(
+        spec_path, expect_sha256=hashlib.sha256(spec_path.read_bytes()).hexdigest()
+    )
+    with TreeSnapshot.select(root, commit) as snapshot:
+        with snapshot.materialize(
+            (loaded.verification.chain.anchor_relative,),
+            tmp_path,
+            repertoire="portable",
+        ) as materialized:
+            anchors = materialized.anchor_set_sha256(loaded.verification.chain)
+
+    results = []
+    for ignorecase in ("false", "true"):
+        _git(root, "config", "core.ignorecase", ignorecase)
+        result = run_verification(
+            root, loaded, commit=commit, expect_commit=commit,
+            expect_tree=tree, expect_anchor_set=anchors,
+        )
+        results.append(result_to_dict(result))
+        assert _git(root, "status", "--porcelain") == ""
+
+    assert results[0] == results[1]
+    assert results[0]["verdict"] == "FAIL"
+    assert results[0]["passes"][0]["failure"] == (
+        "transforming attribute filter applies to protected path "
+        "releases/anchors/alpha-root.pem"
+    )
+    assert results[0]["passesCompleted"] == []

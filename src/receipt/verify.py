@@ -62,6 +62,7 @@ from receipt.release_chain import (
     ChainVerification,
     ReleaseChainError,
     _normalized_spec,
+    _screen_protected_tree_names,
     assert_no_redirecting_git_environment,
     verify_release_chain,
     verify_release_history_immutable,
@@ -654,6 +655,23 @@ def run_verification(
 
             phase = "custody"
 
+            prefixes = (
+                normalized_chain.release_root_relative,
+                normalized_chain.manifest_relative,
+                normalized_chain.state_relative,
+                normalized_chain.prefix_relative,
+                normalized_chain.anchor_relative,
+            )
+            _screen_protected_tree_names(
+                candidate.entries("").as_dict(include_trees=True),
+                prefixes,
+                repertoire=chain_repertoire,
+                release_directories=(
+                    normalized_chain.release_root_relative,
+                    normalized_chain.manifest_relative,
+                ),
+            )
+
             def state_blob(relative: pathlib.PurePosixPath) -> bytes:
                 display = relative.as_posix()
                 try:
@@ -678,13 +696,6 @@ def run_verification(
                 verification_spec.journal_relative.as_posix(): journal_bytes,
                 normalized_chain.prefix_relative.as_posix(): prefix_bytes,
             }
-            prefixes = (
-                normalized_chain.release_root_relative,
-                normalized_chain.manifest_relative,
-                normalized_chain.state_relative,
-                normalized_chain.prefix_relative,
-                normalized_chain.anchor_relative,
-            )
             with tempfile.TemporaryDirectory(
                 prefix="receipt-verification-materialization-"
             ) as directory:

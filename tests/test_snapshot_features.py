@@ -234,7 +234,7 @@ def test_exact_chronicle_eight_line_attributes_fixture_is_accepted(
         assert selected.work.attribute_bytes == len(CHRONICLE_ATTRIBUTES)
         assert (
             selected.work.attribute_match_work
-            == 320
+            == 640
             < snapshot_module.MAX_ATTRIBUTE_MATCH_WORK
         )
 
@@ -1231,7 +1231,7 @@ def test_attribute_parser_enforces_rule_budget_while_expanding(
 def test_attribute_state_application_is_charged_per_matching_path(
     git_repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The reviewer's 1,000-state/500-path shape charges every application."""
+    """Charge 1,000 states over 500 paths independently in both readings."""
 
     attributes = b"*.json " + b" ".join([b"a"] * 1_000) + b"\n"
     paths = tuple(f"releases/m{index:04d}.json" for index in range(500))
@@ -1245,7 +1245,7 @@ def test_attribute_state_application_is_charged_per_matching_path(
 
     with selected:
         selected.refuse_transforming_attributes(paths)
-        assert selected.work.attribute_match_work == 505_500
+        assert selected.work.attribute_match_work == 1_011_000
 
 
 def test_attribute_state_count_has_a_per_line_ceiling(
@@ -1482,27 +1482,72 @@ def test_ignorecase_folds_attribute_patterns_like_git(
             snapshot.refuse_transforming_attributes(["releases/manifests/x.json"])
 
 
-def test_without_ignorecase_a_case_differing_pattern_does_not_apply(
-    tmp_path: pathlib.Path,
+@pytest.mark.parametrize("ignorecase", ["false", "true"])
+def test_a_case_differing_pattern_refuses_whatever_ignorecase_says(
+    tmp_path: pathlib.Path, ignorecase: str,
 ) -> None:
+    """The reader is fail-closed over exact and ASCII-folded readings."""
+
     root = tmp_path / "repo"
     _init(root)
-    _git(root, "config", "core.ignorecase", "false")
+    _git(root, "config", "core.ignorecase", ignorecase)
     snapshot = _snapshot_with_attributes(
         root, b"RELEASES/manifests/x.json filter=evil\n", ["releases/manifests/x.json"]
     )
     with snapshot:
-        snapshot.refuse_transforming_attributes(["releases/manifests/x.json"])
+        with pytest.raises(SnapshotError, match="transforming attribute filter applies"):
+            snapshot.refuse_transforming_attributes(["releases/manifests/x.json"])
+
+
+@pytest.mark.parametrize("ignorecase", ["false", "true"])
+@pytest.mark.parametrize("reset", ["-", "!"])
+@pytest.mark.parametrize("attribute", ["filter", "ident", "working-tree-encoding"])
+def test_case_varied_attribute_reset_cannot_cancel_the_exact_reading(
+    tmp_path: pathlib.Path, ignorecase: str, reset: str, attribute: str,
+) -> None:
+    """Keep last-rule-wins separate for each reading, regardless of config.
+
+    Under ignorecase=true the Git oracle says unset or unspecified. The
+    reader still refuses: it is fail-closed over both readings by design,
+    and the exact reading leaves the transforming attribute valued.
+    """
+
+    root = tmp_path / "repo"
+    _init(root)
+    _git(root, "config", "core.ignorecase", ignorecase)
+    path = "releases/manifests/x.json"
+    value = "UTF-8" if attribute == "working-tree-encoding" else "evil"
+    snapshot = _snapshot_with_attributes(
+        root,
+        f"releases/** {attribute}={value}\nRELEASES/** {reset}{attribute}\n".encode(),
+        [path],
+    )
+    (tmp_path / "empty").write_bytes(b"")
+    (tmp_path / "empty-global").write_bytes(b"")
+    oracle = _git(
+        root,
+        "-c", f"core.ignorecase={ignorecase}",
+        "-c", f"core.attributesFile={tmp_path / 'empty'}",
+        "check-attr", "--cached", "-z", attribute, "--", path,
+        environment=snapshot_module._git_environment(tmp_path / "empty-global"),
+    ).stdout.split(b"\0")
+    expected = value.encode() if ignorecase == "false" else (
+        b"unset" if reset == "-" else b"unspecified"
+    )
+    assert oracle[2] == expected, oracle
+    with snapshot:
+        with pytest.raises(SnapshotError) as caught:
+            snapshot.refuse_transforming_attributes([path])
+    assert str(caught.value) == (
+        f"transforming attribute {attribute} applies to protected path {path}"
+    )
 
 
 def test_a_non_boolean_ignorecase_value_refuses_at_selection(
     tmp_path: pathlib.Path,
 ) -> None:
     """git dies on ``core.ignoreCase=maybe`` during discovery, so selection
-    refuses before any read; the reader's own classifier refuses the same
-    value if a record ever reaches it. It also refuses the integer ``2``,
-    which git reads as true (measured on git 2.53.0), a deliberate narrowing;
-    an explicitly empty value is false, as git reads it."""
+    refuses before any read."""
 
     root = tmp_path / "repo"
     _init(root)
@@ -1511,13 +1556,6 @@ def test_a_non_boolean_ignorecase_value_refuses_at_selection(
     _git(root, "config", "core.ignorecase", "maybe")
     with pytest.raises(SnapshotError):
         TreeSnapshot.select(root, commit)
-    with pytest.raises(SnapshotError, match="non-boolean value 'maybe'"):
-        snapshot_module._config_ignorecase((("local", "core.ignorecase", "maybe"),))
-    assert snapshot_module._config_ignorecase((("local", "core.ignorecase", ""),)) is False
-    with pytest.raises(SnapshotError, match="non-boolean value '2'"):
-        snapshot_module._config_ignorecase((("local", "core.ignorecase", "2"),))
-    assert snapshot_module._config_ignorecase((("local", "core.ignorecase", "Off"),)) is False
-    assert snapshot_module._config_ignorecase((("global", "core.ignorecase", "true"),)) is False
 
 
 def test_an_explicitly_empty_ignorecase_value_is_false_like_git(
@@ -1527,7 +1565,8 @@ def test_an_explicitly_empty_ignorecase_value_is_false_like_git(
 
     ``git config --type=bool`` reports the explicitly empty value as false and
     ``check-attr`` leaves a case-differing pattern unapplied under it, while
-    the reader once read it as true and folded case (peer review, round 4).
+    the reader refuses by design: it is fail-closed over both exact and
+    ASCII-folded readings regardless of the configured value.
     """
 
     root = tmp_path / "repo"
@@ -1558,6 +1597,6 @@ def test_an_explicitly_empty_ignorecase_value_is_false_like_git(
     ).stdout.split(b"\0")
     assert oracle[2] == b"unspecified", oracle
     assert ("local", "core.ignorecase", "") in snapshot._state.config_records
-    assert snapshot_module._config_ignorecase(snapshot._state.config_records) is False
     with snapshot:
-        snapshot.refuse_transforming_attributes(["releases/manifests/x.json"])
+        with pytest.raises(SnapshotError, match="transforming attribute filter applies"):
+            snapshot.refuse_transforming_attributes(["releases/manifests/x.json"])

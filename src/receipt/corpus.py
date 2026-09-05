@@ -736,43 +736,18 @@ def _reject_oversized_text(value: str, label: str) -> str:
 #: and its cost is real: a corpus holding an ordinary ``COM0.yaml`` was
 #: refused outright (peer review, Sol round 2).
 def _assert_portable_name(value: str, label: str) -> str:
-    """Refuse a name outside the repertoire every filesystem agrees about.
+    """Apply the declared portable-name policy through the shared screen.
 
-    One screen, run everywhere this module takes a name: declared paths, the
-    spec's own content roots, the tree entry names the closed-world sweep
-    judges, the entry names beside a pinned root's components, and the entry
-    names a tombstone search reads out of a listing. What it asks is not "is
-    this name legal" but "does this module know what this name means on the
-    filesystem a consumer will resolve the tree on".
+    A component contains only ASCII letters, digits, ``.``, ``_`` and ``-``,
+    does not end in a period and has no Win32 device basename. ``value`` may
+    be a relative path or one component; the refusal quotes the whole value.
 
-    Three questions, one refusal, one message. The component must be spelled
-    with ASCII letters, digits, ``.``, ``_`` and ``-``
-    (:data:`PORTABLE_NAME_RE`); it must not end in a period, which Win32
-    strips before a lookup, so that the entry carrying one is the entry
-    beside it; and its Win32 device basename must not be in
-    :data:`WIN32_RESERVED_DEVICE_NAMES`, because ``rules/NUL.yaml`` opens the
-    null device there rather than the bytes a journal bound. The three are
-    asked over the whole value before it is quoted back, so which of them a
-    name fails is a property of the name and not of where in it the offending
-    character sits.
-
-    The module docstring says why this replaced the modelling that used to
-    live here — a pinned Unicode repertoire, a default-ignorable table, the
-    Turkic dotless i, a colon, a backslash, a trailing space, and an 8.3
-    tilde grammar, each of them a guess at a filesystem this module cannot
-    identify. The short version is that every corpus this package verifies
-    was already inside the portable repertoire, so refusing the rest costs
-    nothing that a real corpus carries and removes five models that were
-    wrong more often than they were right.
-
-    What that buys is stated as an equality rather than as a hope: inside the
-    repertoire :func:`_path_fold` is ASCII case-insensitivity, and ASCII case
-    is the one insensitivity every filesystem in question actually has. There
-    is no second equivalence class left to model.
-
-    ``value`` may be a whole relative path or a single component; the split
-    is over ``/``, so a value that is already one component is screened as
-    one, and every message quotes the value whole through :func:`_quoted`.
+    This checkout-portability policy has a known cost: rulespec-us at
+    d58cc0c carries 33 non-portable names among 15,216 tracked paths in the
+    2026-09-03 census. Such a corpus must rename those paths or declare
+    ``posix-bytes`` for object comparisons. Both repertoires still refuse
+    undecodable names when quoted or folded and ASCII-fold-equal siblings;
+    private materialization requires portable names under either repertoire.
     """
 
     try:

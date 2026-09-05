@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import locale
 import pathlib
 import re
 import tempfile
@@ -22,14 +21,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from receipt._names import (
-    NamePolicyError,
-    ascii_fold_text,
-    assert_no_merging_entries,
-    assert_portable_name,
-    short_name_carries_pinned_suffix,
-    validate_component_text,
-)
 from receipt.canonical import canonical_sha256
 from receipt.corpus import MAX_JOURNAL_BYTES
 from receipt.release_chain import (
@@ -37,6 +28,7 @@ from receipt.release_chain import (
     ChainVerification,
     MANIFEST_RE,
     ReleaseChainError,
+    _screen_protected_tree_names,
     assert_no_redirecting_git_environment,
     verify_base_release_chain,
     verify_release_chain,
@@ -46,7 +38,6 @@ from receipt.snapshot import GitEntry, SnapshotError, TreeSnapshot
 
 
 CODE_ROOT = pathlib.Path(__file__).resolve().parents[2]
-_RELEASE_PINNED_SUFFIXES = (".json", ".sig", ".tsr")
 
 
 @dataclass(frozen=True)
@@ -235,19 +226,18 @@ def check_gate_only_confinement(
     return set(unclassified)
 
 
-def _as_text(payload: bytes, encoding: str | None = None) -> str:
-    """Decode snapshot bytes exactly as ``Path.read_text`` decoded them.
+def _as_text(payload: bytes, relative: str) -> str:
+    """Decode snapshot state as UTF-8 independently of the process locale.
 
-    The snapshot reader replaced two ``read_text`` calls, and this port's
-    refusals are compared with the upstream oracle's byte for byte, so the
-    decoding those calls performed is reproduced rather than approximated:
-    the caller's encoding or, where the call passed none, the same locale
-    default ``open`` would have used, and the universal-newline translation
-    text mode applies to a whole file (``\r\n`` and a lone ``\r`` both
-    become ``\n``).
+    Invalid UTF-8 refuses with the configured state path. Preserve the
+    universal-newline translation of the extracted text policy: ``\r\n``
+    and a lone ``\r`` both become ``\n``.
     """
 
-    decoded = payload.decode(encoding or locale.getpreferredencoding(False))
+    try:
+        decoded = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise AppendError(f"state file is not valid UTF-8: {relative}") from exc
     return decoded.replace("\r\n", "\n").replace("\r", "\n")
 
 
@@ -559,7 +549,9 @@ def check_append_only(
     base: _BaseCommit, lines: list[str], candidate: _CandidateTree
 ) -> int:
     entry = base.tree.entry(candidate.ledger_relative)
-    base_text = _as_text(base.tree.blob(entry, limit=MAX_JOURNAL_BYTES))
+    base_text = _as_text(
+        base.tree.blob(entry, limit=MAX_JOURNAL_BYTES), candidate.ledger_relative
+    )
     base_lines = _lines(base_text)
     if len(lines) < len(base_lines):
         raise AppendError(
@@ -592,7 +584,11 @@ def check_prefix_anchored_to_base(
     binding boundary so a candidate-controlled count can never move it.
     """
     entry = base.tree.entry(candidate.prefix_relative)
-    base_prefix = json.loads(_as_text(base.tree.blob(entry, limit=MAX_JOURNAL_BYTES)))
+    base_prefix = json.loads(
+        _as_text(
+            base.tree.blob(entry, limit=MAX_JOURNAL_BYTES), candidate.prefix_relative
+        )
+    )
     for field in ("prefixLineCount", "prefixSha256", "lineSha256s"):
         if candidate_prefix.get(field) != base_prefix.get(field):
             raise AppendError(
@@ -804,13 +800,6 @@ def _surface_alias_paths(candidate: _CandidateTree) -> tuple[str, ...]:
     return tuple(sorted(paths))
 
 
-def _folded_parts(path: str) -> tuple[str, ...]:
-    try:
-        return tuple(ascii_fold_text(component) for component in path.split("/"))
-    except NamePolicyError as exc:
-        raise AppendError(str(exc)) from exc
-
-
 def _protected_paths(candidate: _CandidateTree) -> tuple[str, ...]:
     chain = candidate.spec.chain
     return tuple(
@@ -845,97 +834,20 @@ def _screen_candidate_tree_aliases(
                 raise SnapshotError(f"state path has a symlinked component: {prefix}")
             raise SnapshotError(f"tree path ancestor is not a directory: {prefix}")
 
-    folded = {path: _folded_parts(path) for path in protected}
-    exact = {path: tuple(path.split("/")) for path in protected}
-    # A non-tree alias carries the legacy diagnostic's complete entry path.
-    # Empty tree aliases are still covered after all non-tree entries.
-    for listed in sorted(
-        entries,
-        key=lambda path: (entries[path].mode == "040000", path),
-    ):
-        parts = tuple(listed.split("/"))
-        listed_folded = _folded_parts(listed)
-        for path in protected:
-            for depth in range(1, len(folded[path]) + 1):
-                if len(parts) < depth or listed_folded[:depth] != folded[path][:depth]:
-                    break
-                if parts[:depth] == exact[path][:depth]:
-                    continue
-                prefix = "/".join(exact[path][:depth])
-                raise AppendError(
-                    f"index carries an alias of a protected path: {listed} "
-                    f"(for {path} at {prefix})"
-                )
-
-    # Screen the release and manifest subtrees and each state file's directory
-    # even when a gate-only proposal will return before materialization. Derive
-    # sibling sets from the already authenticated listing, never the checkout.
-    chain = candidate.spec.chain
-    release_directories = {
-        chain.release_root_relative.as_posix(),
-        chain.manifest_relative.as_posix(),
-    }
-    release_prefixes = tuple(f"{directory}/" for directory in release_directories)
-    state_directories = {
-        relative.parent.as_posix() if relative.parent.parts else ""
-        for relative in (chain.state_relative, chain.prefix_relative)
-    }
-    protected_components = {
-        "/".join(relative.parts[:depth])
-        for relative in (
-            chain.release_root_relative,
-            chain.manifest_relative,
-            chain.state_relative,
-            chain.prefix_relative,
-        )
-        for depth in range(1, len(relative.parts) + 1)
-    }
-    by_directory: dict[str, list[str]] = {}
+    # Gate-only proposals need the same listing screen before their early return.
     try:
-        for relative in sorted(entries):
-            directory, _, name = relative.rpartition("/")
-            if not (
-                relative in protected_components
-                or directory in state_directories
-                or directory in release_directories
-                or directory.startswith(release_prefixes)
-            ):
-                continue
-            ascii_fold_text(name)
-            if chain.name_repertoire == "portable":
-                assert_portable_name(name, f"tree entry {relative!r}")
-            else:
-                validate_component_text(
-                    name,
-                    repertoire=chain.name_repertoire,
-                    label=f"tree entry {relative!r}",
-                )
-            by_directory.setdefault(directory, []).append(name)
-        for directory, names in sorted(by_directory.items()):
-            assert_no_merging_entries(
-                names,
-                repertoire=chain.name_repertoire,
-                label=f"tree directory {directory or '.'!r}",
-            )
-    except NamePolicyError as exc:
+        _screen_protected_tree_names(
+            entries,
+            _materialization_prefixes(candidate),
+            repertoire=candidate.spec.chain.name_repertoire,
+            release_directories=(
+                candidate.spec.chain.release_root_relative,
+                candidate.spec.chain.manifest_relative,
+            ),
+            alias_paths=protected,
+        )
+    except ReleaseChainError as exc:
         raise AppendError(str(exc)) from exc
-
-    if chain.name_repertoire == "portable":
-        for relative in sorted(entries):
-            if not relative.startswith(release_prefixes):
-                continue
-            name = relative.rpartition("/")[2]
-            folded_name = ascii_fold_text(name)
-            if not any(
-                folded_name.endswith(suffix) for suffix in _RELEASE_PINNED_SUFFIXES
-            ) and short_name_carries_pinned_suffix(
-                name,
-                _RELEASE_PINNED_SUFFIXES,
-            ):
-                raise AppendError(
-                    "release root contains an entry whose short-name alias "
-                    f"would carry a pinned suffix: {relative}"
-                )
     return entries
 
 
@@ -1215,11 +1127,13 @@ def _verify_selected_tree(
         entry=prefix_entry,
     )
 
-    text = _as_text(ledger_bytes, "utf-8")
+    text = _as_text(ledger_bytes, candidate.ledger_relative)
     reject_non_append_bytes(text)
     lines = _lines(text)
 
-    prefix = check_prefix(lines, _as_text(prefix_bytes), candidate)
+    prefix = check_prefix(
+        lines, _as_text(prefix_bytes, candidate.prefix_relative), candidate
+    )
     binding_boundary = int(prefix["prefixLineCount"])
     appended = None
     if base is not None:

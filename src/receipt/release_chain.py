@@ -40,7 +40,15 @@ from typing import Any, Literal
 
 from receipt import sign as _sign
 from receipt import tsa as _tsa
-from receipt._names import NamePolicyError, validate_repertoire
+from receipt._names import (
+    NamePolicyError,
+    ascii_fold_text,
+    assert_no_merging_entries,
+    assert_portable_name,
+    short_name_carries_pinned_suffix,
+    validate_component_text,
+    validate_repertoire,
+)
 from receipt.canonical import canonical_bytes, canonical_sha256
 from receipt.snapshot import GitEntry, TreeSnapshot
 
@@ -481,8 +489,9 @@ def assert_manifest_directory_regular(root: pathlib.Path, spec: ChainSpec) -> No
 
     ``verify_release_chain`` calls this guard itself before enumeration, after
     the configured path walk has bound the manifest leaf's spelling but
-    deliberately left its type to this check. The append gate's push path also
-    calls it before asking whether a chain is initialized. Without that guard,
+    deliberately left its type to this check. The append gate screens its
+    authenticated manifest-tree entry before testing initialization; this
+    guard protects direct directory callers. Without a type check,
     ``manifest_directory.is_dir() and any(iterdir())`` gets ``False`` for every
     way the path can be something other than a directory: a 100644 blob
     standing where the manifest directory was, an empty symlink there, or a
@@ -504,10 +513,8 @@ def assert_manifest_directory_regular(root: pathlib.Path, spec: ChainSpec) -> No
     *ancestor* is a regular file — a release root that is a blob,
     or any component of a multi-component manifest path — and ``EACCES`` when
     an ancestor is unsearchable, and catching ``OSError`` turned both into "no
-    manifest directory here". On the push path that is an acceptance with no
-    chain: ``initialized`` is false, nothing is enumerated, and
-    ``verify_release_chain`` is never called, while the commit under review may
-    carry the whole chain.
+    manifest directory here". Treating either as absence could hide a chain
+    in the directory under review.
 
     So the components are walked. ``FileNotFoundError`` at any of them is
     absence — nothing stands there, so nothing stands at the leaf either, and
@@ -1306,10 +1313,10 @@ def _symlinked_component_error(
 ) -> ReleaseChainError:
     """The one refusal both confinement checks give for a linked component.
 
-    The component walk below and the descriptor walk that opens the file
-    raise this same text for the same fact, so a component that becomes a
-    link between them is refused in the words the walk already used rather
-    than in words of its own.
+    The path guard and the regular-file reader's component ``lstat`` walk
+    use the same text. The reader then opens the leaf once with
+    ``O_NOFOLLOW | O_NONBLOCK`` and checks its regular-file identity with
+    ``fstat``; there is no descriptor descent between components.
     """
 
     return ReleaseChainError(
@@ -1437,9 +1444,9 @@ def assert_no_symlinked_state_component(
     while being no part of what the auditor cloned, and no part of what the
     base commit can be diffed against. An in-tree link is the same hole: the
     bytes under audit are then a directory the surface patterns never name.
-    The anchor path is walked this way at the top of ``verify_release_chain``;
-    this is the same walk for the two state paths. (Mirrors
-    ``corpus._assert_no_symlinked_component``.)
+    This standalone directory guard checks a state path. The directory
+    verifier's own regular-file reader performs its component ``lstat``
+    walk at each read.
 
     Each component's spelling is bound here too, after its own symlink check
     so that a linked component keeps that answer: what a component *is* comes
@@ -1660,16 +1667,11 @@ def _state_file_bytes(
 ) -> bytes:
     """One state file's bytes: the caller's snapshot, or a fresh read.
 
-    ``append_gate`` reads each state file once, records the file's identity,
-    and feeds those bytes to every consumer it owns. This verifier was not
-    one of them: it re-opened both paths by name, so a candidate could
-    satisfy the row checks with one ledger and the release chain with
-    another inside a single verdict — and restore the first before the
-    closing re-read looked, since that comparison saw the same device,
-    inode, size, and mtime it started with. A caller that has already read a
-    state path supplies its bytes and this path is not opened again at all.
-    With nothing supplied the read is the one it always was, in the same
-    place, with the same refusals.
+    Commit-addressed callers can supply authenticated blob bytes so every
+    consumer judges the same state. A supplied path is not opened here.
+    Otherwise the configured path is read through the guarded regular-file
+    reader, from a private materialization or a direct caller's directory;
+    there is no closing re-read.
     """
 
     key = relative.as_posix()
@@ -1686,6 +1688,13 @@ def _verify_state_history(
     require_head_current: bool,
     state_bytes: Mapping[str, bytes],
 ) -> None:
+    """Compare release history with supplied state bytes or guarded reads.
+
+    The retained "working-tree" refusals name these consumed state bytes,
+    including authenticated blobs and private materializations. The legacy
+    "ledger/immutable_prefix.json" text names the configured prefix file.
+    """
+
     ledger = _state_file_bytes(root, spec.state_relative, state_bytes)
     prefix = _state_file_bytes(root, spec.prefix_relative, state_bytes)
     offsets = jsonl_line_offsets(ledger, spec.state_path)
@@ -1946,10 +1955,12 @@ def verify_release_chain(
     ``run_verification``, which read only objects. A caller on a directory it
     does not own carries the concurrent-writer residual.
 
-    Every input file is opened once through :func:`_regular_file_bytes` after
-    the configured path walks. With ``compute_anchor_set_digest=True`` the
-    result additionally names the exact configured anchor bytes consumed;
-    OpenSSL always receives a private byte-for-byte ``-CAfile`` copy.
+    Each file consumption goes through :func:`_regular_file_bytes` after
+    the configured path walks. Anchors are consumed again across releases
+    and roles. With ``compute_anchor_set_digest=True``, those repeated
+    observations must agree byte for byte, and the result names the exact
+    configured anchor bytes consumed. OpenSSL always receives a private
+    byte-for-byte ``-CAfile`` copy.
     Caller-supplied ``state_bytes`` replace the two state-file reads.
     """
 
@@ -2220,6 +2231,108 @@ def verify_release_history_immutable(
     )
 
 
+def _folded_parts(path: str) -> tuple[str, ...]:
+    return tuple(ascii_fold_text(component) for component in path.split("/"))
+
+
+def _screen_protected_tree_names(
+    entries: Mapping[str, GitEntry],
+    prefixes: tuple[pathlib.PurePosixPath, ...],
+    *,
+    repertoire: str,
+    release_directories: tuple[pathlib.PurePosixPath, ...],
+    alias_paths: tuple[str, ...] | None = None,
+) -> None:
+    """Screen protected listings and ancestor siblings before writing files.
+
+    The authenticated listing includes files and trees, including empty trees.
+    Only selected subtrees and the immediate listings of their ancestors are
+    screened; a disjoint unused trust subtree is not traversed by this policy.
+    The release-suffix screen applies only below release/manifest directories.
+    Configured spellings are compared at every depth even without an exact
+    counterpart. The append gate supplies its wider ``alias_paths`` policy,
+    which also requires every listing component to be foldable.
+    """
+
+    selected = tuple(relative.as_posix() for relative in prefixes)
+    descendants = tuple(f"{relative}/" for relative in selected)
+    ancestors = {
+        "/".join(relative.parts[:depth])
+        for relative in prefixes
+        for depth in range(len(relative.parts))
+    }
+    by_directory: dict[str, list[str]] = {}
+    screened: list[str] = []
+    try:
+        protected = selected if alias_paths is None else alias_paths
+        folded = {path: _folded_parts(path) for path in protected}
+        exact = {path: tuple(path.split("/")) for path in protected}
+        # Keep the legacy diagnostic's complete non-tree path when present;
+        # an empty tree alias is still covered after all non-tree entries.
+        for listed in sorted(
+            entries, key=lambda path: (entries[path].mode == "040000", path),
+        ):
+            parts = tuple(listed.split("/"))
+            listed_folded = _folded_parts(listed) if alias_paths is not None else ()
+            for path in protected:
+                for depth in range(1, len(folded[path]) + 1):
+                    if len(parts) < depth:
+                        break
+                    if len(listed_folded) < depth:
+                        # Do not fold unused descendants once their ancestor
+                        # differs from every selected protected prefix.
+                        listed_folded += (ascii_fold_text(parts[depth - 1]),)
+                    if listed_folded[:depth] != folded[path][:depth]:
+                        break
+                    if parts[:depth] == exact[path][:depth]:
+                        continue
+                    _folded_parts(listed)  # A quoted full path must be strict UTF-8 too.
+                    prefix = "/".join(exact[path][:depth])
+                    # "index" is retained wording for an authenticated tree entry.
+                    raise ReleaseChainError(
+                        f"index carries an alias of a protected path: {listed} "
+                        f"(for {path} at {prefix})"
+                    )
+        for relative in sorted(entries):
+            directory, _, name = relative.rpartition("/")
+            if not (
+                directory in ancestors
+                or relative in selected
+                or relative.startswith(descendants)
+            ):
+                continue
+            ascii_fold_text(name)
+            if repertoire == "portable":
+                assert_portable_name(name, f"tree entry {relative!r}")
+            else:
+                validate_component_text(
+                    name, repertoire=repertoire, label=f"tree entry {relative!r}"
+                )
+            by_directory.setdefault(directory, []).append(name)
+            screened.append(relative)
+        for directory, names in sorted(by_directory.items()):
+            assert_no_merging_entries(
+                names, repertoire=repertoire,
+                label=f"tree directory {directory or '.'!r}",
+            )
+        if repertoire == "portable":
+            suffixes = (".json", ".sig", ".tsr")
+            release_prefixes = tuple(f"{path.as_posix()}/" for path in release_directories)
+            for relative in screened:
+                if not relative.startswith(release_prefixes):
+                    continue
+                name = relative.rpartition("/")[2]
+                if not ascii_fold_text(name).endswith(suffixes) and (
+                    short_name_carries_pinned_suffix(name, suffixes)
+                ):
+                    raise ReleaseChainError(
+                        "release root contains an entry whose short-name alias "
+                        f"would carry a pinned suffix: {relative}"
+                    )
+    except NamePolicyError as exc:
+        raise ReleaseChainError(str(exc)) from exc
+
+
 def verify_base_release_chain(
     spec: ChainSpec,
     *,
@@ -2245,6 +2358,14 @@ def verify_base_release_chain(
     )
     if anchor_dir is None:
         prefixes += (normalized.anchor_relative,)
+    _screen_protected_tree_names(
+        base.entries("").as_dict(include_trees=True),
+        prefixes,
+        repertoire=normalized.name_repertoire,
+        release_directories=(
+            normalized.release_root_relative, normalized.manifest_relative
+        ),
+    )
     with tempfile.TemporaryDirectory(prefix="receipt-release-base-") as name:
         destination = pathlib.Path(name)
         with base.materialize(
