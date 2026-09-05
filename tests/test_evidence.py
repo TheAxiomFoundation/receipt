@@ -18,8 +18,8 @@ import pytest
 
 from receipt.canonical import canonical_bytes
 from receipt.evidence import (
-    DOMAIN,
     RECORD_RE,
+    SCHEMA_VERSION,
     STANDING,
     EvidenceRecordError,
     EvidenceSpec,
@@ -118,6 +118,14 @@ def _rewrite(path: pathlib.Path, mutate) -> None:
     path.write_bytes(canonical_document_bytes(payload))
 
 
+def _framed(spec: EvidenceSpec, raw: bytes) -> bytes:
+    """The bytes an evidence-record signature covers: ``PAE(schema id, raw)``."""
+
+    from receipt.evidence import _pae
+
+    return _pae(spec.schema_version, raw)
+
+
 # --------------------------------------------------------------------------
 # The invariant this record type exists for.
 # --------------------------------------------------------------------------
@@ -133,7 +141,7 @@ def test_an_evidence_record_is_refused_by_the_authorizing_verifier(
     """Both halves of non-authorization, asserted together.
 
     (a) an evidence record raises in validate_manifest_schema, and (b) its
-    signature fails the no-domain check the authorizing verifier uses. Either
+    signature fails the exact-bytes check the authorizing verifier uses. Either
     failure alone would be enough; both hold.
     """
 
@@ -159,7 +167,8 @@ def test_an_evidence_record_is_refused_by_the_authorizing_verifier(
         validate_manifest_schema(payload, chain_spec)
     assert "closed-world" in str(schema_exc.value)
 
-    # (b) The authorizing verifier checks exact bytes with no domain at all.
+    # (b) The authorizing verifier checks the exact bytes of what it is handed,
+    # and no evidence record's exact bytes are what was signed.
     with pytest.raises(SignError):
         verify_signature_bytes(
             raw,
@@ -170,10 +179,11 @@ def test_an_evidence_record_is_refused_by_the_authorizing_verifier(
             label="as-if-a-manifest",
         )
 
-    # ...and the same signature is valid under this module's domain, so (b) is
-    # a domain separation result and not a broken signature.
+    # ...and the same signature is valid over this record type's frame — the
+    # DSSE pre-authentication encoding of the schema id and the record bytes —
+    # so (b) is a framing result and not a broken signature.
     verify_signature_bytes(
-        DOMAIN + raw,
+        _framed(spec, raw),
         signature,
         public_pem,
         public_key_filename="producer.pem",
@@ -183,6 +193,66 @@ def test_an_evidence_record_is_refused_by_the_authorizing_verifier(
     assert verify_evidence_records(
         tmp_path, spec=spec, anchor_dir=anchor_dir
     ).records[0].sha256 == sha256_bytes(raw)
+
+
+# --------------------------------------------------------------------------
+# The frame the signature is made over.
+# --------------------------------------------------------------------------
+
+
+def test_the_frame_is_the_dsse_pre_authentication_encoding(
+    emitted: pathlib.Path,
+) -> None:
+    """Byte-level pin of PAE as DSSE defines it, for this record type.
+
+    ``"DSSEv1" SP LEN(type) SP type SP LEN(body) SP body``: the schema id is
+    26 bytes, the record's length is written in ASCII decimal, and the record
+    bytes follow verbatim, trailing newline included.
+    """
+
+    from receipt.evidence import _pae
+
+    raw = emitted.read_bytes()
+    assert SCHEMA_VERSION == "receipt/evidence-record/v1"
+    assert _pae("receipt/evidence-record/v1", raw) == (
+        b"DSSEv1 26 receipt/evidence-record/v1 "
+        + str(len(raw)).encode("ascii")
+        + b" "
+        + raw
+    )
+
+
+def test_the_frame_is_self_delimiting(keys: tuple[bytes, bytes]) -> None:
+    """A signature for one payload type over one body is for no other split.
+
+    ``"a" + "bc"`` and ``"ab" + "c"`` are the same bytes concatenated. Under
+    the frame each field carries its own length, so the two encodings differ
+    and a signature over the first does not verify over the second.
+    """
+
+    from receipt.evidence import _pae
+    from receipt.sign import sign_payload
+
+    private_pem, public_pem = keys
+    assert _pae("a", b"bc") != _pae("ab", b"c")
+    signature = sign_payload(private_pem, _pae("a", b"bc"), domain=b"")
+    verify_signature_bytes(
+        _pae("a", b"bc"),
+        signature,
+        public_pem,
+        public_key_filename="producer.pem",
+        spki_sha256=spki_sha256(public_pem),
+        label="type a over bc",
+    )
+    with pytest.raises(SignError):
+        verify_signature_bytes(
+            _pae("ab", b"c"),
+            signature,
+            public_pem,
+            public_key_filename="producer.pem",
+            spki_sha256=spki_sha256(public_pem),
+            label="type ab over c",
+        )
 
 
 def _chain_spec(public_pem: bytes) -> ChainSpec:
@@ -418,7 +488,7 @@ def _resign_in_place(
     new_path.write_bytes(raw)
     new_path.with_name(f"{new_path.stem}.body.json").write_bytes(body_raw)
     new_path.with_name(f"{new_path.stem}.producer.sig").write_bytes(
-        sign_payload(private_key_pem, raw, domain=spec.domain)
+        sign_payload(private_key_pem, _framed(spec, raw), domain=b"")
     )
     return new_path
 
@@ -857,20 +927,21 @@ def test_signature_from_another_key_is_refused(
 
     signature_path = emitted.with_name(f"{emitted.stem}.producer.sig")
     signature_path.write_bytes(
-        sign_payload(other_private, emitted.read_bytes(), domain=DOMAIN)
+        sign_payload(other_private, _framed(spec, emitted.read_bytes()), domain=b"")
     )
     with pytest.raises(EvidenceRecordError):
         verify_evidence_records(tmp_path, spec=spec, anchor_dir=anchor_dir)
 
 
-def test_signature_made_without_the_domain_is_refused(
+def test_signature_over_the_bare_record_bytes_is_refused(
     tmp_path: pathlib.Path,
     spec: EvidenceSpec,
     emitted: pathlib.Path,
     anchor_dir: pathlib.Path,
     keys: tuple[bytes, bytes],
 ) -> None:
-    """The mirror of the invariant: a manifest-style signature is not accepted."""
+    """The mirror of the invariant: a manifest-style signature, made over the
+    record's exact bytes with no frame, is not accepted."""
 
     from receipt.sign import sign_payload
 
@@ -878,6 +949,59 @@ def test_signature_made_without_the_domain_is_refused(
     signature_path = emitted.with_name(f"{emitted.stem}.producer.sig")
     signature_path.write_bytes(
         sign_payload(private_pem, emitted.read_bytes(), domain=b"")
+    )
+    with pytest.raises(EvidenceRecordError):
+        verify_evidence_records(tmp_path, spec=spec, anchor_dir=anchor_dir)
+
+
+def test_signature_under_the_old_nul_domain_convention_is_refused(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    emitted: pathlib.Path,
+    anchor_dir: pathlib.Path,
+    keys: tuple[bytes, bytes],
+) -> None:
+    """What this module signed before the frame: a NUL-terminated domain string
+    prefixed to the record bytes. Nothing was published under it, and it is
+    refused like any other signature over bytes that are not the frame."""
+
+    from receipt.sign import sign_payload
+
+    private_pem, _ = keys
+    signature_path = emitted.with_name(f"{emitted.stem}.producer.sig")
+    signature_path.write_bytes(
+        sign_payload(
+            private_pem,
+            emitted.read_bytes(),
+            domain=b"receipt/evidence-record/v1\x00",
+        )
+    )
+    with pytest.raises(EvidenceRecordError):
+        verify_evidence_records(tmp_path, spec=spec, anchor_dir=anchor_dir)
+
+
+def test_signature_under_another_payload_type_is_refused(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    emitted: pathlib.Path,
+    anchor_dir: pathlib.Path,
+    keys: tuple[bytes, bytes],
+) -> None:
+    """The payload type is the schema id, inside the signed bytes. A signature
+    framed under any other type is a signature for some other record type, and
+    the spec's own schema id is the only one this directory verifies under."""
+
+    from receipt.evidence import _pae
+    from receipt.sign import sign_payload
+
+    private_pem, _ = keys
+    signature_path = emitted.with_name(f"{emitted.stem}.producer.sig")
+    signature_path.write_bytes(
+        sign_payload(
+            private_pem,
+            _pae("receipt/evidence-record/v2", emitted.read_bytes()),
+            domain=b"",
+        )
     )
     with pytest.raises(EvidenceRecordError):
         verify_evidence_records(tmp_path, spec=spec, anchor_dir=anchor_dir)
@@ -1376,16 +1500,9 @@ def test_unsafe_records_path_is_refused(bad: str) -> None:
         )
 
 
-def test_empty_domain_is_refused() -> None:
-    with pytest.raises(EvidenceRecordError, match="domain"):
-        EvidenceSpec(
-            records_relative=RECORDS, producer_spki_sha256=PIN, domain=b""
-        )
-
-
 def test_spec_is_frozen(spec: EvidenceSpec) -> None:
     with pytest.raises(FrozenInstanceError):
-        spec.domain = b"other"  # type: ignore[misc]
+        spec.schema_version = "other"  # type: ignore[misc]
 
 
 def test_sibling_directory_is_permitted() -> None:

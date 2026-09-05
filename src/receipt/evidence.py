@@ -133,9 +133,11 @@ from receipt.release_chain import (
 )
 from receipt.sign import SignError
 
-#: The domain string every evidence-record signature is made under. Its
-#: trailing NUL keeps it unambiguously separated from the payload that follows.
-DOMAIN = b"receipt/evidence-record/v1\x00"
+#: The schema id, and the one value that says which record type a signature
+#: is for. It is the ``schemaVersion`` field inside every record, which the
+#: schema check requires to equal the spec's, and it is the payload type of the
+#: frame every signature is made over (`_pae`), so a signature under any other
+#: type does not verify. The two cannot be paired with anything but each other.
 SCHEMA_VERSION = "receipt/evidence-record/v1"
 #: A literal, checked for equality, so the standing is inside the signed bytes.
 STANDING = "non-authorizing"
@@ -158,8 +160,16 @@ class EvidenceSpec:
     """Consumer-committed constants for one evidence-record directory.
 
     Like `ChainSpec`, this module ships machinery only: the directory, the
-    schema name, the producer fingerprint and the domain all arrive from the
-    consumer's own committed code, never from package defaults.
+    schema id and the producer fingerprint all arrive from the consumer's own
+    committed code, never from package defaults.
+
+    ``schema_version`` is also the payload type of the frame every signature
+    is made over (`_pae`). It used to sit beside a separate ``domain`` field,
+    a NUL-terminated byte string prefixed to the record before signing, so a
+    spec could name one schema and sign under another and nothing in the bytes
+    said which pair applied. There is one value now: the schema check requires
+    the record's ``schemaVersion`` to equal it, and the signature verifies
+    under no other payload type.
     """
 
     records_relative: pathlib.PurePosixPath
@@ -169,7 +179,6 @@ class EvidenceSpec:
     producer_spki_sha256: str
     schema_version: str = SCHEMA_VERSION
     producer_public_key_filename: str = "producer.pem"
-    domain: bytes = DOMAIN
     #: The release root this directory must stay outside of, when the consumer
     #: also runs a release chain. Supplying it turns the "records live outside
     #: the closed release directory" rule into a construction-time refusal.
@@ -194,8 +203,6 @@ class EvidenceSpec:
                 f"records_relative must be a relative path without '..': {records}"
             )
         _sha256(self.producer_spki_sha256, "EvidenceSpec producer_spki_sha256")
-        if type(self.domain) is not bytes or not self.domain:
-            raise EvidenceRecordError("domain must be non-empty bytes")
         root = self.release_root_relative
         if root is not None and (records == root or root in records.parents):
             raise EvidenceRecordError(
@@ -238,7 +245,7 @@ def sha256_bytes(payload: bytes) -> str:
 
 # The closed-world helpers below are deliberate near-copies of release_chain's
 # private ones rather than imports of them. An evidence record is defined by its
-# shape and its domain string and by nothing else, so this module stays liftable
+# shape and its schema id and by nothing else, so this module stays liftable
 # into another project without carrying release_chain's internals with it. Only
 # release_chain's public surface is imported.
 def _fail_json_constant(value: str) -> None:
@@ -415,9 +422,44 @@ def producer_signature_path_for_record(path: pathlib.Path) -> pathlib.Path:
 
 
 def canonical_document_bytes(payload: Any) -> bytes:
-    """The one byte stream this module signs and digests: canonical JSON + LF."""
+    """The one byte stream this module digests, and frames for signing: canonical
+    JSON + LF."""
 
     return canonical_bytes(payload) + b"\n"
+
+
+def _pae(payload_type: str, payload: bytes) -> bytes:
+    """DSSE's pre-authentication encoding: the bytes every signature covers.
+
+    ``PAE(type, body) = "DSSEv1" SP LEN(type) SP type SP LEN(body) SP body``
+    (secure-systems-lab/dsse, protocol.md): ``SP`` is one ASCII space, ``LEN``
+    the ASCII decimal byte length with no leading zeros, ``type`` the UTF-8 of
+    the payload type. Every field is preceded by its own length, so the
+    encoding is self-delimiting: a signature made for one type over one body is
+    not a signature for any other split of the same bytes.
+
+    An evidence-record signature is made over ``PAE(schema id, record bytes)``
+    and never over the record bytes, so the authorizing verifier's exact-bytes
+    check over a record fails by construction (invariant 2), and the schema id
+    inside the signed bytes says which record type the signature is for.
+
+    This is an inline copy, kept to the stdlib so this PR takes no dependency:
+    the frame #34 gives the package, written out here ahead of the package
+    primitive so this record type's wire format is #34's from its first merge.
+    It is to be replaced by that primitive when #34 lands.
+    """
+
+    type_bytes = payload_type.encode("utf-8")
+    return (
+        b"DSSEv1 "
+        + str(len(type_bytes)).encode("ascii")
+        + b" "
+        + type_bytes
+        + b" "
+        + str(len(payload)).encode("ascii")
+        + b" "
+        + payload
+    )
 
 
 def _load_canonical_json(
@@ -585,8 +627,8 @@ def verify_evidence_records(
     This function can never contribute to an authorizing verdict. It is not
     called by `receipt.verify.run_verification`, and `VerifyResult.verdict`
     does not depend on it. A green result here says the records are
-    well-formed, chained, and signed by the pinned producer under this
-    module's domain — and says nothing about the custody of any release. It
+    well-formed, chained, and signed by the pinned producer over this record
+    type's frame — and says nothing about the custody of any release. It
     also says the body beside each record is canonical, not merely that those
     bytes hash to what the record recorded.
 
@@ -634,6 +676,12 @@ def _verify_records(
     ``public_key_filename`` names the key in the two refusals that can only
     come from an unreadable one. It is a path for the consumer and a
     description for the producer, which has no file to name.
+
+    The signature is checked over ``_pae(spec.schema_version, raw)``, the same
+    frame emission signs. It used to be checked over a NUL-terminated domain
+    string prefixed to the record; the frame puts the schema id inside the
+    signed bytes with its own length, so a signature under another schema id,
+    under the old prefix, or over the bare record is refused here alike.
     """
 
     # Asked before enumeration, which cannot answer it: enumeration returns
@@ -688,11 +736,14 @@ def _verify_records(
             )
         signature = signature_path.read_bytes()
         try:
-            # The domain is what makes this signature unusable as a manifest
-            # signature: the authorizing verifier checks exact bytes with no
-            # domain at all, so it can never accept these.
+            # What makes this signature unusable as a manifest signature is
+            # that the signed bytes are the frame, not the record: the
+            # authorizing verifier checks a manifest's exact bytes, and no
+            # record's exact bytes are what was signed here. The frame's
+            # payload type is the schema id, so this one check also refuses a
+            # signature made for any other record type.
             _sign.verify_signature_bytes(
-                spec.domain + raw,
+                _pae(spec.schema_version, raw),
                 signature,
                 public_key_pem,
                 public_key_filename=public_key_filename,
@@ -890,6 +941,10 @@ def _write_evidence_record(
     and a caller's tuple was already a list by the time the schema check asked
     whether refs is an array. Ordering is the one thing not asked here, since
     the sort is what establishes it.
+
+    The signature is made over ``_pae(spec.schema_version, raw)`` with the
+    signing primitive's deliberately empty domain — the frame is the whole
+    message — and `_verify_records` checks exactly those bytes.
     """
 
     # Everything already in the directory is verified before the index is
@@ -931,7 +986,9 @@ def _write_evidence_record(
         raise EvidenceRecordError(
             f"evidence record {record_path.name} already exists at index {index}"
         )
-    signature = _sign.sign_payload(private_key_pem, raw, domain=spec.domain)
+    signature = _sign.sign_payload(
+        private_key_pem, _pae(spec.schema_version, raw), domain=b""
+    )
 
     body_path_for_record(record_path).write_bytes(body_raw)
     producer_signature_path_for_record(record_path).write_bytes(signature)
