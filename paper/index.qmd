@@ -7,7 +7,7 @@ author:
 date: 2026-09-05
 date-format: iso
 kicker: working paper
-revision: "11"
+revision: "12"
 status: |
   Working paper. It describes `receipt` 0.6.0 on PyPI; statements about
   still-open pull requests are marked as such. Code:
@@ -451,18 +451,16 @@ strength:
 
 | Adopter | Branch | Pin | Surface called |
 |---|---|---|---|
-| Axiom encoder | default | `receipt==0.5.1` | threshold keyring check on apply manifests |
-| Thesis Institute forecast tooling | default | `receipt==0.5.1` (custody extra) | signature primitives in verifier and signer |
-| Chronicle | custody branch (unmerged) | `receipt==0.5.2` | release-chain and append-gate shims, differential harnesses re-run on package change |
+| Axiom encoder | default | `receipt==0.6.0` | threshold keyring check on apply manifests |
+| Thesis Institute forecast tooling | default | `receipt==0.6.0` (custody extra) | signature primitives in verifier and signer |
+| Chronicle | custody branch (unmerged) | `receipt==0.6.0` | release-chain and append-gate shims, differential harnesses re-run on package change |
 
-Each pin was the current release at that observation point; the
-receipt repository's own README states that the observation ledger
-consumes the package in production, a producer claim this paper
-reports without independent runtime observation. receipt 0.6.0,
-released on September 5, 2026, moves the append gate and the spanning
-verifier from a checkout to the tree object a commit names
-(@sec-guarantees); each adopter's move to it is in progress as this
-revision goes out.
+Each pin is the current release, 0.6.0, which moves the append gate
+and the spanning verifier from a checkout to the tree object a commit
+names (@sec-guarantees). The receipt repository's own README states
+that the observation ledger consumes the package in production, a
+producer claim this paper reports without independent runtime
+observation.
 
 A package pin is custody, not admission. What an encoder run produced
 is a separate claim, and the foundation's rule corpora make it
