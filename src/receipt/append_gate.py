@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import locale
 import pathlib
 import re
 import tempfile
@@ -235,19 +234,18 @@ def check_gate_only_confinement(
     return set(unclassified)
 
 
-def _as_text(payload: bytes, encoding: str | None = None) -> str:
-    """Decode snapshot bytes exactly as ``Path.read_text`` decoded them.
+def _as_text(payload: bytes, relative: str) -> str:
+    """Decode snapshot state as UTF-8 independently of the process locale.
 
-    The snapshot reader replaced two ``read_text`` calls, and this port's
-    refusals are compared with the upstream oracle's byte for byte, so the
-    decoding those calls performed is reproduced rather than approximated:
-    the caller's encoding or, where the call passed none, the same locale
-    default ``open`` would have used, and the universal-newline translation
-    text mode applies to a whole file (``\r\n`` and a lone ``\r`` both
-    become ``\n``).
+    Invalid UTF-8 refuses with the configured state path. Preserve the
+    universal-newline translation of the extracted text policy: ``\r\n``
+    and a lone ``\r`` both become ``\n``.
     """
 
-    decoded = payload.decode(encoding or locale.getpreferredencoding(False))
+    try:
+        decoded = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise AppendError(f"state file is not valid UTF-8: {relative}") from exc
     return decoded.replace("\r\n", "\n").replace("\r", "\n")
 
 
@@ -559,7 +557,9 @@ def check_append_only(
     base: _BaseCommit, lines: list[str], candidate: _CandidateTree
 ) -> int:
     entry = base.tree.entry(candidate.ledger_relative)
-    base_text = _as_text(base.tree.blob(entry, limit=MAX_JOURNAL_BYTES))
+    base_text = _as_text(
+        base.tree.blob(entry, limit=MAX_JOURNAL_BYTES), candidate.ledger_relative
+    )
     base_lines = _lines(base_text)
     if len(lines) < len(base_lines):
         raise AppendError(
@@ -592,7 +592,11 @@ def check_prefix_anchored_to_base(
     binding boundary so a candidate-controlled count can never move it.
     """
     entry = base.tree.entry(candidate.prefix_relative)
-    base_prefix = json.loads(_as_text(base.tree.blob(entry, limit=MAX_JOURNAL_BYTES)))
+    base_prefix = json.loads(
+        _as_text(
+            base.tree.blob(entry, limit=MAX_JOURNAL_BYTES), candidate.prefix_relative
+        )
+    )
     for field in ("prefixLineCount", "prefixSha256", "lineSha256s"):
         if candidate_prefix.get(field) != base_prefix.get(field):
             raise AppendError(
@@ -1215,11 +1219,13 @@ def _verify_selected_tree(
         entry=prefix_entry,
     )
 
-    text = _as_text(ledger_bytes, "utf-8")
+    text = _as_text(ledger_bytes, candidate.ledger_relative)
     reject_non_append_bytes(text)
     lines = _lines(text)
 
-    prefix = check_prefix(lines, _as_text(prefix_bytes), candidate)
+    prefix = check_prefix(
+        lines, _as_text(prefix_bytes, candidate.prefix_relative), candidate
+    )
     binding_boundary = int(prefix["prefixLineCount"])
     appended = None
     if base is not None:

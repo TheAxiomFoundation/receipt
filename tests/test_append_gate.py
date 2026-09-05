@@ -20,6 +20,7 @@ import os
 import pathlib
 import shutil
 import subprocess
+import sys
 from types import SimpleNamespace
 from dataclasses import dataclass, replace
 from typing import Any
@@ -371,6 +372,88 @@ def test_an_ordinary_append_is_accepted(tmp_path: pathlib.Path) -> None:
     assert run_gate(candidate) == (
         "thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base"
     )
+
+
+@pytest.mark.parametrize("unicode_prefix", [False, True])
+def test_a_utf8_append_accepts_under_the_c_locale(
+    tmp_path: pathlib.Path, unicode_prefix: bool
+) -> None:
+    """A committed Unicode base has the same verdict with ASCII process text."""
+
+    candidate = base_repository(tmp_path)
+    rows = [observation_row(1, domain="caf\u00e9"), observation_row(2)]
+    write_ledger(candidate.root, rows)
+    write_prefix_manifest(candidate.root, rows)
+    # Exercise prefix decoding too: JSON permits unescaped UTF-8 string values.
+    if unicode_prefix:
+        prefix_path = candidate.root / CHAIN_SPEC.prefix_relative
+        prefix = json.loads(prefix_path.read_text(encoding="utf-8"))
+        prefix["description"] = "caf\u00e9"
+        prefix_path.write_text(json.dumps(prefix, ensure_ascii=False), encoding="utf-8")
+    candidate = replace(candidate, base=commit_candidate(candidate, "Unicode base"))
+    write_ledger(candidate.root, rows + [observation_row(3)])
+    commit = commit_candidate(candidate, "Ordinary Unicode append")
+    expected = run_gate(candidate, commit=commit)
+    environment = os.environ.copy()
+    environment.update(
+        LC_ALL="C",
+        PYTHONUTF8="0",
+        PYTHONCOERCECLOCALE="0",
+        PYTHONPATH=os.pathsep.join(
+            [
+                str(pathlib.Path(append_gate.__file__).resolve().parents[1]),
+                str(pathlib.Path(__file__).resolve().parent),
+            ]
+        ),
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import locale, pathlib, sys; "
+            "from test_append_gate import GATE_SPEC; "
+            "from receipt.append_gate import verify_append_gate; "
+            "assert locale.getpreferredencoding(False).lower() in "
+            "{'ascii', 'us-ascii', 'ansi_x3.4-1968'}; "
+            "print(verify_append_gate(pathlib.Path(sys.argv[1]), spec=GATE_SPEC, "
+            "base_ref=sys.argv[2], commit=sys.argv[3]))",
+            str(candidate.root),
+            candidate.base,
+            commit,
+        ],
+        capture_output=True,
+        env=environment,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr.decode("utf-8", "replace")
+    assert completed.stdout.decode("utf-8").strip() == expected
+
+
+@pytest.mark.parametrize("snapshot", ["base", "candidate"])
+@pytest.mark.parametrize(
+    "relative", [CHAIN_SPEC.state_relative, CHAIN_SPEC.prefix_relative]
+)
+def test_invalid_utf8_state_refuses_with_its_path(
+    tmp_path: pathlib.Path, snapshot: str, relative: pathlib.PurePosixPath
+) -> None:
+    """Malformed snapshot text refuses consistently, including base-ref reads."""
+
+    candidate = base_repository(tmp_path)
+    path = candidate.root / relative
+    original = path.read_bytes()
+    if snapshot == "base":
+        path.write_bytes(original + b"\xff")
+        candidate = replace(
+            candidate, base=commit_candidate(candidate, "Invalid UTF-8 base")
+        )
+        path.write_bytes(original)
+    append_one_row(candidate)
+    if snapshot == "candidate":
+        path.write_bytes(path.read_bytes() + b"\xff")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == f"state file is not valid UTF-8: {relative}"
 
 
 def test_base_ref_requires_full_candidate_oid(tmp_path: pathlib.Path) -> None:
