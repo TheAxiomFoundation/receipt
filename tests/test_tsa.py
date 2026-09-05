@@ -8554,6 +8554,55 @@ def test_the_openssl_version_gate_reads_the_banner(banner: str, supported: bool)
     assert tsa_module._supported_openssl_version(banner) is supported
 
 
+def test_an_unsupported_openssl_is_probed_only_once_per_process(
+    monkeypatch: pytest.MonkeyPatch,
+    openssl_preflight_uncached: Any,
+) -> None:
+    """A cached refusal must not turn the preflight into one probe per call."""
+
+    calls: list[list[str]] = []
+
+    def unsupported(arguments: list[str], **keywords: Any) -> str:
+        del keywords
+        calls.append(arguments)
+        return "LibreSSL 3.3.6\n"
+
+    monkeypatch.setattr(tsa_module, "_run_openssl", unsupported)
+    for _ in range(2):
+        with pytest.raises(
+            TsaError,
+            match="receipt requires OpenSSL 3.0 or newer",
+        ):
+            tsa_module._require_supported_openssl()
+
+    assert calls == [["version"]]
+
+
+def test_a_missing_openssl_is_probed_only_once_per_process(
+    monkeypatch: pytest.MonkeyPatch,
+    openssl_preflight_uncached: Any,
+) -> None:
+    """The cached preflight includes the command's own refusal outcome."""
+
+    attempts = 0
+
+    def missing(arguments: list[str], **keywords: Any) -> str:
+        nonlocal attempts
+        del arguments, keywords
+        attempts += 1
+        raise TsaError("openssl is required to verify RFC 3161 tokens")
+
+    monkeypatch.setattr(tsa_module, "_run_openssl", missing)
+    for _ in range(2):
+        with pytest.raises(TsaError) as caught:
+            tsa_module._require_supported_openssl()
+        assert str(caught.value) == (
+            "openssl is required to verify RFC 3161 tokens"
+        )
+
+    assert attempts == 1
+
+
 def test_refuses_an_openssl_that_is_not_openssl_before_reading_a_bundle(
     tmp_path: pathlib.Path,
     local_anchors: tuple[LocalAnchor, ...],

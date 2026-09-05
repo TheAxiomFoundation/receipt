@@ -14,7 +14,7 @@ CANONICAL_SOURCE_SHA256 = (
 
 
 def test_version() -> None:
-    assert receipt.__version__ == "0.5.2"
+    assert receipt.__version__ == "0.6.0"
 
 
 def test_docstring_names_landed_and_pending_extraction() -> None:

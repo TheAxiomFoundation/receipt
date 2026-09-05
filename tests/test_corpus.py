@@ -8,8 +8,8 @@ happy-path test is one line; the value is entirely in the refusals.
 from __future__ import annotations
 
 import json
-import os
 import pathlib
+import subprocess
 import unicodedata
 
 import pytest
@@ -31,14 +31,18 @@ from receipt.corpus import (
     MAX_REMOVED_TEXT,
     REMOVED_PATH_RENDER_STRUCTURE,
     CorpusError,
-    verify_corpus_binding,
+    verify_corpus_binding as _verify_corpus_binding,
     verify_declarations,
 )
+from receipt.snapshot import SnapshotError, TreeSnapshot
 
 from corpus_fixture import (
     ATTESTED,
     CONTENT,
     JOURNAL_SCHEMA,
+    _commit_fixture,
+    append_release,
+    build_corpus,
     corpus_spec,
     journal_rows,
     render_journal,
@@ -53,6 +57,124 @@ NOT_PORTABLE = (
     "is not a portable name (ASCII letters, digits, '.', '_' and '-', not "
     "ending in '.', not a Win32 device name)"
 )
+
+
+def _git(
+    root: pathlib.Path,
+    *arguments: str,
+    input_bytes: bytes | None = None,
+    check: bool = True,
+) -> bytes:
+    completed = subprocess.run(
+        ["git", "-C", str(root), *arguments],
+        input=input_bytes,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if check and completed.returncode:
+        raise AssertionError(
+            f"git {' '.join(arguments)} failed: "
+            f"{completed.stderr.decode('utf-8', 'replace')}"
+        )
+    return completed.stdout
+
+
+def _commit_worktree(root: pathlib.Path) -> str:
+    """Commit the fixture tree and return the immutable subject OID."""
+
+    if not (root / ".git").exists():
+        _git(root, "init", "-q")
+        _git(root, "config", "user.name", "Receipt Tests")
+        _git(root, "config", "user.email", "receipt-tests@example.invalid")
+        _git(root, "config", "commit.gpgSign", "false")
+        _git(root, "config", "core.autocrlf", "false")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "--allow-empty", "-m", "corpus fixture")
+    return _git(root, "rev-parse", "HEAD").decode("ascii").strip()
+
+
+def _hash_blob(root: pathlib.Path, payload: bytes) -> str:
+    return (
+        _git(root, "hash-object", "-w", "--stdin", input_bytes=payload)
+        .decode("ascii")
+        .strip()
+    )
+
+
+def _loose_object_path(root: pathlib.Path, object_id: str) -> pathlib.Path:
+    """Return an asserted loose-object path in one freshly initialized fixture."""
+
+    path = root / ".git" / "objects" / object_id[:2] / object_id[2:]
+    assert path.is_file(), f"fixture object is not loose: {object_id}"
+    return path
+
+
+def _commit_index_updates(
+    root: pathlib.Path,
+    updates: list[tuple[str, str | None, bytes]],
+) -> str:
+    """Commit raw index entries, including names a checkout cannot express."""
+
+    records = bytearray()
+    for mode, object_id, path in updates:
+        if object_id is None:
+            records.extend(b"0 " + (b"0" * 40) + b"\t" + path + b"\0")
+        else:
+            records.extend(
+                mode.encode("ascii")
+                + b" "
+                + object_id.encode("ascii")
+                + b"\t"
+                + path
+                + b"\0"
+            )
+    _git(
+        root,
+        "-c",
+        "core.protectNTFS=false",
+        "-c",
+        "core.protectHFS=false",
+        "-c",
+        "core.ignoreCase=false",
+        "update-index",
+        "-z",
+        "--index-info",
+        input_bytes=bytes(records),
+    )
+    _git(root, "commit", "-q", "--no-gpg-sign", "-m", "raw tree fixture")
+    return _git(root, "rev-parse", "HEAD").decode("ascii").strip()
+
+
+def _commit_extra_blob(root: pathlib.Path, path: bytes, payload: bytes = b"scratch\n") -> str:
+    _commit_worktree(root)
+    return _commit_index_updates(root, [("100644", _hash_blob(root, payload), path)])
+
+
+def _verify_commit(
+    root: pathlib.Path,
+    oid: str,
+    journal_bytes: bytes,
+    *,
+    spec,
+):
+    with TreeSnapshot.select(root, oid) as snapshot:
+        return _verify_corpus_binding(snapshot, journal_bytes, spec=spec)
+
+
+def verify_corpus_binding(
+    subject: pathlib.Path | TreeSnapshot,
+    journal_bytes: bytes,
+    *,
+    spec,
+):
+    """Adapt ordinary fixtures to the commit-addressed production API."""
+
+    if isinstance(subject, TreeSnapshot):
+        return _verify_corpus_binding(subject, journal_bytes, spec=spec)
+    oid = _commit_worktree(subject)
+    with TreeSnapshot.select(subject, oid) as snapshot:
+        return _verify_corpus_binding(snapshot, journal_bytes, spec=spec)
 
 
 def write_tree(
@@ -115,14 +237,555 @@ def first_over(cost: int, budget: int) -> tuple[int, int]:
     return number, number * cost
 
 
-def test_binding_accepts_a_journal_that_describes_the_tree(tmp_path: pathlib.Path) -> None:
+@pytest.mark.parametrize("name_repertoire", ["portable", "posix-bytes"])
+def test_binding_accepts_a_journal_that_describes_the_tree(
+    tmp_path: pathlib.Path, name_repertoire: str
+) -> None:
     write_tree(tmp_path)
     verification = verify_corpus_binding(
-        tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        tmp_path,
+        render_journal(journal_rows()),
+        spec=corpus_spec(name_repertoire=name_repertoire),
     )
     assert [entry.path for entry in verification.content] == sorted(CONTENT)
     assert [entry.path for entry in verification.attested] == sorted(ATTESTED)
     assert len(verification.gates) == 3
+    assert verification.name_repertoire == name_repertoire
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "rules/scratch+1.txt",
+        "docs/My Notes.md",
+        "docs/règles.md",
+        "docs/COM1.txt",
+    ],
+)
+def test_posix_bytes_accepts_tree_names_outside_the_portable_repertoire(
+    tmp_path: pathlib.Path, path: str
+) -> None:
+    """The declared repertoire changes which committed UTF-8 names pass."""
+
+    write_tree(tmp_path)
+    oid = _commit_extra_blob(tmp_path, path.encode("utf-8"))
+    journal_bytes = render_journal(journal_rows())
+
+    verification = _verify_commit(
+        tmp_path,
+        oid,
+        journal_bytes,
+        spec=corpus_spec(name_repertoire="posix-bytes"),
+    )
+    assert verification.name_repertoire == "posix-bytes"
+
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(
+            tmp_path,
+            oid,
+            journal_bytes,
+            spec=corpus_spec(name_repertoire="portable"),
+        )
+    assert NOT_PORTABLE in str(caught.value)
+    assert path in str(caught.value)
+
+
+def test_posix_bytes_preserves_normalization_and_still_folds_ascii_case(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NFC and NFD stay distinct while ASCII-case siblings still merge."""
+
+    from receipt import corpus as corpus_module
+
+    composed = "rules/tax/règles.yaml"
+    decomposed = unicodedata.normalize("NFD", composed)
+    assert composed != decomposed
+    payload = "name: unicode spelling\n"
+    content = {**CONTENT, composed: payload, decomposed: payload}
+
+    write_tree(tmp_path)
+    _commit_worktree(tmp_path)
+    blob_oid = _hash_blob(tmp_path, payload.encode("utf-8"))
+    oid = _commit_index_updates(
+        tmp_path,
+        [
+            ("100644", blob_oid, composed.encode("utf-8")),
+            ("100644", blob_oid, decomposed.encode("utf-8")),
+        ],
+    )
+
+    validated_tree_names: list[str] = []
+    real_validate = corpus_module.validate_component_text
+
+    def recording_validate(value: str, **kwargs: object) -> str:
+        if str(kwargs.get("label", "")).startswith("tree entry "):
+            validated_tree_names.append(value)
+        return real_validate(value, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(corpus_module, "validate_component_text", recording_validate)
+    journal_bytes = render_journal(journal_rows(content=content))
+    spec = corpus_spec(name_repertoire="posix-bytes")
+    verification = _verify_commit(tmp_path, oid, journal_bytes, spec=spec)
+    assert {composed.rpartition("/")[2], decomposed.rpartition("/")[2]} <= set(
+        validated_tree_names
+    )
+    assert {entry.path for entry in verification.content} == set(content)
+
+    case_oid = _commit_index_updates(
+        tmp_path,
+        [
+            ("100644", blob_oid, b"misc/ASCII"),
+            ("100644", blob_oid, b"misc/ascii"),
+        ],
+    )
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(tmp_path, case_oid, journal_bytes, spec=spec)
+    assert str(caught.value) == (
+        "directory holds two entries a case-insensitive filesystem would merge: "
+        "'misc/ASCII' and 'misc/ascii'"
+    )
+
+
+def test_binding_requires_a_selected_tree_snapshot(tmp_path: pathlib.Path) -> None:
+    with pytest.raises(CorpusError) as caught:
+        _verify_corpus_binding(
+            tmp_path,
+            render_journal(journal_rows()),
+            spec=corpus_spec(),
+        )  # type: ignore[arg-type]
+    assert str(caught.value) == (
+        "verify_corpus_binding requires a TreeSnapshot; select one with "
+        "TreeSnapshot.select"
+    )
+
+
+@pytest.mark.parametrize("name_repertoire", ["portable", "posix-bytes"])
+@pytest.mark.parametrize(
+    ("shape", "message"),
+    [
+        (
+            "gitlink",
+            "content root contains a gitlink: 'rules/vendor'",
+        ),
+        (
+            "symlink",
+            "content root contains a symlink where a regular file was recorded: "
+            "'rules/tax/linked.yaml'",
+        ),
+        (
+            "non-utf8",
+            "tree entry name is not valid UTF-8 for folding",
+        ),
+        (
+            "fold-siblings",
+            "directory holds two entries a case-insensitive filesystem would "
+            "merge: 'misc/README' and 'misc/ReadMe'",
+        ),
+    ],
+)
+def test_refuses_unsupported_committed_tree_shapes_under_each_repertoire(
+    tmp_path: pathlib.Path,
+    name_repertoire: str,
+    shape: str,
+    message: str,
+) -> None:
+    """Tree modes and names are screened from objects, not a checkout."""
+
+    write_tree(tmp_path)
+    base_oid = _commit_worktree(tmp_path)
+    blob_oid = _hash_blob(tmp_path, b"shape fixture\n")
+    if shape == "gitlink":
+        updates = [("160000", base_oid, b"rules/vendor")]
+    elif shape == "symlink":
+        updates = [("120000", blob_oid, b"rules/tax/linked.yaml")]
+    elif shape == "non-utf8":
+        updates = [("100644", blob_oid, b"misc/non-utf8-\xff")]
+    else:
+        updates = [
+            ("100644", blob_oid, b"misc/README"),
+            ("100644", blob_oid, b"misc/ReadMe"),
+        ]
+    oid = _commit_index_updates(tmp_path, updates)
+
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(
+            tmp_path,
+            oid,
+            render_journal(journal_rows()),
+            spec=corpus_spec(name_repertoire=name_repertoire),
+        )
+    assert str(caught.value) == message
+
+
+@pytest.mark.parametrize("mode", ["120000", "160000"])
+def test_refuses_a_non_blob_at_an_attested_path(
+    tmp_path: pathlib.Path, mode: str
+) -> None:
+    """An exact attested path must select a regular blob in the tree."""
+
+    write_tree(tmp_path)
+    base_oid = _commit_worktree(tmp_path)
+    if mode == "120000":
+        object_id = _hash_blob(
+            tmp_path,
+            ATTESTED[".axiom/toolchain.toml"].encode("utf-8"),
+        )
+    else:
+        object_id = base_oid
+    oid = _commit_index_updates(
+        tmp_path,
+        [(mode, object_id, b".axiom/toolchain.toml")],
+    )
+
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(
+            tmp_path,
+            oid,
+            render_journal(journal_rows()),
+            spec=corpus_spec(),
+        )
+    assert str(caught.value) == (
+        "bound file is not a regular file: .axiom/toolchain.toml"
+    )
+
+
+def test_refuses_a_suffix_bearing_directory_under_a_content_root(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A tree whose own name carries a pinned suffix is not content."""
+
+    write_tree(tmp_path)
+    _commit_worktree(tmp_path)
+    blob_oid = _hash_blob(tmp_path, b"nested fixture\n")
+    oid = _commit_index_updates(
+        tmp_path,
+        [("100644", blob_oid, b"rules/tax/pipe.yaml/child.txt")],
+    )
+
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(
+            tmp_path,
+            oid,
+            render_journal(journal_rows()),
+            spec=corpus_spec(),
+        )
+    assert str(caught.value) == (
+        "content root contains a non-regular file: 'rules/tax/pipe.yaml'"
+    )
+
+
+@pytest.mark.parametrize("name_repertoire", ["portable", "posix-bytes"])
+@pytest.mark.parametrize(
+    ("shape", "message"),
+    [
+        (
+            "root-blobs",
+            "directory holds two entries a case-insensitive filesystem would "
+            "merge: 'README' and 'ReadMe'",
+        ),
+        (
+            "tree-and-blob",
+            "directory holds two entries a case-insensitive filesystem would "
+            "merge: 'misc/TREE' and 'misc/tree'",
+        ),
+    ],
+)
+def test_refuses_fold_equal_root_and_mixed_mode_siblings(
+    tmp_path: pathlib.Path,
+    name_repertoire: str,
+    shape: str,
+    message: str,
+) -> None:
+    """Root siblings and tree/blob siblings share the same ASCII fold screen."""
+
+    write_tree(tmp_path)
+    _commit_worktree(tmp_path)
+    blob_oid = _hash_blob(tmp_path, b"fold fixture\n")
+    if shape == "root-blobs":
+        updates = [
+            ("100644", blob_oid, b"README"),
+            ("100644", blob_oid, b"ReadMe"),
+        ]
+    else:
+        updates = [
+            ("100644", blob_oid, b"misc/TREE/child.txt"),
+            ("100644", blob_oid, b"misc/tree"),
+        ]
+    oid = _commit_index_updates(tmp_path, updates)
+
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(
+            tmp_path,
+            oid,
+            render_journal(journal_rows()),
+            spec=corpus_spec(name_repertoire=name_repertoire),
+        )
+    assert str(caught.value) == message
+
+
+def test_binding_is_invariant_to_every_worktree_mutation_class(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Rewrite, insert, and rename below every protected root after selection."""
+
+    content_roots = (
+        pathlib.PurePosixPath("rules"),
+        pathlib.PurePosixPath("policies"),
+    )
+    content = {
+        f"{root.as_posix()}/rewrite.yaml": f"name: {root.name}-rewrite\n"
+        for root in content_roots
+    }
+    content.update(
+        {
+            f"{root.as_posix()}/rename.yaml": f"name: {root.name}-rename\n"
+            for root in content_roots
+        }
+    )
+    attested = {
+        ".axiom/toolchain.toml": 'python = "3.14"\n',
+        ".axiom/rename-me.txt": "rename me\n",
+    }
+    write_tree(tmp_path, content=content, attested=attested)
+    journal_bytes = render_journal(journal_rows(content=content, attested=attested))
+    oid = _commit_worktree(tmp_path)
+    spec = corpus_spec(content_roots=content_roots)
+
+    def selected_verdict() -> tuple[object, tuple[str, str]]:
+        with TreeSnapshot.select(tmp_path, oid) as snapshot:
+            identity = (snapshot.commit, snapshot.tree)
+            verdict = _verify_corpus_binding(snapshot, journal_bytes, spec=spec)
+        return verdict, identity
+
+    before_verdict, before_oids = selected_verdict()
+
+    for root in content_roots:
+        directory = tmp_path / root.as_posix()
+        (directory / "rewrite.yaml").write_text("rewritten outside the tree\n")
+        (directory / "inserted.yaml").write_text("inserted outside the tree\n")
+        (directory / "rename.yaml").rename(directory / "renamed.yaml")
+    (tmp_path / ".axiom/toolchain.toml").write_text("rewritten outside the tree\n")
+    (tmp_path / ".axiom/inserted.txt").write_text("inserted outside the tree\n")
+    (tmp_path / ".axiom/rename-me.txt").rename(
+        tmp_path / ".axiom/renamed.txt"
+    )
+    assert _git(tmp_path, "status", "--porcelain")
+
+    after_verdict, after_oids = selected_verdict()
+    assert after_verdict == before_verdict
+    assert before_oids[0] == oid
+    assert after_oids == before_oids
+
+
+def test_binding_materializes_each_listing_path_once(tmp_path: pathlib.Path) -> None:
+    """The one flat listing and exact attested lookup pay one path charge each."""
+
+    write_tree(tmp_path)
+    oid = _commit_worktree(tmp_path)
+    with TreeSnapshot.select(tmp_path, oid) as snapshot:
+        _verify_corpus_binding(
+            snapshot,
+            render_journal(journal_rows()),
+            spec=corpus_spec(),
+        )
+        charged = snapshot.work.path_bytes
+
+    leaves = set(CONTENT) | set(ATTESTED)
+    tree_paths = set(leaves)
+    for path in leaves:
+        parts = path.split("/")
+        tree_paths.update("/".join(parts[:depth]) for depth in range(1, len(parts)))
+    expected_listing = sum(len(path.encode()) for path in tree_paths)
+    expected_attested_lookups = sum(len(path.encode()) for path in ATTESTED)
+    assert charged == expected_listing + expected_attested_lookups
+
+
+def test_translates_a_snapshot_error_from_the_tree_listing(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A subtree lost after selection fails through the listing translation."""
+
+    write_tree(tmp_path)
+    oid = _commit_worktree(tmp_path)
+    rules_oid = _git(tmp_path, "rev-parse", f"{oid}:rules").decode("ascii").strip()
+
+    with TreeSnapshot.select(tmp_path, oid) as snapshot:
+        _loose_object_path(tmp_path, rules_oid).unlink()
+        with pytest.raises(CorpusError) as caught:
+            _verify_corpus_binding(
+                snapshot,
+                render_journal(journal_rows()),
+                spec=corpus_spec(),
+            )
+    assert str(caught.value) == f"object {rules_oid} is unavailable"
+    assert type(caught.value.__cause__) is SnapshotError
+
+
+def test_translates_a_snapshot_error_from_listing_materialization(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A charged full path fails through the TreeListing.as_dict translation."""
+
+    from receipt import snapshot as snapshot_module
+
+    write_tree(tmp_path)
+    oid = _commit_worktree(tmp_path)
+    monkeypatch.setattr(snapshot_module, "MAX_PATH_BYTES_TOTAL", 0)
+
+    with TreeSnapshot.select(tmp_path, oid) as snapshot:
+        with pytest.raises(CorpusError) as caught:
+            _verify_corpus_binding(
+                snapshot,
+                render_journal(journal_rows()),
+                spec=corpus_spec(),
+            )
+    assert str(caught.value) == "tree paths exceed the snapshot budget of 0 bytes"
+    assert type(caught.value.__cause__) is SnapshotError
+
+
+def test_translates_a_snapshot_error_from_the_attested_lookup(
+    tmp_path: pathlib.Path,
+) -> None:
+    """An absent exact attested entry retains the corpus-level diagnostic."""
+
+    write_tree(tmp_path)
+    (tmp_path / ".axiom/toolchain.toml").unlink()
+
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path,
+            render_journal(journal_rows()),
+            spec=corpus_spec(),
+        )
+    assert str(caught.value) == (
+        "bound file is missing or not a regular file: .axiom/toolchain.toml"
+    )
+    assert type(caught.value.__cause__) is SnapshotError
+
+
+def test_translates_a_snapshot_error_from_the_digest_stream(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bound blob lost after listing fails through the digest translation."""
+
+    write_tree(tmp_path)
+    oid = _commit_worktree(tmp_path)
+    blob_oid = (
+        _git(tmp_path, "rev-parse", f"{oid}:rules/tax/rate.yaml")
+        .decode("ascii")
+        .strip()
+    )
+    blob_path = _loose_object_path(tmp_path, blob_oid)
+    real_digests = TreeSnapshot.digests
+
+    def deleting_digests(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        blob_path.unlink()
+        return real_digests(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(TreeSnapshot, "digests", deleting_digests)
+    with TreeSnapshot.select(tmp_path, oid) as snapshot:
+        with pytest.raises(CorpusError) as caught:
+            _verify_corpus_binding(
+                snapshot,
+                render_journal(journal_rows()),
+                spec=corpus_spec(),
+            )
+    assert str(caught.value) == f"object {blob_oid} is unavailable"
+    assert type(caught.value.__cause__) is SnapshotError
+
+
+def test_corpus_fixture_commit_controls_return_the_selected_oid(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Both fixture builders return HEAD by default and honor their opt-out."""
+
+    root = tmp_path / "committed"
+    root.mkdir()
+    workspace = tmp_path / "committed-tsa"
+    first = build_corpus(root, workspace)
+    assert first == _git(root, "rev-parse", "HEAD").decode("ascii").strip()
+
+    corrected = {**CONTENT, "rules/tax/rate.yaml": "name: rate\nvalue: 0.16\n"}
+    second = append_release(root, workspace, content=corrected)
+    assert second != first
+    assert second == _git(root, "rev-parse", "HEAD").decode("ascii").strip()
+
+    uncommitted_append = {
+        **corrected,
+        "rules/tax/rate.yaml": "name: rate\nvalue: 0.17\n",
+    }
+    assert (
+        append_release(
+            root,
+            workspace,
+            content=uncommitted_append,
+            commit=False,
+        )
+        is None
+    )
+    assert second == _git(root, "rev-parse", "HEAD").decode("ascii").strip()
+    assert _git(root, "status", "--porcelain")
+
+    uncommitted_root = tmp_path / "uncommitted"
+    uncommitted_root.mkdir()
+    uncommitted_workspace = tmp_path / "uncommitted-tsa"
+    assert (
+        build_corpus(
+            uncommitted_root,
+            uncommitted_workspace,
+            commit=False,
+        )
+        is None
+    )
+    assert not (uncommitted_root / ".git").exists()
+    journal_before = (uncommitted_root / "receipt/corpus-journal.jsonl").read_bytes()
+    manifests_before = tuple((uncommitted_root / "releases/manifests").iterdir())
+
+    with pytest.raises(ValueError) as caught:
+        append_release(
+            uncommitted_root,
+            uncommitted_workspace,
+            content=CONTENT,
+        )
+    assert str(caught.value) == (
+        "append_release(commit=True) cannot follow build_corpus(commit=False)"
+    )
+    assert (uncommitted_root / "receipt/corpus-journal.jsonl").read_bytes() == (
+        journal_before
+    )
+    assert tuple((uncommitted_root / "releases/manifests").iterdir()) == (
+        manifests_before
+    )
+
+
+def test_commit_helpers_override_hostile_global_git_config(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fixture commits neither sign nor rewrite bytes under hostile globals."""
+
+    global_config = tmp_path / "global.gitconfig"
+    global_config.write_text(
+        "[commit]\n\tgpgSign = true\n[core]\n\tautocrlf = true\n"
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+    payload = b"alpha\r\nbeta\r\n"
+
+    worktree_root = tmp_path / "worktree-helper"
+    worktree_root.mkdir()
+    (worktree_root / "payload.txt").write_bytes(payload)
+    worktree_oid = _commit_worktree(worktree_root)
+    assert _git(worktree_root, "show", f"{worktree_oid}:payload.txt") == payload
+
+    fixture_root = tmp_path / "fixture-helper"
+    fixture_root.mkdir()
+    (fixture_root / "payload.txt").write_bytes(payload)
+    fixture_oid = _commit_fixture(
+        fixture_root,
+        "hostile config fixture",
+        initialize=True,
+    )
+    assert _git(fixture_root, "show", f"{fixture_oid}:payload.txt") == payload
 
 
 def test_refuses_a_content_file_edited_after_witnessing(tmp_path: pathlib.Path) -> None:
@@ -132,6 +795,26 @@ def test_refuses_a_content_file_edited_after_witnessing(tmp_path: pathlib.Path) 
         verify_corpus_binding(
             tmp_path, render_journal(journal_rows()), spec=corpus_spec()
         )
+
+
+def test_refuses_an_attested_file_edited_after_witnessing(
+    tmp_path: pathlib.Path,
+) -> None:
+    write_tree(tmp_path)
+    path = ".axiom/toolchain.toml"
+    tampered = '[toolchain]\ncorpus_release = "tampered"\n'
+    (tmp_path / path).write_text(tampered)
+
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(
+            tmp_path,
+            render_journal(journal_rows()),
+            spec=corpus_spec(),
+        )
+    assert str(caught.value) == (
+        f"attested file {path!r} does not match its witnessed digest: tree has "
+        f"{sha256_text(tampered)}, journal binds {sha256_text(ATTESTED[path])}"
+    )
 
 
 def test_refuses_an_unlisted_content_file(tmp_path: pathlib.Path) -> None:
@@ -160,256 +843,6 @@ def test_refuses_a_content_symlink(tmp_path: pathlib.Path) -> None:
     outside.write_text("name: outside\n")
     (tmp_path / "rules/tax/linked.yaml").symlink_to(outside)
     with pytest.raises(CorpusError, match="symlink"):
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-
-
-def test_refuses_a_symlinked_directory_of_unwitnessed_rules(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Regression for a demonstrated false PASS (cross-family review).
-
-    rglob does not descend symlinked directories, so a suffix-only symlink
-    refusal left a linked tree of rule files invisible to the sweep while any
-    consumer that resolves links would read them as verified corpus content.
-    Every symlink under a content root must refuse, whatever its name.
-    """
-
-    write_tree(tmp_path)
-    outside = tmp_path.parent / "smuggled-rules"
-    outside.mkdir()
-    (outside / "evil.yaml").write_text("name: evil\nvalue: 999\n")
-    (tmp_path / "rules/injected").symlink_to(outside)
-    with pytest.raises(CorpusError, match="symlink"):
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-
-
-def test_refuses_a_symlink_with_a_non_content_name(tmp_path: pathlib.Path) -> None:
-    """Even a symlink named nothing like content refuses — the invariant is
-    "no symlinks under a content root", not "no suspicious-looking ones"."""
-
-    write_tree(tmp_path)
-    outside = tmp_path.parent / "elsewhere.txt"
-    outside.write_text("x\n")
-    (tmp_path / "rules/readme.txt").symlink_to(outside)
-    with pytest.raises(CorpusError, match="symlink"):
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-
-
-def test_refuses_a_directory_it_cannot_enumerate(tmp_path: pathlib.Path) -> None:
-    """Regression: rglob swallows PermissionError while descending, so a
-    searchable-but-unlistable directory (mode 0111) contributed nothing to the
-    sweep while its files stayed readable by exact path — an unwitnessed rule
-    file hid inside it and the corpus still verified. Enumeration failure must
-    refuse, not return an empty result."""
-
-    import os
-
-    write_tree(tmp_path)
-    hidden = tmp_path / "rules" / "hidden"
-    hidden.mkdir()
-    (hidden / "evil.yaml").write_text("name: evil\n")
-    os.chmod(hidden, 0o111)
-    try:
-        with pytest.raises(CorpusError, match="cannot enumerate a directory"):
-            verify_corpus_binding(
-                tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-            )
-    finally:
-        os.chmod(hidden, 0o755)
-
-
-def test_an_unreadable_tree_root_is_not_called_a_directory_under_a_content_root(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Binds S8-F6: the refusal was worded for the one caller it used to have.
-
-    ``_list_directory`` served the closed-world sweep alone, which descends
-    *under* a content root, so its refusal said so. This branch gave it a
-    second caller — ``_assert_no_aliasing_root_component``, which walks the
-    tree root and every ancestor *above* a pinned root — and an unreadable
-    repository root then refused with "cannot enumerate a directory under a
-    content root ... '.'", naming the tree root as something inside a subtree
-    of itself. Nothing in an auditor's hands tells them the mode they need to
-    fix is on the clone's own root.
-
-    Mode 0111 is searchable and not listable, which is the same shape the
-    sweep's own regression above uses: the pinned root still resolves, so the
-    walk reaches the listing rather than failing earlier.
-
-    Without S8-F6 this refusal names a directory under a content root.
-    """
-
-    import os
-
-    write_tree(tmp_path)
-    os.chmod(tmp_path, 0o111)
-    try:
-        with pytest.raises(CorpusError) as caught:
-            verify_corpus_binding(
-                tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-            )
-    finally:
-        os.chmod(tmp_path, 0o755)
-    message = str(caught.value)
-    assert message.startswith(
-        "cannot enumerate the tree root or an ancestor of a content root, so "
-        "the file set cannot be closed: '.'"
-    )
-    assert "a directory under a content root" not in message
-
-
-def test_an_unreadable_ancestor_of_a_pinned_root_is_named_as_an_ancestor(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Binds S8-F6: the intermediate ancestors carry the same wording.
-
-    A content root of more than one component makes the aliasing check list
-    every directory above it, and those are ancestors rather than anything
-    under the root. ``jurisdictions`` here holds the pinned
-    ``jurisdictions/us/rules``; unreadable, it is what the walk cannot
-    enumerate, and the refusal names it as the ancestor it is.
-
-    Without S8-F6 it is named as a directory under a content root, which is
-    the one thing it is not.
-    """
-
-    import os
-
-    content = {"jurisdictions/us/rules/rate.yaml": "name: rate\nvalue: 1\n"}
-    write_tree(tmp_path, content=content)
-    spec = corpus_spec(
-        content_roots=(pathlib.PurePosixPath("jurisdictions/us/rules"),)
-    )
-    rows = journal_rows(content=content)
-
-    os.chmod(tmp_path / "jurisdictions", 0o111)
-    try:
-        with pytest.raises(CorpusError) as caught:
-            verify_corpus_binding(tmp_path, render_journal(rows), spec=spec)
-    finally:
-        os.chmod(tmp_path / "jurisdictions", 0o755)
-    assert str(caught.value).startswith(
-        "cannot enumerate the tree root or an ancestor of a content root, so "
-        "the file set cannot be closed: 'jurisdictions'"
-    )
-
-
-def _lstat_raising_at(target: str, error: OSError, unlink: bool = False):
-    """A ``Path.lstat`` that fails for one relative spelling and no other.
-
-    The race S8-F10 names is the instant between two syscalls on one name, so
-    the second one is made to fail directly. With ``unlink`` the entry really
-    is removed first, which is the race rather than a simulation of it: the
-    walk's ``exists()`` said yes about a name that is gone by the time
-    ``lstat`` asks. ``target`` is matched on the path's tail so the fixture's
-    own temporary directory need not be known here.
-    """
-
-    real = pathlib.Path.lstat
-
-    def lstat(self, **keywords):
-        if self.as_posix().endswith(target):
-            if unlink:
-                self.unlink(missing_ok=True)
-            raise error
-        return real(self, **keywords)
-
-    return lstat
-
-
-def test_a_bound_path_unlinked_between_two_syscalls_refuses_by_name(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds S8-F10: exists() then lstat() is two syscalls and one race.
-
-    ``_assert_no_symlinked_component`` asked ``current.exists()`` and then
-    ``current.lstat()`` about the same name. ``Path.exists`` swallows
-    ``OSError``; ``Path.lstat`` does not. So an entry unlinked between the
-    two raised a bare ``FileNotFoundError`` out of the content-root walk and
-    out of ``_regular_file_digest`` — fail-closed at ``receipt.verify``'s
-    boundary, and nameless, which is the class the round-three tombstone fix
-    closed elsewhere.
-
-    One ``lstat`` inside a ``try`` answers both questions now, and a vanished
-    name is an absence the caller refuses better than this walk could. The
-    entry here is really unlinked as the failing call is made, so what the
-    run reports is what a real race would leave behind: the attested file
-    refused by name, as a ``CorpusError``.
-
-    Without the fix this raises ``FileNotFoundError`` out of the walk.
-    """
-
-    write_tree(tmp_path)
-    monkeypatch.setattr(
-        pathlib.Path,
-        "lstat",
-        _lstat_raising_at(
-            ".axiom/toolchain.toml",
-            FileNotFoundError(2, "No such file or directory"),
-            unlink=True,
-        ),
-    )
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-    assert ".axiom/toolchain.toml" in str(caught.value)
-
-
-def test_a_component_that_cannot_be_stat_ed_refuses_by_name(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds S8-F10: any other failure to look is a refusal, and says so.
-
-    A vanished name is an absence. Everything else — a parent that stopped
-    being searchable while the walk was in it, a name the host will not
-    answer about — is a failure to look, which this module's standing rule
-    makes a refusal rather than an absence. It used to be a bare
-    ``PermissionError`` from the middle of three syscalls.
-
-    Without the fix this raises ``PermissionError``.
-    """
-
-    write_tree(tmp_path)
-    monkeypatch.setattr(
-        pathlib.Path,
-        "lstat",
-        _lstat_raising_at(
-            ".axiom/toolchain.toml", PermissionError(13, "Permission denied")
-        ),
-    )
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-    assert str(caught.value) == (
-        "cannot check whether bound path traverses a symlink at "
-        "'.axiom/toolchain.toml': .axiom/toolchain.toml (Permission denied)"
-    )
-
-
-def test_refuses_a_bound_path_behind_a_symlinked_parent(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Regression: checking only the final component let an intermediate
-    directory symlink put an attested file outside the clone while it still
-    looked regular and matched its digest."""
-
-    write_tree(tmp_path)
-    outside = tmp_path.parent / "ambient"
-    outside.mkdir(exist_ok=True)
-    (outside / "toolchain.toml").write_text(ATTESTED[".axiom/toolchain.toml"])
-    import shutil
-
-    shutil.rmtree(tmp_path / ".axiom")
-    (tmp_path / ".axiom").symlink_to(outside)
-    with pytest.raises(CorpusError, match="traverses a symlink"):
         verify_corpus_binding(
             tmp_path, render_journal(journal_rows()), spec=corpus_spec()
         )
@@ -471,20 +904,6 @@ def test_refuses_a_tombstone_naming_a_superseded_digest(
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
 
 
-def test_refuses_a_fifo_named_like_content(tmp_path: pathlib.Path) -> None:
-    """A FIFO where a rule file is expected is unreadable as content but
-    openable by a consumer; the sweep must refuse, not skip it."""
-
-    import os
-
-    write_tree(tmp_path)
-    os.mkfifo(tmp_path / "rules/tax/pipe.yaml")
-    with pytest.raises(CorpusError, match="non-regular"):
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-
-
 def test_refuses_a_path_with_a_colon(tmp_path: pathlib.Path) -> None:
     """Binds the policy: "C:/x" joins drive-absolute under Windows pathlib.
 
@@ -512,6 +931,26 @@ def test_refuses_an_attested_path_the_spec_requires_but_the_journal_omits(
     rows = reindex([row for row in journal_rows() if row.get("kind") != "attested"])
     with pytest.raises(CorpusError, match="does not attest a path the pinned spec"):
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+
+def test_required_attestation_precedes_a_content_digest_mismatch(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Completeness is checked before the combined bound-file digest stream."""
+
+    write_tree(tmp_path)
+    rows = [row for row in journal_rows() if row.get("kind") != "attested"]
+    for row in rows:
+        if row.get("path") == "rules/benefit/amount.yaml":
+            row["sha256"] = "0" * 64
+    reindex(rows)
+
+    with pytest.raises(CorpusError) as caught:
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+    assert str(caught.value) == (
+        "the witnessed journal does not attest a path the pinned spec requires: "
+        "'.axiom/toolchain.toml'"
+    )
 
 
 def test_refuses_a_required_gate_the_journal_omits(tmp_path: pathlib.Path) -> None:
@@ -824,6 +1263,25 @@ def test_spec_refuses_an_unknown_tier_at_construction() -> None:
         corpus_spec(accepted_gate_tiers=frozenset({"vibes"}))
 
 
+def test_spec_declares_a_defaulted_closed_name_repertoire() -> None:
+    assert corpus_spec().name_repertoire == "portable"
+    assert corpus_spec(name_repertoire="posix-bytes").name_repertoire == "posix-bytes"
+    with pytest.raises(
+        CorpusError,
+        match="name repertoire must be 'portable' or 'posix-bytes'",
+    ):
+        corpus_spec(name_repertoire="unicode")
+
+
+def test_posix_bytes_spec_accepts_nonportable_utf8_paths() -> None:
+    spec = corpus_spec(
+        content_roots=(pathlib.PurePosixPath("règles"),),
+        required_attested_paths=frozenset({".axiom/outil:chaîne.toml"}),
+        name_repertoire="posix-bytes",
+    )
+    assert spec.content_roots == (pathlib.PurePosixPath("règles"),)
+
+
 def test_spec_refuses_an_empty_content_root() -> None:
     with pytest.raises(CorpusError, match="at least one content root"):
         corpus_spec(content_roots=())
@@ -904,6 +1362,24 @@ def test_the_spec_pins_a_suffix_by_one_rule_or_refuses_it() -> None:
         assert corpus_spec(content_suffixes=(suffix,)).content_suffixes == (suffix,)
 
 
+def test_spec_refuses_the_dot_dot_content_suffix_at_construction() -> None:
+    with pytest.raises(CorpusError) as caught:
+        corpus_spec(content_suffixes=("..",))
+    assert str(caught.value) == (
+        "CorpusSpec content suffix cannot be the Git dot-dot component: '..'"
+    )
+
+
+@pytest.mark.parametrize("predicate", ["content_root_of", "is_content_path"])
+def test_content_predicates_raise_for_an_invalid_git_component(
+    predicate: str,
+) -> None:
+    spec = corpus_spec()
+    with pytest.raises(CorpusError) as caught:
+        getattr(spec, predicate)("rules/../x.yaml")
+    assert str(caught.value) == "tree entry name is a dot component: b'..'"
+
+
 def test_the_spec_refuses_a_content_root_outside_the_portable_repertoire() -> None:
     """Binds the policy, root half: the same screen, named for the spec.
 
@@ -935,57 +1411,6 @@ def test_reproducible_and_unreproducible_gates_are_separated(
         "oracle/licensed-parity",
         "ci/repository-checks",
     }
-
-
-def test_refuses_an_empty_content_root_behind_a_symlinked_parent(
-    tmp_path: pathlib.Path,
-) -> None:
-    """A suffix-empty root behind a symlinked parent must not enumerate to an
-    empty set and silently pass. (Cross-family review finding.)"""
-
-    write_tree(tmp_path)
-    # Nested content root corpus/rules, with corpus a symlink to an ambient dir.
-    ambient = tmp_path / "ambient"
-    (ambient / "rules").mkdir(parents=True)
-    (tmp_path / "corpus").symlink_to("ambient", target_is_directory=True)
-    spec = corpus_spec(content_roots=(pathlib.PurePosixPath("corpus/rules"),))
-    # Journal binds nothing under corpus/rules; without the parent guard the
-    # empty enumeration would match an empty journal content set and pass.
-    rows = [r for r in journal_rows() if r.get("kind") != "content"]
-    reindex(rows)
-    with pytest.raises(CorpusError, match="symlink or reparse point"):
-        verify_corpus_binding(tmp_path, render_journal(rows), spec=spec)
-
-
-def test_refuses_a_content_file_inserted_after_first_enumeration(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Closed-world means stable: a file that appears between the first
-    enumeration and the post-hash re-enumeration must refuse, not pass."""
-
-    write_tree(tmp_path)
-    rows = journal_rows()
-
-    import receipt.corpus as corpus_mod
-
-    real = corpus_mod._tree_content_paths
-    calls = {"n": 0}
-
-    def enumerate_then_inject(root: pathlib.Path, spec: object, **passed) -> dict:
-        # The closing sweep is handed a directory-generation recorder (R6-F2);
-        # it is passed straight through so the stand-in stamps what the real
-        # sweep would have stamped.
-        result = real(root, spec, **passed)
-        calls["n"] += 1
-        if calls["n"] == 1:
-            # Simulate an unlisted file landing after the closed-world set was
-            # taken but before verification finished.
-            (root / "rules" / "sneaked.yaml").write_text("name: x\nvalue: 1\n")
-        return result
-
-    monkeypatch.setattr(corpus_mod, "_tree_content_paths", enumerate_then_inject)
-    with pytest.raises(CorpusError, match="changed during verification"):
-        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
 
 
 def test_refuses_paths_that_alias_under_case_or_normalization(
@@ -1368,62 +1793,30 @@ def test_the_alias_index_ceiling_cannot_be_reached() -> None:
 
 
 def test_the_maximum_depth_journal_spends_what_the_comment_says() -> None:
-    """Binds S8-F7: the maximum depth is 512, and the total was the 511 one.
+    """The maximum-depth journal remains inside the alias-prefix budget.
 
-    ``MAX_PATH_COMPONENTS_TOTAL``'s comment said a 4,096-row journal at the
-    maximum depth spends 6,275,072 units. That is 4,096 x 511 x 3, the cost
-    of the root-divergent fixture two tests above, whose paths carry 511
-    components because spelling 4,096 distinct first components takes three
-    characters each. The maximum depth is 512 — 512 one-character components
-    are 1,023 characters, and one component may be two characters long — and
-    the journal that reaches it spends more.
-
-    Measured here in the three parts the comment names: one visit per
-    component, at most one counted prefix per component, and one ancestor
-    visit per component below the last. The ancestor recorder is driven over
-    a stand-in that answers "directory" without touching a filesystem,
-    because the point is the arithmetic and not two million real mkdirs.
+    The pass charges one unit per component visit and one per distinct folded
+    directory prefix. Filesystem ancestor recording is no longer part of the
+    immutable-tree verifier.
     """
 
     from receipt.corpus import (
         MAX_PATH_COMPONENTS,
         MAX_PATH_COMPONENTS_TOTAL,
-        _DirectoryGenerations,
         _PathPrefixWork,
         _reject_aliasing_paths,
     )
-
-    class _EverythingIsADirectory(_DirectoryGenerations):
-        """The ancestor walk's charging, with no filesystem under it."""
-
-        def record(self, directory: pathlib.Path, relative: str) -> bool:
-            self._seen.setdefault(relative, (directory, (0, 0, 0, 0)))
-            return True
 
     paths = _widest_default_journal_paths()
     assert all(path.count("/") + 1 == MAX_PATH_COMPONENTS for path in paths)
 
     visits = MAX_JOURNAL_ROWS * MAX_PATH_COMPONENTS
-    ancestors = MAX_JOURNAL_ROWS * (MAX_PATH_COMPONENTS - 1)
     assert visits == 2097152
-    assert ancestors == 2093056
 
     work = _PathPrefixWork()
     nodes = _reject_aliasing_paths(paths, work=work)
     assert work.work == visits + nodes == 4191728
-    assert visits + nodes + ancestors == 6284784
-    assert 6284784 > MAX_PATH_COMPONENTS_TOTAL == 4194304
-
-    # And the budget is what stops it, part-way through the ancestor walk.
-    generations = _EverythingIsADirectory(work)
-    with pytest.raises(CorpusError) as caught:
-        for path in sorted(paths):
-            generations.record_ancestors(pathlib.Path("/root"), path)
-    assert str(caught.value) == (
-        f"declared paths visit more than {MAX_PATH_COMPONENTS_TOTAL} "
-        "prefixes; the corpus cannot be bound safely"
-    )
-
+    assert work.work <= MAX_PATH_COMPONENTS_TOTAL == 4194304
 
 def test_the_alias_index_refuses_more_prefixes_than_its_ceiling(
     monkeypatch: pytest.MonkeyPatch,
@@ -1538,433 +1931,26 @@ def test_maximum_rows_at_maximum_portable_depth_share_their_counted_prefixes(
     assert folded[0] < 8 * 1024 * 1024 < joined
 
 
-def test_the_fixture_spends_twenty_six_units_from_one_shared_prefix_budget(
+def test_the_fixture_spends_nineteen_units_from_the_alias_prefix_budget(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Binds S7-F1 and S7-R3-F1: one cap over walking and over holding.
-
-    The fixture has eleven declared component prefixes, which name eight
-    distinct folded ones, and seven non-root ancestor prefixes. At
-    twenty-six the whole verification completes; at twenty-five the last
-    unit refuses in the budget's single sentence. Without S7-F1 both runs
-    complete because neither old walk charges a prefix budget shared with
-    the other, and without S7-R3-F1 the total is eighteen rather than
-    twenty-six because the prefixes the index counts are free.
-    """
+    """The fixture charges eleven visits and eight distinct folded prefixes."""
 
     write_tree(tmp_path)
-    monkeypatch.setattr("receipt.corpus.MAX_PATH_COMPONENTS_TOTAL", 26)
+    monkeypatch.setattr("receipt.corpus.MAX_PATH_COMPONENTS_TOTAL", 19)
     verify_corpus_binding(
         tmp_path, render_journal(journal_rows()), spec=corpus_spec()
     )
 
-    monkeypatch.setattr("receipt.corpus.MAX_PATH_COMPONENTS_TOTAL", 25)
+    monkeypatch.setattr("receipt.corpus.MAX_PATH_COMPONENTS_TOTAL", 18)
     with pytest.raises(CorpusError) as caught:
         verify_corpus_binding(
             tmp_path, render_journal(journal_rows()), spec=corpus_spec()
         )
     assert str(caught.value) == (
-        "declared paths visit more than 25 prefixes; the corpus cannot be "
+        "declared paths visit more than 18 prefixes; the corpus cannot be "
         "bound safely"
     )
-
-
-def test_ancestor_stamping_builds_one_path_per_distinct_prefix(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds S7-R3-F2: every prefix was built before ``_seen`` deduplicated it.
-
-    These 4,096 paths share 510 ancestors, so 510 directories are stamped —
-    but the recorder reconstructed ``directory / segment`` and
-    ``"/".join(walked)`` for all 2,088,960 ``(path, prefix)`` visits and let
-    ``_seen`` discard the duplicates afterwards: about 2.09 million ``Path``
-    objects and 1,065,369,600 characters of joined prefix text for 510
-    stamps, all of it inside the budget.
-
-    Deduplicating on the component before the string is built makes the work
-    linear in what is distinct: 510 built prefixes totalling 260,100
-    characters, one per unique ancestor, plus the root offered once per
-    declared path. That total is exactly the bound the finding asked for —
-    strings built at most once per unique prefix plus once per path — and it
-    is asserted as an equality here because this layout meets it exactly.
-
-    What is counted is every relative spelling handed to ``record``, because
-    that is the seam both implementations cross: the old loop built a
-    ``Path`` and a ``"/".join`` for each of its 2,088,960 visits and let
-    ``_seen`` discard the duplicates, so it hands over 2,093,056 strings of
-    1,065,369,600 characters where this hands over 4,606 of 260,100.
-
-    ``_directory_generation`` is stubbed because the layout's own depth
-    exceeds the host's ``PATH_MAX``: what is under test is what the recorder
-    builds and stamps, not what the filesystem answers, and every prefix
-    answering "directory" is the case that makes the walk run to full depth.
-
-    Without S7-R3-F2 both counts fail — 2,093,056 strings and four thousand
-    times the characters — and the ``_under`` join count is zero, because the
-    old loop spells its prefixes with ``"/".join`` instead.
-    """
-
-    import receipt.corpus as corpus_module
-
-    from receipt.corpus import _PathPrefixWork, _reject_aliasing_paths
-
-    shared = ["a"] * 510
-    paths = [
-        "/".join((*shared, f"{index:03x}")) for index in range(MAX_JOURNAL_ROWS)
-    ]
-    joins: list[int] = []
-    built: list[int] = []
-    stamps = [0]
-    real_under = corpus_module._under
-    real_record = corpus_module._DirectoryGenerations.record
-
-    def recording_under(directory: str, name: str) -> str:
-        joined = real_under(directory, name)
-        joins.append(len(joined))
-        return joined
-
-    def recording_record(
-        self: object, directory: pathlib.Path, relative: str
-    ) -> bool:
-        built.append(len(relative))
-        return real_record(self, directory, relative)
-
-    def stub_generation(directory: pathlib.Path) -> tuple[int, int, int, int]:
-        stamps[0] += 1
-        return (1, 2, 3, 4)
-
-    monkeypatch.setattr(corpus_module, "_under", recording_under)
-    monkeypatch.setattr(corpus_module, "_directory_generation", stub_generation)
-    monkeypatch.setattr(
-        corpus_module._DirectoryGenerations, "record", recording_record
-    )
-
-    work = _PathPrefixWork()
-    entries = _reject_aliasing_paths(paths, work=work)
-    generations = corpus_module._DirectoryGenerations(work)
-    for path in paths:
-        generations.record_ancestors(tmp_path, path)
-
-    unique_prefixes = 510
-    # Every string handed to the recorder: the root once per path, and one
-    # per distinct ancestor.
-    assert len(built) == unique_prefixes + len(paths) == 4606
-    # 1 + 3 + … + 1,019 characters, against the 4,096 copies of that sum the
-    # visit-wise loop built.
-    assert sum(built) == unique_prefixes**2 == 260100
-    assert MAX_JOURNAL_ROWS * sum(built) == 1065369600
-    assert len(joins) == unique_prefixes == 510
-    # The root and the 510 ancestors, stamped once each rather than once per
-    # visit, and held once each.
-    assert stamps[0] == unique_prefixes + 1 == 511
-    assert len(generations._seen) == 511
-
-    # 2,093,056 alias visits, 4,606 counted prefixes and 2,088,960 ancestor
-    # visits, from one budget that this layout does not exhaust.
-    assert work.work == 2093056 + entries + MAX_JOURNAL_ROWS * 510 == 4186622
-    assert work.work <= MAX_PATH_COMPONENTS_TOTAL
-
-
-def test_ancestor_stamping_stops_at_the_first_absent_prefix(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds S7-F1: ancestor stamping descended below a path that could not exist.
-
-    Once ``absent`` fails ``lstat``, neither ``absent/child`` nor anything
-    beneath it can have a directory listing to protect. S7-F1 stops after
-    the root and that missing prefix and charges the one non-root visit.
-    Without the stop the recorder makes a third ``lstat`` below the absent
-    prefix, so the exact call list and budget count fail.
-    """
-
-    import receipt.corpus as corpus_module
-
-    calls: list[pathlib.Path] = []
-    real_lstat = corpus_module.os.lstat
-
-    def recording_lstat(path: os.PathLike[str]) -> os.stat_result:
-        calls.append(pathlib.Path(path))
-        return real_lstat(path)
-
-    monkeypatch.setattr(corpus_module.os, "lstat", recording_lstat)
-    work = corpus_module._PathPrefixWork()
-    generations = corpus_module._DirectoryGenerations(work)
-    generations.record_ancestors(tmp_path, "absent/child/file.yaml")
-
-    assert calls == [tmp_path, tmp_path / "absent"]
-    assert work.work == 1
-
-
-def test_refuses_a_fifo_at_an_attested_path_without_blocking(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Attested paths sit outside the content roots, so the tree walk never
-    screens them — the hashing guard is their only non-regular check. A FIFO
-    there must refuse by name, before any open a reader could block on: the
-    sentinel turns a reintroduced open into a loud failure, never a hang."""
-
-    import os
-
-    if not hasattr(os, "mkfifo"):
-        pytest.skip("platform has no FIFOs")
-    write_tree(tmp_path)
-    victim = tmp_path / ".axiom/toolchain.toml"
-    victim.unlink()
-    os.mkfifo(victim)
-
-    real_open = os.open
-
-    def refuse_to_open_the_fifo(
-        path: object, flags: int, *args: object, **kwargs: object
-    ) -> int:
-        assert str(path) != str(victim), (
-            "open() reached a FIFO the by-name screen should have refused"
-        )
-        return real_open(path, flags, *args, **kwargs)
-
-    monkeypatch.setattr("os.open", refuse_to_open_the_fifo)
-    with pytest.raises(CorpusError, match="not a regular file"):
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-
-
-def test_hashing_opens_non_blocking_and_no_follow(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The open flags are load-bearing: O_NONBLOCK is what keeps a raced FIFO
-    from parking the verifier, O_NOFOLLOW (where the platform has it) what
-    keeps a raced symlink from being followed. Capture the flags actually
-    used for a bound file so removing either one fails here, not in an
-    unbounded hang somewhere else."""
-
-    import os
-
-    write_tree(tmp_path)
-    captured: list[tuple[str, int]] = []
-    real_open = os.open
-
-    def recording_open(
-        path: object, flags: int, *args: object, **kwargs: object
-    ) -> int:
-        captured.append((str(path), flags))
-        return real_open(path, flags, *args, **kwargs)
-
-    monkeypatch.setattr("os.open", recording_open)
-    verify_corpus_binding(tmp_path, render_journal(journal_rows()), spec=corpus_spec())
-    flagged = [flags for path, flags in captured if path.endswith("rate.yaml")]
-    assert flagged
-    assert all(flags & os.O_NONBLOCK for flags in flagged)
-    if hasattr(os, "O_NOFOLLOW"):
-        assert all(flags & os.O_NOFOLLOW for flags in flagged)
-
-
-def test_a_fifo_raced_in_after_the_name_check_refuses_without_blocking(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The window the flags exist for: the name check saw a regular file, the
-    open lands on a FIFO. The non-blocking open must return a descriptor
-    immediately and fstat must refuse it. The alarm converts a reintroduced
-    blocking open into a loud failure instead of a hung suite."""
-
-    import os
-    import signal
-
-    if not hasattr(os, "mkfifo"):
-        pytest.skip("platform has no FIFOs")
-    write_tree(tmp_path)
-    victim = tmp_path / ".axiom/toolchain.toml"
-    decoy = tmp_path / "decoy-regular-file"
-    decoy.write_text("looks fine\n")
-    victim.unlink()
-    os.mkfifo(victim)
-
-    real_lstat = os.lstat
-
-    def masking_lstat(path: object, *args: object, **kwargs: object) -> os.stat_result:
-        if str(path) == str(victim):
-            return real_lstat(decoy)
-        return real_lstat(path, *args, **kwargs)
-
-    monkeypatch.setattr("os.lstat", masking_lstat)
-
-    def blocked(_signum: int, _frame: object) -> None:
-        raise RuntimeError("the open blocked: the non-blocking guard is gone")
-
-    previous = signal.signal(signal.SIGALRM, blocked)
-    signal.alarm(10)
-    try:
-        with pytest.raises(CorpusError, match="not a regular file"):
-            verify_corpus_binding(
-                tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-            )
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, previous)
-
-
-def test_refuses_a_file_swapped_between_lstat_and_open(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The descriptor must be the file the name check saw. The decoy carries
-    the correct bytes, so only the device/inode cross-check can refuse — this
-    is the removal detector for that comparison."""
-
-    import os
-
-    write_tree(tmp_path)
-    victim = tmp_path / "rules/tax/rate.yaml"
-    decoy = tmp_path / "decoy-with-identical-bytes"
-    decoy.write_bytes(victim.read_bytes())
-
-    real_open = os.open
-    state = {"armed": True}
-
-    def swap_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
-        if state["armed"] and str(path) == str(victim):
-            state["armed"] = False
-            return real_open(decoy, flags, *args, **kwargs)
-        return real_open(path, flags, *args, **kwargs)
-
-    monkeypatch.setattr("os.open", swap_open)
-    with pytest.raises(CorpusError, match="changed identity while being opened"):
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-
-
-def test_an_appender_cannot_make_hashing_chase_the_live_eof(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds S7-F3: the digest loop followed a writer's moving live EOF.
-
-    Reads are shortened to eight bytes and four bytes are appended after each
-    one. S7-F3 hashes exactly the size captured by ``fstat``, then its one-byte
-    probe sees growth and refuses. Without that fixed horizon the reader
-    consumes the append, reaches another append, and never reaches EOF; the
-    twelve-call sentinel turns the old hang into a deterministic failure.
-    """
-
-    import receipt.corpus as corpus_module
-
-    write_tree(tmp_path)
-    victim = tmp_path / "rules/tax/rate.yaml"
-    initial = victim.stat()
-    real_read = corpus_module.os.read
-    calls: list[tuple[int, int]] = []
-
-    def appending_read(fd: int, amount: int) -> bytes:
-        info = os.fstat(fd)
-        if (info.st_dev, info.st_ino) != (initial.st_dev, initial.st_ino):
-            return real_read(fd, amount)
-        if len(calls) >= 12:
-            pytest.fail("S7-F3: hashing chased the file's live EOF")
-        data = real_read(fd, min(amount, 8))
-        calls.append((amount, len(data)))
-        with victim.open("ab") as stream:
-            stream.write(b"grow")
-        return data
-
-    monkeypatch.setattr(corpus_module.os, "read", appending_read)
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-
-    assert str(caught.value) == (
-        "bound file grew while being read: rules/tax/rate.yaml"
-    )
-    assert sum(received for _, received in calls[:-1]) == initial.st_size
-    assert calls[-1] == (1, 1)
-
-
-def test_a_sparse_extension_after_fstat_is_probed_not_hashed(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds S7-F3: a sparse grow after ``fstat`` forced arbitrary hashing.
-
-    The first target read extends the file to one GiB. S7-F3 requests only
-    the captured size and then one probe byte, which refuses the growth.
-    Without it the live-EOF loop immediately asks for a one-MiB chunk from
-    the sparse extension; the request-size sentinel fails before the hole is
-    hashed, keeping the regression itself bounded.
-    """
-
-    import receipt.corpus as corpus_module
-
-    write_tree(tmp_path)
-    victim = tmp_path / "rules/tax/rate.yaml"
-    initial = victim.stat()
-    real_read = corpus_module.os.read
-    requests: list[int] = []
-    extended = [False]
-
-    def extending_read(fd: int, amount: int) -> bytes:
-        info = os.fstat(fd)
-        if (info.st_dev, info.st_ino) != (initial.st_dev, initial.st_ino):
-            return real_read(fd, amount)
-        if not extended[0]:
-            extended[0] = True
-            os.truncate(victim, 1 << 30)
-        if amount > initial.st_size:
-            pytest.fail("S7-F3: hashing tried to consume the sparse extension")
-        requests.append(amount)
-        return real_read(fd, amount)
-
-    monkeypatch.setattr(corpus_module.os, "read", extending_read)
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-
-    assert extended == [True]
-    assert victim.stat().st_size == 1 << 30
-    assert requests == [initial.st_size, 1]
-    assert str(caught.value) == (
-        "bound file grew while being read: rules/tax/rate.yaml"
-    )
-
-
-def test_a_short_read_before_the_captured_size_refuses_as_shrinkage(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds S7-F3: early EOF used to become only a later digest mismatch.
-
-    The target shrinks by one byte on its first read after ``fstat``. The
-    captured-size loop consumes the short positive read, asks for the final
-    byte, and names shrinkage when EOF arrives. Without S7-F3 the live-EOF
-    loop treats that EOF as success and eventually reports the generic wrong
-    digest, so the exact refusal asserted here fails.
-    """
-
-    import receipt.corpus as corpus_module
-
-    write_tree(tmp_path)
-    victim = tmp_path / "rules/tax/rate.yaml"
-    initial = victim.stat()
-    real_read = corpus_module.os.read
-    shrunk = [False]
-
-    def shrinking_read(fd: int, amount: int) -> bytes:
-        info = os.fstat(fd)
-        if (info.st_dev, info.st_ino) != (initial.st_dev, initial.st_ino):
-            return real_read(fd, amount)
-        if not shrunk[0]:
-            shrunk[0] = True
-            os.truncate(victim, initial.st_size - 1)
-        return real_read(fd, amount)
-
-    monkeypatch.setattr(corpus_module.os, "read", shrinking_read)
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-
-    assert shrunk == [True]
-    assert str(caught.value) == (
-        "bound file shrank while being read: rules/tax/rate.yaml"
-    )
-
 
 def test_refuses_paths_that_alias_under_unicode_normalization_alone(
     tmp_path: pathlib.Path,
@@ -2006,102 +1992,6 @@ def test_refuses_paths_that_alias_under_unicode_normalization_alone(
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
 
 
-def _mutate_after_hashing(
-    monkeypatch: pytest.MonkeyPatch, victim_relative: str, mutate: object
-) -> None:
-    """Run the real digest, then fire ``mutate`` once, right after the victim
-    was hashed — the exact window the post-hash sweeps exist to close."""
-
-    import receipt.corpus as corpus_mod
-
-    real = corpus_mod._regular_file_digest
-    state = {"armed": True}
-
-    def hash_then_mutate(root: pathlib.Path, relative: str, **options: object):
-        result = real(root, relative, **options)
-        if state["armed"] and relative == victim_relative:
-            state["armed"] = False
-            mutate()
-        return result
-
-    monkeypatch.setattr("receipt.corpus._regular_file_digest", hash_then_mutate)
-
-
-def test_refuses_a_bound_file_rewritten_in_place_after_hashing(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Same path, same inode, same size, different bytes, written after the
-    digest was taken: membership re-enumeration cannot see it, so the per-file
-    identity sweep must."""
-
-    write_tree(tmp_path)
-    victim = tmp_path / "rules/tax/rate.yaml"
-
-    def rewrite() -> None:
-        tampered = b"name: rate\nvalue: 9.99\n"
-        assert len(tampered) == len(victim.read_bytes())
-        victim.write_bytes(tampered)
-
-    _mutate_after_hashing(monkeypatch, "rules/tax/rate.yaml", rewrite)
-    with pytest.raises(CorpusError, match="changed during verification"):
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-
-
-def test_refuses_a_bound_file_replaced_after_hashing_even_with_identical_bytes(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Replacement with byte-identical content still changes the inode; the
-    sweep refuses on identity, not content, so it catches the swap that a
-    re-hash would wave through."""
-
-    import os
-
-    write_tree(tmp_path)
-    victim = tmp_path / "rules/tax/rate.yaml"
-
-    def replace() -> None:
-        before = os.lstat(victim)
-        stand_in = tmp_path / "stand-in"
-        stand_in.write_bytes(victim.read_bytes())
-        os.replace(stand_in, victim)
-        # Restore every identity field the sweep compares except the inode,
-        # so only the inode comparison can catch this — removing just that
-        # comparison from the sweep fails this test.
-        os.utime(victim, ns=(before.st_atime_ns, before.st_mtime_ns))
-        after = os.lstat(victim)
-        assert after.st_ino != before.st_ino
-        assert (after.st_dev, after.st_size, after.st_mtime_ns) == (
-            before.st_dev,
-            before.st_size,
-            before.st_mtime_ns,
-        )
-
-    _mutate_after_hashing(monkeypatch, "rules/tax/rate.yaml", replace)
-    with pytest.raises(CorpusError, match="changed during verification"):
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-
-
-def test_refuses_an_attested_file_removed_after_hashing(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Attested paths sit outside the content roots, so membership
-    re-enumeration never sees them; the identity sweep is their only
-    post-hash guard and must cover them too."""
-
-    write_tree(tmp_path)
-    victim = tmp_path / ".axiom/toolchain.toml"
-
-    _mutate_after_hashing(monkeypatch, ".axiom/toolchain.toml", victim.unlink)
-    with pytest.raises(CorpusError, match="disappeared during verification"):
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-
-
 # --- later review round: what the sweep and the sanitiser still let past ----
 
 
@@ -2126,24 +2016,8 @@ def test_refuses_an_unlisted_content_file_whose_suffix_differs_only_by_case(
         )
 
 
-def test_the_suffix_predicate_folds_a_decomposed_spelling_onto_its_pin() -> None:
-    """The same escape spelled in Unicode rather than in case.
-
-    A suffix carrying a composed character has a decomposed spelling that is
-    byte-different and, on a normalizing filesystem, the same name. The
-    predicate folds both before comparing, so neither spelling sits outside
-    the closed world.
-
-    Written against ``_has_pinned_suffix`` rather than through a
-    verification, because S5-F3 made a non-ASCII *pinned* suffix illegal at
-    construction — an 8.3 alias extension cannot be derived against one, and
-    a pin the screen cannot judge is a pin that cannot answer the question
-    it exists to ask. The fold itself is unchanged and is still reached with
-    non-ASCII text everywhere else this module compares names: content-root
-    membership, declared-path aliasing (held end to end by
-    ``test_refuses_paths_that_alias_under_unicode_normalization_alone``),
-    the entry names the sweep judges, and the tombstone search's buckets.
-    """
+def test_the_suffix_predicate_does_not_normalize_unicode() -> None:
+    """Only ASCII case is folded; composed and decomposed text stays exact."""
 
     import unicodedata
 
@@ -2151,7 +2025,7 @@ def test_the_suffix_predicate_folds_a_decomposed_spelling_onto_its_pin() -> None
 
     decomposed = unicodedata.normalize("NFD", "rules/tax/smuggled.café")
     assert decomposed != "rules/tax/smuggled.café"
-    assert _has_pinned_suffix(decomposed, (".yaml", ".café"))
+    assert not _has_pinned_suffix(decomposed, (".yaml", ".café"))
     assert _has_pinned_suffix("rules/tax/smuggled.café", (".yaml", ".café"))
     assert not _has_pinned_suffix(decomposed, (".yaml",))
 
@@ -2378,44 +2252,6 @@ def test_a_removed_content_path_still_in_the_tree_is_refused_as_unlisted(
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
 
 
-def test_refuses_a_removed_path_the_verifier_cannot_look_for(
-    tmp_path: pathlib.Path,
-) -> None:
-    """A tombstone nothing could check is not a tombstone honoured.
-
-    Listing a parent that is neither readable nor searchable fails with
-    EACCES, not ENOENT, so a removed path swallowed by "any error means gone"
-    is reported to the auditor as removed on the strength of a permission
-    error while the file sits on disk. Failure to look is not an absence —
-    the same rule the sweep applies to a directory it cannot enumerate.
-    """
-
-    import os
-
-    body = '{"applied": true}\n'
-    attested = dict(ATTESTED)
-    attested["retired/apply-manifest.json"] = body
-    write_tree(tmp_path, attested=attested)
-    rows = journal_rows(attested=attested)
-    rows.append(
-        {
-            "schemaVersion": JOURNAL_SCHEMA,
-            "kind": "attested",
-            "path": "retired/apply-manifest.json",
-            "sha256": sha256_text(body),
-            "state": "removed",
-        }
-    )
-    reindex(rows)
-    journal = render_journal(rows)
-    os.chmod(tmp_path / "retired", 0o000)
-    try:
-        with pytest.raises(CorpusError, match="tombstone is unverifiable"):
-            verify_corpus_binding(tmp_path, journal, spec=corpus_spec())
-    finally:
-        os.chmod(tmp_path / "retired", 0o755)
-
-
 def test_refuses_a_lone_surrogate_in_gate_evidence(tmp_path: pathlib.Path) -> None:
     """JSON can spell a lone surrogate inside otherwise valid UTF-8.
 
@@ -2442,9 +2278,11 @@ def test_refuses_a_lone_surrogate_in_gate_evidence(tmp_path: pathlib.Path) -> No
 def test_refuses_a_lone_surrogate_in_a_journal_path(tmp_path: pathlib.Path) -> None:
     """A path carrying a lone surrogate cannot be looked for at all.
 
-    ``os.lstat`` raises ``UnicodeEncodeError`` on it, a ``ValueError`` that no
-    ``OSError`` handler in this module sees, so without the screen the row
-    escaped as an unclassified exception instead of a refusal that names it.
+    On the filesystem walk this module no longer makes, ``os.lstat`` raised
+    ``UnicodeEncodeError`` on it, a ``ValueError`` no ``OSError`` handler saw,
+    so without the screen the row escaped as an unclassified exception; the
+    tree listing never looks such a path up, and the screen refuses the row
+    by name before any lookup.
 
     Binds the policy for the message: a lone surrogate is outside the
     portable repertoire, so the refusal is the portable-name one and the
@@ -2492,8 +2330,6 @@ def test_refuses_a_removed_path_that_survives_under_an_aliasing_spelling(
     names the survivor it found.
     """
 
-    import os
-
     body = '{"applied": true}\n'
     attested = dict(ATTESTED)
     attested["retired/apply-manifest.json"] = body
@@ -2509,46 +2345,30 @@ def test_refuses_a_removed_path_that_survives_under_an_aliasing_spelling(
         }
     )
     reindex(rows)
-    os.rename(
+    pathlib.Path.rename(
         tmp_path / "retired/apply-manifest.json",
         tmp_path / "retired/APPLY-MANIFEST.JSON",
     )
-    natively_aliased = (tmp_path / "retired/apply-manifest.json").exists()
     with pytest.raises(CorpusError, match="still present in the tree") as caught:
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
-    if natively_aliased:
-        assert str(caught.value) == (
-            "removed path is still present in the tree: retired/apply-manifest.json"
-        )
-    else:
-        assert "retired/APPLY-MANIFEST.JSON" in str(caught.value)
+    assert str(caught.value) == (
+        "removed path is still present in the tree under a spelling that aliases "
+        "it on a case- or normalization-insensitive filesystem: "
+        "retired/apply-manifest.json ('retired/APPLY-MANIFEST.JSON')"
+    )
 
 
-def test_two_paths_varied_in_case_and_normalization_at_once_still_alias(
+def test_unicode_case_and_normalization_are_not_folded(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Casefold can itself produce decomposed text.
-
-    U+00DF followed by U+0301 folds to s, s, U+0301, whose composed form is
-    s, U+015B. One NFC pass before folding left those keys unequal, so text
-    varied in case and normalization at once escaped every comparison built
-    on the fold. Found by peer review; the fold normalizes again after
-    folding.
-
-    The fold key is still computed this way, and the property is still
-    true of it, because ``_path_fold`` is asked of names the portable-name
-    screen has *not* seen — the siblings of an attested path's components,
-    which are someone else's files. What the policy changes is the second
-    half of this test: a declared path spelled either way is no longer a
-    path a corpus may carry, so the end-to-end refusal is the portable-name
-    one and not the aliasing one. Both halves are asserted, so a change to
-    either is visible.
-    """
+    """The fold preserves non-ASCII bytes and portable paths refuse them."""
 
     from receipt.corpus import _has_pinned_suffix, _path_fold
 
-    assert _path_fold("x\u00df\u0301") == _path_fold("xs\u015b")
-    assert _has_pinned_suffix("rules/tax/smuggled.\u00df\u0301", (".s\u015b",))
+    assert _path_fold("x\u00df\u0301") != _path_fold("xs\u015b")
+    assert not _has_pinned_suffix(
+        "rules/tax/smuggled.\u00df\u0301", (".s\u015b",)
+    )
 
     write_tree(tmp_path)
     rows = journal_rows()
@@ -2797,45 +2617,6 @@ def test_verifies_a_content_row_spelled_with_a_case_varied_suffix(
     assert "rules/tax/extra.YAML" in {binding.path for binding in verification.content}
 
 
-def test_refuses_a_removed_path_under_a_symlinked_parent(
-    tmp_path: pathlib.Path,
-) -> None:
-    """An intermediate symlink refuses, for tombstones as for bound paths.
-
-    Following it also made the fold walk unbounded: case-varied links back
-    into the same directory branch without end (peer review, round two).
-    """
-
-    import os
-
-    import shutil
-
-    body = '{"applied": true}\n'
-    attested = dict(ATTESTED)
-    attested["links/apply-manifest.json"] = body
-    write_tree(tmp_path, attested=attested)
-    rows = journal_rows(attested=attested)
-    rows.append(
-        {
-            "schemaVersion": JOURNAL_SCHEMA,
-            "kind": "attested",
-            "path": "links/apply-manifest.json",
-            "sha256": sha256_text(body),
-            "state": "removed",
-        }
-    )
-    reindex(rows)
-    # The file is gone; its parent is now a link to an empty directory. On a
-    # case-insensitive host a case-varied link would be the same entry, so
-    # the link is spelled exactly: what is refused is the traversal.
-    shutil.rmtree(tmp_path / "links")
-    (tmp_path / "retired").mkdir()
-    os.symlink("retired", tmp_path / "links")
-    with pytest.raises(CorpusError, match="traverses a symlink") as caught:
-        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
-    assert "'links'" in str(caught.value)
-
-
 def test_refuses_a_path_carrying_an_unassigned_code_point(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -2992,821 +2773,6 @@ def _tombstone_rows(path: str, body: str) -> list[dict[str, object]]:
     return reindex(rows)
 
 
-def _two_tombstone_rows() -> list[dict[str, object]]:
-    """A journal retiring two attested paths inside the same directory."""
-
-    body = '{"applied": true}\n'
-    attested = dict(ATTESTED)
-    attested[".axiom/a.json"] = body
-    attested[".axiom/b.json"] = body
-    rows = journal_rows(attested=attested)
-    for name in (".axiom/a.json", ".axiom/b.json"):
-        rows.append(
-            {
-                "schemaVersion": JOURNAL_SCHEMA,
-                "kind": "attested",
-                "path": name,
-                "sha256": sha256_text(body),
-                "state": "removed",
-            }
-        )
-    return reindex(rows)
-
-
-def _tombstone_pass_entries(tmp_path: pathlib.Path) -> int:
-    """Directory entries the two-tombstone pass must index, counting each once."""
-
-    return len(list(tmp_path.iterdir())) + len(list((tmp_path / ".axiom").iterdir()))
-
-
-def _tombstone_pass_work(tmp_path: pathlib.Path) -> int:
-    """Budget units *one* two-tombstone pass charges, counting each entry once.
-
-    Two directories are listed — the tree root and ``.axiom`` — and every
-    entry consumed from a listing is one unit. Each of the two searches then
-    visits the ``.axiom`` candidate on its way down, and a visited candidate
-    is charged as well (F2), which is the two units added here.
-
-    Both passes cost this, and both are charged against one budget, so a
-    verification of this fixture spends twice what this returns. The second
-    pass used to cost ``2 x (entries + 1)`` because it re-listed every
-    directory for every removed path; that is the product S8-F1 removed.
-    """
-
-    return _tombstone_pass_entries(tmp_path) + 2
-
-
-def test_the_tombstone_budget_counts_entries_not_listings(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds F3: the old budget counted listings and reset per removed path.
-
-    ``MAX_TOMBSTONE_LISTINGS`` was a local counter inside one search, so it
-    bounded a single tombstone and said nothing about the pass: R tombstones
-    over a root of E entries cost R×E listings with no ceiling on the product.
-    The budget now counts entries indexed across the whole pass. Without the
-    fix nothing here refuses — the tree is three entries wide.
-    """
-
-    write_tree(tmp_path)
-    monkeypatch.setattr(
-        "receipt.corpus.MAX_TOMBSTONE_WORK", _tombstone_pass_entries(tmp_path) - 1
-    )
-    with pytest.raises(CorpusError, match="tombstone work budget of") as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(_two_tombstone_rows()), spec=corpus_spec()
-        )
-    assert "tombstone is unverifiable: .axiom/a.json" in str(caught.value)
-
-
-def test_the_tombstone_index_is_shared_across_removed_paths(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds F3, and S8-F1: neither pass may pay twice for the same directory.
-
-    The budget is set to exactly what the two passes charge between them,
-    each of them reading the tree once. Both removed paths start at the tree
-    root and share their parent, so this passes only because an index reads
-    each directory once and hands the listing to every later search in its
-    own pass. Re-listing per removed path pushes a pass from five units to
-    eight, which is three over this budget in the first pass and three over
-    it in the second: the module did the former before F3 and the latter
-    before S8-F1, and either one refuses here.
-    """
-
-    write_tree(tmp_path)
-    monkeypatch.setattr(
-        "receipt.corpus.MAX_TOMBSTONE_WORK",
-        2 * _tombstone_pass_work(tmp_path),
-    )
-    verification = verify_corpus_binding(
-        tmp_path, render_journal(_two_tombstone_rows()), spec=corpus_spec()
-    )
-    assert verification.removed_paths == (".axiom/a.json", ".axiom/b.json")
-
-
-class _NamedEntry:
-    """The one attribute the tombstone index reads off a scanned entry.
-
-    ``_TombstoneIndex.folded`` takes ``entry.name`` and builds the child path
-    itself, so a declared entry needs nothing more than a name to stand in
-    for a real ``os.DirEntry``.
-    """
-
-    def __init__(self, name: str) -> None:
-        self.name = name
-
-
-class _Scan:
-    """A stand-in for the iterator ``os.scandir`` hands back.
-
-    The tombstone index scans inside a ``with`` block and abandons the
-    iterator the moment the budget refuses, so a stand-in has to be a context
-    manager and an iterator both. It pulls from the real iterator only as the
-    module asks for the next entry, which is the property these tests are
-    about: an entry the module never asks for is an entry the host is never
-    asked to read.
-    """
-
-    def __init__(self, inner=None, *, pulled=None, hidden=(), extra=()) -> None:
-        self._inner = inner
-        self._pulled = pulled
-        self._hidden = frozenset(hidden)
-        self._extra = iter([_NamedEntry(name) for name in extra])
-
-    def __enter__(self) -> "_Scan":
-        return self
-
-    def __exit__(self, *exc_info: object) -> bool:
-        if self._inner is not None:
-            self._inner.__exit__(*exc_info)
-        return False
-
-    def __iter__(self) -> "_Scan":
-        return self
-
-    def __next__(self):
-        if self._inner is not None:
-            for entry in self._inner:
-                if self._pulled is not None:
-                    self._pulled.append(entry.name)
-                if entry.name not in self._hidden:
-                    return entry
-        return next(self._extra)
-
-
-def _scandir(directory_name: str, **reshape):
-    """An ``os.scandir`` that reshapes exactly one directory's listing.
-
-    Every directory this module reads is scanned — the tombstone index, the
-    attested spelling walk, and since S6-F2 the closed-world sweep and the
-    root-component checks as well, which used to list through
-    ``pathlib.Path.iterdir``. So the wrapper is scoped by directory name and
-    hands back the host's own iterator, untouched, for every other listing.
-
-    Declaring a name rather than writing one is often the only way to say
-    what a test is about on every host. APFS refuses to create a filename
-    carrying an unassigned code point at all — the ``open`` fails with
-    EILSEQ — while ext4 and NTFS store the bytes without comment; a
-    case-insensitive volume cannot hold two entries that differ only in
-    case, which is exactly the pair a collision test needs; and a name Win32
-    strips before a lookup is an ordinary name here. The verifier has to
-    hold on the filesystems that allow these names, so they reach it through
-    the listing rather than off the disk.
-    """
-
-    real = os.scandir
-
-    def scandir(target):
-        if pathlib.PurePath(os.fspath(target)).name != directory_name:
-            return real(target)
-        return _Scan(real(target), **reshape)
-
-    return scandir
-
-
-def _scandir_at(target: pathlib.Path, extra: str):
-    """An ``os.scandir`` that adds one entry to exactly one directory.
-
-    ``_scandir`` is scoped by directory name, which is enough where the name
-    is unique in the tree; this one is scoped by the directory itself, for
-    the tree root and for a name a fixture uses twice. What it injects is a
-    name: the sweep rebuilds every entry as ``directory / name``, so an entry
-    declared here is a name in that directory and nothing else.
-    """
-
-    real = os.scandir
-
-    def scandir(directory):
-        if pathlib.Path(os.fspath(directory)) != target:
-            return real(directory)
-        return _Scan(real(directory), extra=[extra])
-
-    return scandir
-
-
-def test_the_tombstone_scan_stops_reading_a_directory_wider_than_its_budget(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds F2 (round five): the listing was read whole before the check.
-
-    ``pathlib.Path.iterdir`` materialises the entire directory before it
-    yields anything, so a per-entry charge against it bounded only what this
-    module did with the names. The read itself — which is the exhaustion an
-    adversary plants a wide directory to cause — went ahead in full, and
-    round four's test hid that by replacing ``iterdir`` with a lazy
-    generator, which is a listing production never has.
-
-    The index now scans with ``os.scandir`` inside a ``with`` and refuses
-    from inside the loop, so the iterator is closed early and the entries
-    after the one that broke the budget are never pulled. This wrapper hands
-    the module the host's real scandir iterator over a directory really on
-    disk and counts what the module takes from it: at most one entry past the
-    budget, out of two thousand. Without the fix every one of the two
-    thousand is read before the refusal.
-    """
-
-    width = 2000
-    budget = 64
-    pulled: list[str] = []
-    body = '{"applied": true}\n'
-    write_tree(tmp_path)
-    wide = tmp_path / "wide"
-    wide.mkdir()
-    for index in range(width):
-        (wide / f"entry-{index:05d}").write_text("")
-    rows = _tombstone_rows("wide/apply-manifest.json", body)
-    monkeypatch.setattr("receipt.corpus.MAX_TOMBSTONE_WORK", budget)
-    monkeypatch.setattr(os, "scandir", _scandir("wide", pulled=pulled))
-    with pytest.raises(CorpusError, match="tombstone work budget"):
-        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
-    assert len(pulled) <= budget + 1
-    assert len(pulled) < width
-
-
-def test_many_tombstones_over_one_cached_bucket_exceed_the_budget(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds F2: re-traversing a cached bucket advanced no counter.
-
-    The index reads each directory once, so after the first tombstone every
-    later search walks buckets that are already in memory — and those visits
-    were free. R tombstones over a bucket of K entries examined R×K candidates
-    while the counter stayed at the entries indexed, which for this tree is
-    four, so the budget bounded the listings and nothing about the search.
-
-    Forty tombstones share one path here, and each of them re-walks the same
-    two cached components. Every visited candidate is now charged against the
-    same running total, so the pass refuses part-way through. Without the fix
-    it costs four units, the budget of twenty never fires, and the
-    verification returns all forty paths as removed.
-    """
-
-    body = '{"applied": true}\n'
-    write_tree(tmp_path)
-    (tmp_path / ".axiom/retired").mkdir(parents=True)
-    retired = [f".axiom/retired/gone-{index:03d}.json" for index in range(40)]
-    attested = dict(ATTESTED)
-    for path in retired:
-        attested[path] = body
-    rows = journal_rows(attested=attested)
-    for path in retired:
-        rows.append(
-            {
-                "schemaVersion": JOURNAL_SCHEMA,
-                "kind": "attested",
-                "path": path,
-                "sha256": sha256_text(body),
-                "state": "removed",
-            }
-        )
-    monkeypatch.setattr("receipt.corpus.MAX_TOMBSTONE_WORK", 20)
-    with pytest.raises(CorpusError, match="tombstone work budget") as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(reindex(rows)), spec=corpus_spec()
-        )
-    assert "tombstone is unverifiable: .axiom/retired/gone-" in str(caught.value)
-
-
-def test_the_content_sweep_stops_reading_a_directory_wider_than_its_budget(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds S6-F2: the closed-world sweep was the one walk with no ceiling.
-
-    ``_list_directory`` read a directory of any width into a sorted list, and
-    ``_tree_content_paths`` descended into every directory that listing named,
-    with no counter anywhere. So a content root carrying arbitrarily many
-    portable, suffix-excluded entries — names the sweep must look at and the
-    journal need never mention, since none of them is content — made the
-    verifier allocate and ``lstat`` for as long as the tree was wide. The
-    tombstone pass and the spelling walk had both been budgeted for rounds;
-    this one had not.
-
-    Two thousand entries against a budget of sixty-four. The wrapper hands
-    the module the host's own scandir iterator over a directory really on
-    disk and counts what the module takes from it, which is the half of the
-    finding a charge made after the listing would not fix: at most one entry
-    past the budget out of two thousand, because the charge is made as each
-    name arrives and the refusal is raised from inside the ``with``. Without
-    the budget every one of the two thousand is read, sorted and screened,
-    and the verification goes on to refuse them as unlisted content or to
-    pass.
-    """
-
-    width = 2000
-    budget = 64
-    pulled: list[str] = []
-    write_tree(tmp_path)
-    wide = tmp_path / "rules" / "wide"
-    wide.mkdir()
-    for index in range(width):
-        (wide / f"entry-{index:05d}.txt").write_text("")
-    monkeypatch.setattr("receipt.corpus.MAX_SWEEP_WORK", budget)
-    monkeypatch.setattr(os, "scandir", _scandir("wide", pulled=pulled))
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-    assert str(caught.value) == (
-        f"the closed-world sweep would read more than {budget} directory "
-        "entries; the tree cannot be closed"
-    )
-    assert len(pulled) <= budget + 1
-    assert len(pulled) < width
-
-
-def test_an_ordinary_corpus_sweeps_far_under_the_sweep_budget(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds S6-F2, the control: the budget must not refuse a real corpus.
-
-    A bound is only worth having if what it refuses is the adversarial input
-    and not the ordinary one, so the fixture's own cost is measured rather
-    than claimed: it verifies at a budget of fourteen and refuses at
-    thirteen, which is what fourteen entry visits means — the repository
-    root once per sweep for the root-component check, then ``rules``,
-    ``rules/benefit`` and ``rules/tax``, and the whole of it a second time
-    for the closing sweep, because both sweeps charge one running total.
-
-    The shipped number is four orders of magnitude above that, and it has to
-    be read beside ``MAX_JOURNAL_ROWS``: a tree whose content files approach
-    it could not verify anyway, since the journal cannot bind that many rows.
-    What it bounds is everything else a content root may hold.
-
-    This test passes with the S6-F2 change disabled, except for the two
-    lowered-budget assertions that are the change itself.
-    """
-
-    from receipt.corpus import MAX_SWEEP_WORK
-
-    write_tree(tmp_path)
-    journal = render_journal(journal_rows())
-    monkeypatch.setattr("receipt.corpus.MAX_SWEEP_WORK", 14)
-    verification = verify_corpus_binding(tmp_path, journal, spec=corpus_spec())
-    assert [entry.path for entry in verification.content] == sorted(CONTENT)
-    monkeypatch.setattr("receipt.corpus.MAX_SWEEP_WORK", 13)
-    with pytest.raises(CorpusError, match="the tree cannot be closed"):
-        verify_corpus_binding(tmp_path, journal, spec=corpus_spec())
-    assert MAX_SWEEP_WORK == 262144
-
-
-def _planting_fold_survivor(plant):
-    """A ``_fold_survivor`` that changes the tree once, then searches for real.
-
-    The tombstone pass is the longest walk of the tree the verifier does, so
-    it is the widest window an adversary with write access to the clone has.
-    Firing the change from inside the search is only how that window is made
-    to open on every run.
-    """
-
-    import receipt.corpus
-
-    real = receipt.corpus._fold_survivor
-    fired = []
-
-    def fold_survivor(index, relative):
-        if not fired:
-            fired.append(relative)
-            plant()
-        return real(index, relative)
-
-    return fold_survivor
-
-
-def test_a_content_file_inserted_during_the_tombstone_pass_refuses(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds F4: the tombstone pass ran after the last look at the tree.
-
-    Membership was swept once before hashing and re-swept once after, and the
-    tombstone walk ran after both. A content file inserted while that walk was
-    reading directories was therefore never enumerated: the closed-world claim
-    was made over a set that had already changed, and the verdict passed.
-
-    The pass now runs before the hashing, so the re-sweep covers it. Without
-    the fix this verification returns a CorpusVerification and the smuggled
-    rule file is in the tree it just called closed.
-    """
-
-    body = '{"applied": true}\n'
-    write_tree(tmp_path)
-    rows = _tombstone_rows(".axiom/apply-manifest.json", body)
-    monkeypatch.setattr(
-        "receipt.corpus._fold_survivor",
-        _planting_fold_survivor(
-            lambda: (tmp_path / "rules/tax/smuggled.yaml").write_text("name: evil\n")
-        ),
-    )
-    with pytest.raises(CorpusError, match="content tree changed during verification"):
-        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
-
-
-def test_a_bound_file_rewritten_during_the_tombstone_pass_refuses(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds F4: the identity re-check ran before the tombstone walk too.
-
-    The per-file identity re-check is what catches a bound file rewritten
-    after it was hashed, and it ran before the tombstone pass, so a rewrite
-    during that pass kept the verdict of the bytes that were there earlier.
-    The verdict then described a tree that no longer existed, which is the one
-    thing this module is for.
-
-    With the pass moved ahead of the hashing, the rewrite lands before the
-    file is read and the digest itself refuses. Without the fix this
-    verification passes.
-    """
-
-    body = '{"applied": true}\n'
-    write_tree(tmp_path)
-    rows = _tombstone_rows(".axiom/apply-manifest.json", body)
-    monkeypatch.setattr(
-        "receipt.corpus._fold_survivor",
-        _planting_fold_survivor(
-            lambda: (tmp_path / "rules/tax/rate.yaml").write_text("value: 0.99\n")
-        ),
-    )
-    with pytest.raises(CorpusError, match="does not match its witnessed digest"):
-        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
-
-
-def _after_nth_search(after: str, occurrence: int, act):
-    """A ``_fold_survivor`` firing ``act`` after the nth search for ``after``.
-
-    The sibling helper above fires *before* the first search of the pass, so
-    the change is inside the walk. These tests need the change to land after
-    a named removed path has been looked for, which is how the window between
-    the two tombstone passes — or between one search and the next inside a
-    pass — is opened deterministically. Which path to fire behind is the
-    whole design of each test below, so it is named rather than counted.
-
-    Which *pass* is named the same way. A verification searches for every
-    removed path twice, so the first search for a path is the first pass's
-    and the second is the second pass's; ``occurrence`` picks between them,
-    and firing on the second is how a test puts its change inside the pass
-    that closes the run (R6-F2).
-    """
-
-    import receipt.corpus
-
-    real = receipt.corpus._fold_survivor
-    seen: list[str] = []
-
-    def fold_survivor(index, relative):
-        found = real(index, relative)
-        if relative == after:
-            seen.append(relative)
-            if len(seen) == occurrence:
-                act()
-        return found
-
-    return fold_survivor
-
-
-def _after_searching(after: str, act):
-    """Fire ``act`` after the *first* search for ``after`` — the first pass's."""
-
-    return _after_nth_search(after, 1, act)
-
-
-def _before_nth_search(before: str, occurrence: int, act):
-    """A ``_fold_survivor`` firing ``act`` just before the nth search for ``before``.
-
-    One instant earlier than the helper above, and it is the instant that
-    isolates the directory stamp. Every tombstone is checked by an exact
-    ``os.lstat`` of its own spelling and then by the fold search; firing
-    between the two means the host's own lookup has already answered
-    "absent", so a survivor written here is invisible to a search reading a
-    listing its pass took earlier — on a case-sensitive host and on a
-    case-insensitive one alike. What is left to refuse it is the stamp
-    ``_DirectoryGenerations`` took before that listing (S8-F1).
-    """
-
-    import receipt.corpus
-
-    real = receipt.corpus._fold_survivor
-    seen: list[str] = []
-
-    def fold_survivor(index, relative):
-        if relative == before:
-            seen.append(relative)
-            if len(seen) == occurrence:
-                act()
-        return real(index, relative)
-
-    return fold_survivor
-
-
-def _late_survivor_scandir(directory_name: str, survivor: str, planted: list[str]):
-    """A scan that reports one more entry once ``planted`` is non-empty.
-
-    The survivor is declared rather than written, and deliberately so: a name
-    the host itself resolves is caught by the exact-spelling ``os.lstat``
-    whichever pass reaches it first, and on a case-insensitive filesystem
-    that is every fold-varied spelling of a real file. Leaving it in the
-    listing alone makes the fold search the only thing that can find it, and
-    so makes the freshness of the listing the fold search reads the only
-    thing the test is about.
-    """
-
-    real = os.scandir
-
-    def scandir(target):
-        if pathlib.PurePath(os.fspath(target)).name != directory_name:
-            return real(target)
-        return _Scan(real(target), extra=[survivor] if planted else [])
-
-    return scandir
-
-
-def test_a_survivor_planted_after_a_shared_parent_was_cached_refuses(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds F1 (round five): tombstone absence was never re-established.
-
-    The pass reads each directory once and hands the cached listing to every
-    later search, and nothing revalidated it. Nothing after the pass looked
-    at a removed path either: the membership re-sweep covers content paths
-    and the identity re-check covers bound files. Two tombstones sharing a
-    parent is enough to turn that into a false PASS — the first search caches
-    the parent, a fold-varied survivor of the second tombstone appears in
-    that directory afterwards, and the second search reads the stale listing,
-    finds nothing, and the verdict names the path under removedPaths while it
-    is there to be opened.
-
-    The change fires after the search for ``.axiom/a.json``, which is exactly
-    the moment the shared parent has been cached and ``.axiom/b.json`` has
-    not yet been looked for, so the first pass genuinely misses it. The pass
-    now runs a second time over a fresh index, which lists ``.axiom`` again
-    for itself, and that is what refuses. Without the fix this verification
-    returns a CorpusVerification with both paths among its removed paths.
-    """
-
-    planted: list[str] = []
-    write_tree(tmp_path)
-    monkeypatch.setattr(
-        os, "scandir", _late_survivor_scandir(".axiom", "B.JSON", planted)
-    )
-    monkeypatch.setattr(
-        "receipt.corpus._fold_survivor",
-        _after_searching(".axiom/a.json", lambda: planted.append("B.JSON")),
-    )
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(_two_tombstone_rows()), spec=corpus_spec()
-        )
-    assert str(caught.value) == (
-        "removed path appeared during verification under a spelling that "
-        "aliases it on a case- or normalization-insensitive filesystem: "
-        ".axiom/b.json ('.axiom/B.JSON')"
-    )
-
-
-def test_a_removed_file_written_back_after_the_first_pass_refuses(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds F1 (round five): the same hole with a real file on disk.
-
-    A tombstoned file that reappears while the verifier works — a checkout, a
-    stray build step, anyone with write access to the clone — was reported
-    removed, because the tombstone pass ran once and everything after it
-    looked at content membership and at the bound bytes instead. The file is
-    written back here after the first pass has looked for both tombstones, so
-    that pass is honest about the tree it saw and only a second pass can see
-    this.
-
-    Which refusal the second pass raises depends on the host: its
-    exact-spelling ``os.lstat`` resolves ``.axiom/B.JSON`` on a
-    case-insensitive filesystem, and on a case-sensitive one the fold search
-    is what finds it. This pins the clause both of them carry, and the path
-    they name. Without the fix the verification passes and calls the file
-    removed.
-    """
-
-    write_tree(tmp_path)
-    monkeypatch.setattr(
-        "receipt.corpus._fold_survivor",
-        _after_searching(
-            ".axiom/b.json",
-            lambda: (tmp_path / ".axiom/B.JSON").write_text('{"applied": true}\n'),
-        ),
-    )
-    with pytest.raises(CorpusError, match="appeared during verification") as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(_two_tombstone_rows()), spec=corpus_spec()
-        )
-    assert ".axiom/b.json" in str(caught.value)
-
-
-def test_a_wide_static_corpus_verifies_within_the_real_tombstone_budget(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds S8-F1: the shipped budget refused a corpus nobody was writing to.
-
-    Every other test of this budget monkeypatches the constant down to a
-    handful of entries, which binds the counting and says nothing about the
-    number. The number was wrong: the second pass listed every directory on
-    every tombstone's path once *per tombstone*, and all of it was charged
-    against the same 262,144 the first pass had already spent from, so the
-    pass was O(R x E) again and the cap bounded the product.
-
-    The shape here is the reference consumer's own. ``rulespec-us`` holds
-    1,692 tracked files in ``us-co/statutes/39/``, which is what ``WIDTH``
-    is; a journal that has retired 160 paths from such a directory is an
-    ordinary append-only history, at 2,016 rows against a default capacity
-    of 4,096. Against the real constant, unpatched, with no writer anywhere
-    near the tree, that verification refused: ``rules/t00153.yaml`` was
-    reported unverifiable with the total at 262,145. It now costs 3,708 —
-    1,854 for each pass — because each pass lists the directory once.
-
-    The counter is read off the indexes the module builds rather than
-    recomputed here, so what is asserted is the module's own arithmetic. The
-    ceiling asserted is a fortieth of the budget: not "it fits", which the
-    old code also managed for 153 tombstones, but "it is nowhere near".
-    """
-
-    import receipt.corpus
-
-    width = 1692
-    tombstones = 160
-    built: list[object] = []
-    real_index = receipt.corpus._TombstoneIndex
-
-    class Recording(real_index):  # type: ignore[misc, valid-type]
-        def __init__(self, *arguments: object, **keywords: object) -> None:
-            super().__init__(*arguments, **keywords)
-            built.append(self)
-
-    monkeypatch.setattr("receipt.corpus._TombstoneIndex", Recording)
-
-    (tmp_path / "rules").mkdir()
-    (tmp_path / ".axiom").mkdir()
-    (tmp_path / ".axiom/toolchain.toml").write_text(ATTESTED[".axiom/toolchain.toml"])
-    content = {}
-    for index in range(width):
-        relative = f"rules/f{index:05d}.yaml"
-        body = f"name: f{index}\n"
-        (tmp_path / relative).write_text(body)
-        content[relative] = body
-    rows = journal_rows(content=content)
-    removed = [f"rules/t{index:05d}.yaml" for index in range(tombstones)]
-    for state in ("present", "removed"):
-        for relative in removed:
-            rows.append(
-                {
-                    "schemaVersion": JOURNAL_SCHEMA,
-                    "kind": "content",
-                    "path": relative,
-                    "sha256": sha256_text("gone\n"),
-                    "state": state,
-                }
-            )
-    rows = reindex(rows)
-    assert len(rows) < MAX_JOURNAL_ROWS
-
-    verification = verify_corpus_binding(
-        tmp_path, render_journal(rows), spec=corpus_spec()
-    )
-
-    assert verification.removed_paths == tuple(removed)
-    assert len(verification.content) == width
-    # Two indexes, the second carrying the first's total, so the last one
-    # holds what the verification spent between them.
-    assert len(built) == 2
-    spent = built[-1].work  # type: ignore[attr-defined]
-    assert spent == 2 * built[0].work  # type: ignore[attr-defined]
-    assert spent < receipt.corpus.MAX_TOMBSTONE_WORK // 40
-
-
-def test_the_two_tombstone_passes_charge_one_budget(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds F1 (round five): the second pass is not a second budget.
-
-    The work budget bounds a verification, not an index. A second index
-    starting from zero would let a tree of any width be walked twice for the
-    price of the cap once — the pass added to re-establish absence would
-    double the very cost the budget exists to bound. The budget here is
-    exactly what one pass charges, so the first pass finishes and the second
-    refuses on its first charged entry, which happens only if the second
-    index starts where the first one stopped.
-    """
-
-    write_tree(tmp_path)
-    monkeypatch.setattr(
-        "receipt.corpus.MAX_TOMBSTONE_WORK", _tombstone_pass_work(tmp_path)
-    )
-    with pytest.raises(CorpusError, match="tombstone work budget") as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(_two_tombstone_rows()), spec=corpus_spec()
-        )
-    assert "tombstone is unverifiable: .axiom/a.json" in str(caught.value)
-
-
-class _PlainDirectory:
-    """What ``lstat`` says about an ordinary directory.
-
-    Enough of a ``stat_result`` for the tombstone search, which reads the mode
-    to decide the entry is neither a symlink nor a reparse point.
-    """
-
-    st_mode = 0o040755
-    st_reparse_tag = 0
-
-
-class _CaseFoldingPath:
-    """A path object that compares and hashes case-insensitively, as Windows does.
-
-    ``pathlib.WindowsPath`` folds case in ``__eq__`` and ``__hash__`` — that is
-    the platform's own rule, not an approximation — so two spellings of one
-    name are a single dict key there. NTFS carries an opt-in per-directory
-    case-sensitivity flag, so those two spellings can be two real directories
-    at the same time. No POSIX host can hold both, which is why the listings
-    here are declared rather than written to disk.
-
-    Only what the tombstone pass touches is modelled: the ``__fspath__`` the
-    scan is given and the ``__truediv__`` the index builds children with,
-    ``name``, and an ``lstat`` that reports a plain directory.
-    """
-
-    def __init__(self, spelling: str, listings: dict[str, list[str]]) -> None:
-        self.spelling = spelling
-        self.listings = listings
-
-    @property
-    def name(self) -> str:
-        return self.spelling.rsplit("/", 1)[-1]
-
-    def __fspath__(self) -> str:
-        return self.spelling
-
-    def __truediv__(self, name: str) -> "_CaseFoldingPath":
-        return _CaseFoldingPath(
-            f"{self.spelling}/{name}" if self.spelling else name, self.listings
-        )
-
-    def lstat(self) -> _PlainDirectory:
-        return _PlainDirectory()
-
-    def __eq__(self, other: object) -> bool:
-        return (
-            isinstance(other, _CaseFoldingPath)
-            and self.spelling.lower() == other.spelling.lower()
-        )
-
-    def __hash__(self) -> int:
-        return hash(self.spelling.lower())
-
-
-def _declared_scandir(listings: dict[str, list[str]]):
-    """An ``os.scandir`` serving listings no POSIX host could hold at once.
-
-    Keyed by the exact spelling the scanned object reports through
-    ``__fspath__``, so the stand-in distinguishes the two directories the
-    test is about and the index has to distinguish them for itself.
-    """
-
-    def scandir(target):
-        spelling = os.fspath(target)
-        if spelling not in listings:
-            raise FileNotFoundError(spelling)
-        return _Scan(extra=listings[spelling])
-
-    return scandir
-
-
-def test_the_tombstone_index_keys_two_case_varied_directories_apart(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Binds F1: the listing cache was keyed by a path object.
-
-    ``pathlib.Path`` equality and hashing ignore case on Windows, so an empty
-    ``A/`` and a populated ``a/`` shared one cache entry there. Whichever was
-    listed first answered for both: the empty one cached as ``A``'s listing was
-    returned for ``a``, the fold search found no survivor, and a tombstone for
-    ``A/target`` passed while ``a/TARGET`` sat on disk under a spelling that
-    opens the tombstoned name on the very filesystems this search models.
-
-    The cache is keyed by the exact spelling the walk used. Without the fix the
-    second ``folded`` call returns the first call's listing and the survivor is
-    never found.
-    """
-
-    from receipt.corpus import _fold_survivor, _TombstoneIndex
-
-    listings = {"": ["A", "a"], "A": [], "a": ["TARGET"]}
-    monkeypatch.setattr(os, "scandir", _declared_scandir(listings))
-    root = _CaseFoldingPath("", listings)
-    index = _TombstoneIndex(root, generations=None)
-
-    upper = index.folded(_CaseFoldingPath("A", listings), "A", "A/target")
-    lower = index.folded(_CaseFoldingPath("a", listings), "a", "A/target")
-    assert upper == {}
-    assert list(lower) == ["target"]
-
-    assert _fold_survivor(index, "A/target") == "a/TARGET"
-
-
 def test_refuses_a_declared_path_with_a_trailing_dot_component(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -3886,129 +2852,10 @@ def test_refuses_a_declared_path_shaped_like_an_8_3_short_name(
             verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
 
 
-def _hiding_scandir(directory_name: str, hidden: str):
-    """A scan that omits one entry, the way Win32 lookup aliases behave.
-
-    Win32 resolves names no enumeration emits: it strips trailing dots and
-    spaces before a lookup, and NTFS answers to 8.3 short names. No POSIX host
-    does either, so the only way to put a verifier on this machine in front of
-    that filesystem is to hide from the listing a name the OS still resolves.
-    That is the whole premise of F1, and it is what this wrapper models.
-    """
-
-    return _scandir(directory_name, hidden=[hidden])
-
-
-def test_a_tombstoned_path_the_listing_hides_but_the_host_resolves_refuses(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds F1: absence read off a listing is not absence.
-
-    _fold_survivor decided whether a removed path survived from the names
-    ``iterdir`` emits, and Win32 lookup resolves names enumeration never emits.
-    So a retired apply manifest that still opens under the tombstoned spelling
-    was reported gone, the tombstone was honoured, and the verdict listed the
-    path under removedPaths while the file sat on disk.
-
-    The exact-path ``os.lstat`` now runs before the fold search, letting the
-    host that is actually running answer for its own lookup rules. Without it
-    this verification passes and returns the path as removed.
-    """
-
-    body = '{"applied": true}\n'
-    write_tree(tmp_path)
-    (tmp_path / "retired").mkdir()
-    (tmp_path / "retired/apply-manifest.json").write_text(body)
-    rows = _tombstone_rows("retired/apply-manifest.json", body)
-    monkeypatch.setattr(
-        os, "scandir", _hiding_scandir("retired", "apply-manifest.json")
-    )
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
-    assert str(caught.value) == (
-        "removed path is still present in the tree: retired/apply-manifest.json"
-    )
-
-
-def _mutating_scandir(directory_name: str, mutate):
-    """A scan that changes the tree after reading it, deterministically.
-
-    The window between reading a directory's names and stat-ing an entry one
-    of them named is a real one; taking the whole listing here and firing the
-    mutation before the module is handed its first entry is only how that
-    window is made to open on every run.
-
-    Once, though. The tombstone pass reads this directory again on its second
-    run (F1), and a mutation that fired a second time would either fail or
-    describe a tree the test never meant to build.
-    """
-
-    real = os.scandir
-    fired: list[str] = []
-
-    def scandir(target):
-        directory = pathlib.Path(os.fspath(target))
-        if directory.name != directory_name or fired:
-            return real(target)
-        with real(target) as entries:
-            names = [entry.name for entry in entries]
-        fired.append(directory_name)
-        mutate(directory)
-        return _Scan(extra=names)
-
-    return scandir
-
-
 def test_a_directory_that_became_a_file_verifies_and_keeps_verifying(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: pathlib.Path,
 ) -> None:
-    """Binds S7-R3-F5: the search recursed through a regular-file component.
-
-    An ordinary lifecycle: a corpus once carried ``rules/README.md/legacy.yaml``,
-    the journal retired it, and ``rules/README.md`` is now the ordinary
-    read-me file that name usually is. Nothing here is adversarial and
-    nothing is in motion — the tombstone is honoured, the file is gone, and
-    ``README.md`` is not content because ``.md`` is not a pinned suffix.
-
-    The search matched ``README.md`` by fold key, found components still to
-    go, and recursed into it. ``_TombstoneIndex.folded`` stamps a directory
-    before it lists it, so the recorder was handed a regular file;
-    ``_directory_generation`` has no generation for one and recorded
-    ``None``; ``os.scandir`` then raised ``NotADirectoryError``, which the
-    index reads as an ordinary absence, so the tombstone passed. The ``None``
-    was still in the recorder at the end of the run, where ``assert_unchanged``
-    read it as a directory that had moved — so this corpus refused as "the
-    tree changed during verification" on every run, for ever, with the tree
-    perfectly still. Verifying twice is the point: the failure was not a
-    race, and a second identical run reproduced it exactly.
-
-    The first half of the fix is what this binds: the search no longer
-    descends into a non-directory, so the recorder is never offered
-    ``rules/README.md`` at all, which is asserted over every name ``record``
-    is handed. Restoring the recursion stamps it and that assertion fails.
-
-    The second half is bound by
-    ``test_a_stamp_the_recorder_never_took_is_not_a_mutation`` alone, and
-    this test used to claim it too (S8-F8). With the ``continue`` in place no
-    ``None`` stamp is ever taken for that file, so restoring
-    ``if generation is None or ...`` to ``assert_unchanged`` leaves this test
-    green — measured — and only the sibling fails.
-    """
-
-    import receipt.corpus as corpus_module
-
-    recorded: list[str] = []
-    real_record = corpus_module._DirectoryGenerations.record
-
-    def recording_record(
-        self: object, directory: pathlib.Path, relative: str
-    ) -> bool:
-        recorded.append(relative)
-        return real_record(self, directory, relative)
-
-    monkeypatch.setattr(
-        corpus_module._DirectoryGenerations, "record", recording_record
-    )
+    """A tombstoned descendant stays absent when its old parent is a blob."""
 
     write_tree(tmp_path)
     legacy = "rules/README.md/legacy.yaml"
@@ -4029,131 +2876,20 @@ def test_a_directory_that_became_a_file_verifies_and_keeps_verifying(
     readme.write_text("# rules\n")
     assert readme.is_file()
 
+    oid = _commit_worktree(tmp_path)
     for _ in range(2):
-        verification = verify_corpus_binding(
-            tmp_path, render_journal(rows), spec=corpus_spec()
+        verification = _verify_commit(
+            tmp_path,
+            oid,
+            render_journal(rows),
+            spec=corpus_spec(),
         )
         assert verification.removed_paths == (legacy,)
         assert legacy not in {entry.path for entry in verification.content}
-        # The directories around it are stamped; the file is not a directory
-        # and is never offered as one.
-        assert "rules" in recorded
-        assert "rules/README.md" not in recorded
-
-
-def test_a_stamp_the_recorder_never_took_is_not_a_mutation(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Binds S7-R3-F5: a ``None`` stamp was read as a directory that moved.
-
-    ``record`` keeps a ``None`` for anything it could not stamp — a regular
-    file, an absent path, a directory it could not ``lstat`` — and
-    ``assert_unchanged`` treated every one of them as movement. A ``None``
-    says this recorder never had a stamp to compare, which is not a claim
-    about the tree, and the recorders that produce one either refuse at the
-    listing that follows or hand their subject to a re-hash that asks a
-    stronger question.
-
-    The direction that matters is asserted immediately after, because
-    passing over an untaken stamp must not pass over a taken one: a
-    directory stamped with a real generation and then written into still
-    refuses, in the sentence it always did.
-
-    Without S7-R3-F5 the first ``assert_unchanged`` raises.
-    """
-
-    from receipt.corpus import (
-        _DirectoryGenerations,
-        _PathPrefixWork,
-        _directory_generation,
-    )
-
-    (tmp_path / "notes.txt").write_text("x\n")
-    generations = _DirectoryGenerations(_PathPrefixWork())
-    assert generations.record(tmp_path / "notes.txt", "notes.txt") is False
-    assert generations.record(tmp_path / "absent", "absent") is False
-    generations.assert_unchanged()
-
-    watched = tmp_path / "watched"
-    watched.mkdir()
-    assert generations.record(watched, "watched") is True
-    stamped = _directory_generation(watched)
-    (watched / "planted.txt").write_text("y\n")
-    assert _directory_generation(watched) != stamped
-    with pytest.raises(CorpusError) as caught:
-        generations.assert_unchanged()
-    assert str(caught.value) == (
-        "the tree changed during verification; the closed-world verdict is "
-        "refused"
-    )
-
-
-def test_a_tombstone_entry_that_vanishes_after_the_listing_is_not_a_survivor(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds F7: a listed entry may be gone by the time it is stat-ed.
-
-    ``entry.lstat()`` sat outside the ``except OSError`` arm, so a directory
-    named by a listing but absent by the time the search probed it raised
-    FileNotFoundError out of the verifier. Without the fix this test errors
-    with FileNotFoundError; with it the entry is simply not a survivor, and
-    the tombstone — whose path really is gone — is honoured.
-
-    The entry is declared rather than deleted, for the reason
-    ``_late_survivor_scandir`` gives and for one more since S6-F1: the run's
-    directory recorder now stamps a directory at the *first* pass that reads
-    it, so really removing ``retired/vanishing`` while the first tombstone
-    pass walks moves ``retired``'s mtime against a stamp taken before the
-    removal, and the verification refuses — correctly, since the tree did
-    change under it, but for a reason that is not this finding. A name only
-    the listing carries leaves the probe's error handling the one thing
-    under test.
-    """
-
-    body = '{"applied": true}\n'
-    write_tree(tmp_path)
-    (tmp_path / "retired").mkdir(parents=True)
-    rows = _tombstone_rows("retired/vanishing/apply-manifest.json", body)
-    monkeypatch.setattr(os, "scandir", _scandir("retired", extra=["vanishing"]))
-    verification = verify_corpus_binding(
-        tmp_path, render_journal(rows), spec=corpus_spec()
-    )
-    assert verification.removed_paths == ("retired/vanishing/apply-manifest.json",)
-
-
-def test_a_tombstone_entry_that_cannot_be_stat_after_the_listing_refuses(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds F7: the same probe leaked PermissionError.
-
-    A directory that is readable but not searchable lists fine and refuses
-    every stat of a child. The permission drops after the listing here, so the
-    exact-path probe has already returned ENOENT and the fold search is the
-    one that meets the error. Without the fix it is a bare PermissionError out
-    of the verifier; with it, the module's own rule applies — a failure to
-    look is not an absence.
-    """
-
-    import os
-
-    body = '{"applied": true}\n'
-    write_tree(tmp_path)
-    (tmp_path / "retired/sub").mkdir(parents=True)
-    rows = _tombstone_rows("retired/sub/apply-manifest.json", body)
-    monkeypatch.setattr(
-        os,
-        "scandir",
-        _mutating_scandir("retired", lambda d: os.chmod(d, 0o444)),
-    )
-    try:
-        with pytest.raises(CorpusError, match="tombstone is unverifiable"):
-            verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
-    finally:
-        os.chmod(tmp_path / "retired", 0o755)
 
 
 def test_refuses_a_tree_entry_carrying_an_unassigned_code_point(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: pathlib.Path,
 ) -> None:
     """Binds F2 and the policy: entry names were folded without a screen.
 
@@ -4175,16 +2911,19 @@ def test_refuses_a_tree_entry_carrying_an_unassigned_code_point(
 
     assert unicodedata.category("͸") == "Cn"
     write_tree(tmp_path)
-    monkeypatch.setattr(os, "scandir", _scandir("tax", extra=["notes͸"]))
+    oid = _commit_extra_blob(tmp_path, "rules/tax/notes͸".encode())
     with pytest.raises(CorpusError, match="is not a portable name") as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        _verify_commit(
+            tmp_path,
+            oid,
+            render_journal(journal_rows()),
+            spec=corpus_spec(),
         )
     assert "tree entry 'rules/tax/notes" in str(caught.value)
 
 
 def test_refuses_an_unassigned_code_point_in_a_tombstone_listing(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: pathlib.Path,
 ) -> None:
     """Binds F2 and the policy: the tombstone search folds entry names too.
 
@@ -4200,12 +2939,11 @@ def test_refuses_an_unassigned_code_point_in_a_tombstone_listing(
 
     body = '{"applied": true}\n'
     write_tree(tmp_path)
-    (tmp_path / "retired").mkdir()
     rows = _tombstone_rows("retired/apply-manifest.json", body)
-    monkeypatch.setattr(os, "scandir", _scandir("retired", extra=["sibling͸"]))
+    oid = _commit_extra_blob(tmp_path, "retired/sibling͸".encode())
     with pytest.raises(CorpusError, match="is not a portable name") as caught:
-        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
-    assert "tree entry examined for a tombstone" in str(caught.value)
+        _verify_commit(tmp_path, oid, render_journal(rows), spec=corpus_spec())
+    assert f"tree entry {'retired/sibling͸'!r}" in str(caught.value)
 
 
 def test_the_refusal_no_longer_depends_on_the_interpreter_at_all(
@@ -4350,52 +3088,6 @@ def test_a_forged_verdict_line_in_a_tree_name_is_escaped(
     assert "\\x1b[2K\\rVERDICT: PASS" in message
 
 
-def test_refuses_a_directory_reparse_point_under_a_content_root(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds F5: a Windows junction is not a symlink and was descended.
-
-    The sweep asked ``is_symlink()``, which answers for POSIX symlinks only.
-    On Windows a junction, and every other directory reparse point, reports
-    ``False`` there while redirecting the walk somewhere else entirely — so a
-    directory under a content root could be a link into an ambient tree, and
-    the sweep would descend it, hash whatever it found, and call the closed
-    world closed. ``st_reparse_tag`` is how Windows reports one, and it is the test
-    ``_assert_no_symlinked_component`` already applies to a bound path.
-
-    No POSIX host can create a reparse point, so the ``lstat`` for one entry
-    is answered here the way Windows would answer it. Without the fix the
-    walk descends and the refusal names the file inside instead — that is,
-    the junction itself is accepted as an ordinary directory.
-    """
-
-    import stat
-    import types
-
-    write_tree(tmp_path)
-    junction = tmp_path / "rules/junction"
-    junction.mkdir()
-    (junction / "evil.yaml").write_text("name: evil\n")
-    real = pathlib.Path.lstat
-
-    def lstat(self: pathlib.Path, *args: object, **kwargs: object):
-        if self == junction:
-            # IO_REPARSE_TAG_MOUNT_POINT, the tag a junction carries.
-            return types.SimpleNamespace(
-                st_mode=stat.S_IFDIR | 0o755, st_reparse_tag=0xA0000003
-            )
-        return real(self, *args, **kwargs)
-
-    monkeypatch.setattr(pathlib.Path, "lstat", lstat)
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-    assert str(caught.value) == (
-        "content root contains a symlink or reparse point: 'rules/junction'"
-    )
-
-
 def test_refuses_a_content_root_spelled_with_a_varied_case(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -4457,127 +3149,32 @@ def test_a_case_varied_content_root_makes_a_path_content(
 
 
 def test_the_aliasing_root_component_refusal_names_the_entry(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: pathlib.Path,
 ) -> None:
-    """Binds F6: the refusal a case-sensitive host raises, pinned on any host.
-
-    A case-insensitive filesystem cannot hold ``rules`` and ``RULES`` at once,
-    so the test above reaches the unlisted-file refusal here and the
-    aliasing-root-component refusal only on a case-sensitive host. The entry
-    is injected into the tree root's listing so the branch — and its exact
-    wording, which an auditor has to act on — is covered everywhere.
-    """
+    """A raw tree with only an alias spelling names the pinned component."""
 
     write_tree(tmp_path)
-    monkeypatch.setattr(os, "scandir", _scandir_at(tmp_path, "RULES"))
+    _commit_worktree(tmp_path)
+    updates: list[tuple[str, str | None, bytes]] = []
+    for path in sorted(CONTENT):
+        object_id = (
+            _git(tmp_path, "rev-parse", f"HEAD:{path}").decode("ascii").strip()
+        )
+        updates.append(("0", None, path.encode("ascii")))
+        updates.append(
+            ("100644", object_id, path.replace("rules/", "RULES/", 1).encode("ascii"))
+        )
+    oid = _commit_index_updates(tmp_path, updates)
     with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        _verify_commit(
+            tmp_path,
+            oid,
+            render_journal(journal_rows()),
+            spec=corpus_spec(),
         )
     assert str(caught.value) == (
         "tree entry 'RULES' aliases the pinned content root component 'rules' "
         "on a case- or normalization-insensitive filesystem"
-    )
-
-
-def test_refuses_two_directories_a_case_insensitive_checkout_would_merge(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds S5R4-F2: the sweep screened entries, never pairs of them.
-
-    Every screen the sweep runs judges one entry at a time — the portable
-    repertoire, the symlink, the kind, the suffix — and none of them can see
-    that two entries of one directory are one entry somewhere else. A
-    declared ``rules/tax/rate.yaml`` beside an undeclared ``rules/TAX/`` is
-    two directories on the auditor's case-sensitive checkout, where the sweep
-    descends the declared one, finds the declared file, and calls the world
-    closed; a case-insensitive checkout of the same commit holds one merged
-    directory carrying both, so the closed world is open by exactly the files
-    the undeclared spelling brought with it.
-
-    ``_reject_aliasing_paths`` cannot answer this. It compares the paths the
-    *journal* declares, and only one of these two is declared — the other
-    exists only in the listing.
-
-    Without the pair check this tree verifies. The refusal names both
-    entries, with the directory they sit in, because an auditor has to find
-    them.
-    """
-
-    write_tree(tmp_path)
-    monkeypatch.setattr(os, "scandir", _scandir_at(tmp_path / "rules", "TAX"))
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-    assert str(caught.value) == (
-        "directory holds two entries a case-insensitive filesystem would "
-        "merge: 'rules/TAX' and 'rules/tax'"
-    )
-
-
-def test_refuses_a_directory_that_would_merge_with_a_content_file(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds S5R4-F2, the other shape: the pair need not be two directories.
-
-    What merges on a case-insensitive volume is the name, whatever it names,
-    so a directory whose name folds onto a bound content file is the same
-    ambiguity: the consumer's checkout holds one of them and cannot say
-    which. The check therefore runs before either entry is classified, which
-    is what makes a declared name enough here: the entry never reaches the
-    ``lstat`` that would decide what it is.
-
-    Declared rather than written because the pair cannot be written on the
-    volume the ambiguity is about — a case-insensitive host will not hold
-    ``Rate.yaml`` beside ``rate.yaml``, which is the whole finding. Without
-    the pair check the sweep goes on to judge the name one entry at a time
-    and the auditor gets whatever that produces instead of this refusal.
-    """
-
-    write_tree(tmp_path)
-    monkeypatch.setattr(
-        os, "scandir", _scandir_at(tmp_path / "rules" / "tax", "Rate.yaml")
-    )
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-    assert str(caught.value) == (
-        "directory holds two entries a case-insensitive filesystem would "
-        "merge: 'rules/tax/Rate.yaml' and 'rules/tax/rate.yaml'"
-    )
-
-
-def test_refuses_two_merging_entries_beside_a_pinned_root_component(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds S5R4-F2, beside a root component: the same listing, same pair.
-
-    The walk that guards a pinned content root already reads every entry of
-    every parent of the root, and it asked one question of each: does this
-    entry alias the pinned component. Two entries that merge with *each
-    other* went unremarked, although the directory they merge in is the one
-    holding the content root, and on the consumer's volume it is a different
-    directory from the one the auditor listed.
-
-    The root-component refusal keeps its precedence, which the test below
-    this one pins: it names the component a consumer's spec pins, and this
-    refusal could only name two entries.
-
-    Without the pair check this tree verifies.
-    """
-
-    write_tree(tmp_path)
-    (tmp_path / "notes").mkdir()
-    monkeypatch.setattr(os, "scandir", _scandir_at(tmp_path, "NOTES"))
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-    assert str(caught.value) == (
-        "directory holds two entries a case-insensitive filesystem would "
-        "merge: 'NOTES' and 'notes'"
     )
 
 
@@ -4609,6 +3206,51 @@ def test_refuses_a_tree_file_whose_short_name_alias_would_be_content(
         "content root contains a file whose short-name alias would carry a "
         "pinned suffix: 'rules/smuggled.ymlx'"
     )
+
+
+@pytest.mark.parametrize("shape", ["symlink", "directory"])
+@pytest.mark.parametrize("name_repertoire", ["portable", "posix-bytes"])
+def test_short_name_suffix_screen_covers_every_tree_entry_kind_in_portable(
+    tmp_path: pathlib.Path,
+    shape: str,
+    name_repertoire: str,
+) -> None:
+    """A non-blob cannot evade portable 8.3 screening by its entry mode."""
+
+    write_tree(tmp_path)
+    _commit_worktree(tmp_path)
+    blob_oid = _hash_blob(tmp_path, b"shape fixture\n")
+    path = "rules/hidden.ymlx"
+    if shape == "symlink":
+        updates = [("120000", blob_oid, path.encode())]
+    else:
+        updates = [("100644", blob_oid, f"{path}/child.txt".encode())]
+    oid = _commit_index_updates(tmp_path, updates)
+    spec = corpus_spec(
+        content_suffixes=(".yaml", ".yml"),
+        name_repertoire=name_repertoire,
+    )
+
+    if name_repertoire == "posix-bytes":
+        verification = _verify_commit(
+            tmp_path,
+            oid,
+            render_journal(journal_rows()),
+            spec=spec,
+        )
+        assert verification.name_repertoire == "posix-bytes"
+    else:
+        with pytest.raises(CorpusError) as caught:
+            _verify_commit(
+                tmp_path,
+                oid,
+                render_journal(journal_rows()),
+                spec=spec,
+            )
+        assert str(caught.value) == (
+            "content root contains a file whose short-name alias would carry a "
+            f"pinned suffix: {path!r}"
+        )
 
 
 def _refuses_short_name_alias(tmp_path: pathlib.Path, name: str) -> None:
@@ -4696,7 +3338,7 @@ def test_a_short_name_extension_carrying_a_non_ascii_character_is_refused(
 
 
 def test_refuses_a_tree_entry_whose_name_windows_would_strip(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: pathlib.Path,
 ) -> None:
     """Binds R6-F1: a trailing dot on a tree entry aliases the name beside it.
 
@@ -4704,16 +3346,14 @@ def test_refuses_a_tree_entry_whose_name_windows_would_strip(
     ``rules/tax/notes.yaml.`` opens ``rules/tax/notes.yaml`` there. The two
     spellings are not fold-equal, so no fold key pairs them, and a declared
     path spelled either way has been refused since round three — but the
-    entry the *tree* carries was never asked. A file emitted under the dotted
-    spelling is not content by suffix, is skipped by the sweep, and answers
-    to a content name on the filesystem this module's whole portability model
-    is about.
+    entry the *tree* carries was never asked. A blob committed under the
+    dotted spelling is not content by suffix, is omitted from the derived
+    content set, and answers to a content name on the checkout filesystem
+    this module's portability claim is about.
 
-    The name is injected through the sweep's listing rather than written:
-    what the verifier has to hold against is a filesystem that emits the
-    name, and injecting it makes the test say the same thing on every host.
-    Without the screen the entry falls through to the ``lstat``, which fails,
-    and the refusal is the non-regular-file one instead.
+    The name is committed through a raw index entry, so the authenticated
+    listing contains it even when the host checkout cannot. Without the
+    screen it remains an ordinary non-content blob and verification passes.
 
     Binds the policy for the message: the trailing period is the one Win32
     alias rule the portable repertoire does not subsume, so it is one of the
@@ -4721,10 +3361,13 @@ def test_refuses_a_tree_entry_whose_name_windows_would_strip(
     """
 
     write_tree(tmp_path)
-    monkeypatch.setattr(os, "scandir", _scandir("tax", extra=["notes.yaml."]))
+    oid = _commit_extra_blob(tmp_path, b"rules/tax/notes.yaml.")
     with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        _verify_commit(
+            tmp_path,
+            oid,
+            render_journal(journal_rows()),
+            spec=corpus_spec(),
         )
     assert str(caught.value) == (
         f"tree entry 'rules/tax/notes.yaml.' {NOT_PORTABLE}: 'notes.yaml.'"
@@ -4732,7 +3375,7 @@ def test_refuses_a_tree_entry_whose_name_windows_would_strip(
 
 
 def test_refuses_an_entry_beside_a_root_component_windows_would_strip(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: pathlib.Path,
 ) -> None:
     """Binds R6-F1: the same strip decides which directory *is* the root.
 
@@ -4757,13 +3400,16 @@ def test_refuses_an_entry_beside_a_root_component_windows_would_strip(
     """
 
     write_tree(tmp_path)
-    monkeypatch.setattr(os, "scandir", _scandir_at(tmp_path, "rules "))
+    oid = _commit_extra_blob(tmp_path, b"rules /scratch.txt")
     with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        _verify_commit(
+            tmp_path,
+            oid,
+            render_journal(journal_rows()),
+            spec=corpus_spec(),
         )
     assert str(caught.value) == (
-        f"tree entry beside 'rules' {NOT_PORTABLE}: 'rules '"
+        f"tree entry 'rules ' {NOT_PORTABLE}: 'rules '"
     )
 
 
@@ -4783,442 +3429,6 @@ def test_an_ordinary_non_content_file_under_a_content_root_still_verifies(
     write_tree(tmp_path)
     (tmp_path / "rules/README.md").write_text("# rules\n")
     (tmp_path / "rules/tax/notes.txt").write_text("scratch\n")
-    verification = verify_corpus_binding(
-        tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-    )
-    assert len(verification.content) == len(CONTENT)
-
-
-def test_a_survivor_planted_inside_the_second_tombstone_pass_refuses(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds S8-F1: what the second pass gives up by sharing a listing again.
-
-    Round six had that pass list every directory afresh for every removed
-    path, so a survivor appearing in a parent it had already listed was found
-    by the next search rather than missed. That cost R x E and refused a
-    static corpus of the reference consumer's shape (S8-F1), so the pass
-    shares a listing within itself once more — and the window round six
-    closed by re-listing is closed here by the directory stamp instead.
-
-    The survivor is written to disk inside the *second* pass, after that pass
-    has listed the shared parent for ``.axiom/a.json`` and after
-    ``.axiom/b.json``'s own exact-spelling ``os.lstat`` has answered
-    "absent" — which is what ``_before_nth_search`` is for, and what makes
-    the outcome the same on a case-sensitive host and a case-insensitive one.
-    So b.json's search reads the listing its pass took before the write and
-    finds nothing. The write moved ``.axiom``'s mtime and ctime, that
-    directory was stamped an instant before it was first listed, and the
-    closing re-statement refuses. Without the stamp — replacing
-    ``_DirectoryGenerations.assert_unchanged`` with a no-op leaves the rest
-    of the module intact — this verification returns a CorpusVerification
-    naming ``.axiom/b.json`` as removed while the file sits on disk under a
-    spelling that aliases it.
-
-    So the refusal is the recorder's rather than the search's, and the
-    message says so. That is the whole of the trade: what a real host cannot
-    do is add an entry to a directory without moving its stamps, and the
-    residual is a filesystem whose directory timestamps are coarser than the
-    interval between the listing and the re-read — the stamp's own residual,
-    not this pass's.
-    """
-
-    write_tree(tmp_path)
-    monkeypatch.setattr(
-        "receipt.corpus._fold_survivor",
-        _before_nth_search(
-            ".axiom/b.json",
-            2,
-            lambda: (tmp_path / ".axiom/B.JSON").write_text('{"applied": true}\n'),
-        ),
-    )
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(_two_tombstone_rows()), spec=corpus_spec()
-        )
-    assert str(caught.value) == (
-        "the tree changed during verification; the closed-world verdict is refused"
-    )
-
-
-def test_a_content_file_inserted_during_the_second_tombstone_pass_refuses(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds R6-F2: nothing watched the tree while the last pass walked it.
-
-    Round four moved the tombstone walk ahead of the hashing so the two
-    re-checks would close a window over it; round five then put a second walk
-    *after* those re-checks, and stated the cost — no membership re-sweep
-    follows it. That cost was a false PASS: a content file inserted while the
-    second walk read directories was never enumerated again, and the verdict
-    called a set closed that had gained a file since it was last looked at.
-
-    A third re-sweep would only move the boundary, so the walk is watched by
-    generation instead. Every directory the closing sweep read is stamped an
-    instant before it is read and re-stated once the walk has finished, and
-    an insertion moves its parent's mtime and ctime. Without the fix this
-    verification returns a CorpusVerification with the smuggled rule file in
-    the tree it just called closed.
-
-    The check sees a write the host's directory timestamps distinguish from
-    the stamp taken before it; measured on this host, a create moves both
-    stamps. A filesystem with coarser directory timestamps would leave a
-    window this cannot see, which is a property of the stamp, not of the pass.
-    """
-
-    write_tree(tmp_path)
-    monkeypatch.setattr(
-        "receipt.corpus._fold_survivor",
-        _after_nth_search(
-            ".axiom/a.json",
-            2,
-            lambda: (tmp_path / "rules/tax/smuggled.yaml").write_text("name: evil\n"),
-        ),
-    )
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(_two_tombstone_rows()), spec=corpus_spec()
-        )
-    assert str(caught.value) == (
-        "the tree changed during verification; the closed-world verdict is refused"
-    )
-
-
-def _mutate_between_the_sweeps(monkeypatch: pytest.MonkeyPatch, mutate) -> list[int]:
-    """Fire ``mutate`` once from inside the hashing, between the two sweeps.
-
-    The hashing runs after the opening membership sweep and the first
-    tombstone pass and before the closing sweep, so a change fired from
-    there lands in the span S6-F1 is about: after the tree has been
-    enumerated once and before it is enumerated again. Returns the call
-    counter so a test can assert the wrapper really fired.
-    """
-
-    import receipt.corpus as corpus_mod
-
-    real = corpus_mod._regular_file_digest
-    calls: list[int] = []
-
-    def hash_then_mutate(root: pathlib.Path, relative: str, **options: object):
-        result = real(root, relative, **options)  # type: ignore[arg-type]
-        calls.append(1)
-        if len(calls) == 1:
-            mutate()
-        return result
-
-    monkeypatch.setattr(corpus_mod, "_regular_file_digest", hash_then_mutate)
-    return calls
-
-
-def test_a_content_file_created_and_removed_between_the_sweeps_refuses(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds S6-F1: the recorder began after the tree had already been read.
-
-    The directory-generation recorder was built after the opening membership
-    sweep, the first tombstone pass and the hashing, so the earliest stamp of
-    any directory was taken by the *closing* sweep. That leaves a change
-    landing in the first half of the run watched by nothing: membership
-    cannot see a content file that is created and removed between the two
-    sweeps — neither enumeration ever holds it, so the two sets are equal —
-    and the stamp the closing sweep took was taken after the mutation, so it
-    matched as well. The verification returned a PASS over a tree that had
-    gained and lost a file under a content root while it was being called
-    closed, which is outside the residual the module documents: the change
-    landed well before that directory's final re-read.
-
-    One recorder now, built before anything reads the tree and carried into
-    every directory read the run makes, so ``rules/tax`` is stamped by the
-    opening sweep and ``assert_unchanged`` holds it against that stamp.
-    Without the fix this verification returns a CorpusVerification naming all
-    three content files.
-
-    The file is written with a pinned suffix on purpose: had either sweep
-    been looking when it existed, membership would have refused it as
-    unlisted. Neither was, which is the whole finding.
-
-    The wrapper asserts its own premise — that the create and the removal
-    moved the directory's mtime and ctime — because a filesystem whose
-    directory timestamps cannot distinguish them would leave a window this
-    check cannot see. That is a property of the stamp rather than of the
-    pass, and it is the same caveat the two tests above state.
-    """
-
-    from receipt.corpus import _directory_generation
-
-    write_tree(tmp_path)
-    directory = tmp_path / "rules/tax"
-    smuggled = directory / "smuggled.yaml"
-
-    def create_then_remove() -> None:
-        before = _directory_generation(directory)
-        smuggled.write_text("name: evil\n")
-        smuggled.unlink()
-        assert not smuggled.exists()
-        assert _directory_generation(directory) != before
-
-    calls = _mutate_between_the_sweeps(monkeypatch, create_then_remove)
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-    assert calls
-    assert str(caught.value) == (
-        "the tree changed during verification; the closed-world verdict is refused"
-    )
-
-
-def test_an_untouched_tree_still_verifies_through_the_same_wrapper(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds S6-F1, the control: stamping from the first read refuses nothing.
-
-    Stamping every directory from the run's *earliest* read of it widens the
-    window the closing check covers to the whole verification, which is only
-    correct if nothing the verifier itself does moves a stamp. It does not:
-    reading a directory touches its atime, and neither mtime nor ctime, and
-    the verifier never writes. This drives the same wrapper over the same
-    tree with the mutation removed and asserts the verdict is unchanged.
-
-    This test passes with the S6-F1 change disabled, which is the point: it
-    is what keeps the wider window from turning an ordinary corpus into a
-    refusal.
-    """
-
-    write_tree(tmp_path)
-    calls = _mutate_between_the_sweeps(monkeypatch, lambda: None)
-    verification = verify_corpus_binding(
-        tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-    )
-    assert calls
-    assert [entry.path for entry in verification.content] == sorted(CONTENT)
-    assert [entry.path for entry in verification.attested] == sorted(ATTESTED)
-
-
-def test_a_bound_file_rewritten_during_the_second_tombstone_pass_refuses(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds R6-F2: the identity re-check could not speak for the last walk.
-
-    The per-file identity re-check is what catches a hashed file replaced
-    afterwards, and it runs before the second tombstone pass — so a rewrite
-    landing during that pass kept the verdict of bytes that were no longer
-    there. This one replaces a bound content file by renaming another file
-    over its name, which is how a rewrite is done atomically and how it is
-    done by every tool that does it safely.
-
-    A rename over an existing name replaces a directory entry, so the
-    parent's mtime and ctime both move and the generation check refuses. The
-    replacement is staged outside the verified tree so the only change inside
-    it is the one under test. Without the fix this verification passes and
-    reports a digest the tree no longer holds.
-
-    What stays inside the residual, deliberately: a rewrite in place, through
-    the same inode, after the identity re-check has run. It moves the file's
-    own mtime and ctime, not its parent's, and nothing after the identity
-    re-check reads the file again. Closing that would mean re-hashing every
-    bound file after the last pass, which only moves the last look rather
-    than removing it.
-    """
-
-    staged = tmp_path.parent / f"{tmp_path.name}-staged.yaml"
-    staged.write_text("name: rate\nvalue: 0.99\n")
-    write_tree(tmp_path)
-    monkeypatch.setattr(
-        "receipt.corpus._fold_survivor",
-        _after_nth_search(
-            ".axiom/a.json",
-            2,
-            lambda: os.replace(staged, tmp_path / "rules/tax/rate.yaml"),
-        ),
-    )
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(_two_tombstone_rows()), spec=corpus_spec()
-        )
-    assert str(caught.value) == (
-        "the tree changed during verification; the closed-world verdict is refused"
-    )
-
-
-def _replace_keeping_size_and_mtime(
-    target: pathlib.Path, body: str, staging: pathlib.Path
-) -> None:
-    """Rename ``body`` over ``target`` and put the old mtime back.
-
-    How a careful writer replaces a file, and how an adversary hides having
-    done it: same length, same modification time, a new inode. Everything
-    the identity re-check compared before this round survives it except the
-    inode — and the rename lands after that re-check has run, so the only
-    thing left that can notice is the parent directory's own generation.
-
-    The replacement is staged *outside* the verified tree, which is not
-    tidiness: creating and removing a staging file inside the tree root would
-    move the root's own generation, and the root is stamped by every walk, so
-    the test would refuse for a reason that has nothing to do with the file
-    under test.
-    """
-
-    before = target.stat()
-    assert len(body.encode()) == before.st_size
-    staged = staging / f"{target.name}.staged"
-    staged.write_text(body)
-    os.replace(staged, target)
-    os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
-
-
-def test_an_attested_file_replaced_during_the_second_tombstone_pass_refuses(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds S4-F2: generation tracking watched the walks, not the verdict's own files.
-
-    Round six stamped every directory the closing membership sweep and the
-    second tombstone walk *read*. Neither of them reads the directory that
-    holds an attested file: attested paths sit outside the content roots, and
-    a tombstone walk descends only toward a removed path — here a path under
-    ``retired/``, so the walk touches the tree root and ``retired`` and
-    nothing else. ``.axiom`` was stamped by nothing.
-
-    So a producer with write access to the clone could wait until the bound
-    files' identities had been re-stated, then replace
-    ``.axiom/toolchain.toml`` while the last pass walked elsewhere. The
-    rename moves only ``.axiom``'s mtime and ctime, no stamp existed to
-    compare them against, and the verdict returned the digest of bytes the
-    tree no longer held.
-
-    Every ancestor of every bound path is stamped now, before the identity
-    re-check, and ``assert_unchanged`` re-states them last. Without the fix
-    this verification returns a CorpusVerification naming a toolchain pin
-    that is no longer in the tree.
-    """
-
-    body = '{"applied": true}\n'
-    write_tree(tmp_path)
-    (tmp_path / "retired").mkdir()
-    rows = _tombstone_rows("retired/apply-manifest.json", body)
-    replacement = '[toolchain]\ncorpus_release = "test-2026-99-99"\n'
-    monkeypatch.setattr(
-        "receipt.corpus._fold_survivor",
-        _after_nth_search(
-            "retired/apply-manifest.json",
-            2,
-            lambda: _replace_keeping_size_and_mtime(
-                tmp_path / ".axiom/toolchain.toml", replacement, tmp_path.parent
-            ),
-        ),
-    )
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
-    assert str(caught.value) == (
-        "the tree changed during verification; the closed-world verdict is refused"
-    )
-    assert (tmp_path / ".axiom/toolchain.toml").read_text() == replacement
-
-
-def test_a_bound_file_rewritten_in_place_with_its_mtime_restored_refuses(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds S4-F2: the identity tuple compared only what a writer can restore.
-
-    The per-file identity re-check held a bound file to the device, inode,
-    size and mtime the hashing descriptor saw. A rewrite through the same
-    open inode changes none of the first three, and the fourth is a value
-    ``os.utime`` puts back — so a rewrite landing between the hashing and the
-    re-check passed the re-check, and no directory generation saw it either,
-    because writing through an existing inode does not touch the parent
-    directory at all.
-
-    The identity now carries ``st_ctime_ns``, which on POSIX is the inode
-    change time and is not settable from userspace. The rewrite is fired
-    from inside the closing membership sweep, which is the window between the
-    hashing and the re-check; the sweep's own answer is unaffected, since
-    membership does not change. Without the ctime term this verification
-    returns a CorpusVerification reporting a digest the tree no longer holds.
-    """
-
-    import receipt.corpus as corpus_mod
-
-    write_tree(tmp_path)
-    target = tmp_path / "rules/tax/rate.yaml"
-    replacement = "name: rate\nvalue: 0.99\n"
-    assert len(replacement) == len(CONTENT["rules/tax/rate.yaml"])
-    real = corpus_mod._tree_content_paths
-    calls = {"n": 0}
-
-    def sweep_then_rewrite(root: pathlib.Path, spec: object, **passed) -> dict:
-        result = real(root, spec, **passed)
-        calls["n"] += 1
-        if calls["n"] == 2:
-            before = target.stat()
-            with open(target, "r+b") as handle:
-                handle.write(replacement.encode())
-            os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
-            after = target.stat()
-            # The premise: everything the old tuple compared is back.
-            assert (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) == (
-                before.st_dev,
-                before.st_ino,
-                before.st_size,
-                before.st_mtime_ns,
-            )
-        return result
-
-    monkeypatch.setattr(corpus_mod, "_tree_content_paths", sweep_then_rewrite)
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-    assert str(caught.value) == (
-        "bound file 'rules/tax/rate.yaml' changed during verification; the "
-        "verdict is refused"
-    )
-
-
-def test_refuses_to_verify_at_all_off_posix(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds S4-F3: every concurrency claim here rests on POSIX ctime.
-
-    ``_directory_generation`` treats ``st_ctime_ns`` as the change stamp a
-    writer cannot forge, and the bound-file identity added by S4-F2 does the
-    same for a file. On Windows every supported CPython puts the *creation*
-    time in that field — 3.12 deprecated it and 3.14 still does it — so an
-    entry can be added, removed or renamed and the directory's mtime put
-    back with ``os.utime``, leaving the recorded tuple identical. Every
-    stamp the module compares would then say "unchanged" about a tree that
-    changed, which is worse than not looking.
-
-    So the module refuses there, first thing, on a corpus that otherwise
-    verifies — which is what this pins: the tree, the journal and the spec
-    below are the fixture's own, and the verification is refused for the
-    platform alone. Without the fix it returns a PASS whose central claim
-    the platform cannot support.
-    """
-
-    write_tree(tmp_path)
-    monkeypatch.setattr(os, "name", "nt")
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-    assert str(caught.value) == (
-        "corpus verification requires POSIX change-time semantics (st_ctime "
-        "as the inode change time) to detect a tree changing under it; on "
-        "this platform the verifier refuses rather than trusting a stamp a "
-        "writer can restore"
-    )
-
-
-def test_the_same_corpus_verifies_on_posix(tmp_path: pathlib.Path) -> None:
-    """Binds S4-F3, the control: the refusal above is about the platform.
-
-    The identical tree, journal and spec, with ``os.name`` left alone. If
-    this ever fails alongside the test above passing, the platform screen has
-    become the only reason anything refuses.
-    """
-
-    write_tree(tmp_path)
-    assert os.name == "posix"
     verification = verify_corpus_binding(
         tmp_path, render_journal(journal_rows()), spec=corpus_spec()
     )
@@ -5602,80 +3812,6 @@ def test_the_rendered_charge_equals_what_json_dumps_would_cost() -> None:
 # --- second fresh gate, round one: what the closing checks still let past ----
 
 
-def test_a_directory_changed_after_its_own_re_read_is_caught_going_back(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds S5-F1: one ordered re-read leaves every earlier directory open.
-
-    ``assert_unchanged`` re-stated each stamped directory once, in sorted
-    order. A writer with the clone open could therefore wait for the pass to
-    move past a directory and change it while a later one was still being
-    re-read: that directory is never revisited, and the verdict returned
-    claiming a residual of "one instant" that was really the whole span
-    after each directory's own last re-read.
-
-    Here the change lands during the forward pass's re-read of the *last*
-    stamped directory (``rules/tax``) and creates a file in one the pass has
-    already accepted (``rules``). The sequence of re-reads is asserted, not
-    assumed, so the test says which pass refuses: five directories forwards,
-    then backwards until ``rules``, where the stamp no longer matches.
-
-    Without the backward pass nothing refuses — the forward pass has already
-    passed ``rules``, the identity re-check ran earlier and is unaffected by
-    a new file, and the closed-world sweep that would have named the file
-    ``unlisted`` is over — so the verification returns a PASS over a tree
-    that gained a content file while it was being verified.
-
-    The residual this test cannot reach, and no ordering can: a change that
-    lands after the *backward* pass's own re-read of that directory. Some
-    directory is always read last, and only verifying an immutable snapshot
-    removes the span after it (receipt#44).
-    """
-
-    import receipt.corpus as corpus_mod
-
-    write_tree(tmp_path)
-    real = corpus_mod._directory_generation
-    observed: list[str] = []
-    last = tmp_path / "rules/tax"
-    reads: dict[str, int] = {}
-
-    def watched(directory: pathlib.Path):
-        generation = real(directory)
-        relative = (
-            "" if directory == tmp_path else directory.relative_to(tmp_path).as_posix()
-        )
-        observed.append(relative)
-        reads[relative] = reads.get(relative, 0) + 1
-        # The first read of the last directory is its stamp; the second is
-        # the forward pass reaching it, which is the moment the finding is
-        # about — every other stamped directory has been re-read by then.
-        if directory == last and reads[relative] == 2:
-            (tmp_path / "rules/smuggled.yaml").write_text("name: evil\n")
-        return generation
-
-    monkeypatch.setattr(corpus_mod, "_directory_generation", watched)
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-    assert str(caught.value) == (
-        "the tree changed during verification; the closed-world verdict is refused"
-    )
-    assert observed[-8:] == [
-        # forwards, in sorted order, accepting every one of them
-        "",
-        ".axiom",
-        "rules",
-        "rules/benefit",
-        "rules/tax",
-        # and back, refusing at the directory the forward pass had passed
-        "rules/tax",
-        "rules/benefit",
-        "rules",
-    ]
-
-
 ZERO_WIDTH_JOINER = "‍"
 COMBINING_GRAPHEME_JOINER = "͏"
 DOTLESS_SMALL_I = "ı"
@@ -5714,22 +3850,21 @@ def test_refuses_a_tree_entry_a_target_filesystem_would_ignore_a_code_point_in(
 
 
 def test_refuses_a_tombstone_listing_entry_a_filesystem_may_ignore(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: pathlib.Path,
 ) -> None:
     """Binds S5-F2: the tombstone search buckets by the same fold key.
 
     A tombstone is honoured when no fold-equal spelling survives in a
     listing. ``apply-manifest.jso\\u200dn`` is not fold-equal to
-    ``apply-manifest.json`` here — the joiner survives NFC and case folding
-    — so the bucket lookup misses it and the verdict names the path as
+    ``apply-manifest.json`` here — the joiner survives the ASCII-only fold —
+    so the bucket lookup misses it and the verdict names the path as
     removed. On HFS+ that entry *is* the removed path: the file the journal
     says is gone still answers to the name it was retired under.
 
-    The entry is injected into the listing rather than written, for the
-    reason ``_late_survivor_scandir`` gives: what has to be held against is
-    a filesystem that emits the name, and injecting it says the same thing
-    on every host. Without the screen this verification passes and reports
-    ``retired/apply-manifest.json`` under removedPaths.
+    The survivor is written and committed before selecting the snapshot, so
+    the tombstone index reads it from the authenticated flat tree listing.
+    Without the repertoire screen this verification passes and reports
+    ``retired/apply-manifest.json`` under ``removed_paths``.
 
     Binds the policy for the message: the tombstone listing is screened by
     the same one screen every other listing is.
@@ -5739,16 +3874,12 @@ def test_refuses_a_tombstone_listing_entry_a_filesystem_may_ignore(
     write_tree(tmp_path)
     (tmp_path / "retired").mkdir()
     rows = _tombstone_rows("retired/apply-manifest.json", body)
-    monkeypatch.setattr(
-        os,
-        "scandir",
-        _scandir("retired", extra=[f"apply-manifest.jso{ZERO_WIDTH_JOINER}n"]),
-    )
+    survivor = f"apply-manifest.jso{ZERO_WIDTH_JOINER}n"
+    (tmp_path / "retired" / survivor).write_text(body)
     with pytest.raises(CorpusError) as caught:
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
     assert str(caught.value) == (
-        f"tree entry examined for a tombstone {NOT_PORTABLE}: "
-        "'apply-manifest.jso\\u200dn'"
+        f"tree entry {('retired/' + survivor)!r} {NOT_PORTABLE}: {survivor!r}"
     )
 
 
@@ -6174,7 +4305,7 @@ def test_the_device_basename_is_derived_the_way_win32_derives_it() -> None:
     ``LPT0``, which no source supports at all.
     """
 
-    from receipt.corpus import (
+    from receipt._names import (
         WIN32_RESERVED_DEVICE_NAMES,
         _win32_device_basename,
     )
@@ -6201,57 +4332,34 @@ def test_the_device_basename_is_derived_the_way_win32_derives_it() -> None:
         assert _win32_device_basename(name) not in WIN32_RESERVED_DEVICE_NAMES, name
 
 
-def _case_insensitive(directory: pathlib.Path) -> bool:
-    """Whether this volume resolves a name under a spelling it does not store."""
-
-    probe = directory / "ReceiptCaseProbe"
-    probe.write_text("probe\n")
-    try:
-        return (directory / "receiptcaseprobe").exists()
-    finally:
-        probe.unlink()
-
-
 def test_refuses_an_attested_path_the_directory_does_not_spell(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds S5R2-F1: a bound path was opened by its declared spelling.
-
-    The journal attests ``readme.md`` and the tree holds ``README.md``. On a
-    case-insensitive volume the declared spelling resolves to the stored one,
-    so the file was lstat-ed, opened, hashed and matched, and the verdict
-    passed — while a case-sensitive clone of the *same* corpus has no
-    ``readme.md`` at all and refuses it as missing. Which filesystem the
-    auditor cloned onto decided whether the corpus verified, which is exactly
-    the host-dependence the fold-key rules exist to remove.
-
-    Refused on every filesystem now, by one of two mechanisms, and the test
-    asserts the one that belongs to the host it is running on: where the
-    volume resolves the declared spelling, the component walk refuses because
-    the parent's listing does not emit it; where it does not, nothing
-    resolves and the existing missing-file refusal speaks. Without the fix
-    the first host returns a CorpusVerification over the corpus.
-    """
+    """An exact attested lookup does not resolve a case-varied tree name."""
 
     attested = {**ATTESTED, "readme.md": "# corpus\n"}
     write_tree(tmp_path, attested=attested)
-    (tmp_path / "readme.md").unlink()
-    (tmp_path / "README.md").write_text("# corpus\n")
+    _commit_worktree(tmp_path)
+    object_id = (
+        _git(tmp_path, "rev-parse", "HEAD:readme.md").decode("ascii").strip()
+    )
+    oid = _commit_index_updates(
+        tmp_path,
+        [
+            ("0", None, b"readme.md"),
+            ("100644", object_id, b"README.md"),
+        ],
+    )
     with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
+        _verify_commit(
             tmp_path,
+            oid,
             render_journal(journal_rows(attested=attested)),
             spec=corpus_spec(),
         )
-    if _case_insensitive(tmp_path):
-        assert str(caught.value) == (
-            "path component 'readme.md' is not spelled by its directory: "
-            "readme.md"
-        )
-    else:
-        assert str(caught.value) == (
-            "bound file is missing or not a regular file: readme.md"
-        )
+    assert str(caught.value) == (
+        "bound file is missing or not a regular file: readme.md"
+    )
 
 
 def test_refuses_an_attested_name_stored_under_a_different_normalization(
@@ -6295,46 +4403,6 @@ def test_refuses_an_attested_name_stored_under_a_different_normalization(
     )
 
 
-def test_refuses_a_directory_holding_two_spellings_of_a_bound_component(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds S5R3-F3: the spelling walk stopped at the component it wanted.
-
-    S5R2-F1 bound the spelling a directory emits, and it asked the question
-    with ``any(entry.name == component)`` — which stops at the first match.
-    The exact spelling being present does not mean it is the only one. A
-    case-sensitive tree can hold ``.axiom/toolchain.toml`` and
-    ``.axiom/TOOLCHAIN.TOML`` side by side, and the walk saw the first, said
-    the component was spelled, and never looked at the second — while a
-    case-insensitive consumer collapses the two into one file and cannot say
-    which of them the witnessed digest covers. That is the same
-    host-dependence S5R2-F1 closed, arriving from the other side: the
-    corpus is well defined on the auditor's clone and ambiguous on the
-    consumer's.
-
-    The whole listing is consumed now, and a sibling that folds onto the
-    component without being it refuses by name. Under the portable-name
-    policy that is the only fold class left, so what this asks is whether
-    another spelling differs from the bound one only in case.
-
-    The sibling is injected into the listing rather than written, so the
-    test says the same thing on a case-insensitive host, where the tree
-    cannot hold both. Without the fix this verification returns a
-    CorpusVerification over the corpus.
-    """
-
-    write_tree(tmp_path)
-    monkeypatch.setattr(os, "scandir", _scandir(".axiom", extra=["TOOLCHAIN.TOML"]))
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-    assert str(caught.value) == (
-        "directory holds another spelling of a bound path component: "
-        "'TOOLCHAIN.TOML' beside 'toolchain.toml'"
-    )
-
-
 @pytest.mark.parametrize(
     "sibling, why",
     [
@@ -6344,258 +4412,34 @@ def test_refuses_a_directory_holding_two_spellings_of_a_bound_component(
 )
 def test_refuses_an_unscreened_sibling_of_a_bound_component(
     tmp_path: pathlib.Path,
-    monkeypatch: pytest.MonkeyPatch,
     sibling: str,
     why: str,
 ) -> None:
-    """Binds S5R4-F1: the sibling scan compared names it never screened.
+    """Binds S5R4-F1: every name in the committed listing is screened.
 
-    S5R3-F3 made this check consume the whole listing and refuse a sibling
-    that folds onto the bound component. What it did not do is screen the
-    entries it was handed, and the fold key answers exactly one class of
-    equivalence — two spellings that differ in case. A spelling a *lookup*
-    collapses onto the bound name without collapsing under the fold walked
-    straight through: a POSIX tree holding both ``.axiom/toolchain.toml``
-    and ``.axiom/toolchain.toml.`` passes, because the exact spelling is
-    present and the sibling's fold key differs, while Win32 strips the
-    trailing period before it resolves the name and hands back whichever of
-    the two it stores — so the witnessed digest covers a file the auditor
-    cannot identify. A trailing space is the same story with the other
-    character Win32 strips.
+    The raw tree holds both ``.axiom/toolchain.toml`` and a sibling ending in
+    a period or space. Their ASCII fold keys differ, but Win32 collapses the
+    sibling onto the attested spelling before lookup, so an exact attested
+    lookup alone cannot make the checkout unambiguous.
 
-    The portable-name screen is what answers both, and it is the screen
-    every other listing in this module already runs. Without it this
-    verification returns a CorpusVerification over the corpus, on the host
-    where the two names coexist and on the host where they do not.
-
-    The sibling is injected into the listing rather than written, so the
-    test says the same thing wherever it runs — including on a host whose
-    filesystem refuses to store the name at all.
+    The sibling is committed through a raw index entry, so the authenticated
+    listing contains it even on a host that cannot check the name out. The
+    portable repertoire screens it before attested lookup; without that
+    screen the extra non-content blob is ignored and verification passes.
     """
 
     write_tree(tmp_path)
-    monkeypatch.setattr(os, "scandir", _scandir(".axiom", extra=[sibling]))
+    oid = _commit_extra_blob(tmp_path, f".axiom/{sibling}".encode("ascii"))
     with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-    assert str(caught.value) == (
-        f"tree entry beside '.axiom/toolchain.toml' {NOT_PORTABLE}: {sibling!r}"
-    ), why
-
-
-def _scandir_reshaped_after(directory_name: str, calls: int, **reshape):
-    """An ``os.scandir`` that reshapes one directory only after ``calls``.
-
-    The spelling of an attested path is walked twice per verification — once
-    before it is hashed and once in the closing identity loop — and the two
-    askings are what S5R3-F4 is about, so a test has to be able to change
-    what the second one sees without touching the first. Every other
-    directory, and the first ``calls`` listings of this one, come back from
-    the host untouched.
-    """
-
-    real = os.scandir
-    seen = [0]
-
-    def scandir(target):
-        if pathlib.PurePath(os.fspath(target)).name != directory_name:
-            return real(target)
-        seen[0] += 1
-        if seen[0] <= calls:
-            return real(target)
-        return _Scan(real(target), **reshape)
-
-    return scandir
-
-
-def test_stamps_an_attested_ancestor_before_its_spelling_is_walked(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds S5R3-F4: the attested stamps were taken after the hashing.
-
-    The spelling walk and the hash are two separate lookups of the same
-    name, and on the volume the spelling check is about — one that resolves
-    a case variant — a rename landing between them resolves through the
-    declared spelling. The walk had already passed; the hash took the
-    renamed entry's bytes; and the ancestor generations, recorded after all
-    of that, stamped the tree as the rename had left it. Nothing downstream
-    could see it: the closing membership sweep does not reach ``.axiom``,
-    the identity re-check compares stamps taken after the fact, and the
-    closing walk ran with the spelling question turned off.
-
-    The ancestors of every attested path are stamped before the first
-    spelling walk reads anything now, so a change to ``.axiom`` in that
-    window moves its mtime and ctime past a stamp that already exists.
-
-    The change is injected as a directory mutation rather than as the
-    case-only rename itself, because a rename resolves differently by host —
-    the point of the finding — while what has to be caught is the same on
-    every host: ``.axiom`` moved after the walk had read it. Without the
-    move this verification returns a CorpusVerification.
-    """
-
-    import receipt.corpus as corpus_module
-
-    write_tree(tmp_path)
-    real = corpus_module._assert_spelled_by_its_directory
-    armed = [True]
-
-    def walk_then_mutate(
-        parent: pathlib.Path, component: str, relative: str, **options: object
-    ) -> None:
-        real(parent, component, relative, **options)  # type: ignore[arg-type]
-        if armed[0] and component == "toolchain.toml":
-            armed[0] = False
-            scratch = tmp_path / ".axiom" / "scratch.tmp"
-            scratch.write_text("x\n")
-            scratch.unlink()
-
-    monkeypatch.setattr(
-        corpus_module, "_assert_spelled_by_its_directory", walk_then_mutate
-    )
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-    assert not armed[0]
-    assert str(caught.value) == (
-        "the tree changed during verification; the closed-world verdict is "
-        "refused"
-    )
-
-
-def test_the_closing_walk_re_asks_an_attested_path_for_its_spelling(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds S5R3-F4, the second half: the closing walk had it turned off.
-
-    Every bound path is walked once more at the end of the verification, to
-    re-ask the symlink question over the window the hashing opened. That
-    walk passed ``spelled=False`` for every path, so the spelling of an
-    attested path was established exactly once, before it was hashed, and
-    the last thing to look at it was the walk whose answer the finding says
-    can go stale.
-
-    It asks the question for attested paths now — and still not for content
-    ones, whose spelling the closing membership sweep re-derives out of
-    listing names a few lines earlier. The sibling screen from S5R3-F3 rides
-    along with it.
-
-    The second listing of ``.axiom`` is reshaped to hold ``TOOLCHAIN.TOML``
-    where the first held ``toolchain.toml``, which is what a case-only
-    rename in that window looks like to the walk on a volume that resolves
-    either spelling. The tree itself is untouched, so the generation check
-    cannot be what refuses and this test binds the walk alone. Without it
-    the second listing is never taken and the verification returns.
-    """
-
-    write_tree(tmp_path)
-    monkeypatch.setattr(
-        os,
-        "scandir",
-        _scandir_reshaped_after(
-            ".axiom", 1, hidden={"toolchain.toml"}, extra=["TOOLCHAIN.TOML"]
-        ),
-    )
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
-        )
-    assert str(caught.value) == (
-        "path component 'toolchain.toml' is not spelled by its directory: "
-        ".axiom/toolchain.toml"
-    )
-
-
-def _wide_attested_corpus(
-    tmp_path: pathlib.Path, paths: int
-) -> tuple[dict[str, str], list[dict[str, object]]]:
-    """A tree whose attested paths all sit in one directory, and its journal.
-
-    Every one of them is walked twice, and each walk drains the whole of
-    ``.axiom`` — which is what makes the pass quadratic in a directory the
-    producer chooses the width of.
-    """
-
-    attested = {
-        f".axiom/pin{index}.toml": f"[pin]\nindex = {index}\n"
-        for index in range(paths)
-    }
-    write_tree(tmp_path, attested=attested)
-    return attested, journal_rows(attested=attested)
-
-
-def test_the_attested_spelling_walk_is_bounded_by_one_work_budget(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds S5R4-F6: the spelling walk was the one walk with no ceiling.
-
-    Binding a spelling means draining the parent's whole listing, because
-    the answer is as much about the entries the check does not want — a
-    second spelling of the component, a name outside the repertoire — as
-    about the one it does. The walk runs once per component of every
-    attested path, and twice per verification, so R rows sharing a parent of
-    E entries cost about 2×R×E entry visits. Nothing charged them: the
-    tombstone pass is budgeted, the journal is budgeted, and this walk read
-    for as long as the tree was wide.
-
-    One budget for the verification now, charged per entry as the entry
-    arrives, so the listing is abandoned where the charge refuses rather than
-    drained first. The budget is lowered here rather than met, which is the
-    only way to test a ceiling generous enough that a real corpus cannot
-    approach it.
-
-    Without the charge this verification returns a CorpusVerification, having
-    read every entry the producer put in ``.axiom`` once for each attested
-    row, twice over.
-    """
-
-    from receipt.corpus import MAX_SPELLING_WORK
-
-    monkeypatch.setattr("receipt.corpus.MAX_SPELLING_WORK", 64)
-    _, rows = _wide_attested_corpus(tmp_path, 8)
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
+        _verify_commit(
             tmp_path,
-            render_journal(rows),
-            spec=corpus_spec(required_attested_paths=frozenset({".axiom/pin0.toml"})),
+            oid,
+            render_journal(journal_rows()),
+            spec=corpus_spec(),
         )
     assert str(caught.value) == (
-        "the attested spelling check would read more than 64 directory "
-        "entries; the tree cannot be bound"
-    )
-    # The shipped ceiling, so lowering it here cannot be mistaken for what a
-    # consumer runs against.
-    assert MAX_SPELLING_WORK == 262144
-
-
-def test_an_ordinary_corpus_is_far_inside_the_spelling_budget(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds S5R4-F6, the control: what an ordinary corpus actually spends.
-
-    The ceiling has to be a backstop rather than a live limit, so this pins
-    the cost of a real corpus instead of asserting that a generous number is
-    generous. The fixture attests one path of two components: the walk reads
-    the tree root and ``.axiom`` once per component per pass, which is six
-    entry visits over two passes for the tree this package ships, and it
-    verifies with the budget set to sixteen. At five it refuses, so the six
-    is measured rather than claimed.
-
-    Its first half is the control the shipped ceiling rests on — a corpus
-    must verify well inside the budget, and would still verify here with the
-    charge removed — and its second half is what turns "well inside" into a
-    number.
-    """
-
-    write_tree(tmp_path)
-    journal = render_journal(journal_rows())
-    monkeypatch.setattr("receipt.corpus.MAX_SPELLING_WORK", 16)
-    assert verify_corpus_binding(tmp_path, journal, spec=corpus_spec()).attested
-    monkeypatch.setattr("receipt.corpus.MAX_SPELLING_WORK", 5)
-    with pytest.raises(CorpusError, match="would read more than 5 directory"):
-        verify_corpus_binding(tmp_path, journal, spec=corpus_spec())
+        f"tree entry '.axiom/{sibling}' {NOT_PORTABLE}: {sibling!r}"
+    ), why
 
 
 def test_refuses_a_required_attested_path_the_directory_does_not_spell(
@@ -6637,18 +4481,13 @@ def test_refuses_a_required_attested_path_the_directory_does_not_spell(
 def test_a_content_file_found_by_its_spelled_name_still_verifies(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds S5R2-F1, the other side: the sweep already spells its own names.
+    """Binds S5R2-F1: exact committed tree keys decide content membership.
 
-    Every content path in the journal is compared against a set the walk
-    built out of ``os.scandir`` names, so a content file that verifies is one
-    the listing emitted under exactly that spelling. That is why the spelling
-    check is asked of attested paths only: asking it of content too would
-    answer a question already answered, at one listing per component per
-    file, which for a wide content directory is quadratic and unbudgeted.
-
-    Both halves are asserted — an ordinary corpus verifies, and a content
-    file whose on-disk spelling differs from the bound one is refused by the
-    sweep itself, on any host, with the spelling walk never consulted.
+    Every journal content path is compared with the content set derived from
+    one authenticated flat tree listing. An ordinary corpus therefore passes
+    with its exact keys, while replacing one committed key by a case-varied
+    raw index entry leaves that entry unbound and refuses it during membership
+    equality; no host directory walk or separate spelling pass participates.
 
     This test passes with the fix disabled, which is the point.
     """
@@ -6660,10 +4499,25 @@ def test_a_content_file_found_by_its_spelled_name_still_verifies(
     assert [entry.path for entry in verification.content] == sorted(CONTENT)
     assert [entry.path for entry in verification.attested] == sorted(ATTESTED)
 
-    (tmp_path / "rules/tax/rate.yaml").rename(tmp_path / "rules/tax/RATE.yaml")
+    _commit_worktree(tmp_path)
+    object_id = (
+        _git(tmp_path, "rev-parse", "HEAD:rules/tax/rate.yaml")
+        .decode("ascii")
+        .strip()
+    )
+    oid = _commit_index_updates(
+        tmp_path,
+        [
+            ("0", None, b"rules/tax/rate.yaml"),
+            ("100644", object_id, b"rules/tax/RATE.yaml"),
+        ],
+    )
     with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(
-            tmp_path, render_journal(journal_rows()), spec=corpus_spec()
+        _verify_commit(
+            tmp_path,
+            oid,
+            render_journal(journal_rows()),
+            spec=corpus_spec(),
         )
     assert "not bound by the witnessed journal" in str(caught.value)
 
@@ -6677,7 +4531,8 @@ def test_refuses_a_tombstone_survivor_windows_strips_to_the_tombstoned_name(
     ``retired/gone.`` and ``retired/gone `` open ``retired/gone`` on Win32,
     which removes a trailing dot or space from a component before the
     lookup. Neither of the two questions a tombstone asks can see that: the
-    exact ``os.lstat`` of ``retired/gone`` misses on POSIX, and the fold key
+    exact lookup of ``retired/gone`` (once an ``os.lstat``, now the listing's
+    exact index) misses on POSIX, and the fold key
     of ``gone.`` is not the fold key of ``gone``, so the survivor sits in a
     different bucket from the one the search reads. Both answered "absent",
     the verdict named the path under removedPaths, and the file still opened
@@ -6703,51 +4558,7 @@ def test_refuses_a_tombstone_survivor_windows_strips_to_the_tombstoned_name(
     with pytest.raises(CorpusError) as caught:
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
     assert str(caught.value) == (
-        f"tree entry examined for a tombstone {NOT_PORTABLE}: {survivor!r}"
-    )
-
-
-def test_the_second_tombstone_pass_screens_the_strip_alias_as_well(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Binds S5R2-F2: the screen belongs to both askings, not to the first.
-
-    The tombstone pair is asked twice per verification, and the second
-    asking exists precisely because the first one concluded absence from
-    listings it cached. A screen present only in the first pass would leave
-    the pass that re-establishes absence able to read a stripping alias out
-    of a fresh listing and call the path absent — which is the round-five
-    and round-six defect one pass later. The check sits where every listing
-    is read, so both askings screen the same way.
-
-    The first pass is patched to pass so that only the second can refuse,
-    and the call count asserts that is what happened. Without the fix the
-    second pass reports absence and the verification returns.
-    """
-
-    import receipt.corpus as corpus_module
-
-    body = '{"applied": true}\n'
-    rows = _tombstone_rows("retired/gone", body)
-    write_tree(tmp_path, attested={**ATTESTED, "retired/gone": body})
-    (tmp_path / "retired/gone").unlink()
-    (tmp_path / "retired/gone.").write_text(body)
-
-    real = corpus_module._assert_tombstones_absent
-    calls: list[int] = []
-
-    def patched(*args: object, **kwargs: object) -> None:
-        calls.append(1)
-        if len(calls) == 1:
-            return None
-        return real(*args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(corpus_module, "_assert_tombstones_absent", patched)
-    with pytest.raises(CorpusError) as caught:
-        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
-    assert calls == [1, 1]
-    assert str(caught.value) == (
-        f"tree entry examined for a tombstone {NOT_PORTABLE}: 'gone.'"
+        f"tree entry 'retired/{survivor}' {NOT_PORTABLE}: {survivor!r}"
     )
 
 
@@ -6808,7 +4619,7 @@ def test_refuses_a_tombstone_listing_entry_carrying_a_colon(
     with pytest.raises(CorpusError) as caught:
         verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
     assert str(caught.value) == (
-        f"tree entry examined for a tombstone {NOT_PORTABLE}: 'gone:stream'"
+        f"tree entry 'retired/gone:stream' {NOT_PORTABLE}: 'gone:stream'"
     )
 
 
@@ -7355,22 +5166,14 @@ def test_the_device_table_is_exactly_what_its_two_sources_say() -> None:
 def test_a_real_aliasing_root_spelling_keeps_the_root_component_refusal(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Binds S5R2-F1, adversarially: the generic refusal must not preempt.
+    """A committed root alias keeps the path-rich component refusal.
 
-    S5R2-F1 binds every bound path component to the spelling its directory
-    emits, and the pinned content root's own components pass through the
-    same walk. On a case-insensitive host that made the generic "not spelled
-    by its directory" refusal fire for a tree holding ``RULES/`` under a
-    ``rules`` pin — preempting ``_assert_no_aliasing_root_component``, which
-    asks the same question a line later and names the entry that aliases the
-    pinned spelling. The existing test for that wording injects a phantom
-    entry into the listing and so never exercised the real case.
-
-    The content-root walk asks the symlink question and not the spelling
-    one, because the check a line later says more. This asserts the refusal
-    an auditor actually gets, following the host: where the pinned spelling
-    resolves to the differently-spelled directory, the aliasing refusal
-    names it; where it does not, the root is simply absent.
+    The fixture commits the spelling produced by renaming ``rules`` to
+    ``RULES``. ``_assert_content_root_spellings`` reads the authenticated root
+    listing before content membership: when the listing carries ``RULES`` it
+    names that fold-equal entry, and when the host did not record the distinct
+    spelling the pinned root is absent. No live host resolution or separate
+    component-spelling walk participates in the verdict.
     """
 
     write_tree(tmp_path)

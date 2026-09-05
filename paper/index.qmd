@@ -36,6 +36,19 @@ format:
 bibliography: references.bib
 ---
 
+**0.6 contract note.** For `verify_append_gate`, `run_verification`, and
+`verify_corpus_binding`, the verdict is a function of the tree object named
+by a commit, the base tree when supplied, the consumer's specification, and
+the caller's trust material. Every object byte used for that verdict is read
+from the repository's object store and rehashed against its OID; the working
+tree and index are never read. The append and composed verification paths
+pass a private materialization to the retained directory verifier; a direct
+`verify_release_chain` caller retains the directory-as-read contract and its
+concurrent-writer residual. The `receipt verify` output and
+`AppendGateVerdict` name the commit and tree; verification does not establish
+that files in any checkout equal the verified tree. This note updates the subject
+of the 0.5.1 account below for receipt 0.6.
+
 # Introduction {#sec-intro}
 
 Whoever relies on an agent-produced record later — an auditor, a
