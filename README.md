@@ -66,7 +66,8 @@ The verdict does not establish:
 - that the files in any checkout equal the verified tree.
 
 Without an effective anchor pin, it also does not establish that the anchor
-set is one the auditor trusts. The direct `verify_release_chain` API speaks
+set is one the auditor trusts, and without a spec pin, that the spec's code was
+trusted. The direct `verify_release_chain` API speaks
 for a directory as this process read it once; its caller carries the
 concurrent-writer residual. Commit-addressed callers use `run_verification`
 or `verify_append_gate`.

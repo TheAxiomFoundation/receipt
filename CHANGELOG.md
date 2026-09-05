@@ -36,7 +36,7 @@ verify_objects=False)` replaces the split `VerificationSpec`, `spec_path` and
 `spec must be a LoadedSpec returned by load_spec`; a base without the candidate
 pin refuses `base_ref requires expect_commit`. `LoadedSpec` is a frozen,
 loader-owned record of `verification`, `path`, `sha256` and `pinned`.
-`load_spec(path, *, expect_sha256=None)` hashes the source bytes once and checks
+`load_spec(spec_path, *, expect_sha256=None)` hashes the source bytes once and checks
 the expectation before compiling or executing them; a mismatch refuses
 `spec {digest} is not the expected spec {expected}` without running the spec.
 
@@ -293,6 +293,8 @@ row, while under a pin a mismatching spec never runs (row 19); release
 identity: the exact-target checks are recorded evidence in the release notes,
 reviewed by the release peer rather than re-run by it, with closure requiring
 the tag on the reviewed head OID itself under a merge-commit merge (row 20).
+`tsa.py` and `attest.py` remain directory verifiers: their upstreams verify
+record directories with no commit under review.
 
 ## 0.5.2
 
