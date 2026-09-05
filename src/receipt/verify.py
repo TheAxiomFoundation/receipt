@@ -483,11 +483,7 @@ def run_verification(
 
     verification_spec = spec.verification
     chain_repertoire = verification_spec.chain.name_repertoire
-    # Compatibility for the short merge window in which Lane D's defaulted
-    # CorpusSpec field may not yet be present. Lane B removes this getattr.
-    corpus_repertoire = getattr(
-        verification_spec.corpus, "name_repertoire", "portable"
-    )
+    corpus_repertoire = verification_spec.corpus.name_repertoire
     if chain_repertoire != corpus_repertoire:
         raise ValueError("spec declares two name repertoires")
 

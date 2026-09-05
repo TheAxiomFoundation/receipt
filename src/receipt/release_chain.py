@@ -2232,7 +2232,8 @@ def verify_base_release_chain(
 
     By default every configured anchor must belong to the materialized tree.
     An explicit ``anchor_dir`` supplies the caller's trust material instead,
-    as the append gate requires; those anchors are not bound to the base tree.
+    as the append gate requires; a disjoint tree anchor subtree is then neither
+    materialized nor screened, and caller anchors are not bound to the base tree.
     """
 
     normalized = _normalized_spec(spec)
@@ -2241,8 +2242,9 @@ def verify_base_release_chain(
         normalized.manifest_relative,
         normalized.state_relative,
         normalized.prefix_relative,
-        normalized.anchor_relative,
     )
+    if anchor_dir is None:
+        prefixes += (normalized.anchor_relative,)
     with tempfile.TemporaryDirectory(prefix="receipt-release-base-") as name:
         destination = pathlib.Path(name)
         with base.materialize(
