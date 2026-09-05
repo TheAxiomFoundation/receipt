@@ -1,21 +1,66 @@
 # Receipt 0.6 tree-object harness re-pin
 
-This re-pin changes the subject handed to the extracted verifier, not the
-authenticated baseline or its verdict vocabulary. Lane E first committed each
-mutated custody surface and bound its candidate OID. In 0.6, the port leg now
-selects that OID and the base ref as two entered `TreeSnapshot`s, proves
-ancestry, compares release history from their entries, and runs the unchanged
+This re-pin changes the subject handed to the extracted verifier and retains
+the authenticated baseline and each pinned mutation's exact comparison.
+[Lane E (#54)](https://github.com/TheAxiomFoundation/receipt/pull/54) first
+committed each mutated custody surface and bound its candidate OID. In 0.6,
+the port leg now selects that OID and the base ref as two entered
+`TreeSnapshot`s, proves
+ancestry, compares release history from their entries, and runs the retained
 directory verifier over a private candidate materialization. The oracle still
 reads a checkout of the same commit. The detached-checkout leg therefore tests
 both that the checkout of C equals C and that the port does not need a
 checkout.
+
+## Fixture change
+
+Lane E landed the fixture change against 0.5.2 before changing verifier code.
+The shared `commit_candidate(root, name)` runs `git add -A`, commits when the
+index differs from HEAD, and otherwise returns HEAD. `base_unresolvable_ref`
+changes no tree and `base_not_ancestor` only writes a detached commit object,
+so both reuse HEAD. After every moved case's mutation, the helper asserts
+that `git status --porcelain --ignore-submodules=none` and
+`git ls-files --others --ignored --exclude-standard` are empty, and that
+`git write-tree` equals the candidate's `HEAD^{tree}`. The copy assertion
+allows only `ledger/` and `releases/` and refuses a `.gitattributes` anywhere
+under them. Files added by a mutation, including the gate-only script, are
+committed afterward.
+
+Each of the 26 moved cases has two legs: first, the oracle reads the main
+worktree's clean candidate checkout; second, the oracle reads an independent
+detached checkout of the same candidate. The harness creates that checkout
+with `git worktree add --detach`, asserts its HEAD equals the candidate OID,
+and removes that checkout with `git worktree remove --force` in `finally`.
+The port uses the main repository in both legs. The independent detached
+checkout is the consumer's CI shape; at the oracle pin its workflow uses
+`git clone --no-checkout` and `git checkout --detach` to produce it, as
+[Lane E's review response](https://github.com/TheAxiomFoundation/receipt/pull/54#issuecomment-5542695250)
+records.
+
+The fixture capability probe runs once per session and checks `core.fileMode`
+and `core.symlinks`: `base_mode_change` must commit `100755`, and
+`base_worktree_symlink` must commit `120000`. In Lane E it used the 0.5.2
+port's configuration reader; after that reader's deletion, it uses the
+fixture's isolated Git configuration. A false capability skips the moved
+cases with the reason named. A harness run counts only at zero skips.
+
+Lane E recorded 57 passing cases across the two changed harnesses and 94
+across all four, with both legs retaining the 0.5.2 verdicts. The
+`LEDGER_PIN`, `BASELINE_AUTHENTICATED_FILES` and
+`receipts/ledger-pin-source-hashes.txt` authentication contract is retained.
+The comparison remains exit status, complete refusal text after surrounding
+whitespace and OpenSSL error-queue-ID normalization, exact success text, and
+library silence. The blob-OID diagnostic exception below is outside the
+pinned battery.
 
 ## Differential census
 
 The tagged 0.5.2 differential census is 94 cases:
 
 - 26 cases are re-pinned from checkout input to commit-object input: the 8
-  ledger base-ref cases in Lane C and the 18 append-gate cases owned by Lane B.
+  ledger base-ref cases (one clean acceptance and 7 mutations) and the 18
+  append-gate cases (3 acceptances and 15 mutations). Lane E committed their
+  fixtures; Lane C and Lane B changed their port legs to object reads.
 - 68 cases are unchanged: the ledger 26-case `--full` battery and its clean and
   authentication cases, the 3 append-gate authentication cases, all 20 attest
   cases, and all 17 brier cases.
@@ -29,10 +74,13 @@ The tagged 0.5.2 differential census is 94 cases:
   guard; an effective candidate `refs/replace`; and a logical byte flip in a
   loose candidate-tree object that reaches the reader's exact rehash refusal.
 
-The ledger module therefore collects 43 cases after this change: its prior 36
-plus its 7 port-only additions. The append module collects 28: its prior 21
-plus its 7 port-only additions. No case was renamed, no branch marker was
-weakened, and neither authenticated oracle was edited.
+The ledger module therefore collects 43 cases: its prior 36 plus its 7
+port-only additions. The append module collects 28: its prior 21 plus its 7
+port-only additions. Together with 20 attest and 17 brier cases, the total is
+108: **26 re-pinned + 68 unchanged + 7 Lane C + 7 Lane B**. No prior case was
+renamed, no branch marker was weakened, and neither authenticated oracle was
+edited. The [Lane B review](https://github.com/TheAxiomFoundation/receipt/pull/57#issuecomment-5547500164)
+independently confirmed this collection and the retained two-leg wiring.
 
 ## Deliberate divergence
 
@@ -50,8 +98,9 @@ the directory oracle and tree-object port are meant to disagree.
 
 The ledger harness authenticates `scripts/check_thesis_facts_append.py` at its
 pinned SHA-256 for this one deliberate divergence and invokes it unchanged.
-All ordinary differential cases remain comparisons with the authenticated
-release-chain oracle, and Lane B retains ownership of the append-gate harness.
+All ordinary ledger differential cases remain comparisons with the
+authenticated release-chain oracle; the append-gate harness compares against
+the authenticated append oracle.
 
 ## Port-only invariants
 
@@ -81,13 +130,18 @@ the immutable `TreeSnapshot` public surface:
   candidate was selected by OID, while the pinned oracle names the same
   selected commit `HEAD`.
 
-The harness adapts only those two exact `SnapshotError` strings to the pinned
-legacy messages. It does not run another Git command, resolve a ref again,
-weaken comparison, edit either oracle, or change `snapshot.py`. Any other
-reader diagnostic passes through unchanged and still fails byte comparison.
+The ledger harness adapts those two `SnapshotError` strings to the pinned
+legacy messages. Each adapter first asserts the reader's exact diagnostic;
+an unexpected string fails that assertion. Neither adapter resolves a ref
+again or runs another Git command.
+The ancestry adapter calls the candidate `HEAD`, so that particular message
+comparison would mask a wrongly selected candidate OID; a wrong base OID
+would remain in the message and fail comparison. This limit is stated in
+`run_port_base_ref`'s docstring.
 
-Round 1 finding F3 records one accepted exception to the exact-refusal-text
-requirement: when `base_ref` is an existing blob OID, `TreeSnapshot.select`
+[Lane B round 1 finding F3 and its accepted response](https://github.com/TheAxiomFoundation/receipt/pull/57#issuecomment-5547639410)
+record one exception to the exact-refusal-text requirement: when `base_ref`
+is an existing blob OID, `TreeSnapshot.select`
 normalizes the resolution failure and the append entrypoint's adapter omits
 Git's first diagnostic line, `error: <oid>^{commit}: expected commit type, but
 the object dereferences to blob type`. A clean committed scratch fixture
@@ -97,34 +151,21 @@ Needed a single revision` retained. This is a wording exception, with no
 behavior change or second Git resolution. It lies outside the pinned
 differential cases, whose exact comparisons remain unchanged.
 
-## Verification
+## Recorded Lane B verification
 
-Run from the current Lane B worktree with the authenticated local extraction at
-`9dafe8174f42a06c00817fe596d5a8e686cb17b7`:
-
-```console
-RECEIPT_LEDGER_TREE=/Users/maxghenis/TheAxiomFoundation/receipt/.extraction/ledger-9dafe81 /Users/maxghenis/TheAxiomFoundation/receipt/.venv/bin/python -m pytest -q tests/test_ledger_equivalence.py
-43 passed in 15.60s
-```
-
-Collection is 43 with zero skips: all prior 36 cases plus all 7 additions.
-
-Lane B's append harness alone, with the same authenticated Ledger extraction:
-
-```console
-RECEIPT_LEDGER_TREE=/Users/maxghenis/TheAxiomFoundation/receipt/.extraction/ledger-9dafe81 /Users/maxghenis/TheAxiomFoundation/receipt/.venv/bin/python -m pytest -q tests/test_append_gate_equivalence.py
-28 passed in 24.03s
-```
-
-The integrated four-harness run used both authenticated local extractions and
-one pytest process, which also checks the shared-import contract:
+[Lane B's merged PR body](https://github.com/TheAxiomFoundation/receipt/pull/57)
+records the following integrated run from its build worktree, using the
+authenticated Ledger extraction at
+`9dafe8174f42a06c00817fe596d5a8e686cb17b7`, the authenticated Brier extraction,
+and the project virtual environment. All four harnesses ran in one pytest
+process and reported 108 passing cases with zero skips:
 
 ```console
 RECEIPT_LEDGER_TREE=/Users/maxghenis/TheAxiomFoundation/receipt/.extraction/ledger-9dafe81 RECEIPT_BRIER_TREE=/Users/maxghenis/TheAxiomFoundation/receipt/.extraction/brier-4b9e7be /Users/maxghenis/TheAxiomFoundation/receipt/.venv/bin/python -m pytest -q tests/test_append_gate_equivalence.py tests/test_ledger_equivalence.py tests/test_attest_equivalence.py tests/test_brier_witness_equivalence.py
 108 passed in 235.98s
 ```
 
-Finally, Lane B re-ran the #38-body port-only production differential. An
+Lane B also re-ran the #38-body port-only production differential. An
 offline scratch driver used the authenticated `9dafe81` tree, created a fresh
 Git repository and committed candidate for each case, passed each candidate
 OID to `run_port`, required library silence, and checked the two exact success
