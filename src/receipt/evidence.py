@@ -196,6 +196,14 @@ class EvidenceSpec:
         with the one line of consumer code that was supposed to say who may
         write them never consulted. The pin is checked where it is written
         instead.
+
+        The schema id is checked here for the same reason. It is the frame's
+        payload type and the record's own ``schemaVersion``, so an empty one
+        frames every record under no type at all — and did, emitting and
+        verifying green — while ``None`` reached `_pae` as a bare
+        ``AttributeError`` at signing time. Only a non-empty string is asked
+        for: the frame's length prefix makes any content unambiguous, so a NUL
+        or a newline inside the id is not a fact this module can refuse on.
         """
 
         records = self.records_relative
@@ -204,6 +212,11 @@ class EvidenceSpec:
                 f"records_relative must be a relative path without '..': {records}"
             )
         _sha256(self.producer_spki_sha256, "EvidenceSpec producer_spki_sha256")
+        if type(self.schema_version) is not str or not self.schema_version:
+            raise EvidenceRecordError(
+                "EvidenceSpec schema_version must be a non-empty string: "
+                f"{self.schema_version!r}"
+            )
         root = self.release_root_relative
         if root is not None and (records == root or root in records.parents):
             raise EvidenceRecordError(

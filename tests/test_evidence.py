@@ -1800,6 +1800,26 @@ def test_unsafe_records_path_is_refused(bad: str) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "value",
+    ["", None, b"receipt/evidence-record/v1"],
+    ids=["empty", "none", "bytes"],
+)
+def test_a_schema_version_that_names_no_type_is_refused(value: object) -> None:
+    """The schema id is the frame's payload type and the record's own
+    ``schemaVersion``, so a spec with none frames every record under no type
+    at all. An empty string emitted and verified green before this change;
+    ``None`` left emission as an ``AttributeError`` from the frame, and bytes
+    as canonical.py's ``TypeError`` from the payload."""
+
+    with pytest.raises(EvidenceRecordError, match="schema_version"):
+        EvidenceSpec(
+            records_relative=RECORDS,
+            producer_spki_sha256=PIN,
+            schema_version=value,  # type: ignore[arg-type]
+        )
+
+
 def test_spec_is_frozen(spec: EvidenceSpec) -> None:
     with pytest.raises(FrozenInstanceError):
         spec.schema_version = "other"  # type: ignore[misc]
