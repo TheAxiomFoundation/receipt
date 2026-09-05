@@ -18,6 +18,13 @@ existing success text. `verify_append_gate_verdict` returns that text as
 `base_commit`, `base_tree`, `object_format` and `name_repertoire`, so a consumer
 can record which commit the gate judged even when `HEAD` later moves.
 
+Append state blobs, including both base and candidate ledgers and prefixes,
+decode as UTF-8 with universal-newline translation. Invalid bytes refuse
+`state file is not valid UTF-8: {relative}` through `AppendError`. An ordinary
+append over a committed `café` row now accepts under UTF-8, ISO8859-1 and C
+process locales; previously it falsely reported an existing-line rewrite
+under ISO8859-1 and leaked `UnicodeDecodeError` under C.
+
 `verify_corpus_binding(snapshot, journal_bytes, *, spec)` takes an entered
 `TreeSnapshot`. A directory argument refuses with
 `verify_corpus_binding requires a TreeSnapshot; select one with TreeSnapshot.select`.
@@ -64,6 +71,15 @@ disjoint unused anchor subtree is then excluded from materialization. Anchors
 nested under a required release prefix are still written and screened, but the
 append gate's cryptographic calls use the caller-owned directory.
 
+The base helper and composed custody stage share the append gate's protected
+listing screen before materialization or OpenSSL. Files, trees, empty trees
+and every protected ancestor directory's siblings are screened under the
+declared repertoire. A regular `releases/extra` beside an empty `releases/EXTRA`
+now refuses `tree directory 'releases' contains names that merge under ASCII
+case folding: 'EXTRA' and 'extra'`; the base helper previously accepted one
+verified release, and the composed command refused only after custody.
+Disjoint unused tree-anchor descendants remain excluded with caller trust.
+
 `verify_release_chain(root)` remains a directory verifier with its existing
 signature. Its breaking precondition is explicit: it speaks for the directory
 as it was read, once, by this process; a caller on a directory it does not own
@@ -75,6 +91,17 @@ and manifest-directory checks, after argument validation and the OpenSSL 3.0
 preflight. OpenSSL's `-CAfile` names a private byte-for-byte copy of the captured
 anchor bytes even when production pinning and observation are disabled. The
 26-case authenticated `--full` battery retains its directory subject.
+The docstring describes guarded reads per consumption: a two-release probe
+reads the producer key and each TSA anchor twice, and digest observation
+requires repeated anchor bytes to agree across releases and roles.
+
+`repository_slug` parses HTTPS/SSH authorities and SCP origins, requiring
+exactly `github.com` ignoring case and two path components. An optional user,
+port and trailing slash are accepted; only a terminal `.git` is stripped,
+preserving `TheAxiomFoundation/receipt.audit`. Foreign hosts, extra components,
+queries and fragments refuse `cannot derive repository slug from {url!r}`.
+The SSH-port origin `ssh://git@github.com:22/O/R.git` yields `O/R`, previously
+`22/O`. `receipt verify` does not call this helper.
 
 ### Verdict fields and command output (#56; breaking)
 
@@ -135,8 +162,14 @@ stronger rule than the plan's base-outside-boundary residual; use
 `fetch-depth: 0`.
 
 The reader interprets committed `.gitattributes` through a bounded,
-fail-closed matcher rather than checkout filters. Protected `filter`, `ident`
-and `working-tree-encoding` attributes refuse; `text` and `eol` remain accepted.
+fail-closed matcher. Exact and ASCII-folded readings each compute their own
+final attribute state with last-rule-wins precedence; if either reading
+leaves protected `filter`, `ident` or `working-tree-encoding` set or valued,
+verification refuses in the existing transforming-attribute words. Repository
+configuration never chooses the reading. The same fully pinned commit with
+`releases/** filter=evil` followed by `RELEASES/** -filter` now refuses under
+both `core.ignoreCase` settings; it previously passed under `true`.
+`text` and `eol` remain accepted.
 LFS-tracked content roots are unsupported: the raw pointer blob's digest will
 not match the journal's content digest. The working tree's transformed bytes
 cannot substitute for the committed blob.
@@ -155,6 +188,8 @@ exact bytes, with no Unicode normalization or Unicode case-fold model.
 screens names it writes as portable, including under `posix-bytes`. The review
 proved positive nonportable-name cases and NFC/NFD pairs under `posix-bytes`,
 with portable and ASCII-case-collision controls.
+The portable-name helper's docstring states the policy's known cost:
+rulespec-us at d58cc0c carries 33 non-portable names among 15,216 tracked paths.
 
 ### Refusal migrations and removed machinery (#55, #56, #57; breaking)
 
