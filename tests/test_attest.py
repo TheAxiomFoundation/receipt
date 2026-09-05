@@ -316,6 +316,73 @@ def test_commit_age_and_repository_slug_parsers(
 
 
 @pytest.mark.parametrize(
+    ("origin", "expected"),
+    [
+        (
+            "https://github.com/TheAxiomFoundation/receipt.audit.git",
+            "TheAxiomFoundation/receipt.audit",
+        ),
+        (
+            "git@github.com:TheAxiomFoundation/receipt.audit.git",
+            "TheAxiomFoundation/receipt.audit",
+        ),
+        ("ssh://git@github.com:22/O/R.git", "O/R"),
+        ("https://GITHUB.COM/O/R.git", "O/R"),
+        ("git@GITHUB.COM:O/R.git", "O/R"),
+        ("https://github.com/O/R.git/", "O/R"),
+        ("git@github.com:O/R.git/", "O/R"),
+        ("https://git@github.com:443/O/R.git", "O/R"),
+        ("ssh://github.com/O/R.git.audit", "O/R.git.audit"),
+        ("https://github.com/O/R", "O/R"),
+    ],
+)
+def test_repository_slug_preserves_github_origin_identity(
+    tmp_path: pathlib.Path, origin: str, expected: str
+) -> None:
+    """The slug names the whole repository at the parsed GitHub authority."""
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        ["git", "config", "remote.origin.url", origin], cwd=tmp_path, check=True
+    )
+    assert repository_slug(tmp_path) == expected
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://notgithub.com/TheAxiomFoundation/receipt.git",
+        "https://evil.example/github.com/TheAxiomFoundation/receipt.git",
+        "https://github.com.evil.example/O/R.git",
+        "https://github.com/O/R.git/extra",
+        "https://github.com/O/R.git?query=value",
+        "https://github.com/O/R.git#fragment",
+        "https://github.com/O/R.git?",
+        "git@github.com:O/R.git#fragment",
+        "git://github.com/O/R.git",
+        "http://github.com/O/R.git",
+        "ssh://git@github.com:invalid/O/R.git",
+        "ssh://git@github.com:65536/O/R.git",
+        "https://github.com/O//R.git",
+        "https://github.com/O/.git",
+        "https://github.com/O/../",
+    ],
+)
+def test_repository_slug_refuses_non_github_or_ambiguous_origin(
+    tmp_path: pathlib.Path, origin: str
+) -> None:
+    """A GitHub-looking substring must never supply a different identity."""
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        ["git", "config", "remote.origin.url", origin], cwd=tmp_path, check=True
+    )
+    with pytest.raises(ProvenanceError) as caught:
+        repository_slug(tmp_path)
+    assert str(caught.value) == f"cannot derive repository slug from {origin!r}"
+
+
+@pytest.mark.parametrize(
     ("returncode", "expected"),
     [(0, False), (1, True)],
 )
