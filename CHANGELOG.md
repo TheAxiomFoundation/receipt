@@ -4,6 +4,296 @@ Every entry says what changed and what an auditor can conclude from it that
 they could not before. Refusals are named as refusals: a check added here is an
 input the package used to accept, or accept for the wrong reason.
 
+## 0.6.0
+
+### Commit and tree subjects (#52, #55, #56, #57; breaking)
+
+`verify_append_gate(root, *, spec, base_ref=None, commit="HEAD", ...)` verifies
+the tree object named by `commit`. State bytes, release entries, changed paths
+and base ancestry come from entered `TreeSnapshot`s; the working tree and index
+are never read. With a base, the candidate must be a full commit OID or the gate
+refuses `base_ref requires a full commit OID`. The string return keeps the
+existing success text. `verify_append_gate_verdict` returns that text as
+`AppendGateVerdict.summary` beside `candidate_commit`, `candidate_tree`,
+`base_commit`, `base_tree`, `object_format` and `name_repertoire`, so a consumer
+can record which commit the gate judged even when `HEAD` later moves.
+
+`verify_corpus_binding(snapshot, journal_bytes, *, spec)` takes an entered
+`TreeSnapshot`. A directory argument refuses with
+`verify_corpus_binding requires a TreeSnapshot; select one with TreeSnapshot.select`.
+One authenticated tree listing supplies content membership, exact spellings,
+fold-equal siblings and tombstone absence; bound digests stream from the named
+blobs. A content-root gitlink refuses `content root contains a gitlink: {path}`;
+a content symlink refuses
+`content root contains a symlink where a regular file was recorded: {path}`.
+The #44 property tests rewrite, insert and rename files under both content
+roots and `.axiom`, then obtain the same verdict, commit and tree OIDs.
+
+`run_verification(root, spec: LoadedSpec, *, base_ref=None, commit="HEAD",
+expect_commit=None, expect_tree=None, expect_anchor_set=None,
+verify_objects=False)` replaces the split `VerificationSpec`, `spec_path` and
+`spec_sha256` inputs. A direct `VerificationSpec` refuses
+`spec must be a LoadedSpec returned by load_spec`; a base without the candidate
+pin refuses `base_ref requires expect_commit`. `LoadedSpec` is a frozen,
+loader-owned record of `verification`, `path`, `sha256` and `pinned`.
+`load_spec(path, *, expect_sha256=None)` hashes the source bytes once and checks
+the expectation before compiling or executing them; a mismatch refuses
+`spec {digest} is not the expected spec {expected}` without running the spec.
+
+An explicit `expect_anchor_set` without a pinned spec refuses
+`an anchor pin requires a pinned spec`. The new defaulted
+`VerificationSpec.anchor_set_sha256` can supply the anchor expectation under a
+matching spec pin; in an unpinned spec it remains the producer's proposal and
+does not establish trust. Two conflicting pins refuse
+`anchor pins disagree: command expects {direct}, spec expects {declared}`.
+The configured anchor filenames are normalized once, their materialized bytes
+are hashed into the canonical anchor-set digest, and the digest is compared
+before any OpenSSL call. A mismatch refuses
+`anchor set {actual} is not the pinned anchor set {expected}`; the digest the
+custody pass actually consumed must also equal the materialized digest.
+
+`verify_release_history_immutable(spec, *, candidate, base)` compares two
+entered snapshots instead of a directory and a base ref, retaining the
+`existing release file was deleted`, `existing release file mode changed` and
+`existing release file bytes changed` refusals relative to the resolved base
+OID. `verify_base_release_chain(spec, *, base, anchor_dir=None,
+enforce_production_pins=True, clock_skew_seconds=DEFAULT_CLOCK_SKEW_SECONDS)`
+materializes an entered base instead of taking a root, commit and release-entry
+mapping. An explicit `anchor_dir` supplies caller-owned trust material; a
+disjoint unused anchor subtree is then excluded from materialization. Anchors
+nested under a required release prefix are still written and screened, but the
+append gate's cryptographic calls use the caller-owned directory.
+
+`verify_release_chain(root)` remains a directory verifier with its existing
+signature. Its breaking precondition is explicit: it speaks for the directory
+as it was read, once, by this process; a caller on a directory it does not own
+carries the concurrent-writer residual. Commit-addressed callers use
+`verify_append_gate` or `run_verification`, which hand the directory verifier
+private materializations. The directory verifier retains component spelling,
+symlink and regular-file guards; it probes anchors before the configured-path
+and manifest-directory checks, after argument validation and the OpenSSL 3.0
+preflight. OpenSSL's `-CAfile` names a private byte-for-byte copy of the captured
+anchor bytes even when production pinning and observation are disabled. The
+26-case authenticated `--full` battery retains its directory subject.
+
+### Verdict fields and command output (#56; breaking)
+
+The seven-field `VerifyResult` identity and object-store group is `commit`,
+`tree`, `object_format`, `base_commit`, `base_tree`, `name_repertoire` and
+`object_store`. Six are new relative to 0.5.2: `base_commit` already existed.
+Candidate identity is reported once selection succeeds; refusals before that
+point leave it absent. JSON reports `commit`, `tree`, `objectFormat`, `base`
+with commit/tree members, `nameRepertoire` and `objectStore`; the spec record
+gains `pinned`.
+
+`receipt verify` adds `--commit`, `--expect-spec-sha256`, `--expect-commit`,
+`--expect-tree`, `--expect-anchor-set` and `--verify-objects`. The CLI refuses
+`--base-ref requires --expect-commit` and
+`--expect-anchor-set requires --expect-spec-sha256`, including through the JSON
+error boundary. The four identity/status lines are
+`commit <oid> (tree <oid>)`, `base <oid> (tree <oid>)` when supplied,
+`names <repertoire>` and `objects ...`. Object-store status distinguishes
+`objects not requested`, `objects requested; verification did not complete`
+and `objects verified: <count>`; JSON distinguishes `null`,
+`{"requested": true, "report": null}` and a report with `objects`, `storeKiB`
+and `seconds`.
+
+The binding claim changes from
+`binding of the witnessed journal to this working tree` to
+`binding of the witnessed journal to tree {tree[:12]}`. Custody without an
+auditor-owned anchor pin reads
+`custody under the anchor set {digest} the verified tree carries`; with the pin
+it reads `custody of the release chain`. `notEstablished` adds
+`that the files in any checkout equal the verified tree`, and, when applicable,
+`that the anchor set is one the auditor trusts` and
+`that the spec's code was trusted`. Spec, commit, tree and anchor-set pins are
+the auditor's out-of-band inputs, not assertions supplied by the producer.
+
+### Object reader and declared names (#52, #55)
+
+`receipt.snapshot` adds `TreeSnapshot`, `TreeListing`, `Materialization` and
+`ObjectStoreReport`. The context-managed reader type-binds and rehashes fetched
+commit, tree and blob bytes against their object names before using them,
+walks ancestry over authenticated commit objects, and owns one long-lived
+`git cat-file --batch-command` child while entered. Framing failures abandon
+the stream; object, byte, path, depth, time and materialization budgets refuse
+as work arrives. The acceptance fixture has 20,000 entries and exactly
+134,217,728 content bytes and verifies within every default budget. A blob the
+verdict never fetches is bound by name and type only; gitlink OIDs are never
+fetched.
+
+Git runs under a frozen environment and command allow-list, with an explicit
+repository and closing configuration re-audit. The ordinary reader requires
+Git 2.36.0; `verify_objects=True` additionally requires Git 2.50.0 and a build
+reporting `SHA1_DC`, then runs bounded store-wide `fsck` without refs or index.
+The default rehash is plain `hashlib.sha1`. The corruption test flips a packed
+object byte and proves the integrity refusal; collision detection itself is
+Git's, attested by the build-options preflight. Bare and SHA-256 repositories,
+grafts, partial clones and alternates refuse. The shipped reader also refuses
+every shallow repository with `shallow repositories are unsupported`, a
+stronger rule than the plan's base-outside-boundary residual; use
+`fetch-depth: 0`.
+
+The reader interprets committed `.gitattributes` through a bounded,
+fail-closed matcher rather than checkout filters. Protected `filter`, `ident`
+and `working-tree-encoding` attributes refuse; `text` and `eol` remain accepted.
+LFS-tracked content roots are unsupported: the raw pointer blob's digest will
+not match the journal's content digest. The working tree's transformed bytes
+cannot substitute for the committed blob.
+
+`receipt/_names.py` shares the component, device-name, ASCII-fold and 8.3
+suffix screens. `CorpusSpec.name_repertoire` and `ChainSpec.name_repertoire`
+default to `"portable"` and also accept `"posix-bytes"`; existing spec fields
+remain. `CorpusVerification.name_repertoire`, `VerifyResult.name_repertoire`
+and `AppendGateVerdict.name_repertoire` report the choice. Mismatched chain and
+corpus declarations refuse `spec declares two name repertoires`. Both
+repertoires refuse undecodable UTF-8 names wherever quoted or folded and
+ASCII-fold-equal siblings; only `portable` applies the component repertoire,
+Win32 device table and 8.3 extension screen. `posix-bytes` otherwise compares
+exact bytes, with no Unicode normalization or Unicode case-fold model.
+`TreeSnapshot.materialize(..., repertoire=...)` requires the keyword and always
+screens names it writes as portable, including under `posix-bytes`. The review
+proved positive nonportable-name cases and NFC/NFD pairs under `posix-bytes`,
+with portable and ASCII-case-collision controls.
+
+### Refusal migrations and removed machinery (#55, #56, #57; breaking)
+
+The whole-listing corpus screen changes the portable-name contexts
+`tree entry beside '<sibling>'` and `tree entry examined for a tombstone` to
+`tree entry '<entry>'`; the portable-name explanation is unchanged. Both
+`removed path ...` tombstone messages retain their complete wording. Required
+attested-path completeness now precedes every digest comparison, so a journal
+with both an omitted required attested path and a bad content digest refuses
+on completeness first. `CorpusSpec` additionally refuses
+`CorpusSpec content suffix cannot be the Git dot-dot component: {suffix}`.
+Four retained corpus templates interpolate raw paths; `receipt.cli._rendered`
+remains the escaping boundary for command output, while a library caller
+printing `CorpusError` directly receives those raw paths.
+
+The requirement that every directory above a protected path be listable is
+removed for commit-addressed entry points: they read objects and write ordinary
+files. The POSIX requirement remains, including for their private
+materializations and the append gate's caller-owned anchors. The shared
+regular-file reader requires `os.O_NOFOLLOW` and now refuses
+`state files cannot be read with secure descent on this platform (os.O_NOFOLLOW is unavailable); receipt requires a POSIX platform`.
+The parenthetical was `(os.open lacks dir_fd support)` in 0.5.2; descriptor
+descent was removed, not the platform requirement (plan erratum r3l).
+
+The append gate retains a narrow adapter for a nonexistent base's old
+`git rev-parse` diagnostic. An existing blob OID supplied as `base_ref` is an
+accepted exception to exact text: Git's first line,
+`error: <oid>^{commit}: expected commit type, but the object dereferences to blob type`,
+is omitted because snapshot selection normalizes resolution failures. Both
+versions refuse. The harness and re-pin record name this exception; they do
+not broaden message normalization to hide it.
+
+The removed `release_chain` names are `assert_secure_descent_supported`,
+`hold_release_root`, `assert_release_root_unchanged`, `confined_state_descriptor`,
+`read_state_descriptor`, `_working_release_files`,
+`assert_file_modes_authoritative`, `WORKING_TREE_SCAN_OPTIONS`,
+`assert_index_carries_no_protected_alias`,
+`assert_index_hides_no_working_tree_change`, `assert_state_path_tracked`,
+`assert_index_agrees_with_tree`, `assert_release_file_still_indexed`,
+`assert_index_content_bound`, `assert_release_root_index_regular`, `_blob_id`,
+`git_tree_entries` in full, `git_file_entry`, `git_blob_bytes`,
+`materialize_base_tree`, `resolve_base_commit`, `SEARCH_ONLY_DIRECTORY_FLAG`,
+`DIRECTORY_OPEN_FLAGS`, `DESCENT_REQUIRES_DIRECTORY_READ`,
+`unreadable_directory_error`, `_is_symlink_at`, `ConfinedState`,
+`PATHSPEC_ENVIRONMENT`, `_git_environment`, `_git_run`, `_git_bool`,
+`_observed_git_category`, `CE_INTENT_TO_ADD`, `CE_VALID`, `CE_SKIP_WORKTREE`,
+`INDEX_DEBUG_LINES`, `_INDEX_DEBUG_FLAGS_RE`, `_IndexRecord`,
+`_split_index_debug`, `_parse_index_records`, `_index_entries`,
+`_all_index_entries`, `_fold_component`, `_folded_parts`, `_surface_alias_paths`,
+`_exact_relative` and `_assert_no_symlinked_release_component`. Their subjects
+were checkout/index agreement, descriptor lifetimes or readers whose callers
+were deleted. `GitEntry` moved to `snapshot.py` and remains re-exported from
+`release_chain`.
+
+The removed `append_gate` names are `_git_output`, `_resolve_base_commit`,
+`_manifest_at_ref`, `_set_root` including its descriptor-holding return,
+`_staged_surface_changes`, `_StateSnapshot`, `_read_state_snapshot`,
+`_assert_state_unchanged`, `_assert_states_unchanged`, `_assert_root_unchanged`,
+`_bind_new_release_files`, `_hold_release_root`, `_assert_release_root_unchanged`,
+`_assert_release_tree_confined`, `_confine_state_path`, `_nul_paths`,
+`_surface_directories`, `_enumerate_surface_directory`, `_unenumerable_surface`,
+`_assert_listing_complete`, `_warning_is_outside_the_surfaces`,
+`assert_protected_surfaces_enumerable`, `GIT_WARNING_PATH_RE` and
+`MAX_SURFACE_WALK_ENTRIES`. `_check_release_proposal` and
+`_check_release_chain_without_base` are replaced by the selected-tree flow.
+`tests/test_append_gate_diagnostics.py` is deleted: every test targeted
+`_set_root`, `_resolve_base_commit` or `_manifest_at_ref`. Five direct-directory
+reader tests were relocated to `tests/test_release_chain.py`, where their
+subjects still exist.
+
+The removed `corpus` names are `_list_directory`, `_directory_generation`,
+`_DirectoryGenerations`, `_TombstoneIndex`, `_fold_survivor` and its filesystem
+lookup, `_assert_spelled_by_its_directory`, `_SpellingWork`,
+`_assert_no_symlinked_component`, `_assert_no_aliasing_root_component` and its
+stat checks, `_regular_file_digest`, `_FileIdentity`, `_AncestorPrefix`,
+`_SweepWork`, `_assert_tombstones_absent`, `_tree_content_paths`,
+`_assert_no_merging_entries`, `_ascii_upper` and `_win32_device_basename`.
+Shared screens replace the local name helpers. `MAX_TOMBSTONE_WORK`,
+`MAX_SPELLING_WORK` and `MAX_SWEEP_WORK` are removed; the latter was 262144,
+with refusal
+`the closed-world sweep would read more than {MAX_SWEEP_WORK} directory entries; the tree cannot be closed`.
+`MAX_TREE_ENTRIES` bounds immutable tree width instead. The closing membership
+re-sweep, identity re-check, second tombstone pass, POSIX change-time
+precondition and `tree changed during verification` refusals disappear with
+the live filesystem subject. The imported `PORTABLE_NAME_RE`,
+`WIN32_RESERVED_DEVICE_NAMES`, `SHORT_NAME_PUNCTUATION` and
+`ALIAS_CAPABLE_SUFFIX_RE` remain available from `corpus`.
+
+### Harness subject and measured differential (#54, #56, #57)
+
+Lane E committed the mutated fixture before verifier changes and ran each
+moved case with both readers on the clean main checkout, then with the oracle
+on a detached checkout and the port on the main worktree. It checked clean
+status, no ignored files and index-tree equality with `HEAD^{tree}`; the
+fixtures copy only `ledger/` and `releases/`, with no `.gitattributes`. All 94
+baseline cases passed before and after this fixture change. The 0.6 census is
+26 re-pinned cases (18 append and 8 ledger), 68 unchanged, 7 Lane C additions
+and 7 Lane B additions: 108, comprising append 28, ledger 43, attest 20 and
+Brier 17. Lane B recorded 108/108 with zero skips and a separate port-only
+production-tree differential of 17/17: both acceptance texts and all 15
+retained mutation markers matched against the authenticated `9dafe81` tree.
+After a candidate commit, an unstaged rewrite of ledger line 129 deliberately
+makes the append-only directory oracle refuse while the port accepts the
+unchanged commit. The complete fixture, exception and measurement record is
+[`receipts/repin-0.6-tree-object.md`](receipts/repin-0.6-tree-object.md).
+
+### Stated residuals
+
+The plan's STATE rows remain: a same-owner writer to the repository's
+configuration files, which every git process re-reads — detected by the
+closing re-audit, not excluded — and a direct `verify_release_chain` caller on
+a live directory (row 3); shallow: a base outside the boundary refuses,
+`fetch-depth: 0` (row 7; the shipped reader's stronger all-shallow refusal is
+recorded above); attributes and filters for checkouts and for a direct
+`verify_release_chain` caller (`text`, `eol`, `core.autocrlf`, LFS pointers,
+whatever the checkout applied; row 9); the checkout's half of name folding and
+Win32 aliases, repertoire named in the verdict (row 12); binding — the journal
+cannot bind the tree that holds the manifest, #35 is the later closure — and
+collision substitution, STATE by default and CLOSE to the reach of git's own
+detector under `--verify-objects`, because the rehash is `hashlib.sha1`, plain
+SHA-1, and would accept a colliding pair substituted under one OID (row 13);
+stale GitHub test merge: ancestor check kept, both OIDs printed, branch
+protection is the consumer's remedy (row 14); private materialization:
+`mkdtemp` 0700, written once by this process, a same-uid writer is inside the
+process's trust boundary (row 15); append-gate trusted anchors:
+`trusted_code_root` unchanged, at the trust level of the gate's own imported
+code, a commit-addressed `trusted_anchor_commit` is a later non-breaking
+addition; `receipt verify` trust otherwise unestablished, a spec field alone
+is the producer's proposal, custody narrowed to the anchor set the verified
+tree carries (row 16); OpenSSL pathname reads for a direct
+`verify_release_chain` caller on a live directory, where OpenSSL still reads
+receipt paths in that directory (row 18); producer-controlled spec code unless
+the spec is pinned, since without `--expect-spec-sha256` arbitrary code from
+the verified repository runs inside the verifier and can defeat every other
+row, while under a pin a mismatching spec never runs (row 19); release
+identity: the exact-target checks are recorded evidence in the release notes,
+reviewed by the release peer rather than re-run by it, with closure requiring
+the tag on the reviewed head OID itself under a merge-commit merge (row 20).
+
 ## 0.5.2
 
 A refusal release. Nothing new is verified; four classes of input that used to
