@@ -293,16 +293,19 @@ def test_commit_age_and_repository_slug_parsers(
     root = pathlib.Path("/repo")
     outputs = iter(
         [
-            "100",
-            "200",
-            "git@github.com:MaxGhenis/brier.git",
-            "https://example.com/MaxGhenis/brier.git",
+            b"100\n",
+            b"200\n",
+            b"git@github.com:MaxGhenis/brier.git\n",
+            b"https://example.com/MaxGhenis/brier.git\n",
         ]
     )
+
+    def fake_check_output(*args: object, **kwargs: object) -> bytes | str:
+        output = next(outputs)
+        return output.decode() if kwargs.get("text") else output
+
     monkeypatch.setattr(
-        attest_module,
-        "git_output",
-        lambda _root, *args: next(outputs),
+        attest_module.subprocess, "check_output", fake_check_output
     )
     assert commit_age_seconds(root, COMMIT, now=150.9) == 50
     assert commit_age_seconds(root, COMMIT, now=150) == 0
@@ -372,6 +375,48 @@ def test_repository_slug_refuses_non_github_or_ambiguous_origin(
     tmp_path: pathlib.Path, origin: str
 ) -> None:
     """A GitHub-looking substring must never supply a different identity."""
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        ["git", "config", "remote.origin.url", origin], cwd=tmp_path, check=True
+    )
+    with pytest.raises(ProvenanceError) as caught:
+        repository_slug(tmp_path)
+    assert str(caught.value) == f"cannot derive repository slug from {origin!r}"
+
+
+@pytest.mark.parametrize("host", ["g\u0131thub.com", "g\u0130thub.com"])
+@pytest.mark.parametrize(
+    "origin_template",
+    ["https://{host}/O/R.git", "git@{host}:O/R.git", "ssh://git@{host}:22/O/R.git"],
+)
+def test_repository_slug_refuses_unicode_case_aliases(
+    tmp_path: pathlib.Path, host: str, origin_template: str
+) -> None:
+    """Unicode case matches of ASCII i still name a foreign authority."""
+
+    origin = origin_template.format(host=host)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        ["git", "config", "remote.origin.url", origin], cwd=tmp_path, check=True
+    )
+    with pytest.raises(ProvenanceError) as caught:
+        repository_slug(tmp_path)
+    assert str(caught.value) == f"cannot derive repository slug from {origin!r}"
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        " https://github.com/O/R.git",
+        "https://github.com/O/R.git ",
+        "\nhttps://github.com/O/R.git\n",
+    ],
+)
+def test_repository_slug_refuses_boundary_whitespace(
+    tmp_path: pathlib.Path, origin: str
+) -> None:
+    """Only Git's final framing newline may be removed before validation."""
 
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     subprocess.run(

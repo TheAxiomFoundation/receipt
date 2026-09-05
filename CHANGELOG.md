@@ -96,10 +96,12 @@ reads the producer key and each TSA anchor twice, and digest observation
 requires repeated anchor bytes to agree across releases and roles.
 
 `repository_slug` parses HTTPS/SSH authorities and SCP origins, requiring
-exactly `github.com` ignoring case and two path components. An optional user,
-port and trailing slash are accepted; only a terminal `.git` is stripped,
-preserving `TheAxiomFoundation/receipt.audit`. Foreign hosts, extra components,
-queries and fragments refuse `cannot derive repository slug from {url!r}`.
+exactly `github.com` ignoring ASCII case and two path components. An optional
+user, port and trailing slash are accepted; only a terminal `.git` is stripped,
+preserving `TheAxiomFoundation/receipt.audit`. Foreign hosts (including Unicode
+case aliases), extra components, whitespace, queries and fragments refuse
+`cannot derive repository slug from {url!r}`. The origin query
+removes only Git's single framing newline before validation.
 The SSH-port origin `ssh://git@github.com:22/O/R.git` yields `O/R`, previously
 `22/O`. `receipt verify` does not call this helper.
 

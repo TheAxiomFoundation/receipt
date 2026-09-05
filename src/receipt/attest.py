@@ -225,12 +225,17 @@ def commit_age_seconds(
 def repository_slug(root: pathlib.Path) -> str:
     """Derive an exact GitHub ``owner/name`` from an HTTPS, SSH or SCP origin.
 
-    URL authorities may carry a user and port; host comparison ignores case.
+    URL authorities may carry a user and port; host comparison ignores ASCII case.
     One trailing slash and a terminal ``.git`` are removed, preserving periods
     inside the repository name. Queries, fragments and other path shapes refuse.
     """
 
-    url = git_output(root, "remote", "get-url", "origin")
+    # Preserve the configured value's whitespace and control bytes for the
+    # guard below; only the command's one framing newline may be removed.
+    raw_url = subprocess.check_output(
+        ["git", "remote", "get-url", "origin"], cwd=root, stderr=subprocess.PIPE
+    )
+    url = raw_url.removesuffix(b"\n").decode("utf-8", errors="surrogateescape")
     try:
         if "?" in url or "#" in url or any(
             character.isspace() or ord(character) < 32 for character in url
@@ -241,7 +246,7 @@ def repository_slug(root: pathlib.Path) -> str:
             if parsed.scheme not in {"https", "ssh"} or not re.fullmatch(
                 r"(?:[^@:/\s]+@)?github\.com(?::[0-9]+)?",
                 parsed.netloc,
-                re.IGNORECASE,
+                re.IGNORECASE | re.ASCII,
             ):
                 raise ValueError
             # Accessing port validates its numeric range as well as its syntax.
@@ -249,7 +254,7 @@ def repository_slug(root: pathlib.Path) -> str:
             path = parsed.path.removeprefix("/")
         else:
             match = re.fullmatch(
-                r"[^@:/\s]+@github\.com:(.+)", url, re.IGNORECASE
+                r"[^@:/\s]+@github\.com:(.+)", url, re.IGNORECASE | re.ASCII
             )
             if match is None:
                 raise ValueError
