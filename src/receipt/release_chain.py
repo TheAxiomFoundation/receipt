@@ -481,8 +481,9 @@ def assert_manifest_directory_regular(root: pathlib.Path, spec: ChainSpec) -> No
 
     ``verify_release_chain`` calls this guard itself before enumeration, after
     the configured path walk has bound the manifest leaf's spelling but
-    deliberately left its type to this check. The append gate's push path also
-    calls it before asking whether a chain is initialized. Without that guard,
+    deliberately left its type to this check. The append gate screens its
+    authenticated manifest-tree entry before testing initialization; this
+    guard protects direct directory callers. Without a type check,
     ``manifest_directory.is_dir() and any(iterdir())`` gets ``False`` for every
     way the path can be something other than a directory: a 100644 blob
     standing where the manifest directory was, an empty symlink there, or a
@@ -504,10 +505,8 @@ def assert_manifest_directory_regular(root: pathlib.Path, spec: ChainSpec) -> No
     *ancestor* is a regular file — a release root that is a blob,
     or any component of a multi-component manifest path — and ``EACCES`` when
     an ancestor is unsearchable, and catching ``OSError`` turned both into "no
-    manifest directory here". On the push path that is an acceptance with no
-    chain: ``initialized`` is false, nothing is enumerated, and
-    ``verify_release_chain`` is never called, while the commit under review may
-    carry the whole chain.
+    manifest directory here". Treating either as absence could hide a chain
+    in the directory under review.
 
     So the components are walked. ``FileNotFoundError`` at any of them is
     absence — nothing stands there, so nothing stands at the leaf either, and
@@ -1306,10 +1305,10 @@ def _symlinked_component_error(
 ) -> ReleaseChainError:
     """The one refusal both confinement checks give for a linked component.
 
-    The component walk below and the descriptor walk that opens the file
-    raise this same text for the same fact, so a component that becomes a
-    link between them is refused in the words the walk already used rather
-    than in words of its own.
+    The path guard and the regular-file reader's component ``lstat`` walk
+    use the same text. The reader then opens the leaf once with
+    ``O_NOFOLLOW | O_NONBLOCK`` and checks its regular-file identity with
+    ``fstat``; there is no descriptor descent between components.
     """
 
     return ReleaseChainError(
@@ -1437,9 +1436,9 @@ def assert_no_symlinked_state_component(
     while being no part of what the auditor cloned, and no part of what the
     base commit can be diffed against. An in-tree link is the same hole: the
     bytes under audit are then a directory the surface patterns never name.
-    The anchor path is walked this way at the top of ``verify_release_chain``;
-    this is the same walk for the two state paths. (Mirrors
-    ``corpus._assert_no_symlinked_component``.)
+    This standalone directory guard checks a state path. The directory
+    verifier's own regular-file reader performs its component ``lstat``
+    walk at each read.
 
     Each component's spelling is bound here too, after its own symlink check
     so that a linked component keeps that answer: what a component *is* comes
@@ -1660,16 +1659,11 @@ def _state_file_bytes(
 ) -> bytes:
     """One state file's bytes: the caller's snapshot, or a fresh read.
 
-    ``append_gate`` reads each state file once, records the file's identity,
-    and feeds those bytes to every consumer it owns. This verifier was not
-    one of them: it re-opened both paths by name, so a candidate could
-    satisfy the row checks with one ledger and the release chain with
-    another inside a single verdict — and restore the first before the
-    closing re-read looked, since that comparison saw the same device,
-    inode, size, and mtime it started with. A caller that has already read a
-    state path supplies its bytes and this path is not opened again at all.
-    With nothing supplied the read is the one it always was, in the same
-    place, with the same refusals.
+    Commit-addressed callers can supply authenticated blob bytes so every
+    consumer judges the same state. A supplied path is not opened here.
+    Otherwise the configured path is read through the guarded regular-file
+    reader, from a private materialization or a direct caller's directory;
+    there is no closing re-read.
     """
 
     key = relative.as_posix()
@@ -1686,6 +1680,13 @@ def _verify_state_history(
     require_head_current: bool,
     state_bytes: Mapping[str, bytes],
 ) -> None:
+    """Compare release history with supplied state bytes or guarded reads.
+
+    The retained "working-tree" refusals name these consumed state bytes,
+    including authenticated blobs and private materializations. The legacy
+    "ledger/immutable_prefix.json" text names the configured prefix file.
+    """
+
     ledger = _state_file_bytes(root, spec.state_relative, state_bytes)
     prefix = _state_file_bytes(root, spec.prefix_relative, state_bytes)
     offsets = jsonl_line_offsets(ledger, spec.state_path)

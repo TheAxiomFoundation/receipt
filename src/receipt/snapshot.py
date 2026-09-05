@@ -3226,6 +3226,7 @@ class Materialization:
         sibling_names: dict[tuple[bytes, ...], set[bytes]] = {}
         for path, entry in sorted(selected.items()):
             if entry.mode not in _CONTENT_MODES:
+                # "base tree" is legacy text; this may be any selected snapshot.
                 raise SnapshotError(
                     f"base tree entry has non-regular mode {entry.mode}: {path}"
                 )

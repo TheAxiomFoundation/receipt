@@ -866,6 +866,7 @@ def _screen_candidate_tree_aliases(
                 if parts[:depth] == exact[path][:depth]:
                     continue
                 prefix = "/".join(exact[path][:depth])
+                # The legacy "index" diagnostic names an authenticated tree entry.
                 raise AppendError(
                     f"index carries an alias of a protected path: {listed} "
                     f"(for {path} at {prefix})"
