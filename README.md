@@ -16,7 +16,7 @@ Shipped:
 - `receipt.attest` — workflow-provenance verification with self-anchoring enforcement epochs and a full-history sweep over every protected-tree commit
 - `receipt.canonical` — one byte stream per value: canonical JSON with UTF-16 code-unit key order and ECMAScript number formatting
 - `receipt.append_gate` — a candidate change to an append-only ledger must extend the trusted base exactly: prefix retained, rows valid, releases untouched
-- `receipt.corpus` — closed-world binding of a witnessed journal to a working tree: every content file bound, every bound file present, every digest exact, and per-gate reproducibility tiers so a declaration is never mistaken for a verification
+- `receipt.corpus` — closed-world binding of a witnessed journal to a committed tree object: every content file bound, every bound file present, every digest exact, and per-gate reproducibility tiers so a declaration is never mistaken for a verification
 - `receipt verify` — the outside auditor's command: a clone, commodity tools, one offline fail-closed verdict
 
 Arriving:
@@ -29,14 +29,87 @@ Arriving:
 ## Using it
 
 ```bash
-receipt verify --spec path/to/your/spec.py
+receipt verify --spec path/to/spec.py --commit HEAD
 ```
 
-`TheAxiomFoundation/rulespec-nz` is the reference consumer: its `verification/spec.py` is the whole trust configuration, and its `VERIFY.md` is the third-party procedure. The command needs no network, no credentials, and no cooperation from the producer — `openssl`, `git`, and Python are the only dependencies.
+The command selects a commit and prints its full commit and tree OIDs. The
+binding pass compares the witnessed journal with that tree's raw blob bytes;
+changes to the working tree or index do not change the selected subject.
+`--root` names the repository's top level. A history comparison also needs the
+base commit in that repository: `--base-ref REF` requires `--expect-commit OID`.
+
+The auditor's out-of-band pins are `--expect-spec-sha256`, `--expect-commit`,
+`--expect-tree`, and `--expect-anchor-set`. The spec digest is checked before
+its Python code executes. An explicit anchor-set pin requires the spec pin;
+under a pinned spec, `VerificationSpec.anchor_set_sha256` can supply the
+anchor-set pin instead. The anchor bytes are compared before custody
+verification invokes OpenSSL. Without an effective anchor pin, the claim is
+"custody under the anchor set {digest} the verified tree carries"; without a
+spec pin, the verdict also does not establish that the spec's code was trusted.
+The command performs verification offline; its trust configuration is
+executable Python supplied by the caller.
+
+## What this verdict speaks for
+
+A PASS establishes custody under the reported anchor set and binding of the
+witnessed journal to the named tree. An optional history pass establishes that
+every release object at the supplied base remains byte- and mode-identical.
+The verdict does not establish:
+
+- that any declared gate actually passed;
+- that the encoded rules are a correct reading of the law;
+- that this clone holds the producer's newest release (`--base-ref` only bounds
+  staleness against a head the auditor recorded; newest needs an out-of-band
+  comparison);
+- that this is the only history the producer maintains (equivocation is
+  undetectable from a single clone; compare head digests out of band);
+- that the files in any checkout equal the verified tree.
+
+Without an effective anchor pin, it also does not establish that the anchor
+set is one the auditor trusts. The direct `verify_release_chain` API speaks
+for a directory as this process read it once; its caller carries the
+concurrent-writer residual. Commit-addressed callers use `run_verification`
+or `verify_append_gate`.
 
 ## Install
 
-Requires Python 3.11+, `git`, and OpenSSL 3.0 or newer as `openssl` on the path: verifying an RFC 3161 token passes `-no-CAstore`, which older releases do not have, and counting a pinned root's certificates uses `storeutl`, which LibreSSL — the stock `/usr/bin/openssl` on macOS — has at no version. `receipt.tsa` checks the version once per process and refuses a build below the floor by name, before it reads a trust bundle; elsewhere in the package an unusable `openssl` surfaces wherever OpenSSL itself fails. Install OpenSSL (for example `brew install openssl`) and put its `openssl` first on the path. The corpus sweep's change detection requires POSIX change-time semantics; on Windows it refuses to verify rather than trusting a stamp a writer can restore. Corpus paths are portable names: ASCII letters, digits, '.', '_' and '-', not ending in a dot and not a Win32 device name; anything else refuses verification. receipt requires a POSIX platform: its state reads open through directory descriptors (`os.open` with `dir_fd`, which every POSIX platform CPython supports and Windows does not), so on Windows `receipt verify` and the append gate refuse rather than reading state through a weaker path. Every directory above a protected path — the state files, the release root, and the paths configured under it — must also be listable by the verifier: a directory's listing is the only thing that binds the spelling of what it holds, so one that cannot be listed is refused rather than descended, even where it can be traversed. The append gate asks the same of every directory *under* a protected surface whenever it classifies a proposal against a base ref, for the neighbouring reason: `git ls-files` exits 0 while warning that it could not open a directory and omitting that subtree, so a surface the verifier cannot enumerate for itself is a proposal it refuses to classify rather than one it reports as unchanged; that enumeration is bounded, and the bound is charged as each listing is read rather than after a directory has been listed whole, so a directory wider than the bound costs one entry past it and not all of them. The surface a gate-only proposal is confined to includes every directory *above* the release root as well as the root and everything under it: with a release root of `data/releases`, replacing `data` decides whether there is a release root at all, so a change there is a change on the release surface rather than an unclassified one, and the root's components are walked before that verdict is returned. Both halves of that confinement — no symlinked component, every component spelled by the directory that holds it — are checked by `receipt verify` itself, at the top of its custody pass, and not only by the append gate: a release tree reached through a link, or read out of a leaf spelled some other way, is refused before any manifest is enumerated. And the gate reads the whole index once at entry for an entry spelled as another spelling of any path it protects — the release root, the two state files, the manifest and anchor directories, and every path the consumer's own gate and data surface patterns name — because a checkout that folds names materialises both spellings onto one file while every check here compares by exact spelling. Five environment variables make the verifier decline to answer at all: `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY` and `GIT_ALTERNATE_OBJECT_DIRECTORIES` can each decide which repository, working tree, index or object store some git read resolves in, so `receipt verify` (every pass, the `--base-ref` history pass included) and the append gate refuse when one is set in their own environment rather than answering about a tree they were not asked about. git sets some of these variables in its own hook environments (`pre-commit` and the other commit hooks set `GIT_INDEX_FILE`; `pre-receive` sets `GIT_DIR` and the two object-directory variables; `pre-push` and `post-checkout` set none), so an entry wired into one of the former is refused there; the invocation they are written for is a CI job over a checkout.
+Requires Python 3.11+, git 2.36.0 or later, and OpenSSL 3.0 or later as
+`openssl` on the path. The reader uses `git cat-file --batch-command`;
+`--verify-objects` additionally requires git 2.50.0 or later and a build
+reporting `SHA1_DC`. That option runs bounded whole-store `fsck` and reports
+its measurements; ordinary verification rehashes the objects it reads with
+plain SHA-1. SHA-256 repositories and bare repositories are refused.
+
+receipt requires a POSIX platform. Its guarded regular-file reader requires
+`os.O_NOFOLLOW`, including when reading a private materialization or the append
+gate's caller-owned trust directory. OpenSSL's RFC 3161 verification uses
+`-no-CAstore`, and pinned-root certificate counting uses `storeutl`; the
+preflight refuses LibreSSL and OpenSSL below 3.0. Install OpenSSL (for example
+`brew install openssl`) and put its `openssl` first on the path.
+
+Use a repository containing the candidate and, when supplied, the base commit.
+Shallow clones cannot verify a base outside their boundary; this release
+refuses every shallow repository with `shallow repositories are unsupported`,
+including one whose requested commits are present. Use `fetch-depth: 0` in
+GitHub Actions. LFS-tracked content roots are unsupported: verification reads
+the pointer blob, whose digest will not match a journal digest of the expanded
+content. Protected paths with transforming `filter`, `ident`, or
+`working-tree-encoding` attributes refuse; `text` and `eol` are accepted, and
+checkout fidelity is outside the verdict.
+
+`ChainSpec.name_repertoire` and `CorpusSpec.name_repertoire` default to
+`portable`: ASCII letters, digits, `.`, `_`, and `-`, no trailing period or
+Win32 device basename. A spec may declare `posix-bytes` for exact-byte names
+outside the materialized paths; names quoted or folded must still be valid
+UTF-8, and ASCII-fold-equal siblings refuse under both repertoires. Both spec
+fields must agree. Private materialization always requires portable names,
+even under `posix-bytes`, so that declaration can widen content names but cannot
+widen materialized release, state, manifest, or anchor names.
+
+The public `receipt verify` and append-gate entries retain their refusal when
+`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, or
+`GIT_ALTERNATE_OBJECT_DIRECTORIES` is set. The object reader separately freezes
+its Git environment and explicitly selects the repository for its reads.
 
 ```bash
 uv pip install receipt
