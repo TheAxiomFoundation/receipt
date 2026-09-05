@@ -1180,8 +1180,22 @@ def _supported_openssl_version(line: str) -> bool:
 
 
 @functools.cache
+def _openssl_version_requirement() -> tuple[bool, str, str | None]:
+    """Return the cached version verdict, including a command refusal."""
+
+    try:
+        banner = _run_openssl(["version"])
+    except TsaError as exc:
+        return False, "", str(exc)
+    assert isinstance(banner, str)
+    lines = banner.splitlines()
+    line = lines[0].strip() if lines else ""
+    return _supported_openssl_version(line), line, None
+
+
+@functools.cache
 def _require_supported_openssl() -> None:
-    """Refuse, once per process, an ``openssl`` this module cannot rely on.
+    """Probe once per process for an ``openssl`` this package can rely on.
 
     Loading any trust bundle counts a pinned root's certificates with
     ``openssl storeutl``, which LibreSSL does not have.  Without this a
@@ -1202,12 +1216,15 @@ def _require_supported_openssl() -> None:
     ``-CAfile`` loads.
 
     Cached because it is a property of the machine and not of the input.  Run
-    from ``_certificate_count``, so that no path to a count can skip it, and
-    from the top of ``_load_trust_bundle``, so that the refusal reaches an
-    auditor as itself rather than wrapped in that function's message about an
-    anchor's root material.  A missing ``openssl`` raises the ported
-    "openssl is required to verify RFC 3161 tokens" from ``_run_openssl``,
-    which is left to propagate.
+    from ``_certificate_count``, so that no path to a count can skip it, from
+    the top of ``_load_trust_bundle``, so that the refusal reaches an auditor
+    as itself rather than wrapped in that function's message about an anchor's
+    root material, and from ``release_chain.verify_release_chain`` before any
+    path access, so the public directory verifier carries the same floor.  A
+    missing ``openssl`` raises the ported "openssl is required to verify RFC
+    3161 tokens" inside ``_run_openssl``; ``_openssl_version_requirement``
+    catches and caches that refusal text, and this function re-raises it on
+    each call without probing the command again.
 
     ``tests/test_tsa.py`` binds the parser one banner at a time by
     substituting the answer to ``openssl version``, which says what this
@@ -1218,15 +1235,28 @@ def _require_supported_openssl() -> None:
     image at the time of writing) and not a substituted banner.
     """
 
-    banner = _run_openssl(["version"])
-    assert isinstance(banner, str)
-    lines = banner.splitlines()
-    line = lines[0].strip() if lines else ""
-    if not _supported_openssl_version(line):
+    supported, line, command_refusal = _openssl_version_requirement()
+    if command_refusal is not None:
+        raise TsaError(command_refusal)
+    if not supported:
         raise TsaError(
             "receipt requires OpenSSL 3.0 or newer as `openssl` on the path; "
             f"found: {line}"
         )
+
+
+# Existing tests and callers clear the public preflight cache when substituting
+# a version banner. Clear the successful-result cache and the cached refusal
+# together, so that hook retains its original meaning.
+_require_supported_openssl_cache_clear = _require_supported_openssl.cache_clear
+
+
+def _clear_supported_openssl_cache() -> None:
+    _require_supported_openssl_cache_clear()
+    _openssl_version_requirement.cache_clear()
+
+
+_require_supported_openssl.cache_clear = _clear_supported_openssl_cache
 
 
 def _certificate_identity(path: Path) -> dict[str, str]:

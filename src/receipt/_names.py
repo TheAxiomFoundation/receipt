@@ -37,6 +37,17 @@ NAME_REPERTOIRES = frozenset({PORTABLE_REPERTOIRE, POSIX_BYTES_REPERTOIRE})
 # keep state below ``.axiom``.  Empty, ``.`` and ``..`` are rejected separately.
 PORTABLE_NAME_RE = re.compile(r"[A-Za-z0-9._-]+\Z")
 
+# Characters Win32 short-name generation preserves in an extension beside
+# ASCII letters and digits. Spaces are removed before extension derivation;
+# every other character is replaced by an underscore.
+SHORT_NAME_PUNCTUATION = frozenset("$%'-_@~`!(){}^#&")
+
+# A pinned suffix an 8.3 alias can carry in full: one period followed by an
+# extension of at most three portable extension characters. A longer suffix
+# or one with another period cannot be an 8.3 extension and is deliberately
+# outside this screen.
+ALIAS_CAPABLE_SUFFIX_RE = re.compile(r"\.[A-Za-z0-9_-]{1,3}\Z")
+
 # Win32 reserves these basenames in every directory, including when an
 # extension follows.  COM0 and LPT0 are ordinary names; Microsoft's table and
 # the native matcher both reserve only 1 through 9.  The superscript spellings
@@ -97,6 +108,68 @@ def _win32_device_basename(component: str) -> str:
             head = component[:index]
             break
     return _ascii_upper(head.rstrip(" "))
+
+
+def short_name_extension(name: str) -> str | None:
+    """Return the extension Win32 derives for an 8.3 alias.
+
+    The operation is intentionally only the extension screen. The alias stem
+    depends on directory-local collisions, and whether a volume creates short
+    names is not repository data. Callers first apply the portable repertoire,
+    which makes this ASCII derivation exact for every production input.
+    """
+
+    if type(name) is not str:
+        raise NamePolicyError(f"short-name source must be text: {name!r}")
+    stripped = name.replace(" ", "").lstrip(".")
+    _stem, dot, extension = stripped.rpartition(".")
+    if not dot:
+        return None
+    source = extension[:3]
+    mapped = "".join(
+        _ascii_upper(character)
+        if "a" <= character <= "z" or "A" <= character <= "Z"
+        else (
+            character
+            if "0" <= character <= "9" or character in SHORT_NAME_PUNCTUATION
+            else "_"
+        )
+        for character in source
+    )
+    return mapped or None
+
+
+def short_name_carries_pinned_suffix(
+    name: str, suffixes: Iterable[str]
+) -> bool:
+    """Whether an 8.3 alias of ``name`` carries a pinned suffix exactly.
+
+    Pins that cannot themselves be an 8.3 extension are ignored. Comparison
+    folds ASCII letters only; no Unicode normalization or case mapping enters
+    the portable-name policy.
+    """
+
+    if type(name) is not str:
+        raise NamePolicyError(f"short-name source must be text: {name!r}")
+    try:
+        capable = tuple(
+            suffix
+            for suffix in suffixes
+            if type(suffix) is str
+            and ALIAS_CAPABLE_SUFFIX_RE.fullmatch(suffix) is not None
+        )
+    except TypeError as exc:
+        raise NamePolicyError("pinned suffixes must be iterable text") from exc
+    if not capable:
+        return False
+    extension = short_name_extension(name)
+    if extension is None:
+        return False
+    alias = ("." + extension).encode("ascii").translate(_ASCII_LOWER)
+    return any(
+        alias == suffix.encode("ascii").translate(_ASCII_LOWER)
+        for suffix in capable
+    )
 
 
 def _portable_failure(value: object, label: str, repertoire: str | None) -> None:
@@ -319,10 +392,12 @@ _assert_no_merging_entries = assert_no_merging_entries
 
 
 __all__ = [
+    "ALIAS_CAPABLE_SUFFIX_RE",
     "NAME_REPERTOIRES",
     "PORTABLE_NAME_RE",
     "PORTABLE_REPERTOIRE",
     "POSIX_BYTES_REPERTOIRE",
+    "SHORT_NAME_PUNCTUATION",
     "WIN32_RESERVED_DEVICE_NAMES",
     "NamePolicyError",
     "ascii_fold_bytes",
@@ -330,6 +405,8 @@ __all__ = [
     "assert_no_merging_entries",
     "assert_portable_name",
     "decode_component",
+    "short_name_carries_pinned_suffix",
+    "short_name_extension",
     "validate_component_bytes",
     "validate_component_text",
     "validate_repertoire",

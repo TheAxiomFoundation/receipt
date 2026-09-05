@@ -19,14 +19,17 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import pathlib
 import shutil
+import subprocess
 import sys
 
 import pytest
 
 from receipt.cli import EXIT_FAIL, EXIT_OK, EXIT_USAGE, main
 from receipt.sign import generate_signing_keypair, sign_payload
+from receipt.snapshot import TreeSnapshot
 from receipt.verify import VerifySpecError, load_spec
 
 from corpus_fixture import CONTENT, append_release, build_corpus
@@ -61,6 +64,48 @@ def manifest_stem(repo: pathlib.Path) -> pathlib.Path:
     return manifests[0]
 
 
+def _git(repo: pathlib.Path, *args: str) -> str:
+    """Run fixture Git without consulting ambient configuration or redirects."""
+
+    environment = os.environ.copy()
+    for variable in tuple(environment):
+        if variable.startswith("GIT_"):
+            environment.pop(variable)
+    environment.update(
+        {
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_AUTHOR_NAME": "Receipt CLI Fixture",
+            "GIT_AUTHOR_EMAIL": "receipt-cli@example.invalid",
+            "GIT_COMMITTER_NAME": "Receipt CLI Fixture",
+            "GIT_COMMITTER_EMAIL": "receipt-cli@example.invalid",
+        }
+    )
+    completed = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    return completed.stdout.strip()
+
+
+def head_oid(repo: pathlib.Path) -> str:
+    oid = _git(repo, "rev-parse", "--verify", "HEAD")
+    assert len(oid) in {40, 64}
+    assert set(oid) <= set("0123456789abcdef")
+    return oid
+
+
+def commit_candidate(repo: pathlib.Path, message: str = "candidate") -> str:
+    """Commit the exact candidate tree a CLI refusal is meant to inspect."""
+
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "--quiet", "-m", message)
+    return head_oid(repo)
+
+
 # --- the command accepts a corpus that is exactly what it claims to be -------
 
 
@@ -71,6 +116,32 @@ def test_verifies_a_published_corpus_from_a_clone(
     out = capsys.readouterr().out
     assert "VERDICT: PASS" in out
     assert "custody" in out and "binding" in out
+    commit = head_oid(repo)
+    tree = _git(repo, "rev-parse", "HEAD^{tree}")
+    assert f"  commit {commit} (tree {tree})" in out
+    assert "  names portable" in out
+    assert "  objects not requested" in out
+
+
+def test_default_root_walks_from_the_spec_to_the_repository_top_level(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    spec_path = repo / "verification/spec.py"
+
+    assert main(["verify", "--spec", str(spec_path), "--json"]) == EXIT_OK
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["root"] == str(repo.resolve())
+
+
+def test_explicit_nested_root_refuses_as_not_the_repository_top_level(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run(repo, "--root", str(repo / "rules")) == EXIT_FAIL
+    assert (
+        "root is not the top level of its repository"
+        in capsys.readouterr().err
+    )
 
 
 def test_json_pass_writes_to_a_redirected_stringio(
@@ -92,7 +163,15 @@ def test_json_pass_writes_to_a_redirected_stringio(
     assert code == EXIT_OK
     text = captured.getvalue()
     assert text.endswith("\n")
-    assert json.loads(text)["verdict"] == "PASS"
+    payload = json.loads(text)
+    assert payload["verdict"] == "PASS"
+    assert payload["commit"] == head_oid(repo)
+    assert payload["tree"] == _git(repo, "rev-parse", "HEAD^{tree}")
+    assert payload["objectFormat"] == "sha1"
+    assert payload["base"] is None
+    assert payload["nameRepertoire"] == "portable"
+    assert payload["objectStore"] is None
+    assert payload["spec"]["pinned"] is False
 
 
 def test_text_pass_writes_to_a_redirected_stringio(
@@ -486,6 +565,19 @@ def test_the_verdict_states_what_it_did_not_establish(
     assert "NOT RE-RUN BY THIS COMMAND" in out
     assert "does NOT prove" in out
     assert "correct reading of the law" in out
+    assert (
+        "  the producer maintains — a stale or equivocated but honestly "
+        "witnessed\n"
+        "  clone may pass, and this verdict does NOT prove that files in any "
+        "checkout\n"
+        "  equal the verified tree.\n"
+        "  It does NOT establish that the spec's code was trusted.\n"
+        "  It does NOT establish that the anchor set is one the auditor "
+        "trusts.\n"
+        "  Check freshness and uniqueness by comparing head\n"
+        "  digests out of band."
+    ) in out
+    assert "clone also passes" not in out
 
 
 def test_gate_tiers_are_reported_separately(
@@ -520,10 +612,14 @@ def test_json_output_marks_gates_as_not_re_run(
         "that this is the only history the producer maintains "
         "(equivocation is undetectable from a single clone; compare "
         "head digests out of band)",
+        "that the files in any checkout equal the verified tree",
+        "that the anchor set is one the auditor trusts",
+        "that the spec's code was trusted",
     ]
     assert payload["scope"]["established"] == [
-        "custody of the release chain",
-        "binding of the witnessed journal to this working tree",
+        "custody under the anchor set "
+        f"{payload['chain']['anchorSetSha256']} the verified tree carries",
+        f"binding of the witnessed journal to tree {payload['tree'][:12]}",
     ]
     assert payload["chain"]["releases"] == 1
     assert len(payload["chain"]["witnesses"]) == 2
@@ -534,13 +630,54 @@ def test_json_output_marks_gates_as_not_re_run(
     assert payload["passesCompleted"] == ["custody", "binding", "declaration"]
 
 
+def test_verify_objects_reports_the_real_primary_store(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run(repo, "--verify-objects", "--json") == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    report = payload["objectStore"]
+    assert report["objects"] > 0
+    assert report["storeKiB"] >= 0
+    assert report["seconds"] >= 0
+
+    assert run(repo, "--verify-objects") == EXIT_OK
+    out = capsys.readouterr().out
+    assert f"  objects verified: {report['objects']}" in out
+
+
+def test_requested_object_store_failure_is_not_rendered_as_not_requested(
+    repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def refuse(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise RuntimeError("injected object-store refusal")
+
+    monkeypatch.setattr(
+        "receipt.snapshot.TreeSnapshot.verify_object_store",
+        refuse,
+    )
+    assert run(repo, "--verify-objects") == EXIT_FAIL
+    error = capsys.readouterr().err
+    assert "objects requested; verification did not complete" in error
+    assert "objects not requested" not in error
+
+    assert run(repo, "--verify-objects", "--json") == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["objectStore"] == {
+        "requested": True,
+        "report": None,
+    }
+
+
 def anchor_set_recomputed(repo: pathlib.Path) -> tuple[str, dict[str, str]]:
     """The recomputation an auditor would script, sharing no package code:
     hash the spec-configured anchor files, then SHA-256 the compact
     sorted-key JSON of the mapping (receipt-canonical JSON for these
     ASCII filenames)."""
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     names = {
         spec.chain.producer_public_key_filename,
         *(anchor.filename for anchor in spec.chain.anchors.values()),
@@ -557,6 +694,62 @@ def anchor_set_recomputed(repo: pathlib.Path) -> tuple[str, dict[str, str]]:
     return combined, per_file
 
 
+def anchor_set_from_materialized_tree(
+    repo: pathlib.Path, destination: pathlib.Path
+) -> str:
+    """Compute the auditor pin through the same materialized-tree API as the run."""
+
+    chain = load_spec(repo / "verification/spec.py").verification.chain
+    prefixes = (
+        chain.release_root_relative,
+        chain.manifest_relative,
+        chain.state_relative,
+        chain.prefix_relative,
+        chain.anchor_relative,
+    )
+    with TreeSnapshot.select(repo, "HEAD") as snapshot:
+        with snapshot.materialize(
+            prefixes,
+            destination,
+            repertoire=chain.name_repertoire,
+        ) as materialized:
+            return materialized.anchor_set_sha256(chain)
+
+
+def test_matching_spec_and_anchor_pins_publish_full_custody(
+    repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    spec_path = repo / "verification/spec.py"
+    spec_digest = hashlib.sha256(spec_path.read_bytes()).hexdigest()
+    anchor_digest = anchor_set_from_materialized_tree(repo, tmp_path)
+    pins = (
+        "--expect-spec-sha256",
+        spec_digest,
+        "--expect-anchor-set",
+        anchor_digest,
+    )
+
+    assert run(repo, *pins) == EXIT_OK
+    text = capsys.readouterr().out
+    assert "the 2 auditor-pinned RFC 3161 authorities (alpha, beta)" in text
+    assert "Custody is under the anchor set" not in text
+    assert "anchor set is one the auditor trusts" not in text
+    assert "spec's code was trusted" not in text
+
+    assert run(repo, *pins, "--json") == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["scope"]["established"][0] == "custody of the release chain"
+    assert payload["chain"]["anchorSetSha256"] == anchor_digest
+    assert "that the anchor set is one the auditor trusts" not in (
+        payload["scope"]["notEstablished"]
+    )
+    assert "that the spec's code was trusted" not in (
+        payload["scope"]["notEstablished"]
+    )
+
+
 def test_the_json_verdict_names_the_anchor_set_in_force(
     repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -569,6 +762,74 @@ def test_the_json_verdict_names_the_anchor_set_in_force(
     combined, per_file = anchor_set_recomputed(repo)
     assert payload["chain"]["anchorSetSha256"] == combined
     assert payload["chain"]["anchorFiles"] == per_file
+
+
+def test_coordinated_producer_trust_replacement_is_narrowed_or_pinned(
+    repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """New anchors, signed bytes, and a spec field are only a proposal."""
+
+    original_anchor, _ = anchor_set_recomputed(repo)
+    original_spec = hashlib.sha256(
+        (repo / "verification/spec.py").read_bytes()
+    ).hexdigest()
+
+    alternate = tmp_path / "alternate"
+    alternate.mkdir()
+    alternate_content = dict(CONTENT)
+    alternate_content["rules/tax/rate.yaml"] = "name: rate\nvalue: 0.42\n"
+    build_corpus(
+        alternate,
+        tmp_path / "alternate-tsa",
+        content=alternate_content,
+    )
+    alternate_anchor, _ = anchor_set_recomputed(alternate)
+    assert alternate_anchor != original_anchor
+    assert manifest_stem(alternate).read_bytes() != manifest_stem(repo).read_bytes()
+
+    spec_path = alternate / "verification/spec.py"
+    source = spec_path.read_text()
+    source = source.replace(
+        "    chain=CHAIN,\n    corpus=CORPUS,",
+        "    chain=CHAIN,\n"
+        f"    anchor_set_sha256={alternate_anchor!r},\n"
+        "    corpus=CORPUS,",
+    )
+    assert "anchor_set_sha256" in source
+    spec_path.write_text(source)
+    commit_candidate(alternate, "declare replacement anchor set")
+    alternate_spec = hashlib.sha256(spec_path.read_bytes()).hexdigest()
+
+    assert run(alternate) == EXIT_OK
+    narrowed = capsys.readouterr().out
+    assert (
+        f"Custody is under the anchor set {alternate_anchor} "
+        "the verified tree carries."
+    ) in narrowed
+    assert "anchor set is one the auditor trusts" in narrowed
+
+    assert run(
+        alternate,
+        "--expect-spec-sha256",
+        original_spec,
+    ) == EXIT_USAGE
+    assert "is not the expected spec" in capsys.readouterr().err
+
+    assert run(
+        alternate,
+        "--expect-spec-sha256",
+        alternate_spec,
+        "--expect-anchor-set",
+        original_anchor,
+        "--json",
+    ) == EXIT_FAIL
+    pinned = json.loads(capsys.readouterr().out)
+    assert pinned["passes"][0]["failure"] == (
+        f"anchor pins disagree: command expects {original_anchor}, "
+        f"spec expects {alternate_anchor}"
+    )
 
 
 def test_the_text_verdict_carries_every_quotable_digest_in_full(
@@ -833,6 +1094,7 @@ def test_refuses_a_rewritten_prefix_seal(two_releases: pathlib.Path, tmp_path: p
     shutil.copytree(two_releases, repo, symlinks=True)
     prefix = repo / "receipt/immutable-prefix.json"
     prefix.write_bytes(prefix.read_bytes().replace(b'"prefixLineCount":7', b'"prefixLineCount":9'))
+    commit_candidate(repo, "rewrite prefix seal")
     assert main(["verify", "--spec", str(repo / "verification/spec.py"),
                  "--root", str(repo)]) == EXIT_FAIL
 
@@ -846,6 +1108,7 @@ def test_refuses_a_removed_head_release(
     shutil.copytree(two_releases, repo, symlinks=True)
     for path in (repo / "releases/manifests").glob("0001-*"):
         path.unlink()
+    commit_candidate(repo, "remove head release")
     assert main(["verify", "--spec", str(repo / "verification/spec.py"),
                  "--root", str(repo)]) == EXIT_FAIL
 
@@ -857,6 +1120,7 @@ def test_refuses_an_edited_rule_file(
     repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     (repo / "rules/tax/rate.yaml").write_text("name: rate\nvalue: 0.99\n")
+    commit_candidate(repo, "edit rule")
     assert run(repo) == EXIT_FAIL
     err = capsys.readouterr().err
     assert "VERDICT: FAIL" in err
@@ -865,6 +1129,7 @@ def test_refuses_an_edited_rule_file(
 
 def test_refuses_a_rule_file_added_without_witnessing(repo: pathlib.Path) -> None:
     (repo / "rules/tax/extra.yaml").write_text("name: extra\n")
+    commit_candidate(repo, "add unwitnessed rule")
     assert run(repo) == EXIT_FAIL
 
 
@@ -877,7 +1142,8 @@ def test_refuses_a_symlinked_directory_under_a_content_root(
     outside = tmp_path / "smuggled"
     outside.mkdir()
     (outside / "evil.yaml").write_text("name: evil\n")
-    (repo / "rules/injected").symlink_to(outside)
+    (repo / "rules/injected.yaml").symlink_to(outside)
+    commit_candidate(repo, "add symlinked content directory")
     assert run(repo) == EXIT_FAIL
 
 
@@ -888,10 +1154,14 @@ def test_scope_established_on_failure_json(
     binding it never proved (cross-family review finding)."""
 
     (repo / "rules/tax/rate.yaml").write_text("tampered\n")
+    commit_candidate(repo, "tamper with rule")
     assert run(repo, "--json") == EXIT_FAIL
     payload = json.loads(capsys.readouterr().out)
     assert payload["verdict"] == "FAIL"
-    assert payload["scope"]["established"] == ["custody of the release chain"]
+    assert payload["scope"]["established"] == [
+        "custody under the anchor set "
+        f"{payload['chain']['anchorSetSha256']} the verified tree carries"
+    ]
     assert any("newest release" in item for item in payload["scope"]["notEstablished"])
 
 
@@ -903,8 +1173,27 @@ def test_pass_verdict_derives_the_witness_clause(
 
     assert run(repo) == EXIT_OK
     out = capsys.readouterr().out
-    assert "the 2 pinned RFC 3161 authorities (alpha, beta)" in out
+    assert "the 2 RFC 3161 authorities configured by that spec (alpha, beta)" in out
     assert "newest release" in out  # staleness is named, not implied away
+
+
+def test_default_verdict_keeps_the_witness_sentence_whole_before_custody(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The default first-contact paragraph keeps its principal sentence whole."""
+
+    assert run(repo) == EXIT_OK
+    lines = capsys.readouterr().out.split("VERDICT: PASS", 1)[1].splitlines()
+    anchor_set, _ = anchor_set_recomputed(repo)
+
+    assert lines[:6] == [
+        " — custody and corpus binding",
+        "  This proves the published rule files are exactly the bytes the loaded",
+        "  spec's producer key signed,",
+        "  and the 2 RFC 3161 authorities configured by that spec (alpha, beta)",
+        "  witnessed that each recorded prefix existed no later than those times.",
+        f"  Custody is under the anchor set {anchor_set} the verified tree carries.",
+    ]
 
 
 def test_a_verdict_with_no_witnesses_states_no_timing_claim(
@@ -988,6 +1277,7 @@ def test_refuses_an_edited_attested_file(repo: pathlib.Path) -> None:
     (repo / ".axiom/toolchain.toml").write_text(
         '[toolchain]\ncorpus_release = "something-else"\n'
     )
+    commit_candidate(repo, "edit attested file")
     assert run(repo) == EXIT_FAIL
 
 
@@ -996,12 +1286,14 @@ def test_refuses_an_edited_journal(repo: pathlib.Path) -> None:
 
     journal = repo / "receipt/corpus-journal.jsonl"
     journal.write_bytes(journal.read_bytes().replace(b"rules/tax", b"rules/tex"))
+    commit_candidate(repo, "edit journal")
     assert run(repo) == EXIT_FAIL
 
 
 def test_refuses_a_forged_manifest(repo: pathlib.Path) -> None:
     path = manifest_stem(repo)
     path.write_bytes(path.read_bytes().replace(b'"lineCount":7', b'"lineCount":8'))
+    commit_candidate(repo, "forge manifest")
     assert run(repo) == EXIT_FAIL
 
 
@@ -1012,6 +1304,7 @@ def test_refuses_a_corrupt_producer_signature(repo: pathlib.Path) -> None:
     payload = bytearray(signature.read_bytes())
     payload[0] ^= 0xFF
     signature.write_bytes(bytes(payload))
+    commit_candidate(repo, "corrupt producer signature")
     assert run(repo) == EXIT_FAIL
 
 
@@ -1019,18 +1312,19 @@ def test_refuses_a_missing_witness(repo: pathlib.Path) -> None:
     """Dual witnesses means dual: one authority alone is not a verdict."""
 
     next((repo / "releases/manifests").glob("*.beta.tsr")).unlink()
+    commit_candidate(repo, "remove witness")
     assert run(repo) == EXIT_FAIL
 
 
 def test_refuses_a_swapped_trust_anchor(
     repo: pathlib.Path, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The anchor is pinned by digest in committed code, so substituting a
-    different root — even a valid one — refuses."""
+    """The loaded policy binds the anchor digest, so substitution refuses."""
 
     anchor = next((repo / "releases/anchors").glob("alpha-root.pem"))
     beta = next((repo / "releases/anchors").glob("beta-root.pem"))
     anchor.write_bytes(beta.read_bytes())
+    commit_candidate(repo, "swap trust anchor")
     assert run(repo) == EXIT_FAIL
     assert "not code-pinned" in capsys.readouterr().err
 
@@ -1038,12 +1332,12 @@ def test_refuses_a_swapped_trust_anchor(
 def test_refuses_substituted_key_behind_symlinked_anchor_parent(
     repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A symlinked anchor parent must not turn production pinning off.
+    """A candidate-tree symlink cannot redirect materialized anchor bytes.
 
     The replacement directory contains a valid alternate producer key and the
     original TSA roots, so every cryptographic operation is internally valid.
-    Only the consumer's out-of-band pins and path-confinement policy distinguish
-    it from the committed trust configuration.
+    The immutable materializer refuses the tree's non-regular anchor entry
+    before the directory verifier or OpenSSL can consume it.
     """
 
     private_pem, public_pem = generate_signing_keypair()
@@ -1056,34 +1350,24 @@ def test_refuses_substituted_key_behind_symlinked_anchor_parent(
     substituted = repo / "releases/substituted-anchors"
     anchors.rename(substituted)
     anchors.symlink_to(substituted.name, target_is_directory=True)
+    commit_candidate(repo, "substitute symlinked anchors")
 
     assert run(repo) == EXIT_FAIL
-    assert "symlink or reparse point" in capsys.readouterr().err
+    assert (
+        "base tree entry has non-regular mode 120000: releases/anchors"
+        in capsys.readouterr().err
+    )
 
 
 def test_refuses_a_chain_reached_through_a_symlinked_manifest_component(
     repo: pathlib.Path, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Binds S5-R2-F3 where it matters most: this command is the one an
-    outside auditor runs over a clone, and its custody pass is
-    ``verify_release_chain``. The release tree's confinement walk was added
-    for the append gate and reached only from there, so a spec whose manifest
-    directory sits below an interior component — ``releases/journal/manifests``
-    — had that component resolved like any other name, and an untracked
-    symlink at ``releases/journal`` pointing outside the clone made the chain
-    in *that* directory the one this command certified.
+    """A candidate-tree symlink cannot redirect a nested manifest path.
 
-    Measured at this round's head with ``assert_no_symlinked_release_root``
-    removed from ``verify_release_chain``, on this exact arrangement: exit 0,
-    ``[ok  ] custody``, and ``VERDICT: PASS — custody and corpus binding`` —
-    a pass over a release history no part of which is in the tree handed to
-    the auditor. The walk runs at the top of the custody pass now, and the
-    traversal it refuses is named in the verdict.
-
-    The spec module is rewritten here rather than the corpus rebuilt around a
-    nested layout: the custody pass is pass 1 and runs before the binding pass
-    that would notice anything about the spec file, and what is under test is
-    the path the spec configures rather than how the corpus was produced."""
+    The spec selects ``releases/journal/manifests`` while the tree records
+    ``releases/journal`` as a symlink. The immutable materializer refuses that
+    non-regular entry instead of resolving it to the outside directory.
+    """
 
     outside = tmp_path / "elsewhere"
     outside.mkdir()
@@ -1096,30 +1380,22 @@ def test_refuses_a_chain_reached_through_a_symlinked_manifest_component(
     )
     assert "releases/journal/manifests" in rewritten, "the spec pin moved"
     spec_path.write_text(rewritten)
-    # The link really does deliver the chain, so this is a confinement
-    # refusal rather than a refusal about manifests that cannot be read.
+    # The checkout link really delivers the chain; the selected tree still
+    # records a non-regular entry and is the only subject the command reads.
     assert (repo / "releases/journal/manifests").is_dir()
+    commit_candidate(repo, "redirect manifest directory")
 
     assert run(repo) == EXIT_FAIL
     rendered = capsys.readouterr().err
     assert "VERDICT: FAIL — custody" in rendered
     assert (
-        "release root path traverses a symlink at 'releases/journal': "
-        "releases/journal/manifests"
-    ) in rendered
+        "base tree entry has non-regular mode 120000: releases/journal" in rendered
+    )
 
 
 def test_refuses_a_deleted_release_chain(repo: pathlib.Path) -> None:
     shutil.rmtree(repo / "releases/manifests")
-    assert run(repo) == EXIT_FAIL
-
-
-def test_refuses_a_journal_swapped_between_passes(repo: pathlib.Path) -> None:
-    """Custody proves a digest; binding must prove the SAME bytes."""
-
-    journal = repo / "receipt/corpus-journal.jsonl"
-    journal.unlink()
-    journal.symlink_to(repo / ".axiom/toolchain.toml")
+    commit_candidate(repo, "delete release chain")
     assert run(repo) == EXIT_FAIL
 
 
@@ -1213,6 +1489,203 @@ def test_refuses_a_symlinked_spec(
     assert "supply the regular file's path" in payload["failure"]
 
 
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (["--base-ref", "main"], "--base-ref requires --expect-commit"),
+        (
+            ["--expect-anchor-set", "0" * 64],
+            "--expect-anchor-set requires --expect-spec-sha256",
+        ),
+    ],
+)
+def test_pin_dependencies_are_usage_errors_before_the_spec_runs(
+    repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    arguments: list[str],
+    message: str,
+) -> None:
+    def must_not_load(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("the parser dependency must run first")
+
+    monkeypatch.setattr("receipt.cli.load_spec", must_not_load)
+    assert main(
+        [
+            "verify",
+            "--spec",
+            str(repo / "verification/spec.py"),
+            *arguments,
+        ]
+    ) == EXIT_USAGE
+    assert message in capsys.readouterr().err
+
+
+def test_pin_dependency_usage_refusal_honors_json(
+    repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def must_not_load(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("the dependency refusal must run first")
+
+    monkeypatch.setattr("receipt.cli.load_spec", must_not_load)
+    assert run(repo, "--base-ref", "main", "--json") == EXIT_USAGE
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "failure": "--base-ref requires --expect-commit",
+        "passesCompleted": [],
+        "stage": "arguments",
+        "verdict": "FAIL",
+    }
+
+
+def test_spec_expectation_mismatch_is_an_exact_pre_execution_refusal(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    expected = "0" * 64
+    actual = hashlib.sha256(
+        (repo / "verification/spec.py").read_bytes()
+    ).hexdigest()
+    assert actual != expected
+
+    assert run(repo, "--expect-spec-sha256", expected) == EXIT_USAGE
+    assert (
+        f"spec {actual} is not the expected spec {expected}"
+        in capsys.readouterr().err
+    )
+
+
+def test_malformed_anchor_expectation_is_a_json_usage_refusal(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    spec_path = repo / "verification/spec.py"
+    spec_digest = hashlib.sha256(spec_path.read_bytes()).hexdigest()
+
+    assert run(
+        repo,
+        "--expect-spec-sha256",
+        spec_digest,
+        "--expect-anchor-set",
+        "NOTAHEX",
+        "--json",
+    ) == EXIT_USAGE
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "failure": (
+            "expected anchor-set SHA-256 must be a lowercase 64-character "
+            "hex digest"
+        ),
+        "passesCompleted": [],
+        "stage": "spec",
+        "verdict": "FAIL",
+    }
+    assert "verification aborted" not in captured.err
+
+
+def test_candidate_expectations_refuse_commit_before_tree_through_the_cli(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    commit = head_oid(repo)
+    tree = _git(repo, "rev-parse", "HEAD^{tree}")
+    wrong_commit = "0" * len(commit)
+    wrong_tree = "1" * len(tree)
+
+    assert run(
+        repo,
+        "--expect-commit",
+        wrong_commit,
+        "--expect-tree",
+        wrong_tree,
+    ) == EXIT_FAIL
+    assert (
+        f"commit {commit} is not the expected commit {wrong_commit}"
+        in capsys.readouterr().err
+    )
+
+    assert run(
+        repo,
+        "--expect-commit",
+        commit,
+        "--expect-tree",
+        wrong_tree,
+    ) == EXIT_FAIL
+    assert (
+        f"tree {tree} is not the expected tree {wrong_tree}"
+        in capsys.readouterr().err
+    )
+
+
+def test_cli_forwards_the_loaded_spec_and_every_tree_option(
+    repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import subprocess
+
+    spec_path = repo / "verification/spec.py"
+    spec_digest = hashlib.sha256(spec_path.read_bytes()).hexdigest()
+    commit = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    tree = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD^{tree}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    anchor = "1" * 64
+    seen: dict[str, object] = {}
+
+    def capture(*args: object, **kwargs: object) -> object:
+        seen["args"] = args
+        seen["kwargs"] = kwargs
+        raise RuntimeError("captured")
+
+    monkeypatch.setattr("receipt.cli.run_verification", capture)
+    assert main(
+        [
+            "verify",
+            "--spec",
+            str(spec_path),
+            "--expect-spec-sha256",
+            spec_digest,
+            "--root",
+            str(repo),
+            "--commit",
+            commit,
+            "--expect-commit",
+            commit,
+            "--expect-tree",
+            tree,
+            "--expect-anchor-set",
+            anchor,
+            "--base-ref",
+            commit,
+            "--verify-objects",
+            "--json",
+        ]
+    ) == EXIT_FAIL
+
+    supplied_root, loaded = seen["args"]  # type: ignore[misc]
+    assert supplied_root == repo
+    assert loaded.path == spec_path.resolve()
+    assert loaded.sha256 == spec_digest
+    assert loaded.pinned is True
+    assert seen["kwargs"] == {
+        "base_ref": commit,
+        "commit": commit,
+        "expect_commit": commit,
+        "expect_tree": tree,
+        "expect_anchor_set": anchor,
+        "verify_objects": True,
+    }
+    assert json.loads(capsys.readouterr().out)["stage"] == "verification"
+
+
 def test_the_spec_that_runs_is_always_the_spec_that_was_hashed(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -1235,21 +1708,21 @@ def test_the_spec_that_runs_is_always_the_spec_that_was_hashed(
     honest = SPEC_TEMPLATE.format(name="honest", spki="a" * 64)
     path.write_text(honest)
     os.utime(path, (FROZEN_MTIME, FROZEN_MTIME))
-    first, first_digest = load_spec(path)
-    assert first.chain.producer_spki_sha256 == "a" * 64
-    assert first_digest == hashlib.sha256(honest.encode()).hexdigest()
+    first = load_spec(path)
+    assert first.verification.chain.producer_spki_sha256 == "a" * 64
+    assert first.sha256 == hashlib.sha256(honest.encode()).hexdigest()
 
     weakened = SPEC_TEMPLATE.format(name="weaken", spki="0" * 64)
     assert len(weakened) == len(honest)
     path.write_text(weakened)
     os.utime(path, (FROZEN_MTIME, FROZEN_MTIME))
 
-    second, second_digest = load_spec(path)
-    assert second.chain.producer_spki_sha256 == "0" * 64, (
+    second = load_spec(path)
+    assert second.verification.chain.producer_spki_sha256 == "0" * 64, (
         "the loader executed stale bytecode instead of the file on disk"
     )
-    assert second_digest == hashlib.sha256(weakened.encode()).hexdigest()
-    assert second_digest != first_digest
+    assert second.sha256 == hashlib.sha256(weakened.encode()).hexdigest()
+    assert second.sha256 != first.sha256
 
 
 def test_loading_a_spec_leaves_no_bytecode_behind(tmp_path: pathlib.Path) -> None:
@@ -1279,6 +1752,7 @@ def test_failure_output_goes_to_stderr_not_stdout(
     """A pipeline that reads stdout must not see a failure as a clean verdict."""
 
     (repo / "rules/tax/rate.yaml").write_text("tampered\n")
+    commit_candidate(repo, "tamper with rule")
     assert run(repo) == EXIT_FAIL
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -1428,7 +1902,7 @@ def test_pin_inference_yields_only_to_an_explicit_choice(repo: pathlib.Path) -> 
 
     from receipt.release_chain import ReleaseChainError, verify_release_chain
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     private_pem, public_pem = generate_signing_keypair()
     (repo / "releases/anchors/producer-ed25519.pub").write_bytes(public_pem)
     manifest = manifest_stem(repo)
@@ -1465,7 +1939,7 @@ def test_a_chain_resigned_under_a_substituted_key_refuses_by_spki_pin(
 
     from receipt.release_chain import ReleaseChainError, verify_release_chain
 
-    spec, _ = load_spec(repo / "verification/spec.py")
+    spec = load_spec(repo / "verification/spec.py").verification
     private_pem, public_pem = generate_signing_keypair()
     (repo / "releases/anchors/producer-ed25519.pub").write_bytes(public_pem)
     manifest = manifest_stem(repo)
@@ -1485,30 +1959,10 @@ def test_a_chain_resigned_under_a_substituted_key_refuses_by_spki_pin(
         )
 
 
-def _git(repo: pathlib.Path, *args: str) -> None:
-    import subprocess
-
-    subprocess.run(
-        ["git", *args],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        env={
-            "PATH": "/usr/bin:/bin:/usr/local/bin",
-            "GIT_AUTHOR_NAME": "t",
-            "GIT_AUTHOR_EMAIL": "t@t",
-            "GIT_COMMITTER_NAME": "t",
-            "GIT_COMMITTER_EMAIL": "t@t",
-            "HOME": str(repo),
-        },
-    )
-
-
 @pytest.fixture()
 def committed_repo(repo: pathlib.Path) -> pathlib.Path:
-    _git(repo, "init", "-q")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-qm", "base")
+    assert _git(repo, "status", "--porcelain=v1") == ""
+    head_oid(repo)
     return repo
 
 
@@ -1524,7 +1978,15 @@ def test_history_pass_exception_is_a_fail_verdict_not_an_escape(
         raise RuntimeError("injected surprise")
 
     monkeypatch.setattr("receipt.verify.verify_release_history_immutable", boom)
-    assert run(committed_repo, "--base-ref", "HEAD", "--json") == EXIT_FAIL
+    candidate_oid = head_oid(committed_repo)
+    assert run(
+        committed_repo,
+        "--base-ref",
+        candidate_oid,
+        "--expect-commit",
+        candidate_oid,
+        "--json",
+    ) == EXIT_FAIL
     payload = json.loads(capsys.readouterr().out)
     assert payload["verdict"] == "FAIL"
     failed = [p for p in payload["passes"] if not p["ok"]]
@@ -1539,9 +2001,18 @@ def test_pass_text_with_base_ref_claims_only_the_snapshot_comparison(
     present at that ref — never blanket immutability, which the comparison
     does not establish for objects added after the ref."""
 
-    assert run(committed_repo, "--base-ref", "HEAD") == EXIT_OK
+    candidate_oid = head_oid(committed_repo)
+    assert run(
+        committed_repo,
+        "--base-ref",
+        candidate_oid,
+        "--expect-commit",
+        candidate_oid,
+    ) == EXIT_OK
     out = capsys.readouterr().out
     assert "VERDICT: PASS" in out
+    tree = _git(committed_repo, "rev-parse", f"{candidate_oid}^{{tree}}")
+    assert f"  base {candidate_oid} (tree {tree})" in out
     assert "present at the supplied base" in out
     assert "byte- and mode-identical in this tree" in out
     assert "no published release object changed" not in out
@@ -1563,7 +2034,15 @@ def test_pass_text_without_base_ref_names_the_first_contact_limit(
 def test_base_ref_json_reports_the_history_pass(
     committed_repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert run(committed_repo, "--base-ref", "HEAD", "--json") == EXIT_OK
+    candidate_oid = head_oid(committed_repo)
+    assert run(
+        committed_repo,
+        "--base-ref",
+        candidate_oid,
+        "--expect-commit",
+        candidate_oid,
+        "--json",
+    ) == EXIT_OK
     payload = json.loads(capsys.readouterr().out)
     assert payload["verdict"] == "PASS"
     assert "history" in payload["passesCompleted"]
@@ -1585,24 +2064,29 @@ def test_the_history_verdict_names_the_resolved_commit_not_the_ref(
     """
 
     import re
-    import subprocess
-
-    expected = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=committed_repo,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    expected = head_oid(committed_repo)
     assert re.fullmatch(r"[0-9a-f]{40}", expected)
 
-    assert run(committed_repo, "--base-ref", "HEAD", "--json") == EXIT_OK
+    assert run(
+        committed_repo,
+        "--base-ref",
+        "HEAD",
+        "--expect-commit",
+        expected,
+        "--json",
+    ) == EXIT_OK
     payload = json.loads(capsys.readouterr().out)
     assert payload["history"]["baseCommit"] == expected
     (history,) = [p for p in payload["passes"] if p["name"] == "history"]
     assert f"present at HEAD ({expected})" in history["detail"]
 
-    assert run(committed_repo, "--base-ref", "HEAD") == EXIT_OK
+    assert run(
+        committed_repo,
+        "--base-ref",
+        "HEAD",
+        "--expect-commit",
+        expected,
+    ) == EXIT_OK
     assert expected in capsys.readouterr().out
 
 
@@ -1616,14 +2100,49 @@ def test_a_verdict_without_a_base_ref_carries_no_history_block(
     assert "history" not in json.loads(capsys.readouterr().out)
 
 
+def test_selected_commit_is_invariant_under_later_worktree_and_index_mutation(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The named candidate tree, not either mutable checkout view, is read."""
+
+    candidate_oid = head_oid(repo)
+    rule = repo / "rules/tax/rate.yaml"
+    rule.write_text("name: rate\nvalue: staged\n")
+    _git(repo, "add", "--", "rules/tax/rate.yaml")
+    rule.write_text("name: rate\nvalue: unstaged\n")
+    assert _git(repo, "diff", "--cached", "--name-only") == "rules/tax/rate.yaml"
+    assert _git(repo, "diff", "--name-only") == "rules/tax/rate.yaml"
+
+    assert run(
+        repo,
+        "--commit",
+        candidate_oid,
+        "--expect-commit",
+        candidate_oid,
+        "--json",
+    ) == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["commit"] == candidate_oid
+    assert payload["verdict"] == "PASS"
+
+
 def test_base_ref_refusal_is_a_fail_verdict(
     committed_repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """An edited release file refuses the history pass through the CLI."""
 
+    base_oid = head_oid(committed_repo)
     stem = manifest_stem(committed_repo)
     stem.write_bytes(stem.read_bytes() + b"\n")
-    assert run(committed_repo, "--base-ref", "HEAD", "--json") == EXIT_FAIL
+    candidate_oid = commit_candidate(committed_repo, "edit release object")
+    assert run(
+        committed_repo,
+        "--base-ref",
+        base_oid,
+        "--expect-commit",
+        candidate_oid,
+        "--json",
+    ) == EXIT_FAIL
     payload = json.loads(capsys.readouterr().out)
     assert payload["verdict"] == "FAIL"
     assert "history" not in payload["passesCompleted"]
@@ -1795,12 +2314,20 @@ def test_history_pass_detail_is_snapshot_scoped(
 ) -> None:
     """passes[].detail carries the claim independently of the PASS paragraph."""
 
-    assert run(committed_repo, "--base-ref", "HEAD", "--json") == EXIT_OK
+    candidate_oid = head_oid(committed_repo)
+    assert run(
+        committed_repo,
+        "--base-ref",
+        candidate_oid,
+        "--expect-commit",
+        candidate_oid,
+        "--json",
+    ) == EXIT_OK
     payload = json.loads(capsys.readouterr().out)
     (history,) = [p for p in payload["passes"] if p["name"] == "history"]
     assert history["ok"] is True
-    assert "byte- and mode-identical in this tree" in history["detail"]
-    assert "HEAD" in history["detail"]
+    assert "byte- and mode-identical in tree" in history["detail"]
+    assert candidate_oid in history["detail"]
 
 
 def test_base_ref_refuses_a_deleted_release_object(
@@ -1809,8 +2336,17 @@ def test_base_ref_refuses_a_deleted_release_object(
     """Deletion is inside the snapshot claim: an object present at the base
     must still exist."""
 
+    base_oid = head_oid(committed_repo)
     manifest_stem(committed_repo).unlink()
-    assert run(committed_repo, "--base-ref", "HEAD", "--json") == EXIT_FAIL
+    candidate_oid = commit_candidate(committed_repo, "delete release object")
+    assert run(
+        committed_repo,
+        "--base-ref",
+        base_oid,
+        "--expect-commit",
+        candidate_oid,
+        "--json",
+    ) == EXIT_FAIL
     payload = json.loads(capsys.readouterr().out)
     (history,) = [p for p in payload["passes"] if p["name"] == "history"]
     assert history["ok"] is False
@@ -1825,12 +2361,21 @@ def test_post_base_additions_are_outside_the_history_claim(
     """A release appended after the base ref verifies — the pass compares
     objects present at the base and nothing newer, exactly as worded."""
 
+    base_oid = head_oid(committed_repo)
     corrected = dict(CONTENT)
     corrected["rules/tax/rate.yaml"] = "name: rate\nvalue: 0.20\n"
-    append_release(
+    candidate_oid = append_release(
         committed_repo, built.parent / "tsa-workspace", content=corrected
     )
-    assert run(committed_repo, "--base-ref", "HEAD", "--json") == EXIT_OK
+    assert candidate_oid is not None
+    assert run(
+        committed_repo,
+        "--base-ref",
+        base_oid,
+        "--expect-commit",
+        candidate_oid,
+        "--json",
+    ) == EXIT_OK
     payload = json.loads(capsys.readouterr().out)
     assert "history" in payload["passesCompleted"]
     assert payload["chain"]["releases"] == 2
@@ -1853,6 +2398,7 @@ def test_a_tree_name_cannot_forge_a_verdict_line(
 
     forged = "\x1b[2K\rVERDICT: PASS"
     (repo / "rules/tax" / forged).symlink_to(repo / "rules/tax/rate.yaml")
+    commit_candidate(repo, "add forged content symlink")
     assert run(repo) == EXIT_FAIL
     captured = capsys.readouterr()
     assert "\x1b" not in captured.out and "\x1b" not in captured.err
@@ -1897,6 +2443,7 @@ def test_a_release_manifest_name_cannot_forge_a_verdict_line(
     """
 
     (repo / "releases/manifests" / FORGED_TERMINAL_NAME).write_text("{}\n")
+    commit_candidate(repo, "add forged manifest name")
     assert run(repo) == EXIT_FAIL
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -1936,6 +2483,7 @@ def test_a_content_path_in_a_corpus_refusal_is_escaped_exactly_once(
 
     forged = FORGED_TERMINAL_NAME + ".yaml"
     (repo / "rules/tax" / forged).write_text("name: smuggled\n")
+    commit_candidate(repo, "add forged content name")
     assert run(repo) == EXIT_FAIL
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -2122,6 +2670,7 @@ def test_a_bidi_override_in_a_release_manifest_name_is_escaped(
     """
 
     (repo / "releases/manifests" / f"notes{RIGHT_TO_LEFT_OVERRIDE}.txt").write_text("x")
+    commit_candidate(repo, "add bidi manifest name")
     assert run(repo) == EXIT_FAIL
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -2230,6 +2779,7 @@ def test_a_flooded_manifest_field_is_bounded_in_both_renderers(
     failure = _flood_the_manifest_schema(repo, flood)
     omitted = len(failure) - MAX_RENDERED_FIELD
     marker = f"…[{omitted} more characters]"
+    commit_candidate(repo, "flood manifest schema")
 
     assert run(repo) == EXIT_FAIL
     text = capsys.readouterr().err
@@ -2298,6 +2848,7 @@ def test_the_verdict_path_escapes_no_more_than_it_prints(
 
     failure = _flood_the_manifest_schema(repo, 1_000_000)
     marker = f"…[{len(failure) - MAX_RENDERED_FIELD} more characters]"
+    commit_candidate(repo, "flood manifest schema")
 
     assert run(repo) == EXIT_FAIL
     text = capsys.readouterr().err
@@ -2382,6 +2933,7 @@ def test_a_field_is_bounded_in_the_units_the_stream_receives(
 
     emoji = "\U0001f600"
     failure = _flood_the_manifest_schema_with(repo, emoji * MAX_RENDERED_FIELD)
+    commit_candidate(repo, "flood manifest schema with emoji")
     stream = _CodecStdout(encoding)
     monkeypatch.setattr(sys, "stderr", stream)
 
@@ -2466,6 +3018,7 @@ def test_an_ordinary_failure_is_unchanged_by_the_rendering_bound(
     """
 
     (repo / "rules/tax/rate.yaml").write_text("name: rate\nvalue: 0.99\n")
+    commit_candidate(repo, "edit rule")
     assert run(repo) == EXIT_FAIL
     text = capsys.readouterr().err
     assert "…[" not in text
@@ -2794,6 +3347,7 @@ def test_the_failure_verdict_ends_with_the_trusted_sentinel(
     payload = json.loads(manifest.read_text())
     payload["schemaVersion"] = forged * 50
     manifest.write_text(json.dumps(payload))
+    commit_candidate(repo, "forge failure verdict tail")
 
     assert run(repo) == EXIT_FAIL
     text = capsys.readouterr().err
@@ -2836,6 +3390,7 @@ def test_a_refusal_ends_with_the_trusted_sentinel(
         + forged.strip()
         + "')\n"
     )
+    commit_candidate(repo, "forge spec refusal tail")
 
     assert run(repo) == EXIT_USAGE
     captured = capsys.readouterr()
@@ -3701,6 +4256,7 @@ def test_the_emission_encoding_is_decided_once(
 
     emoji = "\U0001f600"
     _flood_the_manifest_schema_with(repo, emoji * MAX_RENDERED_FIELD)
+    commit_candidate(repo, "flood manifest schema with emoji")
     stream = _ShiftingCodecStdout("utf-8", "ascii")
     monkeypatch.setattr(sys, "stderr", stream)
 
@@ -4232,11 +4788,18 @@ def test_a_redirecting_git_variable_refuses_before_the_history_pass(
     ``run_verification`` asks first now, so no history line is printed at all.
     """
 
-    assert run(committed_repo, "--base-ref", "HEAD") == EXIT_OK
+    candidate_oid = head_oid(committed_repo)
+    arguments = (
+        "--base-ref",
+        candidate_oid,
+        "--expect-commit",
+        candidate_oid,
+    )
+    assert run(committed_repo, *arguments) == EXIT_OK
     capsys.readouterr()
 
     monkeypatch.setenv("GIT_DIR", str(tmp_path / "elsewhere.git"))
-    assert run(committed_repo, "--base-ref", "HEAD") == EXIT_FAIL
+    assert run(committed_repo, *arguments) == EXIT_FAIL
     captured = capsys.readouterr()
     text = captured.out + captured.err
     assert (
