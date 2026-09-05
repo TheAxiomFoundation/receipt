@@ -4,12 +4,12 @@ author:
   - name: Max Ghenis
     affiliations:
       - name: Axiom Foundation
-date: 2026-09-02
+date: 2026-09-05
 date-format: iso
 kicker: working paper
 revision: "11"
 status: |
-  Working paper. It describes `receipt` 0.5.2; statements about
+  Working paper. It describes `receipt` 0.6.0 on PyPI; statements about
   still-open pull requests are marked as such. Code:
   [github.com/TheAxiomFoundation/receipt](https://github.com/TheAxiomFoundation/receipt).
   API reference: [axiom.org/receipt/api](https://axiom.org/receipt/api/).
@@ -140,10 +140,23 @@ conditional on the specification, trust material, and options the
 verifier itself supplied, and each check refuses rather than warns when
 its evidence falls short [@receipt-repo].
 
+**The subject is a commit's tree.** For `receipt verify`, the append
+gate, and the corpus binding, the verdict is a function of the tree
+object the named commit carries, the base tree when one is supplied,
+the consumer's specification, and the trust material the verifier
+owns. Every byte the verdict speaks for is read from the repository's
+object store and rehashed against its object name; the working tree
+and the index are never read, and the verdict names the commit and the
+tree it judged, so a checkout that differs from the verified tree is
+outside what it establishes. The release-chain verifier also accepts a
+directory from a caller who owns one, and that call speaks for the
+directory as it was read, with the concurrent-writer residual that
+entails.
+
 **Append-only history.** The release-chain verifier, run with its
 default options, establishes a contiguous, content-addressed,
 producer-signed manifest history from genesis to head whose recorded
-state matches the working tree. Supplying a trusted base reference
+state matches the verified tree. Supplying a trusted base reference
 strengthens the conclusion: every release file present at that
 ancestor still carries identical bytes and file mode. The append gate
 gives its strongest conclusion the same way — with a base reference
@@ -208,11 +221,10 @@ the pieces, not a single spanning call.
 The fifth layer [@receipt-pr14] is a closed-world binding between a witnessed
 journal and the configured corpus — within the specification's content
 roots, an unlisted regular file whose name carries a configured suffix
-(compared after case and normalization folding), a missing file, a
-rewritten byte, or a symlink
-where a regular file was recorded each refuses, as do two listed paths
-that collide under Unicode normalization or case folding and a bound
-file whose identity changes while verification runs — and a spanning
+(compared after ASCII case folding), a missing file, a rewritten
+byte, or a symlink where a regular file was recorded each refuses, as
+do two listed paths that collide under ASCII case folding — no Unicode
+normalization or case-fold model participates — and a spanning
 `receipt verify` command that runs custody, binding, and
 declaration-completeness passes in order, stopping at the first
 failure. Its verdict is fail-closed in the strict sense the verifier
@@ -279,8 +291,10 @@ is unavailable — or untrustworthy — at verification time. The
 workflow-attestation check is the explicit exception: it queries
 GitHub, and the package's differential evidence for that surface is
 scoped accordingly (@sec-extraction). Verification reads each receipt
-and anchor file once and feeds every cryptographic call from that
-snapshot.
+and anchor file through one guarded read per consumption and feeds
+every cryptographic call from those bytes; `receipt verify` also
+checks that the anchor bytes custody consumed are the ones the
+verified tree carries.
 
 **Specified gaps refuse.** Missing witnesses, malformed rows, unknown
 keys, out-of-range times, unlistable directories, paths that escape
@@ -417,7 +431,7 @@ and states plainly that it did not rerun them; declarations concern
 the subject commit, and the pilot documents which event-context
 outcomes do not transfer across the journal's own publication commit.
 
-As of August 17, 2026, three codebases pin released versions of the
+As of September 5, 2026, three codebases pin released versions of the
 package and call it from their verification paths — code-level
 adoption, checkable at each pin, and stated here at exactly that
 strength:
@@ -426,12 +440,16 @@ strength:
 |---|---|---|---|
 | Axiom encoder | default | `receipt==0.5.1` | threshold keyring check on apply manifests |
 | Thesis Institute forecast tooling | default | `receipt==0.5.1` (custody extra) | signature primitives in verifier and signer |
-| Chronicle | custody branch (unmerged) | `receipt==0.5.1` | release-chain and append-gate shims, differential harnesses re-run on package change |
+| Chronicle | custody branch (unmerged) | `receipt==0.5.2` | release-chain and append-gate shims, differential harnesses re-run on package change |
 
 Each pin was the current release at that observation point; the
 receipt repository's own README states that the observation ledger
 consumes the package in production, a producer claim this paper
-reports without independent runtime observation.
+reports without independent runtime observation. receipt 0.6.0,
+released on September 5, 2026, moves the append gate and the spanning
+verifier from a checkout to the tree object a commit names
+(@sec-guarantees); each adopter's move to it is in progress as this
+revision goes out.
 
 A package pin is custody, not admission. What an encoder run produced
 is a separate claim, and the foundation's rule corpora make it
