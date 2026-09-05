@@ -1946,10 +1946,12 @@ def verify_release_chain(
     ``run_verification``, which read only objects. A caller on a directory it
     does not own carries the concurrent-writer residual.
 
-    Every input file is opened once through :func:`_regular_file_bytes` after
-    the configured path walks. With ``compute_anchor_set_digest=True`` the
-    result additionally names the exact configured anchor bytes consumed;
-    OpenSSL always receives a private byte-for-byte ``-CAfile`` copy.
+    Each file consumption goes through :func:`_regular_file_bytes` after
+    the configured path walks. Anchors are consumed again across releases
+    and roles. With ``compute_anchor_set_digest=True``, those repeated
+    observations must agree byte for byte, and the result names the exact
+    configured anchor bytes consumed. OpenSSL always receives a private
+    byte-for-byte ``-CAfile`` copy.
     Caller-supplied ``state_bytes`` replace the two state-file reads.
     """
 
