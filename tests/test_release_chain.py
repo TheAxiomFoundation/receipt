@@ -499,6 +499,140 @@ def test_composed_custody_screens_protected_siblings_before_materialization(
     assert result.passes[1].failure == "not reached"
 
 
+def _commit_lone_protected_alias(
+    root: pathlib.Path, location: str, shape: str,
+) -> tuple[str, str, str, str]:
+    """Add one alias with no exact counterpart to a signed tree, off checkout."""
+
+    def git(*arguments: str, payload: bytes | None = None) -> bytes:
+        return subprocess.run(
+            ["git", "-C", str(root), *arguments], input=payload,
+            capture_output=True, check=True, timeout=30,
+        ).stdout.strip()
+
+    blob = git("hash-object", "-w", "--stdin", payload=b"unrelated\n")
+    if shape == "blob":
+        mode, kind, alias = b"100644", b"blob", blob
+    else:
+        contents = b"" if shape == "empty" else b"100644 blob " + blob + b"\tchild\0"
+        mode, kind = b"040000", b"tree"
+        alias = git("mktree", "-z", payload=contents)
+    if location == "leaf":
+        spelling, prefix = "evidence/archive/CUSTODY", "evidence/archive/custody"
+    else:
+        spelling, prefix = "evidence/ARCHIVE", "evidence/archive"
+    components = spelling.split("/")
+    for component in reversed(components):
+        alias = git("mktree", "-z", payload=(
+            mode + b" " + kind + b" " + alias + b"\t" + component.encode() + b"\0"
+        ))
+        mode, kind = b"040000", b"tree"
+    records = git("ls-tree", "-z", "HEAD") + git("ls-tree", "-z", alias.decode())
+    tree = git("mktree", "-z", payload=records).decode()
+    commit = git("-c", "commit.gpgSign=false", "commit-tree", tree,
+                 "-p", "HEAD", payload=b"lone configured prefix alias\n").decode()
+    return commit, tree, spelling, prefix
+
+
+@pytest.mark.parametrize("repertoire", ["portable", "posix-bytes"])
+@pytest.mark.parametrize("shape", ["empty", "nonempty", "blob"])
+@pytest.mark.parametrize("location", ["leaf", "ancestor"])
+@pytest.mark.parametrize("entry_point", ["base", "composed"])
+def test_lone_configured_prefix_alias_refuses_before_materialization(
+    repo: pathlib.Path, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+    repertoire: str, shape: str, location: str, entry_point: str,
+) -> None:
+    protected = "evidence/archive/custody"
+    spec_path = repo / "verification/spec.py"
+    spec_path.write_text(spec_path.read_text(encoding="utf-8") + (
+        "\nfrom dataclasses import replace\nfrom pathlib import PurePosixPath\n"
+        "SPEC = replace(SPEC, chain=replace(SPEC.chain, "
+        f"release_root_relative=PurePosixPath({protected!r}), "
+        f"name_repertoire={repertoire!r}), corpus=replace(SPEC.corpus, "
+        f"name_repertoire={repertoire!r}))\n"
+    ), encoding="utf-8")
+    loaded = load_spec(spec_path, expect_sha256=hashlib.sha256(spec_path.read_bytes()).hexdigest())
+    chain = loaded.verification.chain
+    commit, tree, spelling, prefix = _commit_lone_protected_alias(repo, location, shape)
+    with TreeSnapshot.select(repo, commit) as snapshot:
+        entries = snapshot.entries("").as_dict(include_trees=True)
+        assert prefix not in entries
+        assert spelling in entries
+        with snapshot.materialize(
+            (chain.anchor_relative,), tmp_path, repertoire=repertoire,
+        ) as materialized:
+            anchors = materialized.anchor_set_sha256(chain)
+    shutil.rmtree(repo / "releases")
+
+    def not_reached(*args: object, **kwargs: object) -> None:
+        pytest.fail("configured-prefix alias screen must precede materialization and OpenSSL")
+
+    monkeypatch.setattr(TreeSnapshot, "materialize", not_reached)
+    monkeypatch.setattr(release_chain._tsa, "_require_supported_openssl", not_reached)
+    listed = f"{spelling}/child" if shape == "nonempty" else spelling
+    expected = (
+        f"index carries an alias of a protected path: {listed} "
+        f"(for {protected} at {prefix})"
+    )
+    if entry_point == "base":
+        with TreeSnapshot.select(repo, commit) as base:
+            with pytest.raises(ReleaseChainError) as caught:
+                verify_base_release_chain(chain, base=base)
+        assert str(caught.value) == expected
+    else:
+        result = run_verification(
+            repo, loaded, commit=commit, expect_commit=commit, expect_tree=tree,
+            expect_anchor_set=anchors,
+        )
+        assert not result.ok
+        assert result.passes[0].name == "custody"
+        assert not result.passes[0].ok
+        assert result.passes[0].failure == expected
+        assert result.passes[1].name == "binding"
+        assert result.passes[1].failure == "not reached"
+
+
+@pytest.mark.parametrize("repertoire", ["portable", "posix-bytes"])
+def test_configured_prefix_comparison_preserves_caller_anchor_exclusion(
+    repo: pathlib.Path, tmp_path: pathlib.Path, repertoire: str,
+) -> None:
+    chain = load_spec(repo / "verification/spec.py").verification.chain
+    external = tmp_path / "trusted-anchors"
+    shutil.copytree(repo / chain.anchor_relative, external)
+    shutil.rmtree(repo / chain.anchor_relative)
+    chain = replace(chain, anchor_relative=pathlib.PurePosixPath("separate/anchors"),
+                    name_repertoire=repertoire)
+    commit_snapshot(repo, "separate caller-owned anchors")
+
+    def git(*arguments: str, payload: bytes | None = None) -> bytes:
+        return subprocess.run(
+            ["git", "-C", str(repo), *arguments], input=payload,
+            capture_output=True, check=True, timeout=30,
+        ).stdout.strip()
+
+    empty = git("mktree", payload=b"")
+    blob = git("hash-object", "-w", "--stdin", payload=b"unused\n")
+    unused = git("mktree", "-z", payload=(
+        b"040000 tree " + empty + b"\tEXTRA\0"
+        b"100644 blob " + blob + b"\textra\0"
+        b"100644 blob " + blob + b"\tbad-\xff\0"
+    ))
+    separate = git("mktree", "-z", payload=b"040000 tree " + unused + b"\tANCHORS\0")
+    tree = git("mktree", "-z", payload=(
+        git("ls-tree", "-z", "HEAD") + b"040000 tree " + separate + b"\tseparate\0"
+    ))
+    commit = git("-c", "commit.gpgSign=false", "commit-tree", tree.decode(),
+                 "-p", "HEAD", payload=b"unused anchor aliases and invalid name\n").decode()
+    with TreeSnapshot.select(repo, commit) as snapshot:
+        verification = verify_base_release_chain(chain, base=snapshot, anchor_dir=external)
+        assert len(verification.releases) == 1
+    # Selecting that anchor subtree still subjects its immediate ancestor
+    # listing to the configured-prefix comparison (without caller trust).
+    with TreeSnapshot.select(repo, commit) as snapshot:
+        with pytest.raises(ReleaseChainError):
+            verify_base_release_chain(chain, base=snapshot)
+
+
 def test_base_release_chain_materializes_the_entered_snapshot(
     repo: pathlib.Path,
 ) -> None:

@@ -2231,12 +2231,17 @@ def verify_release_history_immutable(
     )
 
 
+def _folded_parts(path: str) -> tuple[str, ...]:
+    return tuple(ascii_fold_text(component) for component in path.split("/"))
+
+
 def _screen_protected_tree_names(
     entries: Mapping[str, GitEntry],
     prefixes: tuple[pathlib.PurePosixPath, ...],
     *,
     repertoire: str,
     release_directories: tuple[pathlib.PurePosixPath, ...],
+    alias_paths: tuple[str, ...] | None = None,
 ) -> None:
     """Screen protected listings and ancestor siblings before writing files.
 
@@ -2244,6 +2249,9 @@ def _screen_protected_tree_names(
     Only selected subtrees and the immediate listings of their ancestors are
     screened; a disjoint unused trust subtree is not traversed by this policy.
     The release-suffix screen applies only below release/manifest directories.
+    Configured spellings are compared at every depth even without an exact
+    counterpart. The append gate supplies its wider ``alias_paths`` policy,
+    which also requires every listing component to be foldable.
     """
 
     selected = tuple(relative.as_posix() for relative in prefixes)
@@ -2256,6 +2264,35 @@ def _screen_protected_tree_names(
     by_directory: dict[str, list[str]] = {}
     screened: list[str] = []
     try:
+        protected = selected if alias_paths is None else alias_paths
+        folded = {path: _folded_parts(path) for path in protected}
+        exact = {path: tuple(path.split("/")) for path in protected}
+        # Keep the legacy diagnostic's complete non-tree path when present;
+        # an empty tree alias is still covered after all non-tree entries.
+        for listed in sorted(
+            entries, key=lambda path: (entries[path].mode == "040000", path),
+        ):
+            parts = tuple(listed.split("/"))
+            listed_folded = _folded_parts(listed) if alias_paths is not None else ()
+            for path in protected:
+                for depth in range(1, len(folded[path]) + 1):
+                    if len(parts) < depth:
+                        break
+                    if len(listed_folded) < depth:
+                        # Do not fold unused descendants once their ancestor
+                        # differs from every selected protected prefix.
+                        listed_folded += (ascii_fold_text(parts[depth - 1]),)
+                    if listed_folded[:depth] != folded[path][:depth]:
+                        break
+                    if parts[:depth] == exact[path][:depth]:
+                        continue
+                    _folded_parts(listed)  # A quoted full path must be strict UTF-8 too.
+                    prefix = "/".join(exact[path][:depth])
+                    # "index" is retained wording for an authenticated tree entry.
+                    raise ReleaseChainError(
+                        f"index carries an alias of a protected path: {listed} "
+                        f"(for {path} at {prefix})"
+                    )
         for relative in sorted(entries):
             directory, _, name = relative.rpartition("/")
             if not (

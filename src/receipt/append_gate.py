@@ -21,10 +21,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from receipt._names import (
-    NamePolicyError,
-    ascii_fold_text,
-)
 from receipt.canonical import canonical_sha256
 from receipt.corpus import MAX_JOURNAL_BYTES
 from receipt.release_chain import (
@@ -804,13 +800,6 @@ def _surface_alias_paths(candidate: _CandidateTree) -> tuple[str, ...]:
     return tuple(sorted(paths))
 
 
-def _folded_parts(path: str) -> tuple[str, ...]:
-    try:
-        return tuple(ascii_fold_text(component) for component in path.split("/"))
-    except NamePolicyError as exc:
-        raise AppendError(str(exc)) from exc
-
-
 def _protected_paths(candidate: _CandidateTree) -> tuple[str, ...]:
     chain = candidate.spec.chain
     return tuple(
@@ -845,29 +834,6 @@ def _screen_candidate_tree_aliases(
                 raise SnapshotError(f"state path has a symlinked component: {prefix}")
             raise SnapshotError(f"tree path ancestor is not a directory: {prefix}")
 
-    folded = {path: _folded_parts(path) for path in protected}
-    exact = {path: tuple(path.split("/")) for path in protected}
-    # A non-tree alias carries the legacy diagnostic's complete entry path.
-    # Empty tree aliases are still covered after all non-tree entries.
-    for listed in sorted(
-        entries,
-        key=lambda path: (entries[path].mode == "040000", path),
-    ):
-        parts = tuple(listed.split("/"))
-        listed_folded = _folded_parts(listed)
-        for path in protected:
-            for depth in range(1, len(folded[path]) + 1):
-                if len(parts) < depth or listed_folded[:depth] != folded[path][:depth]:
-                    break
-                if parts[:depth] == exact[path][:depth]:
-                    continue
-                prefix = "/".join(exact[path][:depth])
-                # The legacy "index" diagnostic names an authenticated tree entry.
-                raise AppendError(
-                    f"index carries an alias of a protected path: {listed} "
-                    f"(for {path} at {prefix})"
-                )
-
     # Gate-only proposals need the same listing screen before their early return.
     try:
         _screen_protected_tree_names(
@@ -878,6 +844,7 @@ def _screen_candidate_tree_aliases(
                 candidate.spec.chain.release_root_relative,
                 candidate.spec.chain.manifest_relative,
             ),
+            alias_paths=protected,
         )
     except ReleaseChainError as exc:
         raise AppendError(str(exc)) from exc
