@@ -41,11 +41,12 @@ bibliography: references.bib
 by a commit, the base tree when supplied, the consumer's specification, and
 the caller's trust material. Every object byte used for that verdict is read
 from the repository's object store and rehashed against its OID; the working
-tree and index are never read. The retained directory verifier reads a
-private materialization on these paths, while a direct `verify_release_chain`
-caller retains the directory-as-read contract and its concurrent-writer
-residual. The verdict names the commit and tree and does not establish that
-files in any checkout equal the verified tree. This note updates the subject
+tree and index are never read. The append and composed verification paths
+pass a private materialization to the retained directory verifier; a direct
+`verify_release_chain` caller retains the directory-as-read contract and its
+concurrent-writer residual. The `receipt verify` output and
+`AppendGateVerdict` name the commit and tree; verification does not establish
+that files in any checkout equal the verified tree. This note updates the subject
 of the 0.5.1 account below for receipt 0.6.
 
 # Introduction {#sec-intro}
