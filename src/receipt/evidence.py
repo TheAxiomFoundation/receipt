@@ -115,12 +115,13 @@ import errno
 import fcntl
 import hashlib
 import json
+import math
 import os
 import pathlib
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NoReturn
 
 from receipt import sign as _sign
 from receipt.canonical import canonical_bytes
@@ -428,6 +429,81 @@ def canonical_document_bytes(payload: Any) -> bytes:
     return canonical_bytes(payload) + b"\n"
 
 
+def _canonical_strict(value: Any, label: str) -> None:
+    """Refuse a value `receipt.canonical` would alter, or fall over on, rather
+    than carry.
+
+    `canonical.py` is a hash-pinned port of the upstream serializer and is not
+    edited here. Four things it does to a value are exactly what signed bytes
+    cannot afford. An integer outside ±(2**53 - 1) is rendered through
+    ``float()`` and silently rounded, so the bytes state a number the producer
+    never supplied. A non-finite float raises the serializer's own bare
+    ``ValueError``, not a refusal of this module's. ``-0.0`` is folded to
+    ``0``. And a string holding a lone surrogate — which JSON text can spell as
+    ``"\\ud800"`` and Python will parse — is re-escaped rather than refused,
+    so the bytes carry a value no UTF-8 consumer can hold, and round-trip
+    equal on this side. An object key that is not a string leaves the
+    serializer as an ``AttributeError`` from its sort key.
+
+    Per #34's second half this is one validator applied at every boundary
+    rather than a check per site. Emission runs it on the body and on the
+    payload before either is serialized; verification runs it on the parsed
+    record and the parsed body before anything else reads them, so the schema
+    check and the canonical-equality check only ever see strict input. Each
+    refusal is an `EvidenceRecordError` naming the path to the value, rooted at
+    the value handed in — ``evidence body: count``, ``evidence record:
+    producer.repo``, ``evidence record: refs[1].sha256`` — and the class.
+    Everything else passes: ``True``, ``False``, ``None``, finite floats,
+    integers in range, strings without surrogates. Types canonical.py refuses
+    outright are left to it.
+
+    Module-local until the package's ``canonical_strict`` exists; then imported.
+    """
+
+    def refuse(path: str, reason: str) -> NoReturn:
+        where = path if path else "the top-level value"
+        raise EvidenceRecordError(f"{label}: {where} {reason}")
+
+    def walk(item: Any, path: str) -> None:
+        if item is None or item is True or item is False:
+            return
+        if isinstance(item, int):
+            if abs(item) > 2**53 - 1:
+                refuse(
+                    path,
+                    "is an integer outside ±(2**53 - 1), which canonical JSON "
+                    f"cannot carry exactly: {item}",
+                )
+            return
+        if isinstance(item, float):
+            if not math.isfinite(item):
+                refuse(path, f"is not a finite number: {item}")
+            if item == 0 and math.copysign(1.0, item) < 0:
+                refuse(path, "is negative zero, which canonical JSON folds to 0")
+            return
+        if isinstance(item, str):
+            for position, char in enumerate(item):
+                if 0xD800 <= ord(char) <= 0xDFFF:
+                    refuse(
+                        path,
+                        f"contains a lone surrogate U+{ord(char):04X} at "
+                        f"index {position}, which no UTF-8 consumer can hold",
+                    )
+            return
+        if isinstance(item, list):
+            for position, entry in enumerate(item):
+                walk(entry, f"{path}[{position}]")
+            return
+        if isinstance(item, dict):
+            for key, entry in item.items():
+                if not isinstance(key, str):
+                    refuse(path, f"has an object key that is not a string: {key!r}")
+                walk(entry, f"{path}.{key}" if path else key)
+            return
+
+    walk(value, "")
+
+
 def _pae(payload_type: str, payload: bytes) -> bytes:
     """DSSE's pre-authentication encoding: the bytes every signature covers.
 
@@ -488,7 +564,18 @@ def _load_canonical_json(
 def load_evidence_record(
     path: pathlib.Path, spec: EvidenceSpec
 ) -> tuple[dict[str, Any], bytes, str]:
+    """Read one record: parse, hold the parsed value to strict canonical input,
+    validate the schema, then hold the bytes to the canonical rule.
+
+    The strict check stands first because it is about the value and not about
+    the shape: a lone surrogate in ``producer.repo`` is a non-empty string to
+    the schema and re-escapes to the bytes it was read from, so before this
+    check it verified green; a hand-written ``1e999`` in a numeric field was
+    refused for being "not an integer" rather than for being infinite.
+    """
+
     parsed, raw = _load_canonical_json(path, "evidence record")
+    _canonical_strict(parsed, "evidence record")
     payload = validate_evidence_record_schema(parsed, spec)
     if raw != canonical_document_bytes(payload):
         raise EvidenceRecordError(
@@ -713,6 +800,12 @@ def _verify_records(
             )
 
         parsed_body, body_raw = _load_canonical_json(body_path, "evidence body")
+        # Held to strict canonical input before the canonical-equality check
+        # below, which would otherwise pass a body carrying 2**53 or a lone
+        # surrogate (canonical.py renders each back to the bytes it was read
+        # from) and would leave the module as canonical.py's own bare
+        # ValueError on a hand-written 1e999.
+        _canonical_strict(parsed_body, "evidence body")
         # The digest below binds a byte stream, and every stream that hashes
         # to it satisfies the record. The rule the body is stored under is the
         # record's own — canonical JSON plus one newline — and it has to be
@@ -945,6 +1038,13 @@ def _write_evidence_record(
     The signature is made over ``_pae(spec.schema_version, raw)`` with the
     signing primitive's deliberately empty domain — the frame is the whole
     message — and `_verify_records` checks exactly those bytes.
+
+    The body and the payload are each held to strict canonical input before
+    they are serialized (`_canonical_strict`): the body because this module
+    has no opinion about what it contains and canonical.py would round, fold
+    or raise on some of it without a word; the payload because ``producer`` and
+    ``body_schema`` are the caller's verbatim. Both stand ahead of the first
+    write, as everything that can refuse does.
     """
 
     # Everything already in the directory is verified before the index is
@@ -966,6 +1066,7 @@ def _write_evidence_record(
         previous_sha256 = head.sha256
 
     _validate_ref_entries(refs)
+    _canonical_strict(body, "evidence body")
     body_raw = canonical_document_bytes(body)
     payload = {
         "schemaVersion": spec.schema_version,
@@ -979,6 +1080,7 @@ def _write_evidence_record(
     }
     # Validate before writing anything: a refusal must not leave a partial
     # record on disk for the verifier to trip over.
+    _canonical_strict(payload, "evidence record")
     validate_evidence_record_schema(payload, spec)
     raw = canonical_document_bytes(payload)
     record_path = directory / record_filename(index, raw)

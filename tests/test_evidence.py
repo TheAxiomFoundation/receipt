@@ -473,24 +473,86 @@ def _resign_in_place(
     test is actually aiming at rather than tripping on the filename first.
     """
 
-    from receipt.sign import sign_payload
-
     payload = json.loads(path.read_text())
     mutate(payload)
-    raw = canonical_document_bytes(payload)
+    return _refile(
+        path,
+        spec,
+        private_key_pem,
+        int(payload["recordIndex"]),
+        canonical_document_bytes(payload),
+    )
+
+
+def _refile(
+    path: pathlib.Path,
+    spec: EvidenceSpec,
+    private_key_pem: bytes,
+    index: int,
+    raw: bytes,
+) -> pathlib.Path:
+    """Replace the record at ``path`` with ``raw``: filed under its own digest,
+    its body kept beside it, and signed over the frame."""
+
+    from receipt.sign import sign_payload
+
     body_raw = path.with_name(f"{path.stem}.body.json").read_bytes()
 
     for stale in path.parent.glob(f"{path.stem}.*"):
         stale.unlink()
     path.unlink(missing_ok=True)
 
-    new_path = path.with_name(record_filename(int(payload["recordIndex"]), raw))
+    new_path = path.with_name(record_filename(index, raw))
     new_path.write_bytes(raw)
     new_path.with_name(f"{new_path.stem}.body.json").write_bytes(body_raw)
     new_path.with_name(f"{new_path.stem}.producer.sig").write_bytes(
         sign_payload(private_key_pem, _framed(spec, raw), domain=b"")
     )
     return new_path
+
+
+#: Stands in for a value that has to be spelled by hand, below.
+SENTINEL = "__hand_written__"
+_QUOTED_SENTINEL = f'"{SENTINEL}"'.encode("ascii")
+
+
+def _refile_with_literal(
+    path: pathlib.Path,
+    spec: EvidenceSpec,
+    private_key_pem: bytes,
+    mutate,
+    literal: bytes,
+) -> pathlib.Path:
+    """Re-file a record with one value spelled as a hand-written JSON literal.
+
+    `_resign_in_place` serializes through canonical.py, which is exactly the
+    code that rounds, folds or raises on the values these tests plant — so a
+    record carrying one has to be written the way a person would write it.
+    ``mutate`` sets the target field to `SENTINEL`; the record is canonicalized;
+    the quoted sentinel is then replaced by ``literal`` and the result filed
+    and signed like any other record, so verification reaches the strict-input
+    check rather than the filename or the signature.
+    """
+
+    payload = json.loads(path.read_text())
+    mutate(payload)
+    raw = canonical_document_bytes(payload)
+    assert raw.count(_QUOTED_SENTINEL) == 1
+    return _refile(
+        path,
+        spec,
+        private_key_pem,
+        int(payload["recordIndex"]),
+        raw.replace(_QUOTED_SENTINEL, literal),
+    )
+
+
+def _body_with_literal(literal: bytes) -> bytes:
+    """A canonical one-field body, with the field's value spelled by hand."""
+
+    raw = canonical_document_bytes({"count": SENTINEL})
+    assert raw.count(_QUOTED_SENTINEL) == 1
+    return raw.replace(_QUOTED_SENTINEL, literal)
 
 
 def test_broken_predecessor_link_is_refused(
@@ -1432,6 +1494,244 @@ def test_a_directory_that_verifies_still_takes_the_next_record(
     assert third.name.startswith("0002-")
     result = verify_evidence_records(tmp_path, spec=spec, anchor_dir=anchor_dir)
     assert [record.record_index for record in result.records] == [0, 1, 2]
+
+
+# --------------------------------------------------------------------------
+# Strict canonical input: what canonical.py would round, fold, or raise on.
+# --------------------------------------------------------------------------
+
+#: One case per class the guard refuses, as a Python value a caller can hand
+#: to emission, with the fragment of the refusal that names the class.
+STRICT_VALUES = [
+    pytest.param(2**53, "is an integer outside", id="int-2^53"),
+    pytest.param(-(2**53), "is an integer outside", id="int-minus-2^53"),
+    pytest.param(float("inf"), "is not a finite number", id="inf"),
+    pytest.param(float("nan"), "is not a finite number", id="nan"),
+    pytest.param(-0.0, "is negative zero", id="negative-zero"),
+    pytest.param("\ud800", "lone surrogate", id="lone-surrogate"),
+]
+#: The same classes as JSON text a person could write into a file. There is no
+#: literal for NaN that the loader does not already refuse.
+STRICT_LITERALS = [
+    pytest.param(b"9007199254740992", "is an integer outside", id="int-2^53"),
+    pytest.param(b"-9007199254740992", "is an integer outside", id="int-minus-2^53"),
+    pytest.param(b"1e999", "is not a finite number", id="1e999"),
+    pytest.param(b"-0.0", "is negative zero", id="negative-zero"),
+    pytest.param(b'"\\ud800"', "lone surrogate", id="lone-surrogate"),
+]
+
+
+def _names(directory: pathlib.Path) -> list[str]:
+    return sorted(entry.name for entry in directory.iterdir())
+
+
+@pytest.mark.parametrize("value, reason", STRICT_VALUES)
+def test_emission_refuses_a_body_value_canonical_json_would_alter(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+    emitted: pathlib.Path,
+    value: object,
+    reason: str,
+) -> None:
+    """The body is serialized through canonical.py, a hash-pinned port that
+    rounds an integer beyond 2**53 - 1 through ``float()``, folds ``-0.0`` to
+    ``0``, re-escapes a lone surrogate, and raises a bare ``ValueError`` on a
+    non-finite float. Each is refused before anything is written, in this
+    module's own words, naming the path to the value."""
+
+    private_pem, _ = keys
+    directory = tmp_path / RECORDS
+    before = _names(directory)
+    with pytest.raises(EvidenceRecordError) as exc:
+        emit_evidence_record(
+            tmp_path,
+            spec=spec,
+            private_key_pem=private_pem,
+            body={"count": value},
+            body_schema=BODY_SCHEMA,
+            refs=[],
+            producer=PRODUCER,
+            emitted_at_utc=EMITTED,
+        )
+    message = str(exc.value)
+    assert message.startswith("evidence body: count ")
+    assert reason in message
+    assert _names(directory) == before
+
+
+@pytest.mark.parametrize("value, reason", STRICT_VALUES)
+def test_emission_refuses_a_record_value_canonical_json_would_alter(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+    emitted: pathlib.Path,
+    value: object,
+    reason: str,
+) -> None:
+    """The same guard on the payload, which carries the caller's ``producer``
+    and ``body_schema`` verbatim. It stands ahead of the schema check, so the
+    refusal names the value for what it is rather than for the type the schema
+    wanted there."""
+
+    private_pem, _ = keys
+    directory = tmp_path / RECORDS
+    before = _names(directory)
+    with pytest.raises(EvidenceRecordError) as exc:
+        emit_evidence_record(
+            tmp_path,
+            spec=spec,
+            private_key_pem=private_pem,
+            body=BODY,
+            body_schema=BODY_SCHEMA,
+            refs=[],
+            producer={"repo": value, "branch": "main"},
+            emitted_at_utc=EMITTED,
+        )
+    message = str(exc.value)
+    assert message.startswith("evidence record: producer.repo ")
+    assert reason in message
+    assert _names(directory) == before
+
+
+def test_emission_refuses_an_object_key_that_is_not_a_string(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+    emitted: pathlib.Path,
+) -> None:
+    """canonical.py sorts object keys as UTF-16 before it checks their type, so
+    an integer key left this module as ``AttributeError`` from the sort key."""
+
+    private_pem, _ = keys
+    directory = tmp_path / RECORDS
+    before = _names(directory)
+    arguments = dict(
+        spec=spec,
+        private_key_pem=private_pem,
+        body_schema=BODY_SCHEMA,
+        refs=[],
+        emitted_at_utc=EMITTED,
+    )
+    bad_body = {"count": 1, 2: "two"}
+    bad_producer = {"repo": "example/consumer", "branch": "main", 3: "x"}
+    with pytest.raises(EvidenceRecordError) as body_exc:
+        emit_evidence_record(
+            tmp_path, body=bad_body, producer=PRODUCER, **arguments  # type: ignore[arg-type]
+        )
+    assert str(body_exc.value).startswith(
+        "evidence body: the top-level value has an object key that is not a string"
+    )
+    with pytest.raises(EvidenceRecordError) as record_exc:
+        emit_evidence_record(
+            tmp_path, body=BODY, producer=bad_producer, **arguments  # type: ignore[arg-type]
+        )
+    assert str(record_exc.value).startswith(
+        "evidence record: producer has an object key that is not a string"
+    )
+    assert _names(directory) == before
+
+
+@pytest.mark.parametrize("literal, reason", STRICT_LITERALS)
+def test_a_hand_written_record_value_canonical_json_would_alter_is_refused(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+    emitted: pathlib.Path,
+    anchor_dir: pathlib.Path,
+    literal: bytes,
+    reason: str,
+) -> None:
+    """The verifier's side of the same guard, on the parsed record, ahead of
+    the schema check and the canonical-equality check. A lone surrogate in
+    ``producer.repo`` passed both and verified green before this change: the
+    schema saw a non-empty string, and canonical.py re-escaped it to the same
+    bytes it was read from. The refusal is the strict-input one, by name."""
+
+    private_pem, _ = keys
+    _refile_with_literal(
+        emitted,
+        spec,
+        private_pem,
+        lambda payload: payload["producer"].__setitem__("repo", SENTINEL),
+        literal,
+    )
+    with pytest.raises(EvidenceRecordError) as exc:
+        verify_evidence_records(tmp_path, spec=spec, anchor_dir=anchor_dir)
+    message = str(exc.value)
+    assert message.startswith("evidence record: producer.repo ")
+    assert reason in message
+    assert "canonical JSON plus one newline" not in message
+    assert "digest mismatch" not in message
+
+
+@pytest.mark.parametrize("literal, reason", STRICT_LITERALS)
+def test_a_hand_written_body_value_canonical_json_would_alter_is_refused(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+    emitted: pathlib.Path,
+    anchor_dir: pathlib.Path,
+    literal: bytes,
+    reason: str,
+) -> None:
+    """The guard on the parsed body, ahead of its canonical-equality check.
+
+    Before this change ``9007199254740992`` and ``"\\ud800"`` verified green
+    — canonical.py renders each back to the bytes it was read from — ``-0.0``
+    was refused as a canonical mismatch, and ``1e999`` left the module as the
+    serializer's own bare ``ValueError``. Each is now the strict-input refusal,
+    naming the path.
+    """
+
+    private_pem, _ = keys
+    body_raw = _body_with_literal(literal)
+    emitted.with_name(f"{emitted.stem}.body.json").write_bytes(body_raw)
+    _resign_in_place(
+        emitted,
+        spec,
+        private_pem,
+        lambda payload: payload["body"].__setitem__("sha256", sha256_bytes(body_raw)),
+    )
+    with pytest.raises(EvidenceRecordError) as exc:
+        verify_evidence_records(tmp_path, spec=spec, anchor_dir=anchor_dir)
+    message = str(exc.value)
+    assert message.startswith("evidence body: count ")
+    assert reason in message
+    assert "canonical JSON plus one newline" not in message
+    assert "digest mismatch" not in message
+
+
+@pytest.mark.parametrize(
+    "value",
+    [2**53 - 1, -(2**53 - 1), 0, 0.5, True],
+    ids=["int-2^53-1", "int-minus-2^53-1", "zero", "half", "true"],
+)
+def test_values_at_the_edge_of_strict_input_are_accepted(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+    anchor_dir: pathlib.Path,
+    value: object,
+) -> None:
+    """The guard refuses exactly what canonical.py alters and nothing beside it.
+    These pass before this change as well as after, and are here for that
+    reason: a guard that refused a representable value would be a worse
+    failure than the one being closed."""
+
+    private_pem, _ = keys
+    emit_evidence_record(
+        tmp_path,
+        spec=spec,
+        private_key_pem=private_pem,
+        body={"count": value},
+        body_schema=BODY_SCHEMA,
+        refs=[],
+        producer=PRODUCER,
+        emitted_at_utc=EMITTED,
+    )
+    result = verify_evidence_records(tmp_path, spec=spec, anchor_dir=anchor_dir)
+    assert result.records[0].body_raw == canonical_document_bytes({"count": value})
 
 
 # --------------------------------------------------------------------------
