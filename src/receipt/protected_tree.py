@@ -213,6 +213,9 @@ class _ShapeFacts:
 
     def mode(self, path: str, entry: snapshot.GitEntry | None, *, empty: bool = False) -> ModeFact:
         mode, kind = (entry.mode, entry.object_type) if entry is not None else ("", "")
+        return self.metadata(path, mode, kind, empty=empty)
+
+    def metadata(self, path: str, mode: str, kind: str, *, empty: bool = False) -> ModeFact:
         key = path, mode, kind, empty
         if key not in self.modes:
             self.modes[key] = classify_mode(mode, kind, empty=empty)
@@ -599,6 +602,7 @@ class TreePolicy:
     _shapes: _ShapeFacts = field(default_factory=_ShapeFacts, init=False, repr=False, compare=False)
     _entries: dict[str, snapshot.GitEntry] = field(default_factory=dict, init=False, repr=False, compare=False)
     _scopes: dict[str, str | None] = field(default_factory=dict, init=False, repr=False, compare=False)
+    _empty_roots: dict[str, bool] = field(default_factory=dict, init=False, repr=False, compare=False)
     _runs: dict[ProtectionPlan, _NameRun] = field(default_factory=dict, init=False, repr=False, compare=False)
     _views: WeakValueDictionary = field(default_factory=WeakValueDictionary, init=False, repr=False, compare=False)
     _selections: WeakValueDictionary = field(default_factory=WeakValueDictionary, init=False, repr=False, compare=False)
@@ -642,6 +646,7 @@ class TreePolicy:
         entries = listing.as_dict(include_trees=True)
         self._entries.update(entries)
         self._scopes[prefix] = listing.tree_oid
+        self._empty_roots[prefix] = not listing._node.records
         return entries
 
     def _validate_view(self, view: ProtectedTreeView) -> None:
@@ -745,8 +750,14 @@ class TreePolicy:
             # Only complete listings establish tree emptiness; exact entries
             # alone establish directory shape, without an extra subtree read.
             complete = any(not p or path == p or path.startswith(p + "/") for p in plan.listing_scope)
-            fact = self._shapes.mode(path, entry, empty=complete and path not in parents
-                                     and entry is not None and entry.mode == "040000")
+            if entry is None and self._scopes.get(path) is not None:
+                # A subtree listing carries its root OID separately, including
+                # empty roots. Do not manufacture/charge a public GitEntry or
+                # confuse that authenticated directory with an absent leaf.
+                fact = self._shapes.metadata(path, "040000", "tree", empty=self._empty_roots[path])
+            else:
+                fact = self._shapes.mode(path, entry, empty=complete and path not in parents
+                                         and entry is not None and entry.mode == "040000")
             _run.mode_facts[path, role] = fact
             finding = fact.finding(path, role, position=(ordinal,))
             if finding is not None:

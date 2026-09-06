@@ -222,3 +222,22 @@ def test_object_authentication_precedes_mode_finding(raw_repo, mode):
         with raw_repo.snapshot(commit) as snap:
             value = shape_plan(obligations=("modes",), mode_roles=(("leaf", "state-leaf"),))
             evaluator(snap).evaluate_modes(value)
+
+
+@pytest.mark.parametrize("shape", ("tree", "empty-tree", "missing"))
+def test_partial_listing_root_mode_uses_existing_tree_identity(raw_repo, monkeypatch, shape):
+    commit = raw_repo.commit((("a/child", "100644"),) if shape == "tree" else (),
+                             empty=("a",) if shape == "empty-tree" else ())
+    with raw_repo.snapshot(commit) as snap:
+        subject = evaluator(snap)
+        subject.read_listing("a")
+        before = asdict(snap.work)
+        monkeypatch.setattr(snapshot.TreeSnapshot, "entries", lambda *a: pytest.fail("root mode caused a listing"))
+        monkeypatch.setattr(snapshot.TreeSnapshot, "entry", lambda *a: pytest.fail("root mode caused a lookup"))
+        value = shape_plan(listing_scope=("a",), obligations=("modes",), mode_roles=(("a", "ancestor"),))
+        view = subject.evaluate_modes(value)
+        assert view.mode_facts["a", "ancestor"].shape == shape
+        assert bool(view.findings) == (shape == "missing")
+        exact = subject.evaluate_modes(replace(value, listing_scope=()))
+        assert exact.mode_facts["a", "ancestor"].shape == shape
+        assert asdict(snap.work) == before
