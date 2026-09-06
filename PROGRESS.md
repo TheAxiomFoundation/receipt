@@ -43,13 +43,21 @@ The supplied `issue-62.md` remains an untracked input. Nothing was pushed.
 - Reproduced F2: reduced ceiling 40 gives work 28 on call 1 and refusal at
   work 40 on call 2 (path bytes 27/40, attribute bytes/rules 22/1). Specified
   exact-step replay for the single exhausting rule; normal work is 28/56.
+- Folded F3–F8: PR3a/3b with counter gates; Chronicle per-PR gates; four
+  retained/converted boundary rows and append selector ownership; explicit
+  import-cycle resolution and late monkeypatch seams; concrete consolidation
+  benefits; corrected locators, fixture identifiers and harness normalization.
+- Added the review's smaller compatible-reuse control and case-sensitive plus
+  case-insensitive PR3b gate. Independent audit refined materializer parent
+  insertion order and attribute reading/rule/state-step ordering.
+- Preserved `committed_fixture_filesystem` at its actual `def` line 1135;
+  explicitly identified 1134 as its decorator, correcting the review's nit.
+- Retained the round artifact in the repository and replaced the narrated
+  validation row with its findings and the changes they caused.
 
 ## Next
 
-1. Reproduce F1's append interleave and F2's exact exhaustion counter.
-2. Fold F1–F8: schedules, migration gates, boundary ownership, import direction,
-   benefits, precise locators and review provenance.
-3. Rerun the updated drivers and 1,466 + 108 tests with zero skips; commit each
-   coherent step with the requested co-author trailer.
-4. Write the final report with new record line numbers and F1/F2 output.
+1. Rerun the updated drivers and finish 1,466 + 108 tests with zero skips.
+2. Review the resulting record and commit final validation evidence.
+3. Write the final report with new record line numbers and F1/F2 output.
    Do not push. Implementation and consumer upgrades remain future PR work.
