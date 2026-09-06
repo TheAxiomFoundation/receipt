@@ -1,13 +1,10 @@
 """Exact boundary refusals for every budget owner in the M1 census."""
 from __future__ import annotations
 
-import dataclasses
-
 import pytest
 
 from receipt import corpus, snapshot
 from m1_fixture import raw_repo, signed_repo, outcome, assert_golden
-from corpus_fixture import journal_rows, render_journal
 
 
 @pytest.mark.parametrize("case", ("entries", "name", "path", "paths_total", "path_depth", "tree_depth", "tree_bytes", "selection_bytes"))

@@ -5781,5 +5781,364 @@
     "append_preflight": {
       "value": null
     }
+  },
+  "precedence/swap_cli/unused/bad\udcff": {
+    "exit": 1,
+    "verdict": "FAIL",
+    "phases": [
+      [
+        "custody",
+        false,
+        "index carries an alias of a protected path: Releases/other.txt (for releases at releases)"
+      ],
+      [
+        "binding",
+        false,
+        "not reached"
+      ]
+    ],
+    "stderr": ""
+  },
+  "precedence/swap_cli/AAA-bad\udcff": {
+    "exit": 1,
+    "verdict": "FAIL",
+    "phases": [
+      [
+        "custody",
+        false,
+        "tree entry name is not valid UTF-8 for folding"
+      ],
+      [
+        "binding",
+        false,
+        "not reached"
+      ]
+    ],
+    "stderr": ""
+  },
+  "precedence/swap_cli/Releases/other.txt": {
+    "exit": 1,
+    "verdict": "FAIL",
+    "phases": [
+      [
+        "custody",
+        false,
+        "index carries an alias of a protected path: Releases/other.txt (for releases at releases)"
+      ],
+      [
+        "binding",
+        false,
+        "not reached"
+      ]
+    ],
+    "stderr": ""
+  },
+  "precedence/history_names": {
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "history",
+          false,
+          "release history is not immutable: release path is a symlink: releases/link.txt"
+        ],
+        [
+          "custody",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    },
+    "append": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "index carries an alias of a protected path: Releases/other.txt (for releases at releases)"
+    },
+    "base_chain": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "index carries an alias of a protected path: Releases/other.txt (for releases at releases)"
+    }
+  },
+  "precedence/state_names": {
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "index carries an alias of a protected path: Releases/other.txt (for releases at releases)"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    },
+    "append": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "state file is a symlink: receipt/corpus-journal.jsonl"
+    },
+    "base_chain": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "index carries an alias of a protected path: Releases/other.txt (for releases at releases)"
+    }
+  },
+  "precedence/state_modes": {
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "state file is a symlink: receipt/corpus-journal.jsonl"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    },
+    "append": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "state file is a symlink: receipt/corpus-journal.jsonl"
+    },
+    "base_chain": {
+      "exception": "receipt.snapshot.SnapshotError",
+      "message": "base tree entry has non-regular mode 120000: receipt/corpus-journal.jsonl"
+    }
+  },
+  "precedence/mode_attributes": {
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "base tree entry has non-regular mode 120000: releases/link.txt"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    },
+    "append": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "transforming attribute filter applies to protected path releases/anchors/alpha-root.pem"
+    },
+    "base_chain": {
+      "exception": "receipt.snapshot.SnapshotError",
+      "message": "base tree entry has non-regular mode 120000: releases/link.txt"
+    }
+  },
+  "precedence/mode_bad_attributes": {
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "base tree entry has non-regular mode 120000: releases/link.txt"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    },
+    "append": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "unsupported .gitattributes construct at .gitattributes:1: attribute macro definition"
+    },
+    "base_chain": {
+      "exception": "receipt.snapshot.SnapshotError",
+      "message": "base tree entry has non-regular mode 120000: releases/link.txt"
+    }
+  },
+  "precedence/journal/collision": {
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          true,
+          null
+        ],
+        [
+          "binding",
+          false,
+          "journal row 1 is not valid JSON: Expecting value: line 1 column 1 (char 0)"
+        ],
+        [
+          "declaration",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    },
+    "binding": {
+      "exception": "receipt.corpus.CorpusError",
+      "message": "journal row 1 is not valid JSON: Expecting value: line 1 column 1 (char 0)"
+    }
+  },
+  "precedence/journal/unfoldable": {
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          true,
+          null
+        ],
+        [
+          "binding",
+          false,
+          "journal row 1 is not valid JSON: Expecting value: line 1 column 1 (char 0)"
+        ],
+        [
+          "declaration",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    },
+    "binding": {
+      "exception": "receipt.corpus.CorpusError",
+      "message": "journal row 1 is not valid JSON: Expecting value: line 1 column 1 (char 0)"
+    }
+  },
+  "precedence/journal/portable": {
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          true,
+          null
+        ],
+        [
+          "binding",
+          false,
+          "journal row 1 is not valid JSON: Expecting value: line 1 column 1 (char 0)"
+        ],
+        [
+          "declaration",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    },
+    "binding": {
+      "exception": "receipt.corpus.CorpusError",
+      "message": "journal row 1 is not valid JSON: Expecting value: line 1 column 1 (char 0)"
+    }
+  },
+  "precedence/manifest/False/absent": {
+    "value": "thesis-facts append check OK: 2 rows, immutable prefix 1"
+  },
+  "precedence/manifest/False/empty": {
+    "value": "thesis-facts append check OK: 2 rows, immutable prefix 1"
+  },
+  "precedence/manifest/False/blob": {
+    "exception": "receipt.append_gate.AppendError",
+    "message": "release manifest path is not a regular directory: <ROOT>/releases/manifests"
+  },
+  "precedence/manifest/False/executable": {
+    "exception": "receipt.append_gate.AppendError",
+    "message": "release manifest path is not a regular directory: <ROOT>/releases/manifests"
+  },
+  "precedence/manifest/False/symlink": {
+    "exception": "receipt.append_gate.AppendError",
+    "message": "release manifest path is not a regular directory: <ROOT>/releases/manifests"
+  },
+  "precedence/manifest/False/gitlink": {
+    "exception": "receipt.append_gate.AppendError",
+    "message": "release manifest path is not a regular directory: <ROOT>/releases/manifests"
+  },
+  "precedence/manifest/True/absent": {
+    "value": "thesis-facts append check OK: 2 rows, immutable prefix 1, +0 appended vs base"
+  },
+  "precedence/manifest/True/empty": {
+    "value": "thesis-facts append check OK: 2 rows, immutable prefix 1, +0 appended vs base"
+  },
+  "precedence/manifest/True/blob": {
+    "exception": "receipt.append_gate.AppendError",
+    "message": "legacy pre-genesis proposal must not change releases/; add a complete genesis manifest, producer signature, and both receipts or no release files at all (changed=['releases/manifests'])"
+  },
+  "precedence/manifest/True/executable": {
+    "exception": "receipt.append_gate.AppendError",
+    "message": "legacy pre-genesis proposal must not change releases/; add a complete genesis manifest, producer signature, and both receipts or no release files at all (changed=['releases/manifests'])"
+  },
+  "precedence/manifest/True/symlink": {
+    "exception": "receipt.append_gate.AppendError",
+    "message": "release path is a symlink: releases/manifests"
+  },
+  "precedence/manifest/True/gitlink": {
+    "exception": "receipt.append_gate.AppendError",
+    "message": "release path is not regular: releases/manifests"
+  },
+  "precedence/state_mode/ledger/official_observations.jsonl/100644": {
+    "exception": "receipt.append_gate.AppendError",
+    "message": "state file mode changed relative to base: ledger/official_observations.jsonl"
+  },
+  "precedence/state_mode/ledger/immutable_prefix.json/100644": {
+    "exception": "receipt.append_gate.AppendError",
+    "message": "state file mode changed relative to base: ledger/immutable_prefix.json"
+  },
+  "precedence/state_mode/ledger/official_observations.jsonl/100755": {
+    "value": "thesis-facts append check OK: 2 rows, immutable prefix 1, +0 appended vs base"
+  },
+  "precedence/state_mode/ledger/immutable_prefix.json/100755": {
+    "value": "thesis-facts append check OK: 2 rows, immutable prefix 1, +0 appended vs base"
+  },
+  "precedence/release_mode/120000": {
+    "exception": "receipt.append_gate.AppendError",
+    "message": "release path is a symlink: releases/link.txt"
+  },
+  "precedence/release_mode/160000": {
+    "exception": "receipt.append_gate.AppendError",
+    "message": "release path is not regular: releases/link.txt"
+  },
+  "precedence/base_wrapper/alias": {
+    "exception": "receipt.append_gate.AppendError",
+    "message": "base release chain is invalid: index carries an alias of a protected path: Releases/other.txt (for releases at releases)"
+  },
+  "precedence/base_wrapper/attributes": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "transforming attribute filter applies to protected path releases/anchors/alpha-root.pem"
+  },
+  "precedence/json_child/100644": {
+    "exception": "receipt.append_gate.AppendError",
+    "message": "release proposal must add its manifest, producer signature, and exactly the alpha and beta receipts with no other releases/ changes; missing=['releases/manifests/0000-0123456789abcdef.alpha.tsr', 'releases/manifests/0000-0123456789abcdef.beta.tsr', 'releases/manifests/0000-0123456789abcdef.producer.sig'], extra=[]"
+  },
+  "precedence/json_child/100755": {
+    "exception": "receipt.append_gate.AppendError",
+    "message": "release proposal must add its manifest, producer signature, and exactly the alpha and beta receipts with no other releases/ changes; missing=['releases/manifests/0000-0123456789abcdef.alpha.tsr', 'releases/manifests/0000-0123456789abcdef.beta.tsr', 'releases/manifests/0000-0123456789abcdef.producer.sig'], extra=[]"
+  },
+  "precedence/json_child/040000": {
+    "value": "thesis-facts append check OK: 2 rows, immutable prefix 1, +0 appended vs base"
+  },
+  "precedence/json_child/nonempty_tree": {
+    "exception": "receipt.append_gate.AppendError",
+    "message": "legacy pre-genesis proposal must not change releases/; add a complete genesis manifest, producer signature, and both receipts or no release files at all (changed=['releases/manifests/0000-0123456789abcdef.json/child'])"
   }
 }

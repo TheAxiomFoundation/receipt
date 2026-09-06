@@ -28,10 +28,15 @@ No -o argument was supplied; final report destination: M1-PR1-REPORT.md.
   now assert both Unicode spellings actually exist in the raw tree.
 - Reproduced F1 in a standalone probe before writing assertions: both swapped
   winners and both single-fault controls match the record exactly.
+- Precedence and append census controls: 36 passed in 15.34 s, including
+  signed malformed-journal versus binding-only names, zero early attribute
+  reads, real base-wrapper classes, state mode equality and manifest modes.
+- Record qualification: an empty tree at a .json manifest child passes
+  pre-genesis; only a nonempty tree gives the R2-L1 changed-release refusal.
+  Both cases now have permanent full-string/class/outcome controls.
 
 ## Next
 
-- Capture and verify precedence/swap controls; commit.
 - Add consumer import smoke tests; commit. Add frozen unused shell; commit.
 - Run new files separately and under both fixture ignoreCase settings, run
   the expanded non-harness suite, inspect scope, and write the final report.

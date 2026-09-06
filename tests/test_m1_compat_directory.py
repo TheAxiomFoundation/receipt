@@ -10,7 +10,7 @@ import shutil
 import pytest
 
 from receipt import release_chain as chain
-from receipt.snapshot import Materialization, SnapshotError, TreeSnapshot
+from receipt.snapshot import SnapshotError
 from receipt import append_gate
 from m1_fixture import signed_repo, outcome, assert_golden
 
