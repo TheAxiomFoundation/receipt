@@ -35,8 +35,11 @@ No -o argument was supplied; final report destination: M1-PR1-REPORT.md.
   pre-genesis; only a nonempty tree gives the R2-L1 changed-release refusal.
   Both cases now have permanent full-string/class/outcome controls.
 
+- Consumer import census: 85 checks pass, including Chronicle private helpers,
+  sign-only adopters, retained values/types and all harness import surfaces.
+
 ## Next
 
-- Add consumer import smoke tests; commit. Add frozen unused shell; commit.
+- Add frozen unused shell; commit.
 - Run new files separately and under both fixture ignoreCase settings, run
   the expanded non-harness suite, inspect scope, and write the final report.
