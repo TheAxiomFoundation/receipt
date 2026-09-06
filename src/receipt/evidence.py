@@ -71,7 +71,12 @@ exactly: same regexes, same genesis rule, same four-digit filename limit.
 record as `{stem}.body.json`, canonical, and verification recomputes the
 digest. This is how the record schema stays closed while the body schema stays
 the domain's — the same move `state.jsonlSha256` makes for a journal. This
-module has no opinion about what a body contains.
+module has no opinion about what a body contains. Two things about one are
+not translated into this module's words: a type canonical.py refuses outright
+leaves as its own ``TypeError``, and a pathological depth leaves as Python's ``RecursionError``
+— a cyclic body at emission recurses in `_canonical_strict` before
+canonical.py can say "circular", and a body on disk nested deeper than the
+recursion limit recurses in ``json.loads`` itself. Both fail closed.
 
 `refs[]` is sorted and strictly unique on `(kind, sha256)`, with `kind` drawn
 from a small closed enum. It is how a record sits *beside* a chain without the
@@ -508,7 +513,14 @@ def _canonical_strict(value: Any, label: str) -> None:
     producer.repo``, ``evidence record: refs[1].sha256`` — and the class.
     Everything else passes: ``True``, ``False``, ``None``, finite floats,
     integers in range, strings without surrogates. Types canonical.py refuses
-    outright are left to it.
+    outright are left to it. So is recursion: a cyclic body recurses in this
+    walk before canonical.py could say "circular", and leaves as Python's
+    ``RecursionError`` — fail-closed, stated here, and not translated. And no
+    refusal here asks the interpreter to spell an integer it will not: past
+    ``sys.get_int_max_str_digits()`` (4300 digits by default) CPython raises
+    a ``ValueError`` of its own from ``str()`` and from an f-string alike,
+    which is how ``10**5000`` left emission in place of its refusal; such an
+    integer is described by its width instead.
 
     Module-local until the package's ``canonical_strict`` exists; then imported.
     """
@@ -517,10 +529,23 @@ def _canonical_strict(value: Any, label: str) -> None:
         where = path if path else "the top-level value"
         raise EvidenceRecordError(f"{label}: {where} {reason}")
 
+    def spell(item: int) -> str:
+        """An integer for a refusal, spelled when the interpreter will spell
+        it. Past ``sys.get_int_max_str_digits()`` (4300 digits by default)
+        CPython raises a ``ValueError`` of its own from ``str()`` and from an
+        f-string alike; that limit is the bound, and past it the width is
+        stated instead of the value."""
+        try:
+            return str(item)
+        except ValueError:
+            return f"an integer of {item.bit_length()} bits"
+
     def out_of_range_token(item: int | float) -> str | None:
         """The fact about a number whose canonical token is an integer token
         outside ±(2**53 - 1), or None. Asked after the type rules, so the
-        serializer is only ever handed a finite number it will not raise on."""
+        serializer is only ever handed a finite float it will not raise on, or
+        an ``int`` within ±(2**53 - 1) that it spells in at most sixteen
+        digits — the ``int`` rule has already refused every wider one."""
         token = canonical_stringify(item)
         if _INTEGER_TOKEN_RE.fullmatch(token) is None or abs(int(token)) <= 2**53 - 1:
             return None
@@ -548,8 +573,12 @@ def _canonical_strict(value: Any, label: str) -> None:
                 refuse(
                     path,
                     "is an integer outside ±(2**53 - 1), which canonical JSON "
-                    f"cannot carry exactly: {item}",
+                    f"cannot carry exactly: {spell(item)}",
                 )
+            # Reached only within ±(2**53 - 1): the rule above has refused
+            # every wider int, so canonical_stringify is never handed one it
+            # would render through float() or spell past the interpreter's
+            # digit limit.
             fact = out_of_range_token(item)
             if fact is not None:
                 refuse(path, fact)
@@ -736,6 +765,15 @@ def _load_canonical_json(
     Takes the root and the leaf's path below it, rather than one joined path,
     because the reader walks the components and the walk has to know where
     the root is. The refusals below name the joined path as they always did.
+
+    An integer literal wider than the interpreter will convert —
+    ``sys.get_int_max_str_digits()``, 4300 digits by default since CPython
+    3.11 — leaves ``json.loads`` as a plain ``ValueError`` rather than a
+    ``JSONDecodeError``, and used to leave this module the same way. It is
+    refused here in the module's words, naming the limit for what it is: the
+    interpreter's, not JSON's. The module's own hooks raise
+    `EvidenceRecordError`, itself a ``ValueError``, from inside the parse, so
+    those pass through first and unchanged.
     """
 
     path = root / relative
@@ -750,9 +788,16 @@ def _load_canonical_json(
             object_pairs_hook=_object_without_duplicates,
             parse_constant=_fail_json_constant,
         )
+    except EvidenceRecordError:
+        raise
     except json.JSONDecodeError as exc:
         raise EvidenceRecordError(
             f"{label} is not valid JSON: {path}: {exc}"
+        ) from exc
+    except ValueError as exc:
+        raise EvidenceRecordError(
+            f"{label} holds an integer literal wider than this interpreter will "
+            f"convert: {path}: {exc}"
         ) from exc
     return parsed, raw
 

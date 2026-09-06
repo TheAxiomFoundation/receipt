@@ -2314,6 +2314,139 @@ def test_load_evidence_record_refuses_a_path_outside_the_records_directory(
 
 
 # --------------------------------------------------------------------------
+# Refusals in the module's vocabulary where the interpreter had the last word.
+# --------------------------------------------------------------------------
+
+#: Wider than CPython's default int-to-str limit — ``sys.get_int_max_str_digits()``,
+#: 4300 digits since 3.11 — on both sides of it: ``json.loads`` refuses to
+#: convert the literal, and an f-string refuses to spell the value. Each left
+#: this module as the interpreter's own ``ValueError`` before this change.
+WIDE_LITERAL = b"1" * 5000
+WIDE_INT = 10**5000
+
+
+def test_a_hand_written_integer_wider_than_the_interpreter_converts_is_refused(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+    emitted: pathlib.Path,
+    anchor_dir: pathlib.Path,
+) -> None:
+    """``json.loads`` lets the int-to-str limit out as a plain ``ValueError``,
+    not a ``JSONDecodeError``, so a body carrying a 5000-digit literal left
+    verification as ``ValueError: Exceeds the limit (4300 digits) for integer
+    string conversion …``. The refusal is the module's, and names the limit
+    for what it is: the interpreter's, not JSON's."""
+
+    private_pem, _ = keys
+    body_raw = _body_with_literal(WIDE_LITERAL)
+    emitted.with_name(f"{emitted.stem}.body.json").write_bytes(body_raw)
+    _resign_in_place(
+        emitted,
+        spec,
+        private_pem,
+        lambda payload: payload["body"].__setitem__("sha256", sha256_bytes(body_raw)),
+    )
+    with pytest.raises(EvidenceRecordError) as exc:
+        verify_evidence_records(tmp_path, spec=spec, anchor_dir=anchor_dir)
+    message = str(exc.value)
+    assert message.startswith(
+        "evidence body holds an integer literal wider than this interpreter "
+        "will convert: "
+    )
+    assert "4300" in message
+
+
+def test_a_hand_written_record_index_wider_than_the_interpreter_converts_is_refused(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+    emitted: pathlib.Path,
+    anchor_dir: pathlib.Path,
+) -> None:
+    """The same literal in the record's own ``recordIndex``. Filed under index
+    0 by hand, since `_refile_with_literal` reads the index it would here be
+    replacing."""
+
+    private_pem, _ = keys
+    payload = json.loads(emitted.read_text())
+    payload["recordIndex"] = SENTINEL
+    raw = canonical_document_bytes(payload)
+    assert raw.count(_QUOTED_SENTINEL) == 1
+    _refile(emitted, spec, private_pem, 0, raw.replace(_QUOTED_SENTINEL, WIDE_LITERAL))
+    with pytest.raises(EvidenceRecordError) as exc:
+        verify_evidence_records(tmp_path, spec=spec, anchor_dir=anchor_dir)
+    message = str(exc.value)
+    assert message.startswith(
+        "evidence record holds an integer literal wider than this interpreter "
+        "will convert: "
+    )
+    assert "4300" in message
+
+
+@pytest.mark.parametrize("value", [WIDE_INT, -WIDE_INT], ids=["10^5000", "minus-10^5000"])
+def test_emission_refuses_an_integer_too_wide_to_spell(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+    emitted: pathlib.Path,
+    value: int,
+) -> None:
+    """The int rule fired on ``10**5000``, and the refusal's f-string then asked
+    the interpreter to spell it: ``ValueError: Exceeds the limit (4300 digits)
+    for integer string conversion`` left emission in place of the refusal,
+    with the directory created and empty. Past the interpreter's limit the
+    refusal now describes the width instead of spelling the value."""
+
+    private_pem, _ = keys
+    directory = tmp_path / RECORDS
+    before = _names(directory)
+    with pytest.raises(EvidenceRecordError) as exc:
+        emit_evidence_record(
+            tmp_path,
+            spec=spec,
+            private_key_pem=private_pem,
+            body={"count": value},
+            body_schema=BODY_SCHEMA,
+            refs=[],
+            producer=PRODUCER,
+            emitted_at_utc=EMITTED,
+        )
+    message = str(exc.value)
+    assert message.startswith("evidence body: count is an integer outside ±(2**53 - 1), ")
+    assert message.endswith(f"an integer of {value.bit_length()} bits")
+    assert _names(directory) == before
+
+
+def test_emission_still_spells_an_integer_the_interpreter_can(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+    emitted: pathlib.Path,
+) -> None:
+    """Control: ``10**400`` is far outside the safe range and well inside the
+    interpreter's limit (401 digits of 4300), and is refused in words that
+    spell it — before this change as well as after."""
+
+    private_pem, _ = keys
+    directory = tmp_path / RECORDS
+    before = _names(directory)
+    with pytest.raises(EvidenceRecordError) as exc:
+        emit_evidence_record(
+            tmp_path,
+            spec=spec,
+            private_key_pem=private_pem,
+            body={"count": 10**400},
+            body_schema=BODY_SCHEMA,
+            refs=[],
+            producer=PRODUCER,
+            emitted_at_utc=EMITTED,
+        )
+    assert str(exc.value).endswith(f"cannot carry exactly: {10**400}")
+    assert _names(directory) == before
+
+
+# --------------------------------------------------------------------------
 # Spec construction.
 # --------------------------------------------------------------------------
 
