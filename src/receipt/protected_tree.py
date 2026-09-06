@@ -115,7 +115,7 @@ class Finding:
     stage: str
     position: tuple[int, ...]
     path: str = ""
-    raw_path: bytes = b""
+    raw_path: bytes | None = None
     parent: str = ""
     name: str = ""
     other_name: str = ""
@@ -217,16 +217,26 @@ class _NameFacts:
         try:
             return call()
         except _names.NamePolicyError as exc:
+            try:
+                raw_path = path.encode("utf-8", "surrogateescape")
+            except UnicodeEncodeError:
+                # A compatibility mapping can contain text that cannot be Git
+                # bytes at all. Preserve its original primitive refusal.
+                raw_path = None
             raise _Refusal(Finding(
                 "name", stage, position, path=path,
-                raw_path=path.encode("utf-8", "surrogateescape"), name=name,
+                raw_path=raw_path, name=name,
                 parent=path.rpartition("/")[0], operation=operation, detail=str(exc),
             )) from exc
 
     def aliases(self, entries: Mapping[str, snapshot.GitEntry], plan: ProtectionPlan) -> None:
         root = _AliasNode()
         # Supplied target order is an earlier barrier than any listed entry.
-        for ordinal, path in enumerate(dict.fromkeys(plan.configured_alias_targets)):
+        seen_targets: set[str] = set()
+        for ordinal, path in enumerate(plan.configured_alias_targets):
+            if path in seen_targets:
+                continue
+            seen_targets.add(path)
             exact = tuple(path.split("/"))
             folded = self.path_fold(path, operation="target-fold", position=(0, ordinal))
             node = root
