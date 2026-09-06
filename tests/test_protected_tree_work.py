@@ -122,7 +122,7 @@ def test_d12_matching_checkpoints_unchanged(raw_repo, monkeypatch, ceiling):
 @pytest.mark.parametrize("fault", ("clean", "alias", "ancestor", "unfoldable"))
 def test_append_old_new_public_work(append_repo, fault):
     extras = {"clean": (), "alias": (("Releases/leaf", "100644"),),
-        "ancestor": (("verification", "120000"),),
+        "ancestor": (("scripts", "120000"),),
         "unfoldable": ((b"unused/bad\xff", "100644"),)}[fault]
     commit = append_repo.commit(extras)
     results = []
@@ -132,6 +132,12 @@ def test_append_old_new_public_work(append_repo, fault):
                 GATE_SPEC.chain.state_relative.as_posix(), GATE_SPEC.chain.prefix_relative.as_posix())
             results.append((outcome(lambda: sorted(screen(candidate))), asdict(snap.work)))
     assert results[0] == results[1]
+    if fault == "ancestor":
+        # scripts/ is a proper ancestor of the state path scripts/check_append.py, so the
+        # symlink reaches the ancestor-shape barrier on both paths (round 1, low: the
+        # earlier fixture path was not an ancestor of any protected path)
+        assert results[1][0] == {"exception": "receipt.snapshot.SnapshotError",
+                                 "message": "state path has a symlinked component: scripts"}
 
 
 @pytest.mark.parametrize("ceiling", (60, 120, 100000))
