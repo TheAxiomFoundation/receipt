@@ -2,49 +2,49 @@
   author = {{the Axiom Foundation}},
   title = {receipt: verifiable custody of agent-produced records},
   howpublished = {\url{https://github.com/TheAxiomFoundation/receipt}},
-  note = {Version 0.5.0 on PyPI as of 2026-08-14; commit f44c8a9 audited 2026-08-10}
+  note = {Version 0.6.0 on PyPI as of 2026-09-05; tag v0.6.0 at commit a2228e4}
 }
 
 @misc{receipt-receipts,
   author = {{the Axiom Foundation}},
   title = {receipt repository evidence directory: port diffs, pinned source hashes, and independent review records},
   howpublished = {\url{https://github.com/TheAxiomFoundation/receipt/tree/main/receipts}},
-  note = {Seven files: two raw port diffs (633 and 695 lines), two pinned source-hash lists, three review records. Accessed 2026-08-10}
+  note = {Eight files: two raw port diffs (633 and 695 lines), two pinned source-hash lists, three review records, and the 0.6 re-pin record. Accessed 2026-09-05}
 }
 
 @misc{receipt-pr14,
   author = {{the Axiom Foundation}},
   title = {Ship receipt.corpus and the spanning receipt verify command},
   howpublished = {\url{https://github.com/TheAxiomFoundation/receipt/pull/14}},
-  note = {Merged 2026-08-14 as release 0.5.0; head 8c5570c}
+  note = {Merged 2026-08-14 as release 0.5.0}
 }
 
 @misc{ledger-repo,
   author = {{PolicyEngine}},
   title = {chronicle (formerly ledger): the observation ledger and release chain},
   howpublished = {\url{https://github.com/PolicyEngine/chronicle}},
-  note = {Extraction sources pinned at commits 0798427 and 9dafe81; the custody branch codex/thesis-ledger-facts pins receipt==0.5.1. Accessed 2026-09-01}
+  note = {Extraction sources pinned at commits 0798427 and 9dafe81; the branch codex/thesis-ledger-facts pins receipt==0.6.0. Accessed 2026-09-05}
 }
 
 @misc{brier-repo,
   author = {Ghenis, Max},
   title = {brier: pre-registered forecast records},
   howpublished = {\url{https://github.com/MaxGhenis/brier}},
-  note = {Extraction source pinned at commit 4b9e7be; continued as ThesisInstitute/thesis, whose custody extra pins receipt==0.5.1. Accessed 2026-08-17}
+  note = {Extraction source pinned at commit 4b9e7be; continued as ThesisInstitute/thesis, whose custody extra pins receipt==0.6.0. Accessed 2026-09-05}
 }
 
 @misc{axiom-corpus-431,
   author = {{the Axiom Foundation}},
-  title = {axiom-corpus pull request 431: retain legacy release-verification keys across rotation},
+  title = {Support release signing key rotation},
   howpublished = {\url{https://github.com/TheAxiomFoundation/axiom-corpus/pull/431}},
-  note = {The production key-rotation incident whose semantics receipt.sign adapts; merged as 86e4a4c. Accessed 2026-08-10}
+  note = {axiom-corpus pull request 431: the release-key rotation procedure whose semantics receipt.sign matches; merged as 86e4a4c. Accessed 2026-09-05}
 }
 
 @misc{rulespec-nz-104,
   author = {{the Axiom Foundation}},
-  title = {rulespec-nz pull request 104: corpus custody journal and verification specification},
+  title = {Publish a witnessed corpus an outside auditor can verify offline},
   howpublished = {\url{https://github.com/TheAxiomFoundation/rulespec-nz/pull/104}},
-  note = {Open pilot of the 0.5.0 corpus-verification flow; journal head 7dd2b1a as of 2026-08-10}
+  note = {rulespec-nz pull request 104, open at head 7dd2b1a as of 2026-09-05: the corpus custody journal and verification specification}
 }
 
 @misc{rfc3161,
@@ -57,7 +57,8 @@
   author = {C. Adams and P. Cain and D. Pinkas and R. Zuccherato},
   title = {{Internet X.509 Public Key Infrastructure Time-Stamp Protocol (TSP)}},
   year = 2001,
-  month = aug
+  month = aug,
+  note = {Updated by RFC 5816}
 }
 
 @misc{rfc9162,
@@ -305,27 +306,27 @@
   author       = {Jongerius, Otto and the Obsigna contributors},
   title        = {Obsigna and the Agent Receipts Protocol},
   year         = {2026},
-  howpublished = {Software, version 0.15.0},
+  howpublished = {Protocol specification draft v0.5.0 (2026-06-09); implementation tag obsigna/v0.31.0},
   url          = {https://github.com/agent-receipts/obsigna},
-  note         = {Accessed 2026-08-13}
+  note         = {Accessed 2026-09-05}
 }
 
 @misc{halorecord2026,
   author       = {Kuan, Brian},
   title        = {halo-record: Tamper-Evident Runtime Records for {AI} Agents},
   year         = {2026},
-  howpublished = {Software, version 0.2.30},
+  howpublished = {Software, version 0.2.42 on PyPI (2026-09-02); repository tag v0.2.32},
   url          = {https://github.com/bkuan001/halo-record},
-  note         = {Accessed 2026-08-13}
+  note         = {Accessed 2026-09-05}
 }
 
 @misc{microsoftpyscitt2026,
   author       = {{Microsoft}},
   title        = {pyscitt and the {SCITT CCF} Ledger},
   year         = {2026},
-  howpublished = {Software, pyscitt version 0.14.1},
+  howpublished = {Software, pyscitt version 0.14.2 (2026-08-24)},
   url          = {https://github.com/microsoft/scitt-ccf-ledger},
-  note         = {Accessed 2026-08-13}
+  note         = {Accessed 2026-09-05}
 }
 
 @article{Haber1991Timestamp,
@@ -344,11 +345,13 @@
   number = 9943,
   howpublished = {RFC 9943},
   publisher = {RFC Editor},
-  url = {https://datatracker.ietf.org/doc/rfc9943/},
-  author = {{IETF SCITT Working Group}},
+  doi = {10.17487/RFC9943},
+  url = {https://www.rfc-editor.org/info/rfc9943/},
+  author = {Birkholz, Henk and Delignat-Lavaud, Antoine and Fournet, C{\'e}dric and Deshpande, Yogesh and Lasker, Steve},
   title = {{An Architecture for Trustworthy and Transparent Digital Supply Chains}},
   year = 2026,
-  month = jun
+  month = jun,
+  note = {Proposed Standard; IETF SCITT working group. Accessed 2026-09-05}
 }
 
 @article{McKeemanDifferential,
@@ -359,7 +362,8 @@
   number  = {1},
   pages   = {100--107},
   year    = {1998},
-  url     = {https://www.cs.swarthmore.edu/~bylvisa1/cs97/f13/Papers/DifferentialTestingForSoftware.pdf}
+  url     = {https://www.cs.tufts.edu/comp/150FP/archive/bill-mckeeman/DifferentailTesting.pdf},
+  note    = {Original publisher URL https://www.hpl.hp.com/hpjournal/dtj/vol10num1/vol10num1art9.pdf; the Tufts copy was live 2026-09-05}
 }
 
 @article{SoilandReyes2022ROCrate,
@@ -376,4 +380,34 @@
   year    = {2022},
   doi     = {10.3233/DS-210053},
   url     = {https://arxiv.org/abs/2108.06503}
+}
+
+@misc{sigstore-bundle,
+  author       = {{Sigstore project}},
+  title        = {Sigstore Bundle Format},
+  year         = {2026},
+  howpublished = {Project documentation},
+  url          = {https://docs.sigstore.dev/about/bundle/},
+  note         = {Accessed 2026-09-05}
+}
+
+@misc{receipt-pr53,
+  author       = {Storey, Nathan},
+  title        = {Add non-authorizing evidence records (receipt.evidence)},
+  year         = {2026},
+  howpublished = {\url{https://github.com/TheAxiomFoundation/receipt/pull/53}},
+  note         = {receipt pull request 53, open at cb6272b as of 2026-09-05}
+}
+
+@misc{rfc5816,
+  series = {Request for Comments},
+  number = 5816,
+  howpublished = {RFC 5816},
+  publisher = {RFC Editor},
+  doi = {10.17487/RFC5816},
+  url = {https://www.rfc-editor.org/info/rfc5816/},
+  author = {Santesson, Stefan and Pope, Nick},
+  title = {{ESSCertIDv2 Update for RFC 3161}},
+  year = 2010,
+  month = mar
 }
