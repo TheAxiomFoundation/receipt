@@ -12,8 +12,9 @@ into a verdict it had no business reaching.
 - `KeyringSpec` requires an exact `int` threshold between 1 and the number of
   current keys, and refuses anything else at construction with
   `keyring threshold must be an integer between 1 and the number of current keys; found=nan`.
-  0.6.0 only compared the threshold, so `True`, `1.5`, `float("inf")` and
-  `float("nan")` all constructed a keyring. NaN was the one that mattered:
+  0.6.0 only compared the threshold, so `True`, `1.5` (with two or more
+  keys) and `float("nan")` all constructed a keyring, and only a value
+  outside the bounds, such as `float("inf")`, met the existing refusals. NaN was the one that mattered:
   every comparison against it is false, so `len(satisfied) < threshold` was
   false too and `verify_threshold` returned a verification with zero satisfied
   signatures — a keyring that vouched for an empty signature map. An auditor
