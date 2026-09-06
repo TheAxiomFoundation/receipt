@@ -40,11 +40,12 @@ import hashlib
 import pathlib
 import tempfile
 from contextlib import ExitStack
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
 from receipt import __version__
+from receipt.protected_tree import POLICY_VERSION, ProtectionPlan, TreePolicy
 from receipt.corpus import (
     CI_ATTESTED_TIER,
     GATE_TIERS,
@@ -63,6 +64,7 @@ from receipt.release_chain import (
     ReleaseChainError,
     _normalized_spec,
     _screen_protected_tree_names,
+    _protected_name_error,
     assert_no_redirecting_git_environment,
     verify_release_chain,
     verify_release_history_immutable,
@@ -81,6 +83,14 @@ TIER_MEANING = {
 
 class VerifySpecError(ValueError):
     """The loaded verification spec is missing, malformed, or not a spec."""
+
+
+def _custody_state_error(finding) -> ReleaseChainError:
+    if finding.kind == "missing":
+        return ReleaseChainError(f"state file is missing or not a regular file: {finding.path}")
+    if finding.kind == "symlink":
+        return ReleaseChainError(f"state file is a symlink: {finding.path}")
+    return ReleaseChainError(f"state file is not a regular file: {finding.path}")
 
 
 def _exception_detail(exc: BaseException) -> str:
@@ -662,15 +672,18 @@ def run_verification(
                 normalized_chain.prefix_relative,
                 normalized_chain.anchor_relative,
             )
-            _screen_protected_tree_names(
-                candidate.entries("").as_dict(include_trees=True),
+            policy = TreePolicy(candidate, policy_version=POLICY_VERSION, work=candidate.work)
+            custody_plan = ProtectionPlan.chain_names(
                 prefixes,
                 repertoire=chain_repertoire,
                 release_directories=(
                     normalized_chain.release_root_relative,
                     normalized_chain.manifest_relative,
                 ),
+                use="custody", anchor_origin="tree",
             )
+            names = policy.evaluate(custody_plan, stage="suffixes")
+            names.require(custody_plan.use, render=_protected_name_error)
 
             def state_blob(relative: pathlib.PurePosixPath) -> bytes:
                 display = relative.as_posix()
@@ -682,13 +695,13 @@ def run_verification(
                             f"state file is missing or not a regular file: {display}"
                         ) from exc
                     raise
-                if entry.mode == "120000":
-                    raise ReleaseChainError(f"state file is a symlink: {display}")
-                if entry.mode not in {"100644", "100755"}:
-                    raise ReleaseChainError(
-                        f"state file is not a regular file: {display}"
-                    )
-                return candidate.blob(entry, limit=MAX_JOURNAL_BYTES)
+                policy.observe_entries((entry,))
+                state_plan = replace(custody_plan, obligations=("modes",), listing_scope=(),
+                                     mode_roles=((display, "state-leaf"),), phase="state")
+                state = policy.evaluate(state_plan, stage="modes")
+                selection = state.require(state_plan.use, render=_custody_state_error)
+                selected = selection.entries_for(candidate, use=state_plan.use, plan=state_plan)
+                return candidate.blob(selected[display], limit=MAX_JOURNAL_BYTES)
 
             journal_bytes = state_blob(verification_spec.journal_relative)
             prefix_bytes = state_blob(normalized_chain.prefix_relative)

@@ -168,6 +168,33 @@ def assert_no_merging_entries(
     screen_siblings(names, repertoire=repertoire, materializing=materializing, label=label)
 
 
+def _ancestor_shape_error(finding, *, protected: bool = False) -> SnapshotError:
+    """Keep the three D6 renderers at their legacy snapshot boundary."""
+    if finding.kind == "missing":
+        return SnapshotError(f"tree entry does not exist: {finding.target}")
+    if protected:
+        return SnapshotError(f"protected path ancestor is not a directory: {finding.prefix}")
+    if finding.kind == "symlink":
+        return SnapshotError(f"state path has a symlinked component: {finding.prefix}")
+    return SnapshotError(f"tree path ancestor is not a directory: {finding.prefix}")
+
+
+def _check_tree_ancestor(parts: tuple[bytes, ...], index: int, raw: _RawTreeEntry,
+                         *, protected: bool = False) -> None:
+    # The reader has already authenticated this reached component and charged
+    # its walk. Do not look ahead, flatten a listing or fetch a protected blob.
+    from receipt.protected_tree import ancestor_finding
+
+    finding = ancestor_finding(
+        _tree_path_decode(b"/".join(parts)),
+        _tree_path_decode(b"/".join(parts[:index + 1])),
+        raw.mode.decode("ascii").zfill(6), raw.object_type,
+        position=(index,),
+    )
+    if finding is not None:
+        raise _ancestor_shape_error(finding, protected=protected)
+
+
 def _tree_path_decode(value: bytes) -> str:
     """Decode logical Git path bytes independently of the host filesystem."""
 
@@ -2646,11 +2673,7 @@ class TreeSnapshot:
                 self._batch().info(raw.oid, role=raw.object_type)
             if last:
                 return self._public_entry(parts, raw)
-            if raw.mode != b"40000":
-                prefix = _tree_path_decode(b"/".join(parts[: index + 1]))
-                if raw.mode == b"120000":
-                    raise SnapshotError(f"state path has a symlinked component: {prefix}")
-                raise SnapshotError(f"tree path ancestor is not a directory: {prefix}")
+            _check_tree_ancestor(parts, index, raw)
             tree_oid = raw.oid
         raise AssertionError("a non-empty path has at least one component")
 
@@ -2684,15 +2707,7 @@ class TreeSnapshot:
                     parts[:-1],
                     _TreeNode((_ListingRecord(raw=raw),), None),
                 )
-            if raw.mode != b"40000":
-                prefix_text = _tree_path_decode(b"/".join(parts[: index + 1]))
-                if raw.mode == b"120000":
-                    raise SnapshotError(
-                        f"state path has a symlinked component: {prefix_text}"
-                    )
-                raise SnapshotError(
-                    f"tree path ancestor is not a directory: {prefix_text}"
-                )
+            _check_tree_ancestor(parts, index, raw)
             tree_oid = raw.oid
         raise AssertionError("a non-empty path has at least one component")
 
@@ -2950,11 +2965,7 @@ class TreeSnapshot:
                 self._batch().info(raw.oid, role=raw.object_type)
             if index == len(parts) - 1:
                 return raw
-            if raw.mode != b"40000":
-                ancestor = _tree_path_decode(b"/".join(parts[: index + 1]))
-                raise SnapshotError(
-                    f"protected path ancestor is not a directory: {ancestor}"
-                )
+            _check_tree_ancestor(parts, index, raw, protected=True)
             tree_oid = raw.oid
         return None
 
