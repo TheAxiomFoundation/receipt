@@ -2,11 +2,13 @@
 
 ## State
 
-Complete. The design record is committed at
+Round-1 fold in progress, starting from `2144f07`. Incorporate F1–F8 from
+`docs/design/REVIEW-r1-m1.md`, reproduce both new probes, and rerun the
+embedded drivers and both test suites. The existing record is committed at
 `docs/design/0.7-m1-protected-tree-policy.md` on
 `design/0.7-m1-protected-tree-policy`, based on
-`e404d59298c972993b268494c726472a2613f3b3`. The byte-identical output copy is
-`/tmp/receipt-07-m1-output.md`; no alternative `-o` path was supplied.
+`e404d59298c972993b268494c726472a2613f3b3`. The final round-1 report will use
+`/tmp/receipt-07-m1-output.md` unless a different `-o` path is supplied.
 Source, tests and CONTRIBUTING remain byte-identical to v0.6.0.
 The supplied `issue-62.md` remains an untracked input. Nothing was pushed.
 
@@ -31,11 +33,17 @@ The supplied `issue-62.md` remains an untracked input. Nothing was pushed.
   topology/obligations, shared facts, legacy refusal ordering/admission,
   PR-sized migration steps, consumer compatibility and ranked settling probes.
 - Completed two independent final reviews and incorporated every correction.
-- Mirrored the final record to the output file and verified identical bytes.
+- Mirrored the original record to the output file and verified identical bytes.
 - Used the requested co-author trailer on all design-lane commits.
+- Read the round-1 review and approval requirements. Delegated an independent
+  source-locator audit and suite/F2 validation while folding the record.
 
 ## Next
 
-No work remains in this design lane. Implementation and consumer upgrade tests
-belong to the ordered future PRs in the record; no source/test changes or push
-were performed.
+1. Reproduce F1's append interleave and F2's exact exhaustion counter.
+2. Fold F1–F8: schedules, migration gates, boundary ownership, import direction,
+   benefits, precise locators and review provenance.
+3. Rerun the updated drivers and 1,466 + 108 tests with zero skips; commit each
+   coherent step with the requested co-author trailer.
+4. Write the final report with new record line numbers and F1/F2 output.
+   Do not push. Implementation and consumer upgrades remain future PR work.
