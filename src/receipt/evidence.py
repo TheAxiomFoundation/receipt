@@ -124,7 +124,7 @@ from dataclasses import dataclass
 from typing import Any, NoReturn
 
 from receipt import sign as _sign
-from receipt.canonical import canonical_bytes
+from receipt.canonical import canonical_bytes, canonical_stringify
 from receipt.release_chain import (
     MAX_RELEASE_INDEX,
     SHA256_RE,
@@ -150,6 +150,10 @@ BODY_RE = re.compile(r"(?P<stem>[0-9]{4}-[0-9a-f]{16})\.body\.json\Z")
 PRODUCER_SIGNATURE_RE = re.compile(
     r"(?P<stem>[0-9]{4}-[0-9a-f]{16})\.producer\.sig\Z"
 )
+#: A canonical JSON number token a reader parses as an integer. What
+#: `_canonical_strict` holds to ±(2**53 - 1) is this token, not the Python
+#: type that produced it.
+_INTEGER_TOKEN_RE = re.compile(r"-?[0-9]+")
 
 
 class EvidenceRecordError(ValueError):
@@ -449,8 +453,20 @@ def _canonical_strict(value: Any, label: str) -> None:
     `canonical.py` is a hash-pinned port of the upstream serializer and is not
     edited here. Four things it does to a value are exactly what signed bytes
     cannot afford. An integer outside ±(2**53 - 1) is rendered through
-    ``float()`` and silently rounded, so the bytes state a number the producer
-    never supplied. A non-finite float raises the serializer's own bare
+    ``float()``, so it may round (``2**53 + 1`` does; ``2**53`` happens to
+    render exactly) and in either case leaves an integer token no reader can
+    be held to carry exactly — this module's own reader refuses it. The rule
+    is therefore on the token, not the type: a float is rendered in fixed
+    form below 1e21, so an integral float from ``2**53`` up renders as that
+    same bare integer token, and while the guard asked only the type of an
+    ``int``, ``1e20`` passed as a finite float, was written as
+    ``100000000000000000000``, and the directory then refused at verification
+    and at every emission after. Any number whose canonical token fullmatches
+    ``-?[0-9]+`` outside ±(2**53 - 1) is refused, whatever produced it; the
+    ``int`` rule stands beside it, since an ``int`` at or beyond 1e21 renders
+    in exponent form and would slip a token-only rule. ``1e21`` and beyond
+    render in exponent form, round-trip as floats, and stay accepted, as does
+    ``float(2**53 - 1)``. A non-finite float raises the serializer's own bare
     ``ValueError``, not a refusal of this module's. ``-0.0`` is folded to
     ``0``. And a string holding a lone surrogate — which JSON text can spell as
     ``"\\ud800"`` and Python will parse — is re-escaped rather than refused,
@@ -482,6 +498,19 @@ def _canonical_strict(value: Any, label: str) -> None:
         where = path if path else "the top-level value"
         raise EvidenceRecordError(f"{label}: {where} {reason}")
 
+    def out_of_range_token(item: int | float) -> str | None:
+        """The fact about a number whose canonical token is an integer token
+        outside ±(2**53 - 1), or None. Asked after the type rules, so the
+        serializer is only ever handed a finite number it will not raise on."""
+        token = canonical_stringify(item)
+        if _INTEGER_TOKEN_RE.fullmatch(token) is None or abs(int(token)) <= 2**53 - 1:
+            return None
+        return (
+            f"renders as the integer token {token}, outside ±(2**53 - 1), which "
+            f"a reader takes for an integer canonical JSON cannot carry exactly: "
+            f"{item!r}"
+        )
+
     def lone_surrogate(text: str) -> str | None:
         """The fact about the first surrogate code point in ``text``, or None."""
         for position, char in enumerate(text):
@@ -502,12 +531,18 @@ def _canonical_strict(value: Any, label: str) -> None:
                     "is an integer outside ±(2**53 - 1), which canonical JSON "
                     f"cannot carry exactly: {item}",
                 )
+            fact = out_of_range_token(item)
+            if fact is not None:
+                refuse(path, fact)
             return
         if isinstance(item, float):
             if not math.isfinite(item):
                 refuse(path, f"is not a finite number: {item}")
             if item == 0 and math.copysign(1.0, item) < 0:
                 refuse(path, "is negative zero, which canonical JSON folds to 0")
+            fact = out_of_range_token(item)
+            if fact is not None:
+                refuse(path, fact)
             return
         if isinstance(item, str):
             fact = lone_surrogate(item)

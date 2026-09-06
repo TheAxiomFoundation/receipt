@@ -1704,8 +1704,17 @@ def test_a_hand_written_body_value_canonical_json_would_alter_is_refused(
 
 @pytest.mark.parametrize(
     "value",
-    [2**53 - 1, -(2**53 - 1), 0, 0.5, True],
-    ids=["int-2^53-1", "int-minus-2^53-1", "zero", "half", "true"],
+    [2**53 - 1, -(2**53 - 1), float(2**53 - 1), 0, 0.5, 1e21, -1e21, True],
+    ids=[
+        "int-2^53-1",
+        "int-minus-2^53-1",
+        "float-2^53-1",
+        "zero",
+        "half",
+        "1e21",
+        "minus-1e21",
+        "true",
+    ],
 )
 def test_values_at_the_edge_of_strict_input_are_accepted(
     tmp_path: pathlib.Path,
@@ -1714,10 +1723,14 @@ def test_values_at_the_edge_of_strict_input_are_accepted(
     anchor_dir: pathlib.Path,
     value: object,
 ) -> None:
-    """The guard refuses exactly what canonical.py alters and nothing beside it.
-    These pass before this change as well as after, and are here for that
-    reason: a guard that refused a representable value would be a worse
-    failure than the one being closed."""
+    """The guard refuses what canonical.py alters and what it renders as an
+    integer token outside ±(2**53 - 1), and nothing beside those. ``2**53 - 1``
+    and its float render as an in-range integer token; ``1e21`` renders in
+    exponent form and round-trips as a float; an out-of-range integer *may*
+    round, and ``2**53`` serializes exactly while being deliberately outside
+    the accepted range all the same. These pass before this change as well as
+    after, and are here for that reason: a guard that refused a representable
+    value would be a worse failure than the one being closed."""
 
     private_pem, _ = keys
     emit_evidence_record(
@@ -1868,6 +1881,105 @@ def test_an_astral_body_key_is_accepted(
     )
     result = verify_evidence_records(tmp_path, spec=spec, anchor_dir=anchor_dir)
     assert result.records[0].body_raw == canonical_document_bytes(body)
+
+
+# --------------------------------------------------------------------------
+# Strict canonical input, at the edges the guard first drew: number tokens.
+# --------------------------------------------------------------------------
+
+#: A float whose canonical token is an integer token outside ±(2**53 - 1).
+#: canonical.py renders an integral float below 1e21 in fixed form, so each
+#: of these passed the guard as a finite float and was written as a bare
+#: integer token that this module's own reader then refused: emission was
+#: green, and the directory refused at verification and at every emission
+#: after. The fragment is the token the refusal names.
+OUT_OF_RANGE_TOKENS = [
+    pytest.param(float(2**53), "9007199254740992", id="float-2^53"),
+    pytest.param(1e20, "100000000000000000000", id="1e20"),
+    pytest.param(-1e20, "-100000000000000000000", id="minus-1e20"),
+    pytest.param(9.9e20, "990000000000000000000", id="9.9e20"),
+]
+#: The same numbers as JSON text a person could write. Each parses as a float
+#: and, before this change, was refused for not being canonical — true, and
+#: not the fact.
+OUT_OF_RANGE_TOKEN_LITERALS = [
+    pytest.param(b"9007199254740992.0", "9007199254740992", id="float-2^53"),
+    pytest.param(b"1e20", "100000000000000000000", id="1e20"),
+    pytest.param(b"-1e20", "-100000000000000000000", id="minus-1e20"),
+    pytest.param(b"9.9e20", "990000000000000000000", id="9.9e20"),
+]
+
+
+@pytest.mark.parametrize("value, token", OUT_OF_RANGE_TOKENS)
+def test_emission_refuses_a_number_whose_canonical_token_is_out_of_range(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+    emitted: pathlib.Path,
+    anchor_dir: pathlib.Path,
+    value: float,
+    token: str,
+) -> None:
+    """The rule is on the token, whatever Python type produced it. Before this
+    change ``1e20`` emitted green as ``100000000000000000000``, and the
+    directory then refused at verification and at the next emission. It is
+    refused before anything is written, and the directory still verifies."""
+
+    private_pem, _ = keys
+    directory = tmp_path / RECORDS
+    before = _names(directory)
+    with pytest.raises(EvidenceRecordError) as exc:
+        emit_evidence_record(
+            tmp_path,
+            spec=spec,
+            private_key_pem=private_pem,
+            body={"count": value},
+            body_schema=BODY_SCHEMA,
+            refs=[],
+            producer=PRODUCER,
+            emitted_at_utc=EMITTED,
+        )
+    message = str(exc.value)
+    assert message.startswith(
+        f"evidence body: count renders as the integer token {token},"
+    )
+    assert _names(directory) == before
+    result = verify_evidence_records(tmp_path, spec=spec, anchor_dir=anchor_dir)
+    assert len(result.records) == 1
+
+
+@pytest.mark.parametrize("literal, token", OUT_OF_RANGE_TOKEN_LITERALS)
+def test_a_hand_written_number_whose_canonical_token_is_out_of_range_is_refused(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+    emitted: pathlib.Path,
+    anchor_dir: pathlib.Path,
+    literal: bytes,
+    token: str,
+) -> None:
+    """The verifier's side, on the parsed body. The literal parses as a float,
+    so the guard has to render it to see the integer token; before this change
+    it passed, and the body was refused one check later for not being
+    canonical. The refusal is the strict-input one, naming the token."""
+
+    private_pem, _ = keys
+    body_raw = _body_with_literal(literal)
+    emitted.with_name(f"{emitted.stem}.body.json").write_bytes(body_raw)
+    _resign_in_place(
+        emitted,
+        spec,
+        private_pem,
+        lambda payload: payload["body"].__setitem__("sha256", sha256_bytes(body_raw)),
+    )
+    with pytest.raises(EvidenceRecordError) as exc:
+        verify_evidence_records(tmp_path, spec=spec, anchor_dir=anchor_dir)
+    message = str(exc.value)
+    assert message.startswith(
+        f"evidence body: count renders as the integer token {token},"
+    )
+    assert "canonical JSON plus one newline" not in message
+    assert "digest mismatch" not in message
 
 
 # --------------------------------------------------------------------------
