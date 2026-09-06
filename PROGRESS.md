@@ -37,9 +37,16 @@ No -o argument was supplied; final report destination: M1-PR1-REPORT.md.
 
 - Consumer import census: 85 checks pass, including Chronicle private helpers,
   sign-only adopters, retained values/types and all harness import surfaces.
+- Added unused frozen policy shell with contracts and exact PR2 sentinel;
+  12 shell tests pass, including both fresh-process import orders.
+- Literal grep requested by the assignment also finds the pre-existing
+  _screen_protected_tree_names helper in append_gate/release_chain/verify.
+  Retained those symbols; AST import audit plus whole-word grep proves that
+  no production caller imports the shell.
+- Host: macOS 26.6.2 arm64, APFS; case probe resolves CaseProbe/caseprobe
+  to the same inode (case-insensitive).
 
 ## Next
 
-- Add frozen unused shell; commit.
 - Run new files separately and under both fixture ignoreCase settings, run
   the expanded non-harness suite, inspect scope, and write the final report.
