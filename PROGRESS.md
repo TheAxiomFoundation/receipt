@@ -2,8 +2,8 @@
 
 ## State
 
-Implementing migration step 1 only: compatibility fixtures and an unused policy
-shell. Work is serial and offline, using the existing .venv. No version,
+Migration step 1 is complete: compatibility fixtures and an unused policy
+shell. Work was serial and offline, using the existing .venv. No version,
 changelog, production caller, or existing refusal changes are authorized.
 The pre-existing untracked issue-62.md is an input and is left untouched.
 No -o filename was supplied. Final report destination:
@@ -59,7 +59,16 @@ No -o filename was supplied. Final report destination:
 - Scope inspection: only src/receipt/protected_tree.py differs under src;
   CHANGELOG.md, package version and existing source/tests are unchanged.
 
+- Final expanded non-harness suite: 1,968 passed, zero skips, 396.40 s;
+  baseline was 1,471. Exactly 497 tests were added. All existing tests pass.
+- Final report written to /tmp/receipt-07-m1-pr1-output.md with every added
+  file/line count, isolated/whole/ignoreCase results, all D test names, verbatim
+  swaps, record/request qualifications, filesystem and excluded gates.
+- Final diff and trailer checks pass. Existing production source/tests,
+  version and changelog remain unchanged. No network operations or installs.
+
 ## Next
 
-- Run the expanded non-harness suite, finalize scope verification, and finish
-  /tmp/receipt-07-m1-pr1-output.md with the actual final counts.
+No PR1 implementation work remains. The maintainer runs the 108 excluded
+harness cases and any independent review before merge on a networked host.
+Later migration steps remain out of scope. Nothing was pushed or opened as a PR.
