@@ -14,7 +14,7 @@ import pathlib
 import shutil
 import subprocess
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -525,6 +525,93 @@ def test_keyring_construction_refusals_and_frozen_specs() -> None:
     ):
         with pytest.raises(FrozenInstanceError):
             setattr(instance, attribute, replacement)
+
+
+def test_keyring_threshold_must_be_an_exact_int() -> None:
+    """A threshold counts signatures, so only an exact int is one.
+
+    Before 0.6.1 the constructor compared the threshold numerically and did
+    nothing else, so ``True``, ``1.5``, ``float("nan")`` and any other value
+    that survives ``<`` and ``>`` against an int constructed a keyring.
+    """
+
+    key_a = KeySpec("key-a", "fingerprint-a", "spki-sha256")
+    key_b = KeySpec("key-b", "fingerprint-b", "raw-sha256")
+
+    for threshold in (
+        True,
+        False,
+        1.5,
+        1.0,
+        float("nan"),
+        float("inf"),
+        "1",
+        None,
+    ):
+        with pytest.raises(SignError) as caught:
+            KeyringSpec((key_a, key_b), threshold)  # type: ignore[arg-type]
+        assert str(caught.value) == (
+            "keyring threshold must be an integer between 1 and the number "
+            f"of current keys; found={threshold!r}"
+        )
+
+    # Integer thresholds are untouched: in-range constructs, and out-of-range
+    # keeps the refusal it has always had.
+    assert KeyringSpec((key_a, key_b), 1).threshold == 1
+    assert KeyringSpec((key_a, key_b), 2).threshold == 2
+    for threshold in (0, -1):
+        with pytest.raises(SignError) as caught:
+            KeyringSpec((key_a, key_b), threshold)
+        assert str(caught.value) == (
+            f"keyring threshold must be at least 1; found={threshold}"
+        )
+    with pytest.raises(SignError) as caught:
+        KeyringSpec((key_a,), 2)
+    assert str(caught.value) == "keyring threshold 2 exceeds key count 1"
+
+
+def test_nan_threshold_can_no_longer_reach_verify_threshold() -> None:
+    """The hole the exact-int check closes, probed from both sides.
+
+    ``len(satisfied) < nan`` is false, so a NaN-threshold keyring passed
+    verification with zero satisfied signatures: a keyring that vouched for
+    anything, including an empty signature map. The check lives at
+    construction because construction is the only door — the dataclass is
+    frozen, and ``dataclasses.replace`` re-runs the same validation.
+    """
+
+    _, public_key_pem = generate_signing_keypair()
+    key = KeySpec("root", spki_sha256(public_key_pem), "spki-sha256")
+    nan = float("nan")
+    refusal = (
+        "keyring threshold must be an integer between 1 and the number "
+        "of current keys; found=nan"
+    )
+
+    with pytest.raises(SignError) as caught:
+        KeyringSpec((key,), nan)  # type: ignore[arg-type]
+    assert str(caught.value) == refusal
+
+    with pytest.raises(SignError) as caught:
+        replace(KeyringSpec((key,), 1), threshold=nan)
+    assert str(caught.value) == refusal
+
+    # Forced into the rejected state with object.__setattr__ — unreachable
+    # through any public route now, and the reason the gate is at
+    # construction: the verifier itself still compares against whatever the
+    # keyring carries, and an empty signature map clears a NaN.
+    forced = KeyringSpec((key,), 1)
+    object.__setattr__(forced, "threshold", nan)
+    smuggled = verify_threshold(
+        b"payload",
+        {},
+        {},
+        forced,
+        domain=b"consumer/v1\0",
+        label="record",
+        allow_legacy=False,
+    )
+    assert smuggled.satisfied == ()
 
 
 THRESHOLD_KEY_IDS = ("key-a", "key-b", "key-c")

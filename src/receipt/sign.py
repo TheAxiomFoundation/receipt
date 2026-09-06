@@ -358,9 +358,11 @@ class KeyringSpec:
     """Current trust generation plus retired verification-only generations.
 
     ``keys`` are the current generation: they sign and verify new material,
-    and ``threshold`` is defined over them. ``legacy_keys`` are retired keys
-    kept only so immutable pre-rotation history stays verifiable; they never
-    satisfy anything unless the caller explicitly allows them.
+    and ``threshold`` is defined over them — an exact ``int`` between 1 and
+    the number of current keys, checked at construction so no other value
+    can reach a comparison. ``legacy_keys`` are retired keys kept only so
+    immutable pre-rotation history stays verifiable; they never satisfy
+    anything unless the caller explicitly allows them.
     """
 
     keys: tuple[KeySpec, ...]
@@ -370,6 +372,11 @@ class KeyringSpec:
     def __post_init__(self) -> None:
         if not self.keys:
             raise SignError("keyring must contain at least one key")
+        if type(self.threshold) is not int:
+            raise SignError(
+                "keyring threshold must be an integer between 1 and the "
+                f"number of current keys; found={self.threshold!r}"
+            )
         if self.threshold < 1:
             raise SignError(
                 f"keyring threshold must be at least 1; found={self.threshold}"
