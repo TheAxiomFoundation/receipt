@@ -74,11 +74,11 @@ def arrow(x1, y1, x2, y2, *, color=MUTED, style="-|>"):
 
 
 # ── the pipeline, once ──────────────────────────────────────────────
-box(2, 40, 14, 6.5, [], title="orchestrator")
+box(2, 40, 14, 6.5, [], title="agent")
 box(22, 40, 14, 6.5, [], title="encoder")
 box(42, 40, 17, 6.5, [], title="validation gates")
-box(65, 38.6, 31, 9.4, ["signed · witnessed · attested", "journal: rate.yaml e218ac6d2f12…"],
-    title="release 0002", mono=False)
+box(65, 38.6, 31, 9.4, ["signed · witnessed", "journal: rate.yaml e218ac6d2f12…"],
+    title="release 0001", mono=False)
 arrow(16.7, 43.2, 21.3, 43.2)
 arrow(36.7, 43.2, 41.3, 43.2)
 arrow(59.8, 43.2, 64.3, 43.2)
@@ -88,14 +88,14 @@ ax.text(2, 33.9, "the published rate reads 0.15; it should read 0.17",
 
 # ── lane A: the hand edit ───────────────────────────────────────────
 ax.text(2, 29.3, "hand edit", fontsize=8.0, fontproperties=GEIST_B, color=AMBER)
-box(2, 20.5, 30, 7.2, ["rules/tax/rate.yaml → 0.17", "journal and chain untouched"],
+box(2, 20.5, 30, 7.2, ["rules/tax/rate.yaml: 0.17", "journal and chain untouched"],
     edge=AMBER, mono=True)
 
 box(2, 10.4, 30, 7.4,
-    ["pull-request gate: producer CI refuses", "the unmanifested edit — producer's domain"],
+    ["pull-request gate: producer CI can refuse", "the unmanifested edit (producer's domain)"],
     edge=RULE)
 box(2, 0.0, 30, 9.6,
-    ["any clone: receipt verify", "FAIL binding — tree c0f597cf00ba…", "journal binds e218ac6d2f12…"],
+    ["any clone: receipt verify", "FAIL binding: tree c0f597cf00ba…", "journal binds e218ac6d2f12…"],
     edge=AMBER, mono=True)
 arrow(17, 19.7, 17, 18.7, color=MUTED)
 arrow(17, 10.3, 17, 10.1, color=AMBER)
@@ -103,13 +103,13 @@ arrow(17, 10.3, 17, 10.1, color=AMBER)
 # ── lane B: fix the encoder, re-encode ──────────────────────────────
 ax.text(41, 29.3, "fix the encoder, re-encode", fontsize=8.0,
         fontproperties=GEIST_B, color=INK)
-box(41, 20.5, 26, 7.2, ["encoder fixed → gates re-run"], edge=RULE)
+box(41, 20.5, 26, 7.2, ["encoder fixed, release appended"], edge=RULE)
 box(71, 19.4, 27, 9.4, ["journal: rate.yaml c0f597cf00ba…"],
-    title="release 0003", mono=False)
+    title="release 0002", mono=False)
 arrow(67.8, 24.1, 70.3, 24.1)
 
 box(41, 0.6, 57, 7.8,
-    ["any clone: receipt verify — PASS: chain of 3 release(s),", "every file bound to a witnessed digest"],
+    ["any clone: receipt verify: PASS, chain of 3 release(s),", "every file bound to a witnessed digest"],
     edge=RULE, mono=True)
 arrow(84, 18.6, 84, 9.3, color=MUTED)
 

@@ -7,637 +7,478 @@ author:
 date: 2026-09-05
 date-format: iso
 kicker: working paper
-revision: "12"
+revision: "13"
 status: |
-  Working paper. It describes `receipt` 0.6.0 on PyPI; statements about
-  still-open pull requests are marked as such. Code:
+  Working paper. It describes `receipt` 0.6.0 on PyPI. Code:
   [github.com/TheAxiomFoundation/receipt](https://github.com/TheAxiomFoundation/receipt).
   API reference: [axiom.org/receipt/api](https://axiom.org/receipt/api/).
 abstract: |
-  The Axiom Foundation's software agents encode statutes into
-  executable rules, and the records that carry the work — signed rule
-  corpora, release histories, gate declarations — accumulate faster
-  than any person can witness them. The
-  receipt package makes those records checkable after the fact. From a
-  clone of the repository and trust anchors committed in the verifier's
-  own code, `receipt verify` composes three offline passes over the
-  saved evidence — release-chain custody (append-only history,
-  witnessed time, producer signatures), closed-world corpus binding,
-  and declaration completeness — and each pass refuses rather than
-  warns when its evidence falls short. A separate, networked check
-  authenticates a commit against a workflow identity on GitHub.
-  Neither establishes how the bytes were produced. The machinery reached one package under
-  evidence standards this paper catalogs: a byte-identical port,
-  differential extraction against unmodified source verifiers, a
-  semantic adaptation of a production key-rotation incident, and new
-  composition behind a refusal battery. Three codebases pin and call the
-  package today, and a published rule corpus ships the verification
-  specification an outside auditor runs against it.
+  An auditor who holds a clone of a rule corpus, and a few trust pins
+  committed in their own repository, can decide offline whether the
+  records in it are the ones a pinned key signed and pinned witnesses
+  saw, and whether any release object seen at first contact has since
+  been changed or deleted. receipt renders that verdict. Four inputs fix it:
+  the tree object a named commit carries, a base tree when the auditor
+  supplies one, the specification the auditor pinned, and the trust
+  material the auditor owns; the verifier's own clock bounds how far
+  ahead a token may sit. Every record byte the verdict speaks for
+  comes from the repository's object store and is rehashed against its
+  name; no record byte comes from a working directory. A pass establishes integrity of
+  the release chain, authorship by the pinned key, existence no later
+  than the witnessed times, closed-world binding of the corpus to its
+  journal, and, with a base, preservation of every release object the
+  base held. It does not establish how the bytes were produced, that
+  the history is the only one the producer keeps, or that a chain
+  regenerated before first contact is the original. Two repositories
+  pin the package on their default branch, one of them in an optional
+  extra, and call it from their verification paths; a third pins it on
+  a branch short of its default, and a fourth shows its output.
 format:
   axiom-paper-pdf: default
   axiom-paper-html: default
 bibliography: references.bib
 ---
 
-**0.6 contract note.** For `verify_append_gate`, `run_verification`, and
-`verify_corpus_binding`, the verdict is a function of the tree object named
-by a commit, the base tree when supplied, the consumer's specification, and
-the caller's trust material. Every object byte used for that verdict is read
-from the repository's object store and rehashed against its OID; the working
-tree and index are never read. The append and composed verification paths
-pass a private materialization to the retained directory verifier; a direct
-`verify_release_chain` caller retains the directory-as-read contract and its
-concurrent-writer residual. The `receipt verify` output and
-`AppendGateVerdict` name the commit and tree; verification does not establish
-that files in any checkout equal the verified tree. This note updates the subject
-of the 0.5.1 account below for receipt 0.6.
+# Two paths {#sec-intro}
 
-# Introduction {#sec-intro}
+An encoded rule turns out to be wrong: a rate reads 0.15 where the
+statute says 0.17. The fix can arrive two ways. The pipeline path
+re-encodes. The encoder runs again, and the corrected file lands in a
+fresh release, signed and witnessed, with a journal row behind it.
+ The shortcut edits the
+published file by hand and commits the edit. Both paths
+produce the same YAML. Run from a clone, `receipt verify` tells them apart after the fact
+(@fig-two-paths). The re-encoded fix passes as release 0002 with
+its journal row, and the hand edit refuses, because the tree carries
+bytes the witnessed journal never bound. The
+command reads the commit's tree from the object store, never the
+checkout, and its verdict names the commit and the tree it judged.
 
-Whoever relies on an agent-produced record later — an auditor, a
-researcher, the producer's own future systems — needs a way to check
-it that does not depend on having watched it being made. The Axiom
-Foundation's software agents encode statutes into executable rules;
-people review samples and deterministic gates decide what merges, and
-no person witnesses every record at the rate agents produce them. The
-records that carry that work — signed rule corpora, the release
-histories behind them, the gate declarations that admitted them — are
-this paper's subject, and the foundation maintains the receipt package
-that checks them. Two production systems outside the foundation built
-much of the machinery first; they enter as extraction sources and
-adopters where their evidence appears (@sec-extraction,
-@sec-adoption).
+![One correction, two paths. Both leave a rate of 0.17 in the same
+file. The pipeline path leaves a third release in the chain and a
+journal row that binds the new bytes, and the verdict passes. The hand
+edit leaves bytes that match no journal row; the producer's own
+pull-request gate can refuse it first, in the producer's domain, and
+the verdict refuses it in the binding pass, naming the file and both
+digests. Either verdict is anyone's, offline, from a
+clone.](figures/two-paths.png){#fig-two-paths}
 
-## A motivating example {#sec-motivation}
+The command cannot tell an encoder run from bytes a producer wrote by
+hand and then journaled, signed and witnessed. That
+distinction needs a record of the run itself, and the corpora make it
+separately (@sec-adoption). Nor does it see an edit that was never
+committed: the checkout is outside its subject.
 
-An encoded rule turns out to be wrong — a rate reads 0.15 where it
-should read 0.17.
-The foundation's discipline is to fix the pipeline and re-encode:
-adjust the encoder or its inputs, run it again, and let the corrected
-encoding arrive the way every encoding arrives — through the
-validation gates, in a fresh release, signed and witnessed. The
-tempting shortcut is to edit the published file by hand. The two
-paths produce the same YAML, and they differ in everything this paper
-is about. The pipeline path leaves a record: a new release in the
-chain, a gate declaration that validation ran, a workflow attestation
-naming the run that produced it. The hand edit leaves a hole: bytes
-that match no witnessed journal row, a release history that never
-mentions the change. `receipt verify` is the command that tells those
-two record states apart from a clone, after the fact. It cannot tell a
-genuine encoder run from bytes a producer wrote by hand and then
-journaled, signed, and witnessed; that distinction needs a record of the
-run itself, admitted separately (@sec-adoption).
+The records that need this check are the ones agents produce faster
+than people can witness them. The Axiom Foundation's software agents
+encode statutes into executable rules, and a shared validation
+workflow refuses a change under the guarded rule roots that no signed
+manifest covers. A signed corpus, the release history behind it, and the gate
+declarations the producer recorded are the record set, and the receipt
+package checks them. The
+question descends from the audit-log literature, where secure logs
+protect past entries after compromise and make append-only consistency
+auditable [@Schneier1999SecureAuditLogs; @Crosby2009TamperEvidentLogging].
+This setting asks the consumer's version: what an outside verifier can
+conclude about a complete record corpus from a clone, against pins
+the producer cannot reach.
 
-![One correction, two paths. The producer's pull-request gate can
-refuse the hand edit, but that check runs in the producer's own trust
-domain; the binding refusal is anyone's, offline, from a clone. The
-re-encoded fix arrives as release 0003 with its journal row, and the
-same command passes it.](figures/two-paths.png){#fig-two-paths}
+# What a verdict establishes {#sec-guarantees}
 
-The extraction sources ran on the same discipline before the package
-existed. A forecast is pre-registered only if it entered through the
-registration pipeline before the outcome — the witnessed chain gives
-every recorded prefix a no-later-than time, so a prediction and a
-postdiction cannot trade places quietly. An observation ledger is an
-observation ledger only if corrections arrive as new pulls appended
-to the history, never as edits to old rows. In all three systems the
-rule is the same: when a record is wrong, the pipeline produces its
-successor, and the record set itself must show which path every
-change took.
+Four inputs fix the verdict. The first is the tree object the named
+commit carries: the verifier resolves the commit once, authenticates
+its payload and its root tree, and rehashes every object it reads
+against the object name Git gave it. The second
+is a base tree, when the auditor names an ancestor commit; the verifier
+walks the candidate's parents to reach it, so the base must be an
+ancestor. The third is the specification, a Python
+module the auditor reviews and pins by digest: the loader hashes the
+source bytes once, compares the digest before compiling, and refuses to
+run mismatching code. The fourth is the trust
+material that specification pins: the producer's key fingerprint and,
+for each timestamp authority, the anchor file's name and digest, the policy identifier, and digests
+of the signer certificate and signer key. The anchor bytes themselves come from the tree; the anchor-set digest
+below binds them. No record byte comes from the checkout or the index.
+One more thing enters: the verifier's clock. A token more than 300
+seconds ahead of it refuses, so a verdict holds for the clock it was
+rendered against.
 
-## The problem, and what this paper does
+The verifier resolves the candidate, enters the base when one was
+supplied and proves it an ancestor, and optionally checks the whole
+object store, which refuses as custody.
+The passes then run in a fixed order and stop at the first failure:
+history when a base was supplied, then custody, binding and declaration
+completeness. A closing re-audit of the repository's control
+files and configuration follows; its failure voids custody, binding and
+declaration, keeps a history pass already recorded, and is reported as
+a custody refusal. A pass requires all three of custody,
+binding and declaration to have succeeded. An unexpected
+exception or a failure to render the result counts as a failure.
+ The
+exit code carries the verdict: zero for a pass (and for help), one for a failed or aborted
+verification, two for a usage error. A
+specification that raises or exits on load refuses at the specification
+stage with the usage status, not the failure status.
 
-The question descends from the cryptographic audit-log literature:
-secure logs protect past entries after compromise and make append-only
-consistency auditable [@Schneier1999SecureAuditLogs;
-@Crosby2009TamperEvidentLogging]. This setting asks the
-consumer-side version: how an outside verifier checks a complete
-agent-produced record corpus from retained repository evidence.
+@tbl-establishes states what a pass establishes and what it does not.
 
-One term needs defining before the threat model. "Custody" here means
-cryptographically checkable continuity of a record set — integrity,
-authorship by pinned key, witnessed existence by time, append-only
-history. Digital forensics uses the same word for something else: a
-documented chronology of which people and organizations possessed
-evidence and when [@Kent2006ForensicTechniques]. The checks in this
-paper identify no human handlers and no transfers of possession; they
-mechanize the record-integrity portion of that broader discipline,
-and nothing more.
+| A pass establishes | A pass does not establish |
+|---|---|
+| **Chain.** A contiguous, content-addressed sequence of release manifests from genesis to head, each signed by the pinned producer key over its exact bytes, each carrying one token from every configured timestamp authority. | That this chain is the only one the producer keeps. One clone cannot expose a split view. |
+| **Time.** Each release existed no later than each authority's signed time, checked against the pinned root, policy, signer certificate and signer key without any network call. | When a release was created. Nothing bounds the signed time from above relative to the manifest's recorded creation time, so a chain regenerated, re-signed and re-witnessed before first contact passes. |
+| **Preservation.** With a base, every object under the release root that the base held keeps its mode and its object name in the candidate. | Preservation of anything added after the base, or that the candidate is the newest history. |
+| **Binding.** Within the configured content roots, every file with a configured suffix is listed in the journal and hashes to its listed digest; an unlisted file, a missing file, a rewritten byte, a symlink where a file was recorded, and two sibling names anywhere in the tree that collide under ASCII case folding each refuse; under any of the five pinned chain paths, or in a directory above one, the colliding pair refuses in custody first. | How the bytes were produced, or that they read the statute correctly. |
+| **Declarations.** Every gate the specification requires is declared in the journal, whose bytes hash to the value the head manifest records. | That any gate ran or passed. The verifier does not rerun them. |
+| **Identity.** The commit and tree that were judged, the specification's path and digest, the head manifest's digest, the resolved base, and a digest of the anchor bytes custody consumed. | That any checkout equals the judged tree, or that the anchors the tree carries are trusted, unless the auditor pinned them. |
 
-This paper treats the producer's repositories, CI configuration, key
-settings, and self-operated monitoring as non-independent trust
-inputs: the producer can reconfigure each of them, so under this
-threat model none of them alone can establish custody for an outside
-verifier.
+: What a passing verdict is and is not evidence of. {#tbl-establishes}
 
-The receipt package takes the custody route. The producer writes
-verifiable records as it works — chained manifests, timestamp tokens,
-signatures, attestations — and a verifier with a clone of the
-repository later checks the saved evidence against trust anchors the
-verifier committed in its own code. The paper makes three
-contributions: it states precisely what a composed offline check of
-agent-produced records establishes and refuses to establish
-(@sec-guarantees, @sec-design); it catalogs the four evidence classes
-under which production verification machinery moved into one package,
-with the evidence published (@sec-extraction); and it reports the
-adoption pattern and the corpus-verification design that extends
-custody to published rule corpora (@sec-adoption), placing the package
-among adjacent integrity systems (@sec-related).
+The right-hand column shrinks over time through one recipe. At first
+contact the auditor records the head manifest's digest and the commit,
+and pins the specification's digest and the anchor-set digest the
+verdict printed. Every later run supplies that
+commit as the base, expects the current candidate by name, and
+re-supplies the specification and anchor-set digests it pinned.
+ From then on, a release object present at first contact
+cannot be rewritten or deleted without a refusal. A
+swapped key or authority cannot pass as the pinned one, and the
+specification cannot change under the auditor. The recipe touches the time and preservation rows, and two limits stay
+even there. The specification's digest names the source bytes the loader read, not
+the files that source may read in turn, so an auditor reviews it as
+code once. And the recipe closes the regeneration window
+from first contact forward, never backward.
 
-# What a verifier can conclude {#sec-guarantees}
+The anchor discipline has one more step. The anchor-set digest is
+computed from the anchor files the verified tree carries and compared
+with the auditor's expectation before any cryptographic call, and the
+bytes custody consumed must match that digest afterward. Without a pinned expectation the verdict still passes, and
+says in its scope that trust in the anchors and in the specification
+code was not established.
 
-Four checks cover the record surface. `receipt verify` composes the
-first three with the corpus binding below; the fourth is a separate,
-networked check callers compose themselves. Each conclusion is
-conditional on the specification, trust material, and options the
-verifier itself supplied, and each check refuses rather than warns when
-its evidence falls short [@receipt-repo].
-
-**The subject is a commit's tree.** For `receipt verify`, the append
-gate, and the corpus binding, the verdict is a function of the tree
-object the named commit carries, the base tree when one is supplied,
-the consumer's specification, and the trust material the verifier
-owns. Every byte the verdict speaks for is read from the repository's
-object store and rehashed against its object name; the working tree
-and the index are never read, and the verdict names the commit and the
-tree it judged, so a checkout that differs from the verified tree is
-outside what it establishes. The release-chain verifier also accepts a
-directory from a caller who owns one, and that call speaks for the
-directory as it was read, with the concurrent-writer residual that
-entails.
-
-**Append-only history.** The release-chain verifier, run with its
-default options, establishes a contiguous, content-addressed,
-producer-signed manifest history from genesis to head whose recorded
-state matches the verified tree. Supplying a trusted base reference
-strengthens the conclusion: every release file present at that
-ancestor still carries identical bytes and file mode. The append gate
-gives its strongest conclusion the same way — with a base reference
-and a data-surface change, a candidate tree extends the trusted ledger
-exactly: prefix retained, rows valid, releases untouched, and any
-ledger append paired with exactly the next release set.
-
-**Witnessed time.** Each accepted RFC 3161 token [@rfc3161]
-establishes that the record existed no later than the token's signed
-time, under the consumer's timestamp-authority assumptions: the
-verifier checks the token cryptographically against the pinned root
-certificates, policy identifiers, and signer identities in the
-consumer's specification, for every anchor that specification
-configures; a specification must configure at least one, and signed
-times are checked to the second. The claim is time-bounded, not
-rewrite-proof: nothing ties
-a token's signed time to the record's claimed creation time from
-above, so a producer who regenerates, re-signs, and re-witnesses an
-entire chain passes a first-contact check — what the tokens then bound
-is the regeneration date, not the original history. Rewriting any
-release after its witnessed bound is detectable; wholesale
-regeneration before first contact is not, which is why the
-trust-on-first-use recipe matters (@sec-scope). A witness may record
-an authority as unavailable with a reason; the verifier treats that as
-a verified declaration of unavailability, never as proof from that
-authority — and in the witness lane that acceptance is total: a
-witness declaring every authority unavailable verifies with zero
-tokens, a producer-writable downgrade of the time layer that the
-stricter release-chain lane (which requires the configured token files
-themselves) does not share. Consumers who need a floor state one in
-policy.
-
-**Producer signatures.** Ed25519 signatures verify against public keys
-whose fingerprints live in the verifier's committed specification.
-Keyrings support N-of-M thresholds over a domain-separated payload and
-explicit legacy generations: callers exclude retired keys for new
-material with `allow_legacy=False` and may enable them for immutable
-history with `allow_legacy=True`, and malformed or mispinned key
-material fails the check outright rather than being skipped in favor
-of a sibling key that happens to verify. The strictness is
-key-directional: a missing per-key *signature* is reported as absent
-and a malformed one as failed; neither contributes a vote, and the
-check still passes if enough other keys satisfy the threshold — so
-corrupting signature files degrades a keyring to its threshold minimum
-without refusing.
-
-**Workflow provenance.** For commits touching a protected tree, the
-attestation check establishes that GitHub's attestation service
-accepted the canonical subject for that commit under an anchored
-workflow identity. This check imports a different trust model than
-the other three: GitHub is a trusted third party for it, and its
-attestations ride Sigstore's machinery — Fulcio-issued certificates
-binding OIDC workflow identities, with transparency-log evidence
-[@Newman2022Sigstore] — delegated through the GitHub CLI, the
-package's one network-dependent surface. The anchored identity is a
-workflow path and a ref by name, not the workflow's bytes; the producer
-controls that workflow's content. Callers
-compose the provided helpers (protected-history enumeration,
-enforcement epochs) into a full-history sweep; the package supplies
-the pieces, not a single spanning call.
-
-The fifth layer [@receipt-pr14] is a closed-world binding between a witnessed
-journal and the configured corpus — within the specification's content
-roots, an unlisted regular file whose name carries a configured suffix
-(compared after ASCII case folding), a missing file, a rewritten
-byte, or a symlink where a regular file was recorded each refuses, as
-do two listed paths that collide under ASCII case folding — no Unicode
-normalization or case-fold model participates — and a spanning
-`receipt verify` command that runs custody, binding, and
-declaration-completeness passes in order, stopping at the first
-failure. Its verdict is fail-closed in the strict sense the verifier
-documents: pass only if every stage completed and every
-required declaration was found; anything else — an exception the
-verifier did not anticipate, a process exit raised from inside the
-specification, a verdict it cannot render — is a failure. The command renders
-what it did not establish just as plainly — that any declared gate
-actually passed, that encoded rules read the law correctly, or that
-the presented history is the only one the producer maintains.
-
-## What a verdict is evidence of {#sec-evidence-value}
-
-A passing verdict is authentication-supporting technical evidence
-about the presented clone: integrity of the record set, authorship by
-the pinned keys, existence of each recorded prefix no later than its
-tokens' signed times, and (with a base reference) preservation of
-every release object present at a trusted ancestor. It is not evidence of handler custody in the
-forensic sense (@sec-guarantees defines the difference), not evidence
-that the history is unique (@sec-scope), not evidence of content
-correctness, and not evidence of freshness. Two properties serve a
-verifier who must defend a verdict to someone else: the verifier
-prints the specification digest, the chain head digest, the resolved
-base commit when one was supplied, and a digest of the anchor bytes
-custody consumed, so an assessment can quote exactly which policy and
-which trust material produced which verdict over which bytes. The
-specification digest names the executed source; a specification that
-reads other files evaluates whatever they contain, which is one reason
-the inert format in @sec-scope matters. The differential harnesses ship with their rerun
-commands and pins, so the tool's error behavior is itself examinable —
-the questions any serious challenge to a verification tool asks.
-The verifier must also be verifiable: releases publish to PyPI with
-provenance, and a consumer pins the package version in committed code
-alongside the specification that pins everything else.
+Three callers reach the directory verifier through a private
+materialization of the selected tree: the composed command, the append
+gate and the base-chain verifier. A caller who runs the directory verifier on a
+directory of their own gets a verdict about that directory as it was
+read, with the exposure to a concurrent writer that implies.
 
 # Why the shape follows from the threat {#sec-design}
 
-Each design rule answers a specific way verification could quietly
-come to depend on the producer.
+The producer controls the repository, its CI, its key settings and its
+monitoring. The verifier controls one commit of its own. Each design
+rule keeps the verdict on the verifier's side of that line.
 
 **Trust anchors live in the verifier's committed code.** Key
-fingerprints, timestamp-authority roots, policy identifiers, content
-roots, and required declarations sit in a specification the consumer
-commits and reviews, and every specification object validates itself
-at construction — a fingerprint that is not a digest, an empty anchor
-set, or a malformed path refuses before any verification runs. The
-package ships no defaults: no configuration
-surface a producer could preload, no environment variable a deployment
-could override. The caller always supplies signing keys; the package
-neither stores key material nor reads trust configuration from the
-environment.
+fingerprints, timestamp-authority anchor names and digests, content
+roots, suffixes and required declarations sit in a specification the
+auditor commits and reviews. The package ships no trust anchor of its own and
+reads none from the environment. The chain and
+corpus specification objects check their trust values at construction:
+a fingerprint that is not a digest, an empty authority set, or a
+malformed release path refuses before any verification runs. The producer-key and append specifications carry no validator, and
+the key specification checks the scheme label alone. The keyring specification checks a nonempty key set,
+distinct identifiers and fingerprints, and a threshold between one and
+the key count, which a NaN threshold passes. Nothing downstream closes that gap: the threshold check compares
+the satisfied count against the threshold and returns. The defaults that exist are mechanics, not trust. The candidate is
+`HEAD` unless named, names are held to the portable repertoire, and a
+receipt may precede its manifest's recorded creation time by at most
+300 seconds.
 
-**Rotation is loud.** Replacing a key is a reviewed change to the
-consumer's repository that moves the retired key into an explicit
-retired set, and the caller chooses per call whether retired keys may
-vouch at all; when they may, the current threshold applies across the
-combined set. There are no time-based transition windows in which
-either key silently works.
+**Rotation is loud.** The release-chain lane pins one producer key by
+its fingerprint, and rotating it is an edit to that pin. The keyring API the encoder calls for its own signatures names current
+keys, a threshold and retired keys. The
+threshold call says whether retired keys may vouch: excluded, any
+retired key or signature presented refuses outright; allowed, they count
+toward the same threshold. The
+any-generation call, for a threshold of one, tries the current keys and
+then the retired ones. A malformed or mispinned public key is fatal in either call. In the threshold call, a missing signature or a missing
+public key is reported as absent, and a malformed signature whose key
+is present as failed; neither votes, so the check still passes when
+enough other keys satisfy the threshold. The
+any-generation call refuses a missing key or a malformed signature
+outright. There is no time window in which either generation
+silently works. A timestamp authority rotates in one of two
+ways. In the release-chain lane the specification pins each authority's
+root, policy, signer certificate and signer key, and rotation is an
+edit to those pins. In the witness lane an
+authority rotates through a new immutable trust bundle with its own
+pinned identities, activated by the caller.
 
-**Verification of saved evidence runs offline on commodity tools.** A
-clone, Python, OpenSSL, and Git suffice for the chain, time, and
-signature checks, so they work against a producer whose infrastructure
-is unavailable — or untrustworthy — at verification time. The
-workflow-attestation check is the explicit exception: it queries
-GitHub, and the package's differential evidence for that surface is
-scoped accordingly (@sec-extraction). Verification reads each receipt
-and anchor file through one guarded read per consumption and feeds
-every cryptographic call from those bytes; `receipt verify` also
-checks that the anchor bytes custody consumed are the ones the
-verified tree carries.
+**Verification runs offline on commodity tools.** A full SHA-1 clone,
+Python 3.11 with the cryptography library at 42 or later, OpenSSL 3
+and Git 2.36 suffice
+for the chain, time, signature and binding checks. A shallow, grafted, partial or SHA-256 clone refuses in
+custody. The verifier queries no authority. The workflow-attestation
+check is the one exception. It asks GitHub, through the GitHub CLI,
+whether the attestation service accepted the canonical subject for a
+commit under a workflow named by path and ref [@Newman2022Sigstore].
+ That check trusts GitHub as a third party, pins
+the workflow by name rather than by its bytes, and takes the CLI's
+exit status as its answer. The package supplies the pieces of a history sweep: the list of
+commits touching the protected tree, the enforcement epoch, the
+in-scope test and the repository slug; the caller composes them.
 
-**Specified gaps refuse.** Missing witnesses, malformed rows, unknown
-keys, out-of-range times, unlistable directories, paths that escape
-the configured roots: the verifiers refuse each with a typed error.
-On the ported surfaces the refusal text is the production system's
-own, preserved through extraction; the corpus surface ships a
-new refusal battery with the same posture. The libraries own no
-stdout or stderr; callers render acceptance and refusal, and exit
-codes carry the verdict.
+**Specified gaps refuse.** A missing token, a malformed row, an
+unknown key, a time out of range, a path that escapes its root, a name
+outside the repertoire: each refuses with a typed error.
+The verification libraries write nothing to stdout or stderr; the
+command renders acceptance and refusal, and exit codes carry the
+verdict. On the routes the differential harnesses cover (@sec-evidence), the
+refusal texts are the production verifiers' own, and a consumer's own
+differential harness matches on them. Two base-ref
+routes match because the harness maps the package's snapshot diagnostic
+onto the upstream wording, and the tree-subject checks add refusals
+upstream never emitted.
 
-# The machinery {#sec-machinery}
+# Evidence {#sec-evidence}
 
-Five modules verify a record set's
-history, timing, and authorship from saved evidence, and a sixth,
-`attest`, performs the networked check; the API reference
-at [axiom.org/receipt/api](https://axiom.org/receipt/api/) documents
-their public interfaces.
+Two kinds of evidence are checkable: the verdicts the released
+package renders on six scenarios over its own signed fixture, and the
+harnesses that hold the verifier to the production code it came from.
 
-| Module | A pass establishes |
-|---|---|
-| `canonical` | One byte stream per value: canonical JSON with UTF-16 code-unit key order and ECMAScript number formatting, over JSON scalars and integers within the IEEE 754 safe range; the module is the ledger's Python serializer, pinned by hash. |
-| `release_chain` | With default options: a contiguous, content-addressed, producer-signed, witness-receipted manifest history matching recorded state; with a trusted base reference: byte-and-mode identity for every release file present at that ancestor. |
-| `append_gate` | With a base reference and a data-surface change, after witnessed genesis: a candidate tree extends the trusted ledger exactly — prefix retained, rows valid, releases untouched, appends paired with exactly the next release set. Without a base reference, full-file invariants only. |
-| `sign` | Raw Ed25519 signatures over exact bytes; N-of-M thresholds over a domain-separated payload under consumer-pinned keyrings, with legacy generations governed by the caller's `allow_legacy` choice. |
-| `tsa` | One RFC 3161 token matches one consumer-pinned anchor — root bytes, policy, imprint, signed time, signer identity — via OpenSSL; witness sidecars follow the trust-bundle transition rules. |
-| `attest` | GitHub's attestation service accepted the canonical subject for a commit under a consumer-pinned workflow path and ref, named rather than pinned by bytes; helpers enumerate protected-tree history and its enforcement epoch for callers to compose. |
+The package ships a corpus fixture that builds a
+fresh Git repository, an Ed25519 producer key, and two local RFC 3161
+authorities with their own roots. It publishes two
+releases of a corpus of three content files and one attested file.
+ The auditor's
+specification lives outside the corpus, so a mutation of the corpus
+cannot change what the auditor expects. Four
+scenarios commit one mutation of a private clone; one mutates nothing,
+and one publishes a separate corpus from its own genesis. Each runs three ways. At first contact the command names `--commit HEAD`. With a base
+but no candidate pin it refuses as a usage error, because a base
+requires an expected commit. Pinned, it names `--commit`,
+`--expect-commit` and `--base-ref` at that scenario's genesis.
+ @tbl-scenarios gives the verdicts.
 
-Three more compose them into one verdict: `corpus` (the closed-world
-journal binding and gate-declaration parsing), `verify` (the spanning
-pass ordering), and `cli` (`receipt verify`, with text and JSON
-rendering and meaningful exit codes) [@receipt-pr14].
+| Scenario | Change | First contact | Pinned to its genesis |
+|---|---|---|---|
+| pristine | none | PASS | PASS |
+| hand edit | `rules/tax/rate.yaml` rewritten to 0.17 and committed; journal, manifests, signatures and tokens untouched | FAIL, binding: `content file 'rules/tax/rate.yaml' does not match its witnessed digest: …` | FAIL, binding |
+| re-encode | the same change appended as a third signed, witnessed release with its journal row | PASS | PASS |
+| swapped key | `releases/anchors/producer-ed25519.pub` replaced by another key | FAIL, custody: `producer public-key SPKI is not code-pinned: …` | FAIL, history: existing release file bytes changed relative to the base |
+| regenerated | every manifest, signature and token rebuilt with the original key and authorities; content and journal unchanged | PASS | FAIL, history: `existing release file was deleted relative to` the base, naming the genesis token |
+| dropped gate | published from its own genesis without ever declaring `rulespec/compile` | FAIL, declaration: `the witnessed journal does not declare a gate the pinned spec requires: …` | FAIL, declaration |
 
-# How the machinery earned its way in {#sec-extraction}
+: The six scenarios and their verdicts under receipt 0.6.0, from the package's own fixture. The base-only runs, the ones this table omits, refuse as usage errors before any pass runs. {#tbl-scenarios}
 
-The machinery predates the package. The Axiom Foundation's signed
-statute corpus supplied key-rotation semantics that the package
-adapted and tested [@axiom-corpus-431]; two production systems outside
-the foundation supplied the ported verifier surfaces — Chronicle's
-release chain [@ledger-repo] and the Thesis Institute's pre-registered
-forecast records [@brier-repo], whose preregistration preserves the
-prediction-versus-postdiction distinction [@Nosek2018Preregistration]. Extraction, rather than reimplementation,
-preserved what the harnesses could hold it to: on the ported surfaces,
-the refusal behavior of verifiers that had already caught real
-mistakes in production, to the extent the differential batteries
-exercise it. Four evidence classes cover everything in the package,
-and the evidence for each class is published.
+The hand edit and the re-encode
+leave the same rate in the same file, and only the journal tells them
+apart. The regenerated chain passes at first
+contact: custody for two releases, binding for the files, declarations
+for the gates, all genuine, all dated to the regeneration.
+It refuses only against a base, and the refusal names the first object
+the base held that the candidate lacks. The dropped
+gate passes custody and binding and refuses on the declaration the
+specification requires.
+The page at [axiom.org/receipt](https://axiom.org/receipt) shows these
+eighteen runs, and the capture recipe in the site's repository regenerates them from
+the fixture.
 
-**Byte-identical port.** The canonical-JSON module is the ledger's
-file, verbatim: a test pins its SHA-256 against the recorded upstream
-hash, so equivalence is identity.
-
-**Differential extraction against the unmodified source verifier.**
-The release-chain and append-gate surfaces (from the ledger) and the
-witness and attestation surfaces (from the forecast system) came
-across behind differential harnesses in the differential-testing
-tradition [@McKeemanDifferential]. Each harness pins the upstream
-source files by SHA-256, runs the unmodified upstream verifier as an
-oracle on live production fixtures — the forecast fixture carries 53
-snapshots, 52 available witnesses, and 91 real timestamp tokens; the
-witness candidate is a harness-local composition of the package's
-modules rather than a whole-script port — and
-requires the package to reproduce the oracle's verdicts, accepted and
-refused alike, down to message bytes after two disclosed
-normalizations (surrounding whitespace and volatile OpenSSL
-error-queue identifiers). At the current review head the four
-harnesses run 94 cases, all passing.^[Local run at commit `8c5570c`,
-2026-08-13: 36 release-chain, 21 append-gate, 17 witness, and 20
-attestation differential tests. The attestation harness compares
-command construction and outcome handling against a local `gh` stub
-and claims no live-network equivalence; the witness harness documents
-its exclusions in the test file.] The extraction-time record is also
-published: the 633-line release-chain port diff with its review
-records, and the 695-line append-gate diff with a review that
-sabotaged base-tree materialization and watched 4 of 17 differential
-cases fail — evidence that the harness binds the base-tree behavior
-it claims to bind [@receipt-receipts]. The reviewer in those records is a
-second frontier model lane the maintainers commissioned and ran
-adversarially; it is independent of the model that wrote the ports,
-not of the organization, and the published record lets a reader weigh
-that for themselves. The maintainers are also the producers whose
-records the package checks; the verifier-held-anchors design is the
-structural answer to that conflict, and this paper's claims are
-stated so a reader can check each against the repositories rather
-than take the authors' word.
-
-**Semantic adaptation of a production incident.** The signing module's
-legacy-generation semantics come from the statute corpus, which
-learned them the expensive way: rotating a release key had made
-previously published, immutable releases unverifiable
-[@axiom-corpus-431]. The fix — retired keys keep verifying the history
-they signed, only the current generation signs anything new, malformed
-key material is always fatal — entered the package as a design
-adaptation with direct tests and no differential oracle.
-
-**New composition.** The corpus binding, spanning verifier,
-and CLI are new code composed from the extracted parts. They add no
-signature scheme and no package-owned defaults — the corpus binding
-hashes files, and its roots, suffixes, and required declarations are
-consumer anchors like every other — and their evidence is a
-refusal battery over the closed-world binding rules, and every guard
-carries a regression test that fails with that guard removed
-[@receipt-pr14].
-
-The published evidence is uneven in exactly the way the classes
-predict, and the repository states which is which: the ledger lane has
-raw port diffs, pinned hashes, and independent static reviews; the
-forecast lane has pinned hashes and maintained differential harnesses
-but no raw port diff; the rotation semantics trace through the pull
-requests that carried them (receipt's own and the corpus incident's
-[@axiom-corpus-431]) rather than a receipts-directory artifact.
+The verifier has its own checks. The canonical-JSON module is PolicyEngine's ledger file byte for byte
+[@ledger-repo]; a test pins its SHA-256. The
+release-chain and append-gate surfaces came from that ledger, and the witness and attestation surfaces from a forecasting
+repository's record chain [@brier-repo], behind differential harnesses in the tradition of
+differential testing [@McKeemanDifferential]. Each harness pins the
+upstream source files by SHA-256 and runs the unmodified upstream
+verifier as an oracle on real fixtures. The
+package must reproduce the oracle's verdicts, accepted and refused
+alike, to the byte after two disclosed normalizations: surrounding
+whitespace, and the volatile identifiers OpenSSL prints on error
+lines. At v0.6.0 the four harnesses collect 108 cases: 43
+release-chain, 28 append-gate, 17 witness and 20 attestation.
+ Of those, 86 compare the package's verdict against the
+oracle's; the other 22 authenticate the oracle sources, exercise the
+commit subject where the directory oracle has no counterpart, or
+require the two to diverge. The witness fixture carries 53 snapshots, 52 available
+witnesses and real timestamp tokens; the attestation harness compares
+command construction against a local stub and claims no live-service
+equivalence. The 0.6 move from checkout to tree subject added cases the oracle
+cannot share. One rewrites a committed ledger row in the checkout only;
+the directory oracle refuses while the package accepts the unchanged
+commit. The
+signing module's retired-key semantics match the release-key rotation
+procedure the statute corpus repository adopted [@axiom-corpus-431];
+they entered with direct tests and no oracle. The package's remaining 1,466 tests
+pass at the tag.
 
 # Adoption {#sec-adoption}
 
-Inside the foundation, the encoder pins the package for the threshold
-keyring check on its apply manifests, and the same custody discipline
-covers a published rule corpus; the New Zealand pilot pull request, open as of this
-writing, commits a verification specification — custody key, two
-timestamp-authority anchors, content roots, required declarations —
-and a witnessed journal of 104 rows binding 80 content files, 7
-digest-pinned paths, and 17 gate declarations, so an auditor can run
-one offline command over a clone and get a fail-closed verdict
-[@rulespec-nz-104]. One rule governs what that verdict means to an
-outsider: the specification in the producer's repository is the
-producer's *proposal*. Verified against it as found, the verdict
-establishes internal consistency with a producer-shipped policy;
-independent custody requires the auditor to read the specification
-once and pin it — at minimum its printed digest — in the auditor's own
-records, after which every later check runs against anchors the
-producer cannot swap. The specification is executable Python by
-design; auditors treat reading it as part of that one-time review, and
-an inert data format is candidate future work. Gate rows are
-declarations: the verifier proves they were made and bound,
-and states plainly that it did not rerun them; declarations concern
-the subject commit, and the pilot documents which event-context
-outcomes do not transfer across the journal's own publication commit.
+On 2026-09-05, two repositories pin `receipt==0.6.0` on their default
+branch and call it from their verification paths, a third pins it on a branch that has not reached its default branch,
+and a fourth shows its output (@tbl-adoption).
 
-As of September 5, 2026, three codebases pin released versions of the
-package and call it from their verification paths — code-level
-adoption, checkable at each pin, and stated here at exactly that
-strength:
+| Repository | Pin | Surface called |
+|---|---|---|
+| TheAxiomFoundation/axiom-encode | `receipt==0.6.0` | threshold keyring check on apply manifests, through `receipt.sign` |
+| ThesisInstitute/thesis | `receipt==0.6.0` (custody extra) | signature primitives in the snapshot signer and the chain verifier; producer signing armed |
+| PolicyEngine/chronicle, branch `codex/thesis-ledger-facts` | `receipt==0.6.0` | release-chain and append-gate shims over `receipt.release_chain` and `receipt.append_gate`, whose shim headers require a fresh byte-equivalence proof against pinned legacy oracles before each receipt upgrade |
+| TheAxiomFoundation/axiom.org | none in a dependency manifest; the capture recipe installs 0.6.0 | the receipt page shows eighteen fixture runs, byte-identical to the maintainer's regeneration at v0.6.0 after masking the run-minted object ids, digests, times and temporary paths |
 
-| Adopter | Branch | Pin | Surface called |
-|---|---|---|---|
-| Axiom encoder | default | `receipt==0.6.0` | threshold keyring check on apply manifests |
-| Thesis Institute forecast tooling | default | `receipt==0.6.0` (custody extra) | signature primitives in verifier and signer |
-| Chronicle | custody branch (unmerged) | `receipt==0.6.0` | release-chain and append-gate shims, differential harnesses re-run on package change |
+: Adoption at one date. {#tbl-adoption}
 
-Each pin is the current release, 0.6.0, which moves the append gate
-and the spanning verifier from a checkout to the tree object a commit
-names (@sec-guarantees). The receipt repository's own README states
-that the observation ledger consumes the package in production, a
-producer claim this paper reports without independent runtime
-observation.
+The New Zealand pilot [@rulespec-nz-104] ships, in its open pull
+request, an auditor guide, a specification and a witnessed journal. The
+guide's recipe is written for `receipt>=0.5` and its worked
+reproduction pins 0.5.0. Its base-ref recipe predates the 0.6 commit
+contract, which requires an expected commit alongside a base.
+ The
+specification carries the custody key, two timestamp-authority anchors,
+one content root and six required gate identifiers. It commits a witnessed
+journal of 104 rows: 80 content files, 7 attested context paths and 17 gate declarations, every digest matching its committed blob.
 
-A package pin is custody, not admission. What an encoder run produced
-is a separate claim, and the foundation's rule corpora make it
-separately: the encoder signs an apply manifest binding source, tool,
-generated-output digest, and applied-file digests, and the shared
-validation workflow refuses a change to an atomic rule file that no
-manifest covers.^[rulespec-us at commit `d58cc0ce` calls the shared
-workflow at `7a1eb243` with the generated-file guard on and the
-`programs` composition root excluded; the encoder's manifest schema is
-`axiom-encode/applied-rulespec/v5` at `29b30fb7`. Observed 2026-09-01;
-repository controls are mutable after observation.] That check runs in
-the producer's trust domain, and it is what `receipt verify` cannot
-supply: the custody verdict says the journaled bytes are the ones a
-pinned key signed and pinned witnesses saw, however they were made.
+A producer proposes a specification by shipping it in the
+repository. An auditor who verifies against it as found establishes consistency
+with a policy the producer shipped. Independent custody
+begins when the auditor reads the specification once, pins its digest
+and the anchor-set digest in the auditor's own records, and supplies
+both on every later run. What a gate
+row does and does not establish is in @tbl-establishes.
+
+A package pin fixes the verifier's bytes; custody comes from the trust
+pins the auditor supplies. What an encoder run produced
+is a separate claim, and the foundation's corpora make it separately.
+The encoder signs an apply manifest binding source, tool,
+generated-output digest and applied-file digests, and the shared
+validation workflow refuses a change to a guarded rule file that no
+manifest covers.^[rulespec-us at `d58cc0ce` calls the shared workflow at `7a1eb243`
+with the generated-file guard on and `guard-programs-root` off (134
+files under `programs/` unguarded); manifest schema
+`axiom-encode/applied-rulespec/v5`, fields at
+`src/axiom_encode/cli.py:503` of `29b30fb7`. Observed 2026-09-05.
+] That check runs in the producer's trust domain, and it supplies what
+the custody verdict cannot (@tbl-establishes).
 
 # Related systems {#sec-related}
 
-receipt assembles per-consumer custody policy in committed code,
-multi-anchor timestamp composition, record-level history checks, and
-closed-world corpus binding under one
-fail-closed verdict that names its non-conclusions. Each neighboring
-system solves an adjacent problem, and several share individual
-features; the differences below are checkable against their
-specifications.
+receipt assembles per-consumer trust policy in committed code,
+multi-anchor timestamp composition, record-level history checks and
+closed-world corpus binding under one fail-closed verdict that names
+its non-conclusions. Each neighbor solves an adjacent problem (@tbl-related).
 
 | system | trust root | verification setting | witnessed time | history and binding |
 |---|---|---|---|---|
-| receipt | consumer's committed code | offline, from a clone, no service | multi-anchor RFC 3161, pinned roots and signers | append-only record chain; closed-world corpus binding; gates stay declarations |
+| receipt | consumer's committed code | offline, from a clone, no service | multi-anchor RFC 3161, pinned roots and signers | append-only release chain; closed-world corpus binding; gates stay declarations |
 | OpenTimestamps | blockchain consensus | proof against the chain | blockchain anchoring | existence proofs per document |
-| CT / Go checksum DB | log operators; client-pinned keys (Go) | log service plus monitors or gossip | log-assigned timing | public append-only log; split-view detection |
-| SCITT | transparency service | online registration, service in the loop | service countersignature | registry of signed statements |
+| CT / Go checksum DB | log operators; client-pinned key (Go) | log service plus monitors; gossip outside the RFC (CT), designed in (Go) | SCT timestamps (CT); not specified in the design proposal (Go) | public append-only log with consistency proofs |
+| SCITT | transparency service | online registration; receipts verify offline with the service's key | the service's signed endorsement of its log state | registry of signed statements |
 | TUF | client-side root metadata, thresholds | updater fetching current metadata | expiry-based freshness | current snapshot only |
-| Sigstore (keyless) | OIDC identity federation | bundles verify offline; log for inclusion | log timestamp | signature transparency, per artifact |
-| Signed Git commits | locally configured allowed signers | offline, from a clone | none | commit-object authentication over the DAG |
-| in-toto | owner-signed layout | offline against the layout | none | step materials and products; verifies steps ran |
-| Agent event receipts (obsigna, halo-record, tool receipts) | runtime or daemon-held keys | inside or against the live runtime | optional RFC 3161 checkpoints | per-event chains and single observations |
+| Sigstore (keyless) | OIDC identity federation | bundles verify offline; log for inclusion | log entry timestamp, or RFC 3161 | signature transparency, per artifact |
+| Signed Git commits | locally configured signers | offline, from a clone | none | commit-object authentication over the DAG |
+| in-toto | owner-signed layout | offline against the layout | none | step materials and products; steps attested by authorized functionaries |
+| Agent event receipts | in-process, daemon or HSM keys (Obsigna); an external witness (halo-record) | offline, against a saved chain or receipt database; Obsigna resolves the issuer key by DID | optional RFC 3161 timestamps | per-event chains |
 
-: Each row restates the characterization the prose below gives that
-system, where the citations live. The scopes differ by design —
-several of these compose with receipt rather than compete with it —
-and the receipt column is the combination this setting needs:
-consumer-held trust, an offline clone, external time, and a record
-history checked closed-world. {#tbl-related tbl-colwidths="[19,19,21,19,22]"}
+: Neighboring systems by trust root, setting, time and history. The receipt row describes the custody and binding path; its workflow-attestation check is the online exception (@sec-design). {#tbl-related tbl-colwidths="[19,19,21,19,22]"}
 
-**Timestamping.** Linked timestamping begins with Haber and Stornetta
-[@Haber1991Timestamp]; RFC 3161 [@rfc3161] defines the single-token
-transaction receipt builds on, and the package composes saved tokens
-from the consumer's configured authorities with pinned roots,
-policies, and signer identities. OpenTimestamps [@Todd2016OpenTimestamps]
-anchors existence in a blockchain instead of pinned authorities — the
-principal alternative trust model for witnessed time. Evidence Record
-Syntax [@RFC4998; @RFC6283] is the standards answer to keeping such
-evidence valid across hash and certificate obsolescence; receipt has
-no renewal protocol yet (@sec-scope).
+**Timestamping.** Haber and Stornetta [@Haber1991Timestamp] make
+back-dating and forward-dating infeasible even against the service;
+RFC 3161 [@rfc3161], as updated by RFC 5816 [@rfc5816], defines the
+token receipt builds on, and the package composes saved tokens from the consumer's
+authorities under pinned roots, policies and signers. OpenTimestamps
+[@Todd2016OpenTimestamps] anchors existence in a blockchain instead, a different trust root for
+witnessed time. Evidence
+Record Syntax [@RFC4998; @RFC6283] keeps such evidence valid across
+hash and certificate obsolescence; receipt has no renewal protocol
+(@sec-scope).
 
-**Transparency logs.** Certificate Transparency [@rfc9162] puts TLS
-certificates in public append-only logs with third-party monitors, and
-the Go checksum database [@Cox2019GoChecksumDatabase] applies the
-pattern ecosystem-wide with client-pinned keys and gossip; receipt
-verifies a repository-local history against consumer pins without a
-log service, accepting one cost the log systems exist to remove — a
-single clone cannot expose a split view. IETF SCITT [@rfc9943;
-@microsoftpyscitt2026] registers signed statements with transparency
-services that return countersigned inclusion proofs — proofs the
-architecture itself calls receipts; SCITT is an online registration
-protocol with a service in the loop, where this package checks a
-locally held history with no service. PeerReview
-[@Haeberlen2007PeerReview] holds distributed nodes accountable by
-replaying their tamper-evident logs; receipt never replays or
-adjudicates the agent's behavior, only the custody of what it wrote.
+**Transparency logs.** Certificate Transparency [@rfc9162] and the Go
+checksum database [@Cox2019GoChecksumDatabase] put records in public
+append-only logs with consistency proofs and third-party monitors. A
+log that shows different views to different clients defeats a lone
+client in both; CT's own RFC leaves gossip out of scope, and the Go
+design builds it in. A single clone has the same gap and no log to
+gossip about. SCITT [@rfc9943; @microsoftpyscitt2026] registers signed
+statements with a transparency service that returns signed inclusion
+proofs, which its architecture calls receipts. Registration puts a
+service in the loop, and a receipt then verifies offline against the
+service's key; this package checks a locally held history with no
+service at either stage. PeerReview [@Haeberlen2007PeerReview]
+holds nodes accountable by checking each other's tamper-evident logs
+of their own actions; receipt never judges the agent's behavior, only
+the custody of what it wrote.
 
 **Update and signing systems.** The Update Framework [@tuf-spec;
-@Samuel2010Survivable] also roots trust client-side with thresholds
-and offline root keys, but is an updater protocol for fetching current
-metadata; receipt checks an already obtained clone's history and
-rotates roots only through the consumer's reviewed specification.
-Sigstore's default keyless flow [@Newman2022Sigstore] binds signatures
-to OIDC identities via short-lived certificates and a transparency
-log, its bundles verify offline, and it supports self-managed keys;
+@Samuel2010Survivable] roots trust client-side with thresholds and
+offline root keys, as an updater protocol for fetching current
+metadata; receipt checks the history of a clone already obtained.
+Sigstore's keyless flow [@Newman2022Sigstore] binds signatures to OIDC
+identities through short-lived certificates and a transparency log.
+Its bundles carry what a verifier needs offline [@sigstore-bundle].
 receipt's signature and witness surfaces use no identity federation
-and no log, pinning identities in each consumer's specification —
-while its workflow-provenance check explicitly rides GitHub's
-Sigstore-backed attestation service as a trusted third party
-(@sec-guarantees). Signed Git commits [@gitformat-signature]
-authenticate commit objects under locally configured trust, including
-a repository-relative allowed-signers file; receipt additionally
-verifies the domain-specific chain, witnessed time, historical file
-bytes and modes, and corpus binding.
+and no log, while its workflow-provenance check rides GitHub's
+Sigstore-backed attestation service. Signed Git commits
+[@gitformat-signature] authenticate commit objects under locally
+configured signers; receipt adds the release chain, witnessed time,
+historical bytes and modes, and corpus binding.
 
 **Process attestation.** in-toto [@TorresArias2019InToto] verifies
-that supply-chain steps matched an owner-signed layout, records the
-materials and products passed to its tooling, and derives coverage
-from the authored rules — with Witness and Archivista as its capture
-and storage tooling; receipt verifies custody of the records
-themselves and treats process gates strictly as declarations it never
-reruns. SLSA [@slsa-spec] specifies leveled requirements rather than
-mandating one verifier; receipt is a concrete verifier a consumer
-points at one history. Reproducible builds [@reproducible-builds]
-compare independently rebuilt artifacts byte for byte; receipt's
-differential harnesses compare verifier verdicts on common fixtures,
-a related but distinct discipline.
+that supply-chain steps matched an owner-signed layout and records
+their materials and products; receipt verifies custody of the records
+and treats gates strictly as declarations it never reruns. SLSA
+[@slsa-spec] specifies leveled requirements rather than one verifier.
+Reproducible builds [@reproducible-builds] compare rebuilt artifacts
+byte for byte; receipt's harnesses compare verifier verdicts on shared
+fixtures, a related and distinct discipline.
 
-**Agent-record neighbors, and the word "receipt".** The term now
-names several adjacent mechanisms. Obsigna's agent receipts
-[@obsigna2026] sign and chain individual runtime actions under a
-daemon-held key; halo-record [@halorecord2026] captures an agent
-event stream with hash chaining and optional RFC 3161 checkpoints;
-Basu's tool receipts [@Basu2026ToolReceipts] HMAC-authenticate one
-tool observation inside a trusted live runtime for hallucination
-checking; and C2PA 2.4's repository receipt [@C2PA2026ContentCredentials]
-binds asset ingestion proofs under its X.509 ecosystem. Each
-authenticates machine-produced evidence at the event or asset level
-inside or against a runtime trust domain; this package verifies the
-durable repository history those events could land in, under trust
-policy each consumer commits — runtime grounding records and
-repository custody compose rather than compete. Richer agent
-provenance schemas [@Souza2025PROVAgent], research-object packaging
-[@SoilandReyes2022ROCrate], and proofs of agent computation
-[@Wang2026zkAgent] occupy the same neighborhood: description, packaging,
-and execution-correctness respectively, each combinable with custody
-of the resulting records.
+**Agent-record neighbors, and the word "receipt".** Obsigna's agent
+receipts [@obsigna2026] sign and chain runtime actions under a key held
+in process, by a signing daemon, or in a hardware module, with optional
+RFC 3161 timestamps. halo-record [@halorecord2026] holds no signing key
+at all; it hash-chains the agent's event stream to checkpoints an
+external witness keeps, with optional RFC 3161 timestamps on the
+checkpoint. Basu's tool receipts [@Basu2026ToolReceipts] authenticate
+one tool observation inside a live runtime, and C2PA's repository
+receipt [@C2PA2026ContentCredentials] binds asset ingestion under its
+X.509 ecosystem. Each authenticates machine-produced evidence at the event
+or asset level, in or beside a runtime; this package verifies the
+durable repository history those events land in, under trust policy
+each consumer commits. Agent provenance schemas [@Souza2025PROVAgent],
+research-object packaging [@SoilandReyes2022ROCrate] and proofs of
+agent computation [@Wang2026zkAgent] describe, package and prove the
+computation; each combines with custody of the resulting records.
 
-# Scope and pending work {#sec-scope}
+# Limits {#sec-scope}
 
-A pass establishes custody, not truth: the verifier recognizes gate
-declarations but does not rerun them, and nothing in a verdict says
-encoded rules read the law correctly. An honestly witnessed stale
-clone can pass; a base reference proves the release objects present at
-the specified ancestor are unchanged — objects added later sit outside
-that claim — and freshness requires an out-of-band expectation.
-The practical recipe for both the freshness and regeneration limits is
-trust on first use: record the chain head digest and witness times at
-first contact, and supply that ancestor as the base reference in every
-later check — after which rewriting or regenerating any release object
-present at that ancestor refuses; later content may still be
-superseded through the journal, by design. Equivocation — a producer maintaining
-parallel histories for different verifiers — sits outside what any
-single clone can detect; verifiers who compare head digests out of
-band learn that their views diverge for the cost of a message, and the
-transparency-log literature (@sec-related) supplies the systematic
-version. Consumers configure timestamp-authority diversity; the
-verifier enforces the configured anchor set and cannot prove that
-authorities fail independently, validates certificates as of the
-token's signed time via OpenSSL, to the second and without revocation
-checking, and has no long-term renewal protocol for aging evidence
-[@RFC4998] — nor validity intervals for timestamp-authority
-signers: an authority's own key rotation is a new immutable bundle
-version with its own pinned identity, so verification splits into eras
-by bundle version that the consumer spec carries explicitly, and the
-superseded signer stops vouching for new records once the newer bundle
-is active. The release-chain lane requires the exact
-configured receipt set, so a release missing one configured authority's
-token cannot pass until the consumer revises policy — the witness
-lane's declared-unavailable escape (@sec-guarantees) does not exist
-there. The differential harnesses cover finite fixture and
-mutation batteries — each test file documents its commands, source
-pins, and exclusions, which is also the rerun recipe — not all
-possible inputs, and the package inherits the standard assumptions of
-its primitives: signature schemes and hash functions unbroken,
-timestamp authorities honest about time. Key compromise before
-rotation defeats the signature layer for the compromised generation.
+A pass establishes custody, not truth (@tbl-establishes). Freshness
+needs an expectation from outside the clone, and comparing head digests
+out of band is how two auditors learn that their views diverge.
+ The base recipe in @sec-guarantees reaches forward
+from first contact only. Later content may still be
+superseded through the journal, by design: the base protects release
+objects, not the current binding.
+
+The consumer chooses the authorities and the verifier enforces the
+configured set; it cannot show that authorities fail independently.
+ The release-chain lane requires one token from every
+configured authority for every release, so a release missing one
+authority's token cannot pass until the consumer revises policy.
+ The witness lane accepts a declared outage with a reason as a
+declaration and can verify a record with zero tokens. A consumer who needs a floor reads the returned status and token list
+and enforces it in their own code; the specification has no field for
+it. Certificates are validated as of the token's
+signed time through OpenSSL without revocation checking, and no
+renewal protocol carries aging evidence forward [@RFC4998].
+
+The differential harnesses cover finite batteries, and each test file
+carries its pins, commands and exclusions, which is also its rerun
+recipe. The package inherits the assumptions of its
+primitives: signature schemes and hash functions unbroken, authorities
+honest about time. Ordinary object reads rehash with plain SHA-1;
+optional store-wide verification hands collision detection to Git's own
+detector and requires Git 2.50. Key compromise
+before rotation defeats the signature layer for that generation.
+
 The package verifies and supplies signing primitives; it does not
-produce manifests, witnesses, or journals — those come from the
-producers' own tooling — and a producer-side reference implementation
-plus an inert specification format are the two pieces a second
-organization would most need. A contributed producer-side record type,
-signed at emission and non-authorizing by construction, is under
-review as this revision goes out. The
-waiver ratchet and chronology tiers remain in their source systems
-pending extraction. The package is Python; producers on other stacks interoperate
-at the artifact layer (canonical JSON, manifests, tokens, signatures)
-rather than the library layer.
+produce manifests, witnesses or journals, which come from the
+producers' own tooling. The package supplies no
+producer-side reference implementation and no inert specification
+format. A contributed producer-side
+evidence-record type, non-authorizing by design, is open [@receipt-pr53]. The package is Python; producers on other
+stacks interoperate at the artifact layer, in canonical JSON,
+manifests, tokens and signatures.
 
 # Availability
 
 `receipt` is on PyPI (Apache-2.0), with source, port diffs, review
-records, and differential harnesses at
+records and differential harnesses at
 [github.com/TheAxiomFoundation/receipt](https://github.com/TheAxiomFoundation/receipt),
 the package page at [axiom.org/receipt](https://axiom.org/receipt),
 and the API reference at
@@ -645,10 +486,11 @@ and the API reference at
 
 # Acknowledgements {.unnumbered}
 
-Nathan Storey's review of revision 10 and his contributed evidence-record
-proposal shaped the account of the producer side in @sec-scope.
+Nathan Storey's review and his contributed evidence-record proposal
+shaped the account of the producer side in @sec-scope.
 
 # References {.unnumbered}
 
 ::: {#refs}
 :::
+
