@@ -21,10 +21,17 @@ No -o argument was supplied; final report destination: M1-PR1-REPORT.md.
 - Physical reader/serialization defenses include fault injections for races,
   permission failures, and JSON-key collision; no production changes.
 - mount reports APFS; diskutil is unavailable inside this sandbox.
+- D1–D12: 55 tests passed in 35.25 s. Exact values cover the CLI and
+  chain names/materialization/binding/base/append preflight on identical trees,
+  plus caller anchors, direct-directory reads, gate-only success, and D12 28/40.
+- Disabled Git core.precomposeUnicode in fixtures after detecting NFD collapse;
+  now assert both Unicode spellings actually exist in the raw tree.
+- Reproduced F1 in a standalone probe before writing assertions: both swapped
+  winners and both single-fault controls match the record exactly.
 
 ## Next
 
-- Port D1–D12; commit. Add precedence/swap controls; commit.
+- Capture and verify precedence/swap controls; commit.
 - Add consumer import smoke tests; commit. Add frozen unused shell; commit.
 - Run new files separately and under both fixture ignoreCase settings, run
   the expanded non-harness suite, inspect scope, and write the final report.

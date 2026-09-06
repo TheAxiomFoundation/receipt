@@ -54,6 +54,7 @@ class RawRepo:
             "user.email": "receipt-m1@example.invalid",
             "commit.gpgSign": "false",
             "core.autocrlf": "false",
+            "core.precomposeUnicode": "false",
             "core.ignoreCase": os.environ.get("RECEIPT_M1_IGNORECASE", "false"),
             "core.protectNTFS": "false",
             "core.protectHFS": "false",
