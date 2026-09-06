@@ -1,0 +1,1675 @@
+{
+  "names/repertoire": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "name repertoire must be 'portable' or 'posix-bytes': 'Portable'"
+  },
+  "names/portable": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "fixture is not a portable name (ASCII letters, digits, '.', '_' and '-', not ending in '.', not a Win32 device name): 'bad?'"
+  },
+  "names/portable_path": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "fixture is not a portable name (ASCII letters, digits, '.', '_' and '-', not ending in '.', not a Win32 device name): 'good/bad?'"
+  },
+  "names/portable_accept": {
+    "value": ".axiom/A_2-z.txt"
+  },
+  "names/text_bytes": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name cannot be represented as Git tree-name bytes: '\\ud800'"
+  },
+  "names/bytes_type": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name must be bytes: 'a'"
+  },
+  "names/bytes_empty": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name is empty"
+  },
+  "names/bytes_dot": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name is a dot component: b'.'"
+  },
+  "names/bytes_dotdot": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name is a dot component: b'..'"
+  },
+  "names/bytes_nul": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name contains NUL: b'a\\x00b'"
+  },
+  "names/bytes_slash": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name contains '/': b'a/b'"
+  },
+  "names/decode_portable": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name is not valid UTF-8 under name repertoire 'portable': b'bad\\xff'"
+  },
+  "names/decode_export": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name is not valid UTF-8 under name repertoire 'posix-bytes': b'bad\\xff'"
+  },
+  "names/decode_lossless": {
+    "value": "bad\udcff"
+  },
+  "names/text_type": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name must be text: b'a'"
+  },
+  "names/text_roundtrip": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name does not round-trip through Git tree-name bytes: '\\udcc3\\udca9'"
+  },
+  "names/fold_bytes": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name is not valid UTF-8 for folding"
+  },
+  "names/fold_text": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name is not valid UTF-8 for folding"
+  },
+  "names/fold_type": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name must be text: 3"
+  },
+  "names/fold_ascii_only": {
+    "value": "az-\u00c4\u00df"
+  },
+  "names/siblings_type": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name must be bytes or text: 3"
+  },
+  "names/siblings_duplicate": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree directory contains a duplicate entry name: 'a'"
+  },
+  "names/siblings_fold": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree directory contains names that merge under ASCII case folding: 'A' and 'a'"
+  },
+  "names/siblings_unicode": {
+    "value": null
+  },
+  "names/short_extensions": {
+    "value": [
+      "SIG",
+      "JSO",
+      "YML",
+      "GZ",
+      "B_C",
+      null,
+      null
+    ]
+  },
+  "names/short_suffixes": {
+    "value": [
+      true,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "paths/entry/type": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path must be str or bytes: 7"
+  },
+  "paths/entries/type": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path must be str or bytes: 7"
+  },
+  "paths/attributes/type": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path must be str or bytes: 7"
+  },
+  "paths/materialize/type": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization prefix must be str, bytes, or PurePosixPath: 7"
+  },
+  "paths/entry/surrogate": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path cannot be encoded: '\\ud800'"
+  },
+  "paths/entries/surrogate": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path cannot be encoded: '\\ud800'"
+  },
+  "paths/attributes/surrogate": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path cannot be encoded: '\\ud800'"
+  },
+  "paths/materialize/surrogate": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path cannot be encoded: '\\ud800'"
+  },
+  "paths/entry/empty": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path must be a relative non-empty path: ''"
+  },
+  "paths/entries/empty": {
+    "value": {}
+  },
+  "paths/attributes/empty": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path must be a relative non-empty path: ''"
+  },
+  "paths/materialize/empty": {
+    "value": []
+  },
+  "paths/entry/absolute": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path must be a relative non-empty path: '/a'"
+  },
+  "paths/entries/absolute": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path must be a relative non-empty path: '/a'"
+  },
+  "paths/attributes/absolute": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path must be a relative non-empty path: '/a'"
+  },
+  "paths/materialize/absolute": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path must be a relative non-empty path: '/a'"
+  },
+  "paths/entry/trailing": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path must be a relative non-empty path: 'a/'"
+  },
+  "paths/entries/trailing": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path must be a relative non-empty path: 'a/'"
+  },
+  "paths/attributes/trailing": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path must be a relative non-empty path: 'a/'"
+  },
+  "paths/materialize/trailing": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path must be a relative non-empty path: 'a/'"
+  },
+  "paths/entry/empty_part": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component is empty"
+  },
+  "paths/entries/empty_part": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component is empty"
+  },
+  "paths/attributes/empty_part": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component is empty"
+  },
+  "paths/materialize/empty_part": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component is empty"
+  },
+  "paths/entry/dot": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component is a dot component: b'.'"
+  },
+  "paths/entries/dot": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component is a dot component: b'.'"
+  },
+  "paths/attributes/dot": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component is a dot component: b'.'"
+  },
+  "paths/materialize/dot": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component is a dot component: b'.'"
+  },
+  "paths/entry/dotdot": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component is a dot component: b'..'"
+  },
+  "paths/entries/dotdot": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component is a dot component: b'..'"
+  },
+  "paths/attributes/dotdot": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component is a dot component: b'..'"
+  },
+  "paths/materialize/dotdot": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component is a dot component: b'..'"
+  },
+  "paths/entry/nul": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component contains NUL: b'a\\x00b'"
+  },
+  "paths/entries/nul": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component contains NUL: b'a\\x00b'"
+  },
+  "paths/attributes/nul": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component contains NUL: b'a\\x00b'"
+  },
+  "paths/materialize/nul": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component contains NUL: b'a\\x00b'"
+  },
+  "arguments/attributes_str": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "attribute paths must be an iterable of paths"
+  },
+  "arguments/attributes_bytes": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "attribute paths must be an iterable of paths"
+  },
+  "arguments/attributes_entry": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "attribute paths must be an iterable of paths"
+  },
+  "arguments/attributes_int": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "attribute paths must be an iterable of paths"
+  },
+  "arguments/prefix_str": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization prefixes must be an iterable of paths"
+  },
+  "arguments/prefix_bytes": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization prefixes must be an iterable of paths"
+  },
+  "arguments/prefix_path": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization prefixes must be an iterable of paths"
+  },
+  "arguments/prefix_int": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization prefixes must be iterable"
+  },
+  "arguments/prefix_item": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization prefix must be str, bytes, or PurePosixPath: 1"
+  },
+  "arguments/destination": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization destination must be path-like"
+  },
+  "arguments/repertoire": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "name repertoire must be 'portable' or 'posix-bytes': 'Portable'"
+  },
+  "arguments/attributes_count": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "attribute paths exceed the budget of 1 entries"
+  },
+  "arguments/prefix_count": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization prefixes exceed the budget of 1 entries"
+  },
+  "arguments/digests_count": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "content entries exceed the budget of 1 entries"
+  },
+  "ancestor/100644/entry": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path ancestor is not a directory: parent"
+  },
+  "ancestor/100755/entry": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path ancestor is not a directory: parent"
+  },
+  "ancestor/120000/entry": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "state path has a symlinked component: parent"
+  },
+  "ancestor/160000/entry": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path ancestor is not a directory: parent"
+  },
+  "ancestor/040000/entry": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree entry does not exist: parent/child"
+  },
+  "ancestor/absent/entry": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree entry does not exist: parent/child"
+  },
+  "ancestor/100644/entries": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path ancestor is not a directory: parent"
+  },
+  "ancestor/100755/entries": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path ancestor is not a directory: parent"
+  },
+  "ancestor/120000/entries": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "state path has a symlinked component: parent"
+  },
+  "ancestor/160000/entries": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path ancestor is not a directory: parent"
+  },
+  "ancestor/040000/entries": {
+    "value": {}
+  },
+  "ancestor/absent/entries": {
+    "value": {}
+  },
+  "ancestor/100644/attributes": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "protected path ancestor is not a directory: parent"
+  },
+  "ancestor/100755/attributes": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "protected path ancestor is not a directory: parent"
+  },
+  "ancestor/120000/attributes": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "protected path ancestor is not a directory: parent"
+  },
+  "ancestor/160000/attributes": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "protected path ancestor is not a directory: parent"
+  },
+  "ancestor/040000/attributes": {
+    "value": null
+  },
+  "ancestor/absent/attributes": {
+    "value": null
+  },
+  "ancestor/100644/materialize": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "protected path ancestor is not a directory: parent"
+  },
+  "ancestor/100755/materialize": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "protected path ancestor is not a directory: parent"
+  },
+  "ancestor/120000/materialize": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "protected path ancestor is not a directory: parent"
+  },
+  "ancestor/160000/materialize": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "protected path ancestor is not a directory: parent"
+  },
+  "ancestor/040000/materialize": {
+    "value": []
+  },
+  "ancestor/absent/materialize": {
+    "value": []
+  },
+  "raw/malformed": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree <TREE> has a malformed entry"
+  },
+  "raw/no_nul": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree <TREE> has a malformed entry"
+  },
+  "raw/mode": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree <TREE> has unsupported raw mode '100600'"
+  },
+  "raw/padded_tree_mode": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree <TREE> has unsupported raw mode '040000'"
+  },
+  "raw/truncated": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree <TREE> has a truncated object name"
+  },
+  "raw/empty": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree <TREE> has an invalid entry name: tree entry name is empty"
+  },
+  "raw/dot": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree <TREE> has an invalid entry name: tree entry name is a dot component: b'.'"
+  },
+  "raw/dotdot": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree <TREE> has an invalid entry name: tree entry name is a dot component: b'..'"
+  },
+  "raw/slash": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree <TREE> has an invalid entry name: tree entry name contains '/': b'a/b'"
+  },
+  "raw/duplicate": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree <TREE> contains duplicate entry name b'a'"
+  },
+  "raw/order": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree <TREE> entries are not in canonical Git order"
+  },
+  "raw/directory_order": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree <TREE> entries are not in canonical Git order"
+  },
+  "payload/100644/blob": {
+    "value": {
+      "bytes": "68656c6c6f"
+    }
+  },
+  "payload/100755/blob": {
+    "value": {
+      "bytes": "68656c6c6f"
+    }
+  },
+  "payload/120000/blob": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree entry has non-regular mode 120000: file"
+  },
+  "payload/160000/blob": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "object <OID> is a commit, not the blob its reference requires"
+  },
+  "payload/040000/blob": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "object <OID> is a tree, not the blob its reference requires"
+  },
+  "payload/100644/digests": {
+    "value": [
+      [
+        "file",
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+      ]
+    ]
+  },
+  "payload/100755/digests": {
+    "value": [
+      [
+        "file",
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+      ]
+    ]
+  },
+  "payload/120000/digests": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree entry has non-regular mode 120000: file"
+  },
+  "payload/160000/digests": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "object <OID> is a commit, not the blob its reference requires"
+  },
+  "payload/040000/digests": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "object <OID> is a tree, not the blob its reference requires"
+  },
+  "payload/100644/materialize": {
+    "value": [
+      "file"
+    ]
+  },
+  "payload/100755/materialize": {
+    "value": [
+      "file"
+    ]
+  },
+  "payload/120000/materialize": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "base tree entry has non-regular mode 120000: file"
+  },
+  "payload/160000/materialize": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "base tree entry has non-regular mode 160000: file"
+  },
+  "payload/040000/materialize": {
+    "value": []
+  },
+  "attribute_parser/non_ascii": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: non-ASCII pattern"
+  },
+  "attribute_parser/quote": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: C-quoted pattern"
+  },
+  "attribute_parser/negative": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: negative pattern"
+  },
+  "attribute_parser/question": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: ?"
+  },
+  "attribute_parser/bracket": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: bracket expression"
+  },
+  "attribute_parser/backslash": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: backslash escape"
+  },
+  "attribute_parser/trailing": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: trailing slash"
+  },
+  "attribute_parser/pattern": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: pattern 'file:'"
+  },
+  "attribute_parser/empty_segment": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: empty pattern segment"
+  },
+  "attribute_parser/globstar": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: misplaced **"
+  },
+  "attribute_parser/control": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: control byte"
+  },
+  "attribute_parser/long": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: line longer than 2048 bytes"
+  },
+  "attribute_parser/no_state": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: line has no attribute state"
+  },
+  "attribute_parser/macro": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: attribute macro definition"
+  },
+  "attribute_parser/non_ascii_state": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: non-ASCII attribute state"
+  },
+  "attribute_parser/state_name": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: attribute name 'builtin_x'"
+  },
+  "attribute_parser/empty_pattern": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: empty pattern"
+  },
+  "attribute_state/filter/set": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "transforming attribute filter applies to protected path file"
+  },
+  "attribute_state/ident/set": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "transforming attribute ident applies to protected path file"
+  },
+  "attribute_state/working-tree-encoding/set": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "transforming attribute working-tree-encoding applies to protected path file"
+  },
+  "attribute_state/text/set": {
+    "value": null
+  },
+  "attribute_state/eol/set": {
+    "value": null
+  },
+  "attribute_state/filter/value": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "transforming attribute filter applies to protected path file"
+  },
+  "attribute_state/ident/value": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "transforming attribute ident applies to protected path file"
+  },
+  "attribute_state/working-tree-encoding/value": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "transforming attribute working-tree-encoding applies to protected path file"
+  },
+  "attribute_state/text/value": {
+    "value": null
+  },
+  "attribute_state/eol/value": {
+    "value": null
+  },
+  "attribute_state/filter/unset": {
+    "value": null
+  },
+  "attribute_state/ident/unset": {
+    "value": null
+  },
+  "attribute_state/working-tree-encoding/unset": {
+    "value": null
+  },
+  "attribute_state/text/unset": {
+    "value": null
+  },
+  "attribute_state/eol/unset": {
+    "value": null
+  },
+  "attribute_state/filter/unspecified": {
+    "value": null
+  },
+  "attribute_state/ident/unspecified": {
+    "value": null
+  },
+  "attribute_state/working-tree-encoding/unspecified": {
+    "value": null
+  },
+  "attribute_state/text/unspecified": {
+    "value": null
+  },
+  "attribute_state/eol/unspecified": {
+    "value": null
+  },
+  "attribute_mode/120000": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes entry at .gitattributes: mode 120000"
+  },
+  "attribute_mode/160000": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes entry at .gitattributes: mode 160000"
+  },
+  "attribute_mode/040000": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes entry at .gitattributes: mode 040000"
+  },
+  "attribute_quoting": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree entry name is not valid UTF-8 for quoting"
+  },
+  "content_root/missing": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "pinned content root is absent from the tree: rules"
+  },
+  "content_root/blob": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "pinned content root is not a directory: rules"
+  },
+  "content_root/executable": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "pinned content root is not a directory: rules"
+  },
+  "content_root/symlink": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "pinned content root is not a directory: rules"
+  },
+  "content_root/gitlink": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "pinned content root is not a directory: rules"
+  },
+  "content_root/empty_tree": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "3 content file(s) bound by the journal are missing from the tree, starting with 'rules/benefit/amount.yaml'"
+  },
+  "declared/portable/full": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "two declared paths would alias on a case- or normalization-insensitive filesystem, so the closed-world set is ambiguous: 'rules/A/x.yaml' and 'rules/a/x.yaml'"
+  },
+  "declared/portable/prefix": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "two declared paths would alias at a directory: 'rules/A' and 'rules/a'"
+  },
+  "declared/portable/full_before_prefix": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "two declared paths would alias on a case- or normalization-insensitive filesystem, so the closed-world set is ambiguous: 'rules/Z/z.yaml' and 'rules/z/z.yaml'"
+  },
+  "declared/posix-bytes/full": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "two declared paths would alias on a case- or normalization-insensitive filesystem, so the closed-world set is ambiguous: 'rules/A/x.yaml' and 'rules/a/x.yaml'"
+  },
+  "declared/posix-bytes/prefix": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "two declared paths would alias at a directory: 'rules/A' and 'rules/a'"
+  },
+  "declared/posix-bytes/full_before_prefix": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "two declared paths would alias on a case- or normalization-insensitive filesystem, so the closed-world set is ambiguous: 'rules/Z/z.yaml' and 'rules/z/z.yaml'"
+  },
+  "declaration_path/empty": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "fixture must be a non-empty string"
+  },
+  "declaration_path/long": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "fixture is longer than 1024 characters (1025)"
+  },
+  "declaration_path/absolute": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "fixture must be relative with no trailing slash: '/a'"
+  },
+  "declaration_path/trailing": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "fixture must be relative with no trailing slash: 'a/'"
+  },
+  "declaration_path/empty_segment": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "fixture has an empty path segment: 'a//b'"
+  },
+  "declaration_path/dot": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "fixture contains a relative segment: 'a/../b'"
+  },
+  "declaration_path/portable": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "fixture is not a portable name (ASCII letters, digits, '.', '_' and '-', not ending in '.', not a Win32 device name): 'a/bad?'"
+  },
+  "declaration_path/posix_unfoldable": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "tree entry name is not valid UTF-8 for folding"
+  },
+  "tombstone/exact": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "removed path is still present in the tree: retired/item.json"
+  },
+  "tombstone/alias": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "removed path is still present in the tree under a spelling that aliases it on a case- or normalization-insensitive filesystem: retired/item.json ('retired/ITEM.JSON')"
+  },
+  "tombstone/absent": {
+    "value": {
+      "content": [
+        {
+          "path": "rules/benefit/amount.yaml",
+          "sha256": "08e6f34303ef62e74e9b84e142c80bf315851132a0f43fda09a590a78f9fa1f0",
+          "entry_index": 0
+        },
+        {
+          "path": "rules/tax/rate.test.yaml",
+          "sha256": "67fd4cc91da7c4d6870049981fed4d367327a4bb687e73666652796d80b533b8",
+          "entry_index": 1
+        },
+        {
+          "path": "rules/tax/rate.yaml",
+          "sha256": "e218ac6d2f126c76eb6e74203814e06e3fd528afc809576cede2e2b2546bdc49",
+          "entry_index": 2
+        }
+      ],
+      "attested": [
+        {
+          "path": ".axiom/toolchain.toml",
+          "sha256": "75312e9184f8c106c14e7fbb7d258bf50a5467751b16e2d4564166200053b61b",
+          "entry_index": 3
+        }
+      ],
+      "gates": [
+        {
+          "gate_id": "rulespec/compile",
+          "tier": "public",
+          "outcome": "pass",
+          "evidence": {
+            "command": "make validate"
+          },
+          "entry_index": 4
+        },
+        {
+          "gate_id": "oracle/licensed-parity",
+          "tier": "restricted",
+          "outcome": "pass",
+          "evidence": {
+            "restrictedInput": "licensed bundle"
+          },
+          "entry_index": 5
+        },
+        {
+          "gate_id": "ci/repository-checks",
+          "tier": "ci-attested",
+          "outcome": "pass",
+          "evidence": {
+            "workflow": "repository-checks.yml"
+          },
+          "entry_index": 6
+        }
+      ],
+      "removed_paths": [
+        "retired/item.json"
+      ],
+      "name_repertoire": "portable"
+    }
+  },
+  "attested/missing": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "bound file is missing or not a regular file: .axiom/toolchain.toml"
+  },
+  "attested/ancestor_link": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "bound file is missing or not a regular file: .axiom/toolchain.toml"
+  },
+  "attested/ancestor_blob": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "bound file is missing or not a regular file: .axiom/toolchain.toml"
+  },
+  "attested/leaf_link": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "bound file is not a regular file: .axiom/toolchain.toml"
+  },
+  "attested/leaf_gitlink": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "bound file is not a regular file: .axiom/toolchain.toml"
+  },
+  "attested/leaf_tree": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "bound file is not a regular file: .axiom/toolchain.toml"
+  },
+  "state/receipt/corpus-journal.jsonl/missing": {
+    "append_state": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "state file is missing or not a regular file: receipt/corpus-journal.jsonl"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "state file is missing or not a regular file: receipt/corpus-journal.jsonl"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "state/receipt/immutable-prefix.json/missing": {
+    "append_state": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "state file is missing or not a regular file: receipt/immutable-prefix.json"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "state file is missing or not a regular file: receipt/immutable-prefix.json"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "state/receipt/corpus-journal.jsonl/100644": {
+    "append_state": {
+      "value": {
+        "path": "receipt/corpus-journal.jsonl",
+        "mode": "100644",
+        "bytes": {
+          "bytes": "7b22656e747279496e646578223a302c226b696e64223a22636f6e74656e74222c2270617468223a2272756c65732f62656e656669742f616d6f756e742e79616d6c222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c22736861323536223a2230386536663334333033656636326537346539623834653134326338306266333135383531313332613066343366646130396135393061373866396661316630222c227374617465223a2270726573656e74227d0a7b22656e747279496e646578223a312c226b696e64223a22636f6e74656e74222c2270617468223a2272756c65732f7461782f726174652e746573742e79616d6c222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c22736861323536223a2236376664346363393164613763346436383730303439393831666564346433363733323761346262363837653733363636363532373936643830623533336238222c227374617465223a2270726573656e74227d0a7b22656e747279496e646578223a322c226b696e64223a22636f6e74656e74222c2270617468223a2272756c65732f7461782f726174652e79616d6c222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c22736861323536223a2265323138616336643266313236633736656236653734323033383134653036653366643532386166633830393537366365646532653262323534366264633439222c227374617465223a2270726573656e74227d0a7b22656e747279496e646578223a332c226b696e64223a226174746573746564222c2270617468223a222e6178696f6d2f746f6f6c636861696e2e746f6d6c222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c22736861323536223a2237353331326539313834663863313036633134653766626237643235386266353061353436373735316231366532643435363431363632303030353362363162222c227374617465223a2270726573656e74227d0a7b22656e747279496e646578223a342c2265766964656e6365223a7b22636f6d6d616e64223a226d616b652076616c6964617465227d2c22676174654964223a2272756c65737065632f636f6d70696c65222c226b696e64223a2267617465222c226f7574636f6d65223a2270617373222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c2274696572223a227075626c6963227d0a7b22656e747279496e646578223a352c2265766964656e6365223a7b2272657374726963746564496e707574223a226c6963656e7365642062756e646c65227d2c22676174654964223a226f7261636c652f6c6963656e7365642d706172697479222c226b696e64223a2267617465222c226f7574636f6d65223a2270617373222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c2274696572223a2272657374726963746564227d0a7b22656e747279496e646578223a362c2265766964656e6365223a7b22776f726b666c6f77223a227265706f7369746f72792d636865636b732e796d6c227d2c22676174654964223a2263692f7265706f7369746f72792d636865636b73222c226b696e64223a2267617465222c226f7574636f6d65223a2270617373222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c2274696572223a2263692d6174746573746564227d0a"
+        }
+      }
+    },
+    "cli": {
+      "exit": 0,
+      "verdict": "PASS",
+      "phases": [
+        [
+          "custody",
+          true,
+          null
+        ],
+        [
+          "binding",
+          true,
+          null
+        ],
+        [
+          "declaration",
+          true,
+          null
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "state/receipt/immutable-prefix.json/100644": {
+    "append_state": {
+      "value": {
+        "path": "receipt/immutable-prefix.json",
+        "mode": "100644",
+        "bytes": {
+          "bytes": "7b226c696e6553686132353673223a5b2263303439376630393331323138393534336332613033376638666438383761343439373061323263393265316466343334306461343339323338633336363663222c2233316166376466643165656233356139636639333766643164333937653138323132653335333262366262303135373838313266356433393362653065303032222c2264643961623931613862656130663634333532393661363337346438623465376537653337396638643235363064333338646237666633333364363061623063222c2234363931666539356263343139656462313131636531306466326461316563353831346135306564383937386132383135396163376134316263313662636239222c2237663134353462656163616237373261323162393736313937383933376566646632323462323766353564613463633561626163393065306335616637383038222c2233636232616531333563303362336531643238303566373566646463653064343064316337623862373964336432633765663830323362616131366334626264222c2239383436393436373538663062383937363232373737366138663663653936336263646165373436643135373362316532646365343633306265613639666163225d2c227072656669784c696e65436f756e74223a372c22707265666978536861323536223a2264663333386366316665373061613832363338613964383030353230326532643232663262333363326233383433373239396431363461346430333234306566222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d7072656669782f7631227d0a"
+        }
+      }
+    },
+    "cli": {
+      "exit": 0,
+      "verdict": "PASS",
+      "phases": [
+        [
+          "custody",
+          true,
+          null
+        ],
+        [
+          "binding",
+          true,
+          null
+        ],
+        [
+          "declaration",
+          true,
+          null
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "state/receipt/corpus-journal.jsonl/100755": {
+    "append_state": {
+      "value": {
+        "path": "receipt/corpus-journal.jsonl",
+        "mode": "100755",
+        "bytes": {
+          "bytes": "7b22656e747279496e646578223a302c226b696e64223a22636f6e74656e74222c2270617468223a2272756c65732f62656e656669742f616d6f756e742e79616d6c222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c22736861323536223a2230386536663334333033656636326537346539623834653134326338306266333135383531313332613066343366646130396135393061373866396661316630222c227374617465223a2270726573656e74227d0a7b22656e747279496e646578223a312c226b696e64223a22636f6e74656e74222c2270617468223a2272756c65732f7461782f726174652e746573742e79616d6c222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c22736861323536223a2236376664346363393164613763346436383730303439393831666564346433363733323761346262363837653733363636363532373936643830623533336238222c227374617465223a2270726573656e74227d0a7b22656e747279496e646578223a322c226b696e64223a22636f6e74656e74222c2270617468223a2272756c65732f7461782f726174652e79616d6c222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c22736861323536223a2265323138616336643266313236633736656236653734323033383134653036653366643532386166633830393537366365646532653262323534366264633439222c227374617465223a2270726573656e74227d0a7b22656e747279496e646578223a332c226b696e64223a226174746573746564222c2270617468223a222e6178696f6d2f746f6f6c636861696e2e746f6d6c222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c22736861323536223a2237353331326539313834663863313036633134653766626237643235386266353061353436373735316231366532643435363431363632303030353362363162222c227374617465223a2270726573656e74227d0a7b22656e747279496e646578223a342c2265766964656e6365223a7b22636f6d6d616e64223a226d616b652076616c6964617465227d2c22676174654964223a2272756c65737065632f636f6d70696c65222c226b696e64223a2267617465222c226f7574636f6d65223a2270617373222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c2274696572223a227075626c6963227d0a7b22656e747279496e646578223a352c2265766964656e6365223a7b2272657374726963746564496e707574223a226c6963656e7365642062756e646c65227d2c22676174654964223a226f7261636c652f6c6963656e7365642d706172697479222c226b696e64223a2267617465222c226f7574636f6d65223a2270617373222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c2274696572223a2272657374726963746564227d0a7b22656e747279496e646578223a362c2265766964656e6365223a7b22776f726b666c6f77223a227265706f7369746f72792d636865636b732e796d6c227d2c22676174654964223a2263692f7265706f7369746f72792d636865636b73222c226b696e64223a2267617465222c226f7574636f6d65223a2270617373222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c2274696572223a2263692d6174746573746564227d0a"
+        }
+      }
+    },
+    "cli": {
+      "exit": 0,
+      "verdict": "PASS",
+      "phases": [
+        [
+          "custody",
+          true,
+          null
+        ],
+        [
+          "binding",
+          true,
+          null
+        ],
+        [
+          "declaration",
+          true,
+          null
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "state/receipt/immutable-prefix.json/100755": {
+    "append_state": {
+      "value": {
+        "path": "receipt/immutable-prefix.json",
+        "mode": "100755",
+        "bytes": {
+          "bytes": "7b226c696e6553686132353673223a5b2263303439376630393331323138393534336332613033376638666438383761343439373061323263393265316466343334306461343339323338633336363663222c2233316166376466643165656233356139636639333766643164333937653138323132653335333262366262303135373838313266356433393362653065303032222c2264643961623931613862656130663634333532393661363337346438623465376537653337396638643235363064333338646237666633333364363061623063222c2234363931666539356263343139656462313131636531306466326461316563353831346135306564383937386132383135396163376134316263313662636239222c2237663134353462656163616237373261323162393736313937383933376566646632323462323766353564613463633561626163393065306335616637383038222c2233636232616531333563303362336531643238303566373566646463653064343064316337623862373964336432633765663830323362616131366334626264222c2239383436393436373538663062383937363232373737366138663663653936336263646165373436643135373362316532646365343633306265613639666163225d2c227072656669784c696e65436f756e74223a372c22707265666978536861323536223a2264663333386366316665373061613832363338613964383030353230326532643232663262333363326233383433373239396431363461346430333234306566222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d7072656669782f7631227d0a"
+        }
+      }
+    },
+    "cli": {
+      "exit": 0,
+      "verdict": "PASS",
+      "phases": [
+        [
+          "custody",
+          true,
+          null
+        ],
+        [
+          "binding",
+          true,
+          null
+        ],
+        [
+          "declaration",
+          true,
+          null
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "state/receipt/corpus-journal.jsonl/120000": {
+    "append_state": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "state file is a symlink: receipt/corpus-journal.jsonl"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "state file is a symlink: receipt/corpus-journal.jsonl"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "state/receipt/immutable-prefix.json/120000": {
+    "append_state": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "state file is a symlink: receipt/immutable-prefix.json"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "state file is a symlink: receipt/immutable-prefix.json"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "state/receipt/corpus-journal.jsonl/160000": {
+    "append_state": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "state file is not a regular file: receipt/corpus-journal.jsonl"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "state file is not a regular file: receipt/corpus-journal.jsonl"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "state/receipt/immutable-prefix.json/160000": {
+    "append_state": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "state file is not a regular file: receipt/immutable-prefix.json"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "state file is not a regular file: receipt/immutable-prefix.json"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "state/receipt/corpus-journal.jsonl/040000": {
+    "append_state": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "state file is not a regular file: receipt/corpus-journal.jsonl"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "state file is not a regular file: receipt/corpus-journal.jsonl"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "state/receipt/immutable-prefix.json/040000": {
+    "append_state": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "state file is not a regular file: receipt/immutable-prefix.json"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "state file is not a regular file: receipt/immutable-prefix.json"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "history/delete": {
+    "history": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "existing release file was deleted relative to <BASE>: releases/note"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "history",
+          false,
+          "release history is not immutable: existing release file was deleted relative to <BASE>: releases/note"
+        ],
+        [
+          "custody",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "history/mode": {
+    "history": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "existing release file mode changed relative to <BASE>: releases/note (100644 -> 100755)"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "history",
+          false,
+          "release history is not immutable: existing release file mode changed relative to <BASE>: releases/note (100644 -> 100755)"
+        ],
+        [
+          "custody",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "history/bytes": {
+    "history": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "existing release file bytes changed relative to <BASE>: releases/note"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "history",
+          false,
+          "release history is not immutable: existing release file bytes changed relative to <BASE>: releases/note"
+        ],
+        [
+          "custody",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "history/symlink": {
+    "history": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "release path is a symlink: releases/note"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "history",
+          false,
+          "release history is not immutable: release path is a symlink: releases/note"
+        ],
+        [
+          "custody",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "history/gitlink": {
+    "history": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "release path is not regular: releases/note"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "history",
+          false,
+          "release history is not immutable: release path is not regular: releases/note"
+        ],
+        [
+          "custody",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "history/base_mode": {
+    "history": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "base release entry has non-regular git mode 120000: releases/note"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "history",
+          false,
+          "release history is not immutable: base release entry has non-regular git mode 120000: releases/note"
+        ],
+        [
+          "custody",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "history/accept": {
+    "history": {
+      "value": {
+        "resolved": "<BASE>",
+        "added": [],
+        "entries": [
+          "releases/anchors/alpha-root.pem",
+          "releases/anchors/beta-root.pem",
+          "releases/anchors/producer-ed25519.pub",
+          "releases/manifests/<MANIFEST>.alpha.tsr",
+          "releases/manifests/<MANIFEST>.beta.tsr",
+          "releases/manifests/<MANIFEST>.json",
+          "releases/manifests/<MANIFEST>.producer.sig",
+          "releases/note"
+        ]
+      }
+    },
+    "cli": {
+      "exit": 0,
+      "verdict": "PASS",
+      "phases": [
+        [
+          "history",
+          true,
+          null
+        ],
+        [
+          "custody",
+          true,
+          null
+        ],
+        [
+          "binding",
+          true,
+          null
+        ],
+        [
+          "declaration",
+          true,
+          null
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "filename/type": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "anchor filenames must be str or os.PathLike when the anchor-set digest is computed; got int"
+  },
+  "filename/decode": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "anchor filename could not be decoded to a pathname: BrokenPath"
+  },
+  "filename/surrogate": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "anchor filename spells an astral character as an explicit surrogate pair, which JSON parsing would rewrite; configure the character directly: '\\ud800\\udc00.pem'"
+  },
+  "filename/astral": {
+    "value": "\ud800\udc00.pem"
+  },
+  "filename/short_source": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "short-name source must be text: 123"
+  },
+  "filename/suffix_iterable": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "pinned suffixes must be iterable text"
+  },
+  "filename/suffix_ignored": {
+    "value": true
+  },
+  "anchor/escape": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "configured anchor filename leaves the anchor directory: '../escape.pem'"
+  },
+  "anchor/missing": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "configured anchor was not materialized: anchors/missing.pem"
+  },
+  "anchor/unavailable": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "configured materialized anchor is unavailable: anchors/producer.pem"
+  },
+  "anchor/nonregular": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "configured materialized anchor is not regular: anchors/producer.pem"
+  },
+  "anchor/changed": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "anchor file 'producer.pem' bytes changed during verification"
+  },
+  "anchor/json_alias": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "two configured anchor filenames are distinct in Python but identical as JSON strings; the verdict cannot report them faithfully"
+  },
+  "anchor/accept": {
+    "value": "a0aa4ddea8e749f9ae01216445e636209269889950bd7a65597a6d7e1aee6420"
+  },
+  "anchor/spec_absent": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "chain_spec does not carry the configured anchor set"
+  },
+  "anchor/spec_relative": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "chain_spec anchor_relative must be a PurePosixPath"
+  },
+  "anchor/spec_anchors": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "chain_spec anchors must be a mapping"
+  },
+  "anchor/spec_filename": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "configured anchor does not carry a filename"
+  },
+  "lifecycle/path": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization must be entered before its path is used"
+  },
+  "lifecycle/entries": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization must be entered before entries are used"
+  },
+  "lifecycle/anchor": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization must be entered before anchor bytes are digested"
+  },
+  "lifecycle/closed": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization is closed"
+  },
+  "lifecycle/entered": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization is already entered"
+  },
+  "lifecycle/absent": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization destination does not exist"
+  },
+  "lifecycle/file": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization destination is not a real directory"
+  },
+  "lifecycle/link": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization destination is not a real directory"
+  },
+  "spec/chain_type": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "ChainSpec manifest_relative must be a pathlib.PurePosixPath, not str"
+  },
+  "spec/chain_relative": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "ChainSpec manifest_relative must be a relative path naming at least one component, with no '..': '../escape'"
+  },
+  "spec/chain_repertoire": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "name repertoire must be 'portable' or 'posix-bytes': 'Portable'"
+  },
+  "spec/corpus_repertoire": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "name repertoire must be 'portable' or 'posix-bytes': 'Portable'"
+  },
+  "spec/corpus_portable": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "CorpusSpec content root is not a portable name (ASCII letters, digits, '.', '_' and '-', not ending in '.', not a Win32 device name): 'bad?'"
+  },
+  "directory/manifest/missing": {
+    "value": null
+  },
+  "directory/manifest/ancestor": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "release manifest path ancestor is not a directory: releases"
+  },
+  "directory/manifest/leaf": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "release manifest path is not a regular directory: <ROOT>/releases/manifests"
+  },
+  "directory/manifest/permission": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "cannot stat release manifest path: releases/manifests (Permission denied)"
+  },
+  "directory/manifest/race_enotdir": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "release manifest path ancestor is not a directory: releases/manifests"
+  },
+  "directory/enumerate/missing": {
+    "value": []
+  },
+  "directory/enumerate/leaf": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "release manifest path is not a regular directory: <ROOT>/releases/manifests"
+  },
+  "directory/enumerate/nonregular": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "release manifest directory contains a non-regular entry: <ROOT>/releases/manifests/extra"
+  },
+  "directory/enumerate/unknown": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "unknown file in closed release manifest directory: junk.txt"
+  },
+  "directory/reader/leaf_link": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "required state file is missing or non-regular: <ROOT>/state/journal"
+  },
+  "directory/reader/ancestor_link": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "state path traverses a symlink at 'state': state/journal"
+  },
+  "directory/reader/missing": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "required state file is missing or non-regular: <ROOT>/state/journal"
+  },
+  "directory/reader/regular": {
+    "value": {
+      "bytes": "68656c6c6f"
+    }
+  },
+  "directory/reader/platform": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "state files cannot be read with secure descent on this platform (os.O_NOFOLLOW is unavailable); receipt requires a POSIX platform"
+  },
+  "directory/reader/replaced": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "required state file was replaced while being read: <ROOT>/state/journal"
+  },
+  "directory/reader/short": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "required state file was replaced while being read: <ROOT>/state/journal"
+  },
+  "directory/reader/long": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "required state file was replaced while being read: <ROOT>/state/journal"
+  },
+  "directory/path/legacy_state": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "state path traverses a symlink at 'receipt': receipt/corpus-journal.jsonl"
+  },
+  "directory/path/release_root": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "releases must be a real directory, not a symlink"
+  },
+  "directory/path/release_ancestor": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "release root path traverses a symlink at 'releases/nested': releases/nested/manifests"
+  },
+  "directory/path/anchor_probe": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "anchor path component is a symlink or reparse point: <ROOT>/releases"
+  },
+  "directory/path/spelling": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "path component releases/manifests is not spelled by its directory: releases/manifests"
+  },
+  "directory/path/unlistable": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "cannot bind the spelling of releases/manifests: its directory cannot be listed: releases/manifests"
+  },
+  "directory/caller/manifest": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "manifest is not a regular file: <ROOT>/missing"
+  },
+  "directory/caller/producer_key": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "missing or non-regular producer public key: <ROOT>/producer-ed25519.pub"
+  },
+  "directory/caller/producer_signature": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "missing or non-regular producer signature: <ROOT>/missing"
+  },
+  "directory/caller/receipt": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "missing or non-regular RFC 3161 receipt: <ROOT>/missing"
+  },
+  "directory/caller/tsa_anchor": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "missing or non-regular TSA anchor: <ROOT>/alpha-root.pem"
+  },
+  "directory/caller/receipt_unreadable": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "cannot read RFC 3161 receipt <ROOT>/token.tsr: PermissionError"
+  },
+  "directory/caller/receipt_replaced": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "RFC 3161 receipt was replaced while it was being read: <ROOT>/token.tsr"
+  },
+  "wrapper/base/release": {
+    "exception": "receipt.append_gate.AppendError",
+    "message": "base release chain is invalid: captured base failure"
+  },
+  "wrapper/base/snapshot": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "captured base failure"
+  },
+  "budget/entries": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree walk exceeds the budget of 1 entries"
+  },
+  "budget/name": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree entry name exceeds the budget of 2 bytes"
+  },
+  "budget/path": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path exceeds the budget of 2 bytes"
+  },
+  "budget/paths_total": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree paths exceed the snapshot budget of 2 bytes"
+  },
+  "budget/path_depth": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path exceeds the depth budget of 0"
+  },
+  "budget/tree_depth": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree depth exceeds the budget of 0"
+  },
+  "budget/tree_bytes": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree and commit bytes exceed the snapshot budget of <LIMIT> bytes"
+  },
+  "budget/selection_bytes": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "commit and tree bytes exceed the snapshot budget of 1 bytes"
+  },
+  "budget/blob": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "object <BLOB_OID> exceeds the payload budget of 1 bytes"
+  },
+  "budget/attribute_blob": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "object <ATTRIBUTE_OID> exceeds the payload budget of 1 bytes"
+  },
+  "budget/attribute_bytes": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "attribute bytes exceed the snapshot budget of 1 bytes"
+  },
+  "budget/attribute_rules": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "attribute rules exceed the snapshot budget of 1 rules"
+  },
+  "budget/attribute_states": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "attribute states at .gitattributes:1 exceed the per-line budget of 0 states"
+  },
+  "budget/attribute_work": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "attribute matching exceeds the work budget of 0 steps"
+  },
+  "budget/materialized_blob": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialized blob 'one' exceeds the budget of 1 bytes"
+  },
+  "budget/materialized_total": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialized bytes exceed the budget of 5 bytes"
+  },
+  "budget/content_blob": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "content blob 'one' exceeds the budget of 1 bytes"
+  },
+  "budget/content_total": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "content bytes exceed the budget of 5 bytes"
+  },
+  "budget/content_snapshot": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "content bytes exceed the snapshot budget of 5 bytes"
+  },
+  "budget/declarations/prefixes": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "declared paths visit more than 1 prefixes; the corpus cannot be bound safely"
+  },
+  "budget/declarations/index": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "declared paths name more than 1 distinct directories; declared paths exceed the alias index budget"
+  }
+}
