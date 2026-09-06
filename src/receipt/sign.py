@@ -8,13 +8,16 @@ material nor reads trust configuration from the environment.
 Keyrings follow loud rotation: the keyring is an object committed in consumer
 code, and rotation is a reviewed replacement of that object that moves the
 retired key into ``legacy_keys``. Legacy keys can vouch only where the caller
-explicitly verifies immutable pre-rotation history (``allow_legacy=True``, or
-``verify_any_generation`` for envelopes whose key identifier does not name the
-signing generation); they are refused loudly for new material, malformed key
-material is always fatal, and only a clean signature mismatch under a
-validated key falls through to an older generation. There are no time-based
-transition windows. Keys outside the committed keyring are refused, and
-unknown fingerprints are surfaced verbatim in refusals.
+explicitly verifies immutable pre-rotation history under ``allow_legacy=True``:
+``verify_threshold`` requires that word at every call site, and
+``verify_any_generation`` — for envelopes whose key identifier does not name
+the signing generation — takes it as the default. They are refused loudly for
+new material, a presented retired key_id refusing either call under
+``allow_legacy=False``; malformed key material is always fatal, and only a
+clean signature mismatch under a validated key falls through to an older
+generation. There are no time-based transition windows. Keys outside the
+committed keyring are refused, and unknown fingerprints are surfaced verbatim
+in refusals.
 """
 
 from __future__ import annotations
@@ -546,6 +549,7 @@ def verify_any_generation(
     *,
     domain: bytes,
     label: str,
+    allow_legacy: bool = True,
 ) -> str:
     """Verify one signature against the current generation, then each legacy.
 
@@ -557,6 +561,12 @@ def verify_any_generation(
     kind is immediately fatal, and only a clean signature mismatch under a
     validated key falls through to the next generation. Returns the key_id
     that vouched, so consumers log which generation verified the artifact.
+
+    ``allow_legacy`` defaults to ``True``, the historical behavior this call
+    exists for. A caller reaching for it on new material says ``False``: no
+    retired key is tried, a presented retired key_id is refused loudly the
+    way ``verify_threshold`` refuses one, and key material is then required
+    for the current generation only.
     """
 
     if keyring.threshold != 1:
@@ -568,6 +578,8 @@ def verify_any_generation(
         raise SignError("signature payload must be bytes")
     if type(domain) is not bytes:
         raise SignError("signature domain must be bytes")
+    if type(allow_legacy) is not bool:
+        raise SignError("allow_legacy must be a bool")
     if type(signature) is not bytes or len(signature) != PRODUCER_SIGNATURE_BYTES:
         actual = len(signature) if isinstance(signature, bytes) else "non-bytes"
         raise SignError(
@@ -575,11 +587,23 @@ def verify_any_generation(
             f"{PRODUCER_SIGNATURE_BYTES} raw bytes; found={actual}"
         )
 
-    ordered = (*keyring.keys, *keyring.legacy_keys)
-    specs = {key.key_id: key for key in ordered}
-    unknown_key_ids = sorted(set(public_keys) - set(specs))
+    known = {key.key_id: key for key in (*keyring.keys, *keyring.legacy_keys)}
+    unknown_key_ids = sorted(set(public_keys) - set(known))
     if unknown_key_ids:
         raise SignError(f"unknown key_id: {unknown_key_ids[0]!r}")
+    if not allow_legacy:
+        presented_legacy = sorted(
+            set(public_keys) & {key.key_id for key in keyring.legacy_keys}
+        )
+        if presented_legacy:
+            raise SignError(
+                f"legacy key_id refused for new material: {presented_legacy[0]!r}"
+            )
+
+    ordered = (
+        (*keyring.keys, *keyring.legacy_keys) if allow_legacy else keyring.keys
+    )
+    specs = {key.key_id: key for key in ordered}
     missing = sorted(set(specs) - set(public_keys))
     if missing:
         raise SignError(

@@ -1396,6 +1396,188 @@ def test_verify_any_generation_requires_material_and_threshold_one() -> None:
         )
 
 
+def test_verify_any_generation_allow_legacy_defaults_to_true() -> None:
+    """The keyword is additive: every 0.6.0 call site keeps its behavior.
+
+    ``verify_any_generation`` exists for immutable pre-rotation history, so
+    trying the retired generations is the default; the keyword only lets a
+    caller say the artifact is new material.
+    """
+
+    parameter = inspect.signature(verify_any_generation).parameters["allow_legacy"]
+    assert parameter.default is True
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+
+    material, keyring = _rotated_keyring()
+    payload = b"artifact"
+    domain = b"consumer/v1\0"
+    public_keys = {
+        "new-root": material["new-root"][1],
+        "old-root": material["old-root"][1],
+    }
+    legacy_signature = sign_payload(material["old-root"][0], payload, domain=domain)
+
+    # Unstated and stated True are the same call.
+    for call in (
+        lambda: verify_any_generation(
+            payload,
+            legacy_signature,
+            public_keys,
+            keyring,
+            domain=domain,
+            label="record",
+        ),
+        lambda: verify_any_generation(
+            payload,
+            legacy_signature,
+            public_keys,
+            keyring,
+            domain=domain,
+            label="record",
+            allow_legacy=True,
+        ),
+    ):
+        assert call() == "old-root"
+
+
+def test_verify_any_generation_allow_legacy_false_refuses_retired_keys() -> None:
+    """``allow_legacy=False`` puts the retired generation out of reach.
+
+    A retired signature no longer falls through to the key that would vouch
+    for it, and a presented retired key_id refuses with the wording
+    ``verify_threshold`` already uses for one — before any signature is
+    tried, so an accompanying valid current signature cannot mask it.
+    """
+
+    material, keyring = _rotated_keyring()
+    payload = b"new material"
+    domain = b"consumer/v1\0"
+    current_only = {"new-root": material["new-root"][1]}
+    both_keys = {
+        "new-root": material["new-root"][1],
+        "old-root": material["old-root"][1],
+    }
+
+    # A retired signature: only the current generation is tried, and the
+    # refusal names exactly what was tried.
+    legacy_signature = sign_payload(material["old-root"][0], payload, domain=domain)
+    with pytest.raises(SignError) as caught:
+        verify_any_generation(
+            payload,
+            legacy_signature,
+            current_only,
+            keyring,
+            domain=domain,
+            label="record",
+            allow_legacy=False,
+        )
+    assert str(caught.value) == (
+        "signature does not verify under any keyring generation for record: "
+        "tried=['new-root']"
+    )
+
+    # A retired PUBLIC KEY refuses on presence alone, exactly as
+    # verify_threshold refuses one, even though the signature is current and
+    # the current key material is present and correct.
+    current_signature = sign_payload(material["new-root"][0], payload, domain=domain)
+    with pytest.raises(SignError) as caught:
+        verify_any_generation(
+            payload,
+            current_signature,
+            both_keys,
+            keyring,
+            domain=domain,
+            label="record",
+            allow_legacy=False,
+        )
+    assert str(caught.value) == "legacy key_id refused for new material: 'old-root'"
+
+    # ... and with a retired signature too, presence still decides first.
+    with pytest.raises(SignError) as caught:
+        verify_any_generation(
+            payload,
+            legacy_signature,
+            both_keys,
+            keyring,
+            domain=domain,
+            label="record",
+            allow_legacy=False,
+        )
+    assert str(caught.value) == "legacy key_id refused for new material: 'old-root'"
+
+    # An unknown key_id still outranks the legacy refusal, as in
+    # verify_threshold: the caller is told about the key nobody pinned first.
+    with pytest.raises(SignError, match="^unknown key_id: 'stranger'$"):
+        verify_any_generation(
+            payload,
+            current_signature,
+            {**both_keys, "stranger": material["new-root"][1]},
+            keyring,
+            domain=domain,
+            label="record",
+            allow_legacy=False,
+        )
+
+    # The required-material check narrows to the current generation, so the
+    # retired key's absence is no longer missing material — and a current
+    # signature verifies without the retired key ever being loaded.
+    assert (
+        verify_any_generation(
+            payload,
+            current_signature,
+            current_only,
+            keyring,
+            domain=domain,
+            label="record",
+            allow_legacy=False,
+        )
+        == "new-root"
+    )
+    with pytest.raises(SignError) as caught:
+        verify_any_generation(
+            payload,
+            current_signature,
+            {},
+            keyring,
+            domain=domain,
+            label="record",
+            allow_legacy=False,
+        )
+    assert str(caught.value) == (
+        "verify_any_generation requires key material for every keyring "
+        "key; missing=['new-root']"
+    )
+
+
+def test_verify_any_generation_allow_legacy_must_be_a_bool() -> None:
+    """Exactly the bool discipline verify_threshold holds allow_legacy to.
+
+    ``1`` and ``0`` would otherwise silently read as True and False, which is
+    how a caller means to refuse retired keys and gets them tried anyway.
+    """
+
+    material, keyring = _rotated_keyring()
+    payload = b"artifact"
+    domain = b"consumer/v1\0"
+    signature = sign_payload(material["new-root"][0], payload, domain=domain)
+    public_keys = {
+        "new-root": material["new-root"][1],
+        "old-root": material["old-root"][1],
+    }
+
+    for allow_legacy in (1, 0, None, "false"):
+        with pytest.raises(SignError, match="^allow_legacy must be a bool$"):
+            verify_any_generation(
+                payload,
+                signature,
+                public_keys,
+                keyring,
+                domain=domain,
+                label="record",
+                allow_legacy=allow_legacy,  # type: ignore[arg-type]
+            )
+
+
 def test_rotation_round_trip_story() -> None:
     """The corpus-shaped lifecycle: sign, rotate, history stays verifiable."""
 
