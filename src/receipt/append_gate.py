@@ -855,7 +855,7 @@ def _screen_candidate_tree_aliases(
         selection = view.require(plan.use, render=_protected_name_error)
     except ReleaseChainError as exc:
         raise AppendError(str(exc)) from exc
-    return entries
+    return dict(selection.entries_for(candidate.snapshot, use=plan.use))
 
 
 def _attribute_entries(

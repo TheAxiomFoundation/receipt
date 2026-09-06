@@ -29,7 +29,10 @@ class PolicyUseError(RuntimeError):
 
 def _paths(values: Iterable[str | PurePosixPath]) -> tuple[str, ...]:
     # Plans compile admitted configuration, not an alternative spec parser.
-    return tuple(p.as_posix() if isinstance(p, PurePosixPath) else p for p in values)
+    result = tuple(p.as_posix() if isinstance(p, PurePosixPath) else p for p in values)
+    if any(type(p) is not str for p in result):
+        raise PolicyUseError("plan selectors must be admitted path strings")
+    return result
 
 
 @dataclass(frozen=True)
@@ -155,6 +158,10 @@ class _AliasNode:
     # Earliest target, then earliest target with a different exact prefix.
     first: tuple[int, str, tuple[str, ...]] | None = None
     second: tuple[int, str, tuple[str, ...]] | None = None
+    continuing: int | None = None
+
+    def match(self, key: str) -> _AliasNode | None:
+        return self.children.get(key)
 
     def add(self, witness: tuple[int, str, tuple[str, ...]]) -> None:
         if self.first is None:
@@ -198,6 +205,13 @@ class _NameFacts:
     def folded_parts(self, path: str) -> tuple[str, ...]:
         return tuple(self.fold(part) for part in path.split("/"))
 
+    def path_fold(self, path: str, *, operation: str,
+                  position: tuple[int, ...]) -> tuple[str, ...]:
+        return tuple(self.primitive(
+            operation, lambda: self.fold(part), stage="aliases",
+            position=(*position, depth), path=path, name=part,
+        ) for depth, part in enumerate(path.split("/"), start=1))
+
     def primitive(self, operation: str, call: Callable, *, stage: str,
                   position: tuple[int, ...], path: str, name: str = ""):
         try:
@@ -214,12 +228,11 @@ class _NameFacts:
         # Supplied target order is an earlier barrier than any listed entry.
         for ordinal, path in enumerate(dict.fromkeys(plan.configured_alias_targets)):
             exact = tuple(path.split("/"))
-            folded = self.primitive(
-                "target-fold", lambda: self.folded_parts(path), stage="aliases",
-                position=(0, ordinal), path=path,
-            )
+            folded = self.path_fold(path, operation="target-fold", position=(0, ordinal))
             node = root
             for depth, key in enumerate(folded, start=1):
+                if node.continuing is None:
+                    node.continuing = ordinal
                 if key not in node.children:
                     node.children[key] = _AliasNode()
                     self.counts["alias_index_nodes"] += 1
@@ -230,21 +243,29 @@ class _NameFacts:
             entries, key=lambda path: (entries[path].mode == "040000", path),
         )):
             parts = tuple(listed.split("/"))
-            folded = self.primitive(
-                "whole-path-fold", lambda: self.folded_parts(listed), stage="aliases",
-                position=(1, ordinal, 0), path=listed,
+            folded = self.path_fold(
+                listed, operation="whole-path-fold", position=(1, ordinal, 0),
             ) if plan.fold_whole_alias_paths else ()
             node = root
             winner: tuple[int, int, str, tuple[str, ...]] | None = None
             for depth, part in enumerate(parts, start=1):
                 if not node.children:
                     break
-                key = folded[depth - 1] if folded else self.primitive(
-                    "reached-component-fold", lambda: self.fold(part), stage="aliases",
-                    position=(1, ordinal, 1, depth), path=listed, name=part,
-                )
+                # A prior alias would fold its full diagnostic before the
+                # legacy traversal could reach a later, unfoldable component.
+                try:
+                    key = folded[depth - 1] if folded else self.primitive(
+                        "reached-component-fold", lambda: self.fold(part), stage="aliases",
+                        position=(1, ordinal, 1, node.continuing, depth, 0),
+                        path=listed, name=part,
+                    )
+                except _Refusal:
+                    if winner is not None:
+                        self.path_fold(listed, operation="diagnostic-fold",
+                            position=(1, ordinal, 1, winner[0], winner[1], 1))
+                    raise
                 self.counts["alias_steps"] += 1
-                child = node.children.get(key)
+                child = node.match(key)
                 if child is None:
                     break
                 node = child
@@ -255,11 +276,8 @@ class _NameFacts:
                         winner = candidate
             if winner is not None:
                 target_ordinal, depth, target, exact = winner
-                position = (1, ordinal, 1, target_ordinal, depth)
-                self.primitive(
-                    "diagnostic-fold", lambda: self.folded_parts(listed),
-                    stage="aliases", position=position, path=listed,
-                )
+                position = (1, ordinal, 1, target_ordinal, depth, 1)
+                self.path_fold(listed, operation="diagnostic-fold", position=position)
                 raise _Refusal(Finding(
                     "configured-alias", "aliases", position, path=listed,
                     raw_path=listed.encode("utf-8", "surrogateescape"),
@@ -531,7 +549,7 @@ class TreePolicy:
             self._runs[plan] = run
         run.evaluate(stage)
         entries = MappingProxyType(dict(run.entries))
-        children: dict[str, dict[str, snapshot.GitEntry]] = {}
+        children: dict[str, dict[str, snapshot.GitEntry]] = {p: {} for p in plan.listing_scope}
         for path, entry in entries.items():
             parent, _, name = path.rpartition("/")
             children.setdefault(parent, {})[name] = entry
@@ -673,3 +691,6 @@ class DirectoryEvidence:
     origin: str = "directory"
     observations: tuple[tuple[str, str], ...] = ()
     provenance: object = field(default_factory=object, repr=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "observations", tuple(tuple(item) for item in self.observations))
