@@ -53,12 +53,13 @@ No -o filename was supplied. Final report destination:
 
 - Every new test file has passed alone: golden 247, directory 32, budgets 21,
   inputs 9, D fixtures 55, precedence 36, consumer imports 85, shell 12.
-  Total additions: 497 tests. Both ignoreCase reruns and the final expanded
-  non-harness suite remain in progress.
+  Total additions: 497 tests.
+- Both fixture settings pass all 497 additions with zero skips: ignoreCase=true
+  in 115.10 s and ignoreCase=false in 103.31 s. Same goldens in both runs.
 - Scope inspection: only src/receipt/protected_tree.py differs under src;
   CHANGELOG.md, package version and existing source/tests are unchanged.
 
 ## Next
 
-- Run new files separately and under both fixture ignoreCase settings, run
-  the expanded non-harness suite, inspect scope, and write the final report.
+- Run the expanded non-harness suite, finalize scope verification, and finish
+  /tmp/receipt-07-m1-pr1-output.md with the actual final counts.
