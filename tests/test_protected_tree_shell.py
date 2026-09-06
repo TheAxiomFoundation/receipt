@@ -38,23 +38,22 @@ def test_tree_policy_constructor_surface():
     assert policy.TreePolicy.__annotations__["snapshot"] == "snapshot.TreeSnapshot"
 
 
-LATER_STAGE_METHODS = ("evaluate_modes", "evaluate_ancestors", "select_export", "evaluate_attributes")
-STEP_2_IMPORTERS = {"append_gate.py", "release_chain.py", "snapshot.py"}
+LATER_STAGE_METHODS = ("select_export", "evaluate_attributes")
+STEP_3A_IMPORTERS = {"append_gate.py", "release_chain.py", "snapshot.py", "verify.py"}
 
 
 @pytest.mark.parametrize("method", LATER_STAGE_METHODS)
 def test_later_stage_methods_are_unimplemented(raw_repo, method):
     with raw_repo.snapshot() as snap:
         evaluator = policy.TreePolicy(snap, policy_version=policy.POLICY_VERSION, work=snap.work)
-        # record: migration steps 3 and 4 own modes, ancestors, export selection and attributes;
-        # step 2 implements names and aliases only
+        # record: PR3b owns export selection; PR4 owns attributes.
         with pytest.raises(NotImplementedError) as caught:
             getattr(evaluator, method)()
         assert type(caught.value) is NotImplementedError
         assert str(caught.value).startswith("receipt 0.7 M1 PR")
 
 
-def test_production_importers_are_the_step_2_sites():
+def test_production_importers_are_the_step_3a_sites():
     root = pathlib.Path(__file__).resolve().parents[1]
     importers = set()
     for source in (root / "src/receipt").glob("*.py"):
@@ -69,10 +68,9 @@ def test_production_importers_are_the_step_2_sites():
                     alias.name == "protected_tree" for alias in node.names
                 ):
                     importers.add(source.name)
-    # record: migration step 2 migrates the chain name helper, snapshot sibling names and
-    # append's alias screen; corpus, verify's composed custody and materialization wait
-    # for later steps and must not import the module yet
-    assert importers == STEP_2_IMPORTERS
+    # PR3a adds only verify.py: composed custody consumes the authenticated
+    # five-prefix name view and state mode selections at its existing barriers.
+    assert importers == STEP_3A_IMPORTERS
 
 
 @pytest.mark.parametrize("first,second", (("receipt.snapshot", "receipt.protected_tree"),
