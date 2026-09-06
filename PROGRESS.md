@@ -6,7 +6,8 @@ Implementing migration step 1 only: compatibility fixtures and an unused policy
 shell. Work is serial and offline, using the existing .venv. No version,
 changelog, production caller, or existing refusal changes are authorized.
 The pre-existing untracked issue-62.md is an input and is left untouched.
-No -o argument was supplied; final report destination: M1-PR1-REPORT.md.
+No -o filename was supplied. Final report destination:
+/tmp/receipt-07-m1-pr1-output.md (outside the implementation diff).
 
 ## Done
 
@@ -49,6 +50,13 @@ No -o argument was supplied; final report destination: M1-PR1-REPORT.md.
 - Completed retained spec-path, redirecting-environment and bounded-quote
   goldens (9 tests). Split captured expectations by census/D identifier; every
   Python test and JSON expectation file is below 1,500 lines.
+
+- Every new test file has passed alone: golden 247, directory 32, budgets 21,
+  inputs 9, D fixtures 55, precedence 36, consumer imports 85, shell 12.
+  Total additions: 497 tests. Both ignoreCase reruns and the final expanded
+  non-harness suite remain in progress.
+- Scope inspection: only src/receipt/protected_tree.py differs under src;
+  CHANGELOG.md, package version and existing source/tests are unchanged.
 
 ## Next
 
