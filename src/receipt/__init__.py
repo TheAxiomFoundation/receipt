@@ -22,10 +22,12 @@ tests/test_cli.py.
 
 Also shipped, and deliberately outside every verdict: non-authorizing
 emission-time evidence records (receipt.evidence). A record is
-manifest-shaped but signed under its own domain and stored outside the
+manifest-shaped but carries DSSE PAE framing with a detached Ed25519
+signature over its schema id and its own bytes, and is stored outside the
 closed release directory, so the authorizing verifier refuses it twice over
-— once at the closed-world schema check, once at the no-domain signature
-check. Its verifier is not wired into receipt.verify and no VerifyResult
+— once at the closed-world schema check, once at the exact-bytes signature
+check, which no record passes because the signed bytes are the frame and not
+the record. Its verifier is not wired into receipt.verify and no VerifyResult
 depends on it. Its gate is the refusal battery in tests/test_evidence.py.
 
 Pending extraction: waiver ratchet and chronology tiers.

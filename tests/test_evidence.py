@@ -1500,7 +1500,8 @@ def test_a_directory_that_verifies_still_takes_the_next_record(
 
 
 # --------------------------------------------------------------------------
-# Strict canonical input: what canonical.py would round, fold, or raise on.
+# Strict canonical input: what canonical.py would round, fold, raise on, or
+# re-escape into bytes no consumer can hold.
 # --------------------------------------------------------------------------
 
 #: One case per class the guard refuses, as a Python value a caller can hand

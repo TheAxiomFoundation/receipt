@@ -18,9 +18,10 @@ than of any caller's discipline (tests/test_evidence.py):
 2. **An evidence record's signature is not a manifest signature.** Manifest
    producer signatures are verified by `sign.verify_signature_bytes` over the
    exact manifest bytes with no domain — that function takes no domain
-   parameter at all. An evidence record is signed over ``DOMAIN + raw``, so
-   presenting one to the authorizing verifier fails the signature check even if
-   the schema check were somehow passed.
+   parameter at all. An evidence record is signed over ``PAE(schema id, record
+   bytes)``: DSSE pre-authentication framing, with a detached Ed25519 signature
+   beside the record. So presenting one to the authorizing verifier fails the
+   signature check even if the schema check were somehow passed.
 
 Either failure alone is sufficient. Both hold, and neither depends on a
 consumer remembering to keep the two apart.
@@ -29,16 +30,25 @@ Records also live outside the release directory. Note what does *not* keep them
 apart: this module's `RECORD_RE` and `PRODUCER_SIGNATURE_RE` are deliberately the
 same patterns as `release_chain`'s, because a record mirrors a manifest's
 filename layout on purpose. A record dropped into a release directory is
-therefore refused, but by three different mechanisms depending on what travels
-with it (tests/test_evidence.py):
+therefore refused — in four arrangements, by three mechanisms, depending on
+what travels with it (tests/test_evidence.py):
 
 - record, body and signature together — `_enumerate_manifest_files` raises
   "unknown file in closed release manifest directory", because `{stem}.body.json`
-  matches no pattern it knows.
-- record and signature alone — enumeration *accepts* them as a manifest/signature
-  pair, and the refusal lands one step later at `validate_manifest_schema`. This
-  is invariant 1 doing exactly the job it exists for.
-- record alone — enumeration raises for a missing producer signature.
+  matches no pattern it knows
+  (`test_planted_record_with_body_is_refused_at_enumeration`).
+- record alone — enumeration requires one witness receipt per configured
+  anchor, and asks for that before it looks for a producer signature, so a
+  record alone stops there
+  (`test_planted_record_alone_is_refused_for_a_missing_receipt`).
+- record and signature — the pair satisfies both filename patterns, and is
+  refused in the same place for the same missing receipts
+  (`test_planted_record_and_signature_are_refused_for_a_missing_receipt`).
+- record, signature and a correctly named witness sidecar — enumeration
+  *accepts* all three, counting the receipt without opening it, and the refusal
+  lands one step later at `validate_manifest_schema`. This is invariant 1 doing
+  exactly the job it exists for
+  (`test_planted_record_signature_and_receipt_die_at_the_schema`).
 
 The safety property holds in every arrangement; it is the closed-world schema
 check, not the filename grammar, that carries it. The release directory is
@@ -71,9 +81,22 @@ exactly: same regexes, same genesis rule, same four-digit filename limit.
 record as `{stem}.body.json`, canonical, and verification recomputes the
 digest. This is how the record schema stays closed while the body schema stays
 the domain's — the same move `state.jsonlSha256` makes for a journal. This
-module has no opinion about what a body contains. Two things about one are
-not translated into this module's words: a type canonical.py refuses outright
-leaves as its own ``TypeError``, and a pathological depth leaves as Python's ``RecursionError``
+module does not validate domain-specific body schemas. What it does enforce is
+the rule the body is stored under — canonical JSON plus one newline, checked at
+verification rather than merely hashed — and strict canonical input.
+
+Strict canonical input is what every body and every record is held to, at
+emission and at verification alike (`_canonical_strict`). Every value is walked,
+and every object key with it: canonical.py escapes a key exactly as it escapes a
+value, so a key holding a lone surrogate is refused for the reason a value is.
+Numbers are held by their canonical token rather than by the Python type that
+produced it — a token that reads as an integer outside ±(2**53 - 1) is refused
+whatever produced it, because an out-of-range integer *may* round (``2**53 + 1``
+does; ``2**53`` serializes exactly, and is outside the accepted range all the
+same) and no reader can be held to carry such a token exactly. Not every refusal
+the serializer can raise is translated into this module's words: a type
+canonical.py refuses outright — a tuple, a bytes value — leaves as its own
+``TypeError``, and a pathological depth leaves as Python's ``RecursionError``
 — a cyclic body at emission recurses in `_canonical_strict` before
 canonical.py can say "circular", and a body on disk nested deeper than the
 recursion limit recurses in ``json.loads`` itself. Both fail closed.
@@ -87,18 +110,32 @@ What v1 does not do
 -------------------
 
 RFC 3161 witnessing is deliberately out of v1. Because `emittedAtUtc` is a
-claim by the producer and nothing else, this module parses it and refuses a
-malformed one, but never uses it in a refusal — mirroring the release chain,
-where a claimed `createdAtUtc` is only ever checked *against* a witness's
-gen_time and is never trusted on its own. Adding `{stem}.{tsa}.tsr` sidecars
-later is expected to be additive — the filename and digest layout already
-matches the one `receipt.tsa` verifies for manifests — though no witness path
-is implemented or tested here, so that is a design expectation rather than a
-demonstrated one.
+claim by the producer and nothing else, this module checks it for syntax and
+calendar validity and refuses a malformed one
+(`test_malformed_emitted_at_is_refused`), but never uses it in a chronology or
+custody decision — mirroring the release chain, where a claimed `createdAtUtc`
+is only ever checked *against* a witness's gen_time and is never trusted on its
+own. Adding `{stem}.{tsa}.tsr` sidecars later is expected to be additive — the
+filename and digest layout already matches the one `receipt.tsa` verifies for
+manifests — though no witness path is implemented or tested here, so that is a
+design expectation rather than a demonstrated one. What the directory does with
+one today is refuse it, rather than ignore it
+(`test_tsa_sidecar_is_not_yet_accepted`).
 
 `verify_evidence_records` is not wired into `receipt.verify.run_verification`,
 and must not be. `VerifyResult.verdict` cannot depend on it; that is the whole
 point of the standing.
+
+It also reads a different subject. 0.6 puts the authorizing verdict on the tree
+object a commit names: `verify.run_verification` and
+`append_gate.verify_append_gate` take their bytes from `snapshot.TreeSnapshot`,
+for which the working tree and the index are never subjects.
+`verify_evidence_records` reads the checkout. That is right for an emission-side
+tool standing outside every verdict — the producer verifies and extends what it
+has just written, and no commit names those bytes yet — and it is what
+`_regular_file_bytes` bounds: a read-once contract, not a lock against a writer
+outside the emitter's own. A snapshot-reading verifier for records is later
+work, not a condition of this one.
 
 Consumers and projection
 ------------------------
@@ -106,11 +143,15 @@ Consumers and projection
 Any consumer can project these records one-way into its own envelope, because
 serialization here is deterministic and digests are stable: the record bytes
 are canonical JSON plus one newline, the digest is SHA-256 of exactly those
-bytes, and the signature covers ``DOMAIN`` followed by exactly those bytes
-including the trailing newline. A projection that wants to remain checkable
-must therefore carry the original bytes verbatim rather than re-serializing
-from parsed JSON. The projection is the consumer's; this package neither
-defines nor blesses one.
+bytes, and the signature covers ``PAE(schema id, record bytes)`` — those same
+bytes, trailing newline included, inside DSSE's pre-authentication framing. A
+consumer reconstructs the signed bytes as
+``b"DSSEv1 26 receipt/evidence-record/v1 " + LEN(raw) + b" " + raw``, where
+``LEN`` is the ASCII decimal byte length with no leading zeros
+(`test_the_frame_is_the_dsse_pre_authentication_encoding`). A projection that
+wants to remain checkable must therefore carry the original bytes verbatim
+rather than re-serializing from parsed JSON. The projection is the consumer's;
+this package neither defines nor blesses one.
 """
 
 from __future__ import annotations
@@ -170,9 +211,11 @@ class EvidenceRecordError(ValueError):
 class EvidenceSpec:
     """Consumer-committed constants for one evidence-record directory.
 
-    Like `ChainSpec`, this module ships machinery only: the directory, the
-    schema id and the producer fingerprint all arrive from the consumer's own
-    committed code, never from package defaults.
+    Like `ChainSpec`, this module ships machinery only, and the two anchors
+    are required consumer inputs with no defaults: where the records live, and
+    which producer key may write them. The other two fields do carry defaults,
+    and neither is a trust anchor — ``schema_version`` to this record type's
+    own v1 schema id, ``producer_public_key_filename`` to ``producer.pem``.
 
     ``schema_version`` is also the payload type of the frame every signature
     is made over (`_pae`). It used to sit beside a separate ``domain`` field,
@@ -422,16 +465,20 @@ def validate_evidence_record_schema(
     else:
         _sha256(previous, "previousRecordSha256")
 
-    # Parsed for well-formedness only. The producer's claimed emission time is
-    # never used in a refusal: with no witness to check it against there is
-    # nothing it could establish, and treating it as evidence is exactly the
-    # mistake the release chain avoids.
+    # Checked for syntax and calendar validity, and for nothing else. A
+    # malformed one is refused here; a well-formed one is never read into a
+    # chronology or custody decision, because with no witness to check it
+    # against there is nothing it could establish, and treating it as evidence
+    # is exactly the mistake the release chain avoids.
     try:
         parse_created_at(payload["emittedAtUtc"], "emittedAtUtc")
     except ReleaseChainError as exc:
         # Reuse the release chain's timestamp grammar, but never leak its
-        # exception type: every refusal from this module is an
-        # EvidenceRecordError.
+        # exception type: this module's own schema and strict-input checks
+        # refuse with an EvidenceRecordError. Not everything that leaves this
+        # module does — the producer key read in `verify_evidence_records`
+        # refuses in `sign`'s words, IO errors escape as raised, and a body
+        # type canonical.py refuses outright leaves as its own TypeError.
         raise EvidenceRecordError(str(exc)) from exc
 
     producer = _exact_keys(payload["producer"], {"repo", "branch"}, "producer")
@@ -511,9 +558,11 @@ def _canonical_strict(value: Any, label: str) -> None:
     refusal is an `EvidenceRecordError` naming the path to the value, rooted at
     the value handed in — ``evidence body: count``, ``evidence record:
     producer.repo``, ``evidence record: refs[1].sha256`` — and the class.
-    Everything else passes: ``True``, ``False``, ``None``, finite floats,
-    integers in range, strings without surrogates. Types canonical.py refuses
-    outright are left to it. So is recursion: a cyclic body recurses in this
+    Everything else passes: ``True``, ``False``, ``None``, integers in range,
+    finite floats whose canonical token is not an out-of-range integer token
+    and that are not negative zero, strings without surrogates. Types
+    canonical.py refuses outright are left to it. So is recursion: a cyclic
+    body recurses in this
     walk before canonical.py could say "circular", and leaves as Python's
     ``RecursionError`` — fail-closed, stated here, and not translated. And no
     refusal here asks the interpreter to spell an integer it will not: past
@@ -882,7 +931,8 @@ def _assert_records_directory_is_confined(
 def _enumerate_record_files(
     root: pathlib.Path, spec: EvidenceSpec
 ) -> list[tuple[pathlib.Path, pathlib.Path, pathlib.Path]]:
-    """Enumerate one closed records directory, after placing it on disk.
+    """Enumerate one closed records directory, after checking its filesystem
+    confinement.
 
     The confinement check stands here rather than in either caller so that
     reading and writing get the same answer about the same directory, and it
@@ -914,8 +964,10 @@ def _enumerate_record_files(
         if signature_match is not None:
             signatures[signature_match.group("stem")] = entry
             continue
-        # Checked last: `0000-<16 hex>.body.json` also ends in `.json`, so the
-        # body pattern must win before the record pattern is consulted.
+        # Checked last, and harmlessly: `RECORD_RE` is anchored and does not
+        # match `0000-<16 hex>.body.json`, so the order the three patterns are
+        # consulted in is free
+        # (`test_record_filename_grammar_is_deliberately_a_manifest_grammar`).
         if RECORD_RE.fullmatch(entry.name) is not None:
             records[entry.stem] = entry
             continue
@@ -982,6 +1034,13 @@ def verify_evidence_records(
     could not be told apart by is now `EvidenceVerification.directory_present`
     — the one thing a zero-record result does not otherwise say, and what a
     caller needs to refuse a mistyped `records_relative` on its own terms.
+
+    The pinned public key is read out of ``anchor_dir`` by `sign`, which
+    refuses a missing or non-regular one in its own words, as a `SignError`.
+    What else leaves this entry point in words other than this module's: IO
+    errors, as raised, and a ``RecursionError`` on a record or body nested
+    deeper than the interpreter's recursion limit, which recurses in
+    ``json.loads`` itself and is not translated.
     """
 
     key_spec = _sign.ProducerKeySpec(
@@ -1174,9 +1233,16 @@ def _exclusive_records_directory(directory: pathlib.Path) -> Iterator[None]:
 
     The lock is advisory and non-blocking, which is the fail-closed reading:
     a second emitter is told another one holds the directory rather than
-    queueing behind it or, worse, proceeding. `fcntl.flock` is POSIX, which
-    this package already requires (README): its state reads open through
-    directory descriptors.
+    queueing behind it or, worse, proceeding. It is advisory in the strict
+    sense: it binds the writers that take it, and every claim made here about
+    a second writer rests on the assumption that every writer to this directory
+    is an emitter that does. `fcntl.flock` is not standardized by POSIX, but it
+    is available on the POSIX platforms this package requires (README) — the
+    same platforms its guarded reader requires, and that reader is a component
+    ``lstat`` walk, one open of the leaf with ``O_NOFOLLOW | O_NONBLOCK``, an
+    ``fstat`` held to the regular inode the walk approved, and reads through
+    that descriptor (`release_chain._regular_file_bytes`, and this module's
+    near-copy of it).
 
     Only ``EAGAIN`` (``EWOULDBLOCK`` is the same number) says a second emitter
     holds it. A filesystem with no advisory locks answers ``ENOTSUP``, a
@@ -1220,14 +1286,21 @@ def emit_evidence_record(
     This is the producer-side half: the record is signed when it is emitted,
     not when some later release happens to sweep it up.
 
-    Three things are settled before any byte is written. The signing key is
-    compared to the spec's pin, because a key the verifier will refuse is a
-    fact the producer can know at emission time rather than one an auditor
-    discovers later; that comparison stands ahead of the `mkdir`, so a refused
-    emission leaves no directory behind. The records directory is placed on
-    disk, so a linked component cannot receive the write. And the directory is
-    held exclusively from enumeration through the last write, so the index
-    this emission claims is still free when it claims it.
+    Three things are settled before any byte of a record is written. The
+    signing key is compared to the spec's pin, because a key the verifier will
+    refuse is a fact the producer can know at emission time rather than one an
+    auditor discovers later. The records directory is checked for confinement —
+    no symlinked component, and not inside the release root as the filesystem
+    resolves it — before it is created, so a linked component is refused rather
+    than written through. The signing-key checks — decoding and the pin — and
+    the confinement check are the only ones ahead of the `mkdir`: a refusal
+    from any of them leaves no directory behind, while every later refusal
+    leaves the directory — possibly created empty by this call — and writes no
+    record or sidecar bytes. And the directory is held exclusively from
+    enumeration through the last write, so no second emitter that takes the
+    same lock can claim the index this one claims; the lock is advisory, so
+    that holds for the writers that take it, which every emitter does and
+    nothing else is assumed to.
 
     A fourth is settled inside that lock, before the index is: every record
     already in the directory is verified exactly as `verify_evidence_records`
@@ -1244,9 +1317,13 @@ def emit_evidence_record(
     written. The cost is one signature verification per record already there,
     bounded by the four-digit filename limit.
 
-    The record is created exclusively and written last: a record on disk
-    therefore implies its body and signature are already there, which is the
-    order enumeration reads them in.
+    The record is created exclusively and written last, after both sidecars,
+    so a record's presence implies its body and its signature were written
+    before it. It does not imply a complete or durable record: nothing here
+    fsyncs, and the exclusive create refuses an existing leaf and nothing more.
+    Nor is it the order enumeration reads them in — enumeration collects
+    whatever names the directory lists, in no specified order, and sorts the
+    records at the end.
     """
 
     signing_spki_sha256 = _signing_key_spki_sha256(private_key_pem)
@@ -1299,10 +1376,18 @@ def _write_evidence_record(
 
     The body and the payload are each held to strict canonical input before
     they are serialized (`_canonical_strict`): the body because this module
-    has no opinion about what it contains and canonical.py would round, fold
-    or raise on some of it without a word; the payload because ``producer`` and
-    ``body_schema`` are the caller's verbatim. Both stand ahead of the first
-    write, as everything that can refuse does.
+    does not validate what a domain event contains and canonical.py would
+    round, fold, re-escape or raise on some of it without a word; the payload
+    because ``producer`` and ``body_schema`` are the caller's verbatim. Both
+    stand ahead of the first write, and so does the verification of what is
+    already in the directory: every input and chain refusal is complete before
+    a sidecar byte is written. What is not ahead of the writes is the exclusive
+    create that binds the index — it comes after both sidecars — and the
+    sidecar writes themselves, which can fail on IO. A crash in that window
+    leaves an orphan body or signature, and the directory then refuses to
+    enumerate at all until they are cleared by hand
+    (`test_orphan_body_is_refused`, `test_orphan_signature_is_refused`):
+    fail-closed, and not self-healing.
     """
 
     # Everything already in the directory is verified before the index is
@@ -1336,8 +1421,10 @@ def _write_evidence_record(
         "body": {"schema": body_schema, "sha256": sha256_bytes(body_raw)},
         "refs": sorted(refs, key=lambda ref: (ref["kind"], ref["sha256"])),
     }
-    # Validate before writing anything: a refusal must not leave a partial
-    # record on disk for the verifier to trip over.
+    # Validate before writing anything: no input refusal leaves a partial
+    # record on disk for the verifier to trip over. A crash after the sidecar
+    # writes below still can, and the directory refuses those orphans rather
+    # than reading past them.
     _canonical_strict(payload, "evidence record")
     validate_evidence_record_schema(payload, spec)
     raw = canonical_document_bytes(payload)
@@ -1352,8 +1439,9 @@ def _write_evidence_record(
 
     body_path_for_record(record_path).write_bytes(body_raw)
     producer_signature_path_for_record(record_path).write_bytes(signature)
-    # Exclusive, and last: the create is the one step that cannot be racing a
-    # writer outside this lock, and a record's presence implies its sidecars'.
+    # Exclusive, and last: `O_EXCL` refuses an existing leaf, which is all it
+    # refuses — it is no bar against a writer outside this lock — and a
+    # record's presence implies its sidecars were written before it.
     try:
         descriptor = os.open(
             record_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666
