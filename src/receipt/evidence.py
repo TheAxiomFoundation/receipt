@@ -284,8 +284,26 @@ def _object_without_duplicates(
 
 
 def _exact_keys(value: Any, expected: set[str], label: str) -> dict[str, Any]:
+    """Require ``value`` to be an object whose keys are exactly ``expected``.
+
+    A key that is not a string is refused first, in this module's words. The
+    closed-world refusal below sorts the unknown keys to name them, and a set
+    holding an ``int`` beside strings has no order — so a caller's ref of
+    ``{"kind": ..., "sha256": ..., 1: 0, "extra": 0}`` left this module as a
+    bare ``TypeError`` from that sort, with the records directory created and
+    empty, because emission checks every ref here ahead of the payload's
+    strict guard. The same refusal now stands at each of the four objects this
+    closes — the record, ``producer``, ``body`` and every ref — so every
+    caller gets it, whichever layer is asked first.
+    """
+
     if type(value) is not dict:
         raise EvidenceRecordError(f"{label} must be an object")
+    for key in value:
+        if not isinstance(key, str):
+            raise EvidenceRecordError(
+                f"{label} has an object key that is not a string: {key!r}"
+            )
     actual = set(value)
     if actual != expected:
         missing = sorted(expected - actual)

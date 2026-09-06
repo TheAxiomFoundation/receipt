@@ -1983,6 +1983,131 @@ def test_a_hand_written_number_whose_canonical_token_is_out_of_range_is_refused(
 
 
 # --------------------------------------------------------------------------
+# Closed-world checks: a non-string key is refused before anything sorts it.
+# --------------------------------------------------------------------------
+
+#: The mixed shape: string keys the check knows, one it does not, and one that
+#: is not a string at all. A set holding an ``int`` beside strings has no
+#: order, so naming the unknown keys by sorting them raised a bare
+#: ``TypeError`` before this change.
+MIXED_KEYS = {1: 0, "extra": 0}
+
+
+def test_emission_refuses_a_ref_with_a_non_string_key_by_name(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+) -> None:
+    """Refs are checked entry by entry ahead of the payload's strict guard, so
+    a ref carrying a non-string key reached `_exact_keys` first — which left
+    this module as a bare ``TypeError`` (``'<' not supported`` between ``int``
+    and ``str``, in whichever order the set iterates) from the sort that names
+    unknown keys, with the records directory created and empty. The refusal is
+    the module's own, naming the ref, and no record file is written."""
+
+    private_pem, _ = keys
+    directory = tmp_path / RECORDS
+    mixed_ref = {"kind": "record", "sha256": "a" * 64, **MIXED_KEYS}
+    with pytest.raises(EvidenceRecordError) as exc:
+        emit_evidence_record(
+            tmp_path,
+            spec=spec,
+            private_key_pem=private_pem,
+            body=BODY,
+            body_schema=BODY_SCHEMA,
+            refs=[mixed_ref],  # type: ignore[list-item]
+            producer=PRODUCER,
+            emitted_at_utc=EMITTED,
+        )
+    assert str(exc.value) == "refs[0] has an object key that is not a string: 1"
+    assert _names(directory) == []
+
+
+@pytest.mark.parametrize(
+    "arguments, where",
+    [
+        pytest.param(
+            {"producer": {**PRODUCER, **MIXED_KEYS}, "body": BODY},
+            "evidence record: producer",
+            id="producer",
+        ),
+        pytest.param(
+            {"producer": PRODUCER, "body": {**BODY, **MIXED_KEYS}},
+            "evidence body: the top-level value",
+            id="body",
+        ),
+    ],
+)
+def test_emission_refuses_a_non_string_key_beside_string_keys_by_name(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+    arguments: dict,
+    where: str,
+) -> None:
+    """The same mixed shape on the two objects a caller hands over whole. The
+    strict guard stands ahead of the schema check for both, so these pass
+    before this change as well as after; what they pin is the vocabulary — a
+    non-string key is refused as a fact about the key, in the module's words,
+    at whichever layer sees it first."""
+
+    private_pem, _ = keys
+    directory = tmp_path / RECORDS
+    with pytest.raises(EvidenceRecordError) as exc:
+        emit_evidence_record(
+            tmp_path,
+            spec=spec,
+            private_key_pem=private_pem,
+            body_schema=BODY_SCHEMA,
+            refs=[],
+            emitted_at_utc=EMITTED,
+            **arguments,  # type: ignore[arg-type]
+        )
+    assert str(exc.value) == f"{where} has an object key that is not a string: 1"
+    assert _names(directory) == []
+
+
+@pytest.mark.parametrize(
+    "plant, label",
+    [
+        pytest.param(
+            lambda payload: payload.update(MIXED_KEYS), "evidence record", id="record"
+        ),
+        pytest.param(
+            lambda payload: payload["producer"].update(MIXED_KEYS),
+            "producer",
+            id="producer",
+        ),
+        pytest.param(
+            lambda payload: payload["body"].update(MIXED_KEYS), "body", id="body-block"
+        ),
+        pytest.param(
+            lambda payload: payload["refs"].append(
+                {"kind": "record", "sha256": "a" * 64, **MIXED_KEYS}
+            ),
+            "refs[0]",
+            id="ref",
+        ),
+    ],
+)
+def test_the_schema_check_refuses_a_non_string_key_at_every_layer(
+    spec: EvidenceSpec, plant, label: str
+) -> None:
+    """`validate_evidence_record_schema` has no strict guard in front of it, so
+    this is `_exact_keys`'s own refusal at each of the four objects it closes.
+    Every layer left as the bare ``TypeError`` before this change. Nothing on
+    disk can reach it: a JSON object key is a string by grammar, and the
+    loader hands the schema check only ``str`` keys — so there is no
+    verification-side case to write, and none is."""
+
+    payload = _valid_payload()
+    plant(payload)
+    with pytest.raises(EvidenceRecordError) as exc:
+        validate_evidence_record_schema(payload, spec)
+    assert str(exc.value) == f"{label} has an object key that is not a string: 1"
+
+
+# --------------------------------------------------------------------------
 # Spec construction.
 # --------------------------------------------------------------------------
 
