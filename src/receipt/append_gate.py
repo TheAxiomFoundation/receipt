@@ -649,6 +649,8 @@ def check_state_modes(
 ) -> None:
     """Require both selected state entries to retain their base modes."""
 
+    from receipt.protected_tree import classify_mode
+
     selected = entries or {}
     for relative in (
         candidate.spec.chain.state_relative,
@@ -657,7 +659,11 @@ def check_state_modes(
         path = relative.as_posix()
         candidate_entry = selected.get(path) or candidate.snapshot.entry(path)
         base_entry = base.tree.entry(path)
-        if candidate_entry.mode != base_entry.mode:
+        # Equality remains a journal/history obligation: consume mode facts
+        # without adding a regular-file refusal to this later boundary.
+        candidate_mode = classify_mode(candidate_entry.mode, candidate_entry.object_type)
+        base_mode = classify_mode(base_entry.mode, base_entry.object_type)
+        if candidate_mode.mode != base_mode.mode:
             raise AppendError(f"state file mode changed relative to base: {path}")
 
 

@@ -2190,21 +2190,31 @@ def verify_release_history_immutable(
 ) -> tuple[str, set[str], dict[str, GitEntry]]:
     """Compare release entries in two entered, authenticated tree snapshots."""
 
+    from receipt.protected_tree import POLICY_VERSION, ProtectionPlan, TreePolicy
+
     release_root = spec.release_root_relative.as_posix()
     base_entries = base.entries(release_root).as_dict()
     candidate_entries = candidate.entries(release_root).as_dict()
+    candidate_policy = TreePolicy(candidate, policy_version=POLICY_VERSION, work=candidate.work)
+    base_policy = TreePolicy(base, policy_version=POLICY_VERSION, work=base.work)
+    candidate_policy.observe_entries(candidate_entries.values())
+    base_policy.observe_entries(base_entries.values())
+    plan = ProtectionPlan(selected_prefixes=(release_root,), listing_scope=(),
+                          obligations=("modes",), use="release-history",
+                          mode_roles=tuple((p, "release-leaf") for p in sorted(candidate_entries)))
+    modes = candidate_policy.evaluate(plan, stage="modes")
 
     # The old working-directory enumeration refused every candidate link or
     # non-regular entry before comparing base bytes. Preserve that ordering
     # over the tree's modes, without opening any blob.
-    for relative, entry in sorted(candidate_entries.items()):
-        if entry.mode == "120000":
-            raise ReleaseChainError(f"release path is a symlink: {relative}")
-        if entry.mode not in {"100644", "100755"}:
-            raise ReleaseChainError(f"release path is not regular: {relative}")
+    modes.require(plan.use, render=_history_mode_error)
 
     for relative, prior in sorted(base_entries.items()):
-        if prior.mode not in {"100644", "100755"}:
+        prior_plan = ProtectionPlan(listing_scope=(), obligations=("modes",),
+                                   use="base-history", mode_roles=((relative, "release-leaf"),))
+        prior_view = base_policy.evaluate(prior_plan, stage="modes")
+        prior_mode = prior_view.mode_facts[relative, "release-leaf"]
+        if prior_view.finding_for(prior_plan.use) is not None:
             raise ReleaseChainError(
                 f"base release entry has non-regular git mode {prior.mode}: {relative}"
             )
@@ -2214,7 +2224,7 @@ def verify_release_history_immutable(
                 f"existing release file was deleted relative to "
                 f"{base.commit}: {relative}"
             )
-        if current.mode != prior.mode:
+        if modes.mode_facts[relative, "release-leaf"].mode != prior_mode.mode:
             raise ReleaseChainError(
                 f"existing release file mode changed relative to {base.commit}: "
                 f"{relative} ({prior.mode} -> {current.mode})"
@@ -2229,6 +2239,12 @@ def verify_release_history_immutable(
         set(candidate_entries) - set(base_entries),
         base_entries,
     )
+
+
+def _history_mode_error(finding) -> ReleaseChainError:
+    if finding.kind == "symlink":
+        return ReleaseChainError(f"release path is a symlink: {finding.path}")
+    return ReleaseChainError(f"release path is not regular: {finding.path}")
 
 
 def _folded_parts(path: str) -> tuple[str, ...]:
