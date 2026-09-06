@@ -404,3 +404,31 @@ def test_unrepresentable_mapping_name_keeps_primitive_refusal():
     assert finding.kind == "name"
     assert finding.raw_path is None
     assert finding.detail == "tree entry name cannot be represented as Git tree-name bytes: '\\ud800'"
+
+
+@pytest.mark.parametrize("targets,operation,position", (
+    (("a/b/c", "A/b"), "reached-component-fold", (1, 0, 1, 0, 3, 0)),
+    (("A/b", "a/b/c"), "diagnostic-fold", (1, 0, 1, 0, 1, 1, 3)),
+))
+def test_target_order_locates_the_same_unfoldable_witness(raw_repo, targets, operation, position):
+    commit = raw_repo.commit(((b"a/b/bad\xff", "100644"),))
+    with raw_repo.snapshot(commit) as snap:
+        finding = evaluator(snap).evaluate(plan(configured_alias_targets=targets), stage="aliases").findings[0]
+        assert finding.operation == operation
+        assert finding.position == position
+        assert finding.detail == "tree entry name is not valid UTF-8 for folding"
+
+
+@pytest.mark.parametrize("exists", (False, True))
+def test_partial_empty_listing_root_keeps_its_authenticated_tree_identity(raw_repo, exists):
+    commit = raw_repo.commit(empty=("protected",) if exists else ())
+    value = plan(listing_scope=("protected",), ancestor_listing_scope=())
+    with raw_repo.snapshot(commit) as snap:
+        view = evaluator(snap).evaluate(value, stage="suffixes")
+        assert view.listings["protected"] == {}
+        oid = view.listing_tree_ids["protected"]
+        assert bool(oid) == exists
+        if exists:
+            assert oid == snap.entry("protected").object_id
+        with pytest.raises(TypeError):
+            view.listing_tree_ids["protected"] = None

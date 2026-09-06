@@ -270,7 +270,7 @@ class _NameFacts:
                         path=listed, name=part,
                     )
                 except _Refusal:
-                    if winner is not None:
+                    if winner is not None and winner[0] <= node.continuing:
                         self.path_fold(listed, operation="diagnostic-fold",
                             position=(1, ordinal, 1, winner[0], winner[1], 1))
                     raise
@@ -487,7 +487,7 @@ class TreePolicy:
     work: snapshot.SnapshotWork = field(kw_only=True)
     _facts: _NameFacts = field(default_factory=_NameFacts, init=False, repr=False, compare=False)
     _entries: dict[str, snapshot.GitEntry] = field(default_factory=dict, init=False, repr=False, compare=False)
-    _scopes: dict[str, None] = field(default_factory=dict, init=False, repr=False, compare=False)
+    _scopes: dict[str, str | None] = field(default_factory=dict, init=False, repr=False, compare=False)
     _runs: dict[ProtectionPlan, _NameRun] = field(default_factory=dict, init=False, repr=False, compare=False)
     _views: WeakValueDictionary = field(default_factory=WeakValueDictionary, init=False, repr=False, compare=False)
     _selections: WeakValueDictionary = field(default_factory=WeakValueDictionary, init=False, repr=False, compare=False)
@@ -516,9 +516,10 @@ class TreePolicy:
         counters and late limits before deduplicating immutable metadata.
         """
         self.snapshot._batch()
-        entries = self.snapshot.entries(prefix).as_dict(include_trees=True)
+        listing = self.snapshot.entries(prefix)
+        entries = listing.as_dict(include_trees=True)
         self._entries.update(entries)
-        self._scopes[prefix] = None
+        self._scopes[prefix] = listing.tree_oid
         return entries
 
     def _validate_view(self, view: ProtectedTreeView) -> None:
@@ -572,6 +573,7 @@ class TreePolicy:
             names=tuple(entries),
             listings=MappingProxyType({p: MappingProxyType(dict(v)) for p, v in children.items()}),
             listing_scopes=plan.listing_scope,
+            listing_tree_ids=MappingProxyType({p: self._scopes[p] for p in plan.listing_scope}),
             fold_index=MappingProxyType({p: f for p, f in self._facts.folds.items() if isinstance(f, str)}),
             findings=tuple(run.findings), completed=frozenset(run.completed),
             refused=frozenset(f.stage for f in run.findings),
@@ -621,6 +623,7 @@ class ProtectedTreeView:
     names: tuple[str, ...]
     listings: Mapping[str, Mapping[str, snapshot.GitEntry]]
     listing_scopes: tuple[str, ...]
+    listing_tree_ids: Mapping[str, str | None]
     fold_index: Mapping[str, str]
     findings: tuple[Finding, ...]
     completed: frozenset[str]

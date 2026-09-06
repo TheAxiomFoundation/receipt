@@ -36,8 +36,13 @@ def test_repeated_and_failed_listing_admission_identical(raw_repo, monkeypatch, 
     commit = raw_repo.commit((("protected/nested/leaf", "100644"),) + extras)
     monkeypatch.setattr(snapshot, "MAX_PATH_BYTES_TOTAL", ceiling)
     results = []
+    original_charge = snapshot.TreeSnapshot._charge_path_bytes
     for new in (False, True):
-        calls = []
+        calls, charged_paths = [], []
+        def charge(subject, raw):
+            charged_paths.append(raw)
+            return original_charge(subject, raw)
+        monkeypatch.setattr(snapshot.TreeSnapshot, "_charge_path_bytes", charge)
         with raw_repo.snapshot(commit) as snap:
             value = plan()
             subject = policy.TreePolicy(snap, policy_version=policy.POLICY_VERSION, work=snap.work) if new else None
@@ -49,7 +54,7 @@ def test_repeated_and_failed_listing_admission_identical(raw_repo, monkeypatch, 
                         view.require(value.use, render=_protected_name_error)
                     else:
                         old_names(snap.entries("").as_dict(include_trees=True), value)
-                calls.append((outcome(call), asdict(snap.work)))
+                calls.append((outcome(call), asdict(snap.work), tuple(charged_paths)))
         results.append(calls)
     assert results[0] == results[1]
 
