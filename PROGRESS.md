@@ -2,13 +2,15 @@
 
 ## State
 
-Round-1 fold in progress, starting from `2144f07`. Incorporate F1–F8 from
-`docs/design/REVIEW-r1-m1.md`, reproduce both new probes, and rerun the
-embedded drivers and both test suites. The existing record is committed at
+Round-1 fold complete, starting from `2144f07`. Incorporated F1–F8 from
+`docs/design/REVIEW-r1-m1.md`, reproduced both new probes, and reran the
+embedded drivers and both test suites. The updated record is committed at
 `docs/design/0.7-m1-protected-tree-policy.md` on
 `design/0.7-m1-protected-tree-policy`, based on
-`e404d59298c972993b268494c726472a2613f3b3`. The final round-1 report will use
-`/tmp/receipt-07-m1-output.md` unless a different `-o` path is supplied.
+`e404d59298c972993b268494c726472a2613f3b3`. The final round-1 report is
+`/tmp/receipt-07-m1-output.md`, containing finding-by-finding new record
+line numbers and F1/F2 output. This reuses the prior output path because no
+different `-o` path was supplied; it now holds the report rather than a record copy.
 Source, tests and CONTRIBUTING remain byte-identical to v0.6.0.
 The supplied `issue-62.md` remains an untracked input. Nothing was pushed.
 
@@ -54,10 +56,22 @@ The supplied `issue-62.md` remains an untracked input. Nothing was pushed.
   explicitly identified 1134 as its decorator, correcting the review's nit.
 - Retained the round artifact in the repository and replaced the narrated
   validation row with its findings and the changes they caused.
+- Reran the edited record's three embedded drivers: 43 matrix cases, eight
+  contract cases, four historical controls, four repeat-charge rows and four
+  interleave cases; also reran both isolated payload-reader controls. Matrix
+  outcomes, refusal strings and phase statuses match the review's run; only
+  generated commit IDs and successful custody signing/time metadata were
+  excluded from comparison. Interleave output matches the independent rerun.
+- Reran non-harness tests: 1,466 passed, zero skips, exit 0, 348.80 seconds.
+  Reran all authenticated harnesses: 108 passed, zero skips, exit 0, 284.48
+  seconds. Reconfirmed 43/28/17/20 collection and all 11 source SHA-256 checks.
+  Logs and reproduction summaries are under `/tmp/receipt-m1-fold-r1/`.
+- Final independent audit found no blockers against F1–F8 or the review's
+  five approval requirements. This is a fold audit, not new Opus approval.
+- Wrote the final report and committed validation evidence. Rechecked that
+  source, tests and CONTRIBUTING still match v0.6.0; nothing was pushed.
 
 ## Next
 
-1. Rerun the updated drivers and finish 1,466 + 108 tests with zero skips.
-2. Review the resulting record and commit final validation evidence.
-3. Write the final report with new record line numbers and F1/F2 output.
-   Do not push. Implementation and consumer upgrades remain future PR work.
+No work remains in this design-only fold. Implementation, permanent test
+fixtures and consumer upgrade runs belong to the future PRs in the record.
