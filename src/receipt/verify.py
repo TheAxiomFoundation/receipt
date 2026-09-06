@@ -44,8 +44,8 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
-from receipt import __version__
-from receipt.protected_tree import POLICY_VERSION, ProtectionPlan, TreePolicy
+from receipt import __version__, snapshot as snapshot_module
+from receipt.protected_tree import POLICY_VERSION, ProtectionPlan, TreePolicy, classify_mode
 from receipt.corpus import (
     CI_ATTESTED_TIER,
     GATE_TIERS,
@@ -673,7 +673,11 @@ def run_verification(
                 normalized_chain.prefix_relative,
                 normalized_chain.anchor_relative,
             )
-            policy = TreePolicy(candidate, policy_version=POLICY_VERSION, work=candidate.work)
+            # Keep the existing replaceable reader protocol used by composition
+            # callers. Only the concrete authenticated reader can issue views;
+            # supplied mappings remain compatibility evidence, never authority.
+            policy = (TreePolicy(candidate, policy_version=POLICY_VERSION, work=candidate.work)
+                      if type(candidate) is snapshot_module.TreeSnapshot else None)
             custody_plan = ProtectionPlan.chain_names(
                 prefixes,
                 repertoire=chain_repertoire,
@@ -683,8 +687,16 @@ def run_verification(
                 ),
                 use="custody", anchor_origin="tree",
             )
-            names = policy.evaluate(custody_plan, stage="suffixes")
-            names.require(custody_plan.use, render=_protected_name_error)
+            if policy is None:
+                _screen_protected_tree_names(
+                    candidate.entries("").as_dict(include_trees=True), prefixes,
+                    repertoire=chain_repertoire,
+                    release_directories=(normalized_chain.release_root_relative,
+                                         normalized_chain.manifest_relative),
+                )
+            else:
+                names = policy.evaluate(custody_plan, stage="suffixes")
+                names.require(custody_plan.use, render=_protected_name_error)
 
             def state_blob(relative: pathlib.PurePosixPath) -> bytes:
                 display = relative.as_posix()
@@ -696,6 +708,13 @@ def run_verification(
                             f"state file is missing or not a regular file: {display}"
                         ) from exc
                     raise
+                if policy is None:
+                    # The legacy state protocol exposes mode only. This does
+                    # not bind an object type or authorize a Git payload read.
+                    finding = classify_mode(entry.mode, "blob").finding(display, "state-leaf")
+                    if finding is not None:
+                        raise _custody_state_error(finding)
+                    return candidate.blob(entry, limit=MAX_JOURNAL_BYTES)
                 policy.observe_entries((entry,))
                 state_plan = replace(custody_plan, obligations=("modes",), listing_scope=(),
                                      mode_roles=((display, "state-leaf"),), phase="state")
@@ -722,12 +741,13 @@ def run_verification(
                     # the materializer facade for PR3b. Consume its actual
                     # paths, including the effect of overlapping prefixes.
                     materialized_entries = materialized.entries
-                    selected_paths = tuple(sorted(materialized_entries))
-                    shape_plan = replace(custody_plan, obligations=("ancestors", "modes"),
-                                         ancestor_paths=selected_paths,
-                                         mode_roles=tuple((p, "export-leaf") for p in selected_paths))
-                    shapes = policy.evaluate(shape_plan, stage="modes")
-                    shapes.require(shape_plan.use, render=_base_shape_error)
+                    if policy is not None:
+                        selected_paths = tuple(sorted(materialized_entries))
+                        shape_plan = replace(custody_plan, obligations=("ancestors", "modes"),
+                                             ancestor_paths=selected_paths,
+                                             mode_roles=tuple((p, "export-leaf") for p in selected_paths))
+                        shapes = policy.evaluate(shape_plan, stage="modes")
+                        shapes.require(shape_plan.use, render=_base_shape_error)
                     candidate.refuse_transforming_attributes(
                         materialized_entries.values()
                     )
