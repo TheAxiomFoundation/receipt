@@ -2298,6 +2298,9 @@ def verify_base_release_chain(
     materialized nor screened, and caller anchors are not bound to the base tree.
     """
 
+    from dataclasses import replace
+    from receipt.protected_tree import POLICY_VERSION, ProtectionPlan, TreePolicy
+
     normalized = _normalized_spec(spec)
     prefixes = (
         normalized.release_root_relative,
@@ -2307,14 +2310,25 @@ def verify_base_release_chain(
     )
     if anchor_dir is None:
         prefixes += (normalized.anchor_relative,)
-    _screen_protected_tree_names(
-        base.entries("").as_dict(include_trees=True),
+    policy = TreePolicy(base, policy_version=POLICY_VERSION, work=base.work)
+    plan = ProtectionPlan.chain_names(
         prefixes,
         repertoire=normalized.name_repertoire,
         release_directories=(
             normalized.release_root_relative, normalized.manifest_relative
         ),
+        use="base-chain", anchor_origin="tree" if anchor_dir is None else "caller",
     )
+    names = policy.evaluate(plan, stage="suffixes")
+    names.require(plan.use, render=_protected_name_error)
+    shape_plan = replace(
+        plan, obligations=("ancestors", "modes"), ancestor_paths=plan.selected_prefixes,
+        mode_roles=tuple((path, "export-leaf") for path, entry in sorted(names.entries.items())
+                         if entry.mode != "040000" and any(
+                             path == prefix or path.startswith(prefix + "/")
+                             for prefix in plan.selected_prefixes)),
+    )
+    shapes = policy.evaluate(shape_plan, stage="modes")
     with tempfile.TemporaryDirectory(prefix="receipt-release-base-") as name:
         destination = pathlib.Path(name)
         with base.materialize(
@@ -2322,6 +2336,10 @@ def verify_base_release_chain(
             destination,
             repertoire=normalized.name_repertoire,
         ) as materialized:
+            # PR3b owns export selection. Keep its full admission/walk/mode/name
+            # schedule ahead of consuming these metadata-only shape findings.
+            # The snapshot walk facade renders ancestors during that selection.
+            shapes.require(shape_plan.use, render=_base_shape_error)
             base.refuse_transforming_attributes(materialized.entries.values())
             if anchor_dir is None:
                 materialized.anchor_set_sha256(normalized)
@@ -2338,6 +2356,16 @@ def verify_base_release_chain(
                 enforce_production_pins=enforce_production_pins,
                 clock_skew_seconds=clock_skew_seconds,
             )
+
+
+def _base_shape_error(finding) -> SnapshotError:
+    from receipt.snapshot import _ancestor_shape_error
+
+    if finding.stage == "ancestors":
+        return _ancestor_shape_error(finding, protected=True)
+    return SnapshotError(
+        f"base tree entry has non-regular mode {finding.mode}: {finding.path}"
+    )
 
 
 def _format_time(value: datetime) -> str:
