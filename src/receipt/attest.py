@@ -21,6 +21,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from receipt.canonical import canonical_bytes
 
@@ -222,13 +223,51 @@ def commit_age_seconds(
 
 
 def repository_slug(root: pathlib.Path) -> str:
-    """Derive the GitHub ``owner/name`` slug using the pinned parser."""
+    """Derive an exact GitHub ``owner/name`` from an HTTPS, SSH or SCP origin.
 
-    url = git_output(root, "remote", "get-url", "origin")
-    match = re.search(r"github\.com[:/]+([^/]+/[^/.]+)", url)
-    if not match:
-        raise ProvenanceError(f"cannot derive repository slug from {url!r}")
-    return match.group(1)
+    URL authorities may carry a user and port; host comparison ignores ASCII case.
+    One trailing slash and a terminal ``.git`` are removed, preserving periods
+    inside the repository name. Queries, fragments and other path shapes refuse.
+    """
+
+    # Preserve the configured value's whitespace and control bytes for the
+    # guard below; only the command's one framing newline may be removed.
+    raw_url = subprocess.check_output(
+        ["git", "remote", "get-url", "origin"], cwd=root, stderr=subprocess.PIPE
+    )
+    url = raw_url.removesuffix(b"\n").decode("utf-8", errors="surrogateescape")
+    try:
+        if "?" in url or "#" in url or any(
+            character.isspace() or ord(character) < 32 for character in url
+        ):
+            raise ValueError
+        if "://" in url:
+            parsed = urlsplit(url)
+            if parsed.scheme not in {"https", "ssh"} or not re.fullmatch(
+                r"(?:[^@:/\s]+@)?github\.com(?::[0-9]+)?",
+                parsed.netloc,
+                re.IGNORECASE | re.ASCII,
+            ):
+                raise ValueError
+            # Accessing port validates its numeric range as well as its syntax.
+            _ = parsed.port
+            path = parsed.path.removeprefix("/")
+        else:
+            match = re.fullmatch(
+                r"[^@:/\s]+@github\.com:(.+)", url, re.IGNORECASE | re.ASCII
+            )
+            if match is None:
+                raise ValueError
+            path = match.group(1)
+        owner, name = path.removesuffix("/").split("/")
+        name = name.removesuffix(".git")
+        if owner in {".", ".."} or name in {".", ".."}:
+            raise ValueError
+        return _repository_slug(f"{owner}/{name}")
+    except ValueError:
+        raise ProvenanceError(
+            f"cannot derive repository slug from {url!r}"
+        ) from None
 
 
 def extract_certificate_identities(payload: object) -> set[str]:
