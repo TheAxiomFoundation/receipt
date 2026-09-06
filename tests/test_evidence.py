@@ -1735,6 +1735,142 @@ def test_values_at_the_edge_of_strict_input_are_accepted(
 
 
 # --------------------------------------------------------------------------
+# Strict canonical input, at the edges the guard first drew: object keys.
+# --------------------------------------------------------------------------
+
+#: A key is held to the same string rule as a value. Each of these is a Python
+#: string of one or two surrogate code points — the explicit pair is two code
+#: points, not the astral character they would pair into — and each emitted,
+#: signed and verified green as a body key before this change: the dict branch
+#: checked a key's type and walked only its value. The fragment is the code
+#: point the refusal names.
+SURROGATE_KEYS = [
+    pytest.param("\ud800", "U+D800", id="high-surrogate"),
+    pytest.param("\udc00", "U+DC00", id="low-surrogate"),
+    pytest.param("\ud83d\ude00", "U+D83D", id="pair-as-two-code-points"),
+]
+#: Where a keyed object can sit in a body: at the top, inside an object, and
+#: inside an array. The path the refusal names is the container's.
+KEY_PLACEMENTS = [
+    pytest.param(lambda key: {key: 1}, "the top-level value", id="top-level"),
+    pytest.param(lambda key: {"outer": {key: 1}}, "outer", id="inside-an-object"),
+    pytest.param(lambda key: {"outer": [{key: 1}]}, "outer[0]", id="inside-an-array"),
+]
+
+
+@pytest.mark.parametrize("place, where", KEY_PLACEMENTS)
+@pytest.mark.parametrize("key, code_point", SURROGATE_KEYS)
+def test_emission_refuses_a_body_key_holding_a_lone_surrogate(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+    emitted: pathlib.Path,
+    key: str,
+    code_point: str,
+    place,
+    where: str,
+) -> None:
+    """canonical.py escapes a key exactly as it escapes a value, so a key
+    holding a lone surrogate is re-escaped rather than refused and the signed
+    bytes carry a key no UTF-8 consumer can hold. The guard refuses it before
+    anything is written, naming the container and the key."""
+
+    private_pem, _ = keys
+    directory = tmp_path / RECORDS
+    before = _names(directory)
+    with pytest.raises(EvidenceRecordError) as exc:
+        emit_evidence_record(
+            tmp_path,
+            spec=spec,
+            private_key_pem=private_pem,
+            body=place(key),
+            body_schema=BODY_SCHEMA,
+            refs=[],
+            producer=PRODUCER,
+            emitted_at_utc=EMITTED,
+        )
+    message = str(exc.value)
+    assert message.startswith(f"evidence body: {where} has an object key {key!r} ")
+    assert f"lone surrogate {code_point}" in message
+    assert _names(directory) == before
+
+
+#: JSON text has no way to spell the pair as two code points: the parser pairs
+#: ``\\ud83d\\ude00`` into U+1F600, canonical.py writes that character raw,
+#: and the escaped spelling is then refused for being non-canonical — the
+#: right refusal, and not this one. Only a lone surrogate reaches the guard
+#: from a file.
+LONE_SURROGATE_KEYS = SURROGATE_KEYS[:2]
+
+
+@pytest.mark.parametrize("key, code_point", LONE_SURROGATE_KEYS)
+def test_a_hand_written_body_key_holding_a_lone_surrogate_is_refused(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+    emitted: pathlib.Path,
+    anchor_dir: pathlib.Path,
+    key: str,
+    code_point: str,
+) -> None:
+    """The verifier's side. A body whose key is spelled ``"\\ud800"`` parses,
+    re-escapes to the bytes it was read from, and hashes to what the record
+    recorded, so it verified green before this change. The refusal is the
+    strict-input one, naming the key — not the canonical or the digest one,
+    which the hand-written bytes satisfy."""
+
+    private_pem, _ = keys
+    escaped = "".join(f"\\u{ord(char):04x}" for char in key)
+    body_raw = ('{"' + escaped + '":1}\n').encode("ascii")
+    # canonical.py renders the key back to exactly these bytes, so the body is
+    # canonical and the refusal reached is the strict one.
+    assert body_raw == canonical_document_bytes({key: 1})
+    emitted.with_name(f"{emitted.stem}.body.json").write_bytes(body_raw)
+    _resign_in_place(
+        emitted,
+        spec,
+        private_pem,
+        lambda payload: payload["body"].__setitem__("sha256", sha256_bytes(body_raw)),
+    )
+    with pytest.raises(EvidenceRecordError) as exc:
+        verify_evidence_records(tmp_path, spec=spec, anchor_dir=anchor_dir)
+    message = str(exc.value)
+    assert message.startswith(
+        f"evidence body: the top-level value has an object key {key!r} "
+    )
+    assert f"lone surrogate {code_point}" in message
+    assert "canonical JSON plus one newline" not in message
+    assert "digest mismatch" not in message
+
+
+def test_an_astral_body_key_is_accepted(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+    anchor_dir: pathlib.Path,
+) -> None:
+    """U+1F600 is one code point, and canonical.py orders keys by UTF-16 code
+    unit for exactly such keys. It passes before this change as well as
+    after, and is here for that reason: the rule is about surrogate code
+    points, not about the plane a key lives in."""
+
+    private_pem, _ = keys
+    body = {"\U0001F600": 1, "a": 2}
+    emit_evidence_record(
+        tmp_path,
+        spec=spec,
+        private_key_pem=private_pem,
+        body=body,
+        body_schema=BODY_SCHEMA,
+        refs=[],
+        producer=PRODUCER,
+        emitted_at_utc=EMITTED,
+    )
+    result = verify_evidence_records(tmp_path, spec=spec, anchor_dir=anchor_dir)
+    assert result.records[0].body_raw == canonical_document_bytes(body)
+
+
+# --------------------------------------------------------------------------
 # Spec construction.
 # --------------------------------------------------------------------------
 

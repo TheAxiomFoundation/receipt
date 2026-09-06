@@ -456,7 +456,12 @@ def _canonical_strict(value: Any, label: str) -> None:
     ``"\\ud800"`` and Python will parse — is re-escaped rather than refused,
     so the bytes carry a value no UTF-8 consumer can hold, and round-trip
     equal on this side. An object key that is not a string leaves the
-    serializer as an ``AttributeError`` from its sort key.
+    serializer as an ``AttributeError`` from its sort key. A key that *is* a
+    string is escaped exactly as a value is, so a key holding a lone surrogate
+    is re-escaped too — and until this guard walked keys, the dict branch
+    checked a key's type and walked only its value, so ``{"\\ud800": 1}``
+    emitted, signed and verified green at every depth. Every key is now held
+    to the same string rule as every value, ahead of its value.
 
     Per #34's second half this is one validator applied at every boundary
     rather than a check per site. Emission runs it on the body and on the
@@ -477,6 +482,16 @@ def _canonical_strict(value: Any, label: str) -> None:
         where = path if path else "the top-level value"
         raise EvidenceRecordError(f"{label}: {where} {reason}")
 
+    def lone_surrogate(text: str) -> str | None:
+        """The fact about the first surrogate code point in ``text``, or None."""
+        for position, char in enumerate(text):
+            if 0xD800 <= ord(char) <= 0xDFFF:
+                return (
+                    f"contains a lone surrogate U+{ord(char):04X} at index "
+                    f"{position}, which no UTF-8 consumer can hold"
+                )
+        return None
+
     def walk(item: Any, path: str) -> None:
         if item is None or item is True or item is False:
             return
@@ -495,13 +510,9 @@ def _canonical_strict(value: Any, label: str) -> None:
                 refuse(path, "is negative zero, which canonical JSON folds to 0")
             return
         if isinstance(item, str):
-            for position, char in enumerate(item):
-                if 0xD800 <= ord(char) <= 0xDFFF:
-                    refuse(
-                        path,
-                        f"contains a lone surrogate U+{ord(char):04X} at "
-                        f"index {position}, which no UTF-8 consumer can hold",
-                    )
+            fact = lone_surrogate(item)
+            if fact is not None:
+                refuse(path, fact)
             return
         if isinstance(item, list):
             for position, entry in enumerate(item):
@@ -511,6 +522,12 @@ def _canonical_strict(value: Any, label: str) -> None:
             for key, entry in item.items():
                 if not isinstance(key, str):
                     refuse(path, f"has an object key that is not a string: {key!r}")
+                # The key first, through the same check as a value: the path
+                # the refusal names is the container's, and the key is named
+                # in it, since a surrogate cannot be spelled into a path.
+                fact = lone_surrogate(key)
+                if fact is not None:
+                    refuse(path, f"has an object key {key!r} that {fact}")
                 walk(entry, f"{path}.{key}" if path else key)
             return
 
