@@ -4,6 +4,37 @@ Every entry says what changed and what an auditor can conclude from it that
 they could not before. Refusals are named as refusals: a check added here is an
 input the package used to accept, or accept for the wrong reason.
 
+## 0.6.1
+
+Two keyring corrections. Both are refusals: values 0.6.0 accepted, one of them
+into a verdict it had no business reaching.
+
+- `KeyringSpec` requires an exact `int` threshold between 1 and the number of
+  current keys, and refuses anything else at construction with
+  `keyring threshold must be an integer between 1 and the number of current keys; found=nan`.
+  0.6.0 only compared the threshold, so `True`, `1.5`, `float("inf")` and
+  `float("nan")` all constructed a keyring. NaN was the one that mattered:
+  every comparison against it is false, so `len(satisfied) < threshold` was
+  false too and `verify_threshold` returned a verification with zero satisfied
+  signatures — a keyring that vouched for an empty signature map. An auditor
+  can now conclude that a keyring which exists names a real signature count.
+  The two existing threshold refusals keep their exact texts, and every
+  integer threshold constructs as before.
+
+- `verify_any_generation` takes `allow_legacy: bool = True`. The default is
+  the 0.6.0 behavior — the current generation first, then each retired one in
+  declaration order — so no existing call site changes. Saying `False` tries
+  no retired key and refuses a retired key_id presented in the public-key map
+  with the text the threshold call already raises for the same situation,
+  `legacy key_id refused for new material: 'old-root'`, before any signature
+  is verified; the required-key-material check then narrows to the current
+  generation, and a retired signature reaches the existing exhaustion refusal
+  with `tried=` naming the current generation alone. 0.6.0 offered no per-call
+  choice: an envelope in this shape carrying new material was checked against
+  retired keys with no way for the caller to say otherwise. The keyword is
+  held to the exact-bool discipline `verify_threshold` holds its own to
+  (`allow_legacy must be a bool`).
+
 ## 0.6.0
 
 ### Commit and tree subjects (#52, #55, #56, #57; breaking)

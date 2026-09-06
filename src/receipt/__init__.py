@@ -23,4 +23,4 @@ tests/test_cli.py.
 Pending extraction: waiver ratchet and chronology tiers.
 """
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
