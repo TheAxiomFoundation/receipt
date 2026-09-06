@@ -298,7 +298,7 @@ def test_composed_old_new_work_and_read_barriers(signed_repo, monkeypatch, fault
         print("composed", fault, "events", len(events), "work", results[1][2])
 
 
-@pytest.mark.parametrize("fault", ("clean", "mode", "ancestor", "missing", "empty"))
+@pytest.mark.parametrize("fault", ("clean", "mode", "ancestor", "missing", "empty", "release-root-blob"))
 @pytest.mark.parametrize("caller_anchors", (False, True))
 @pytest.mark.parametrize("ceiling", (80, 10000000))
 def test_base_chain_old_new_work(signed_repo, monkeypatch, fault, caller_anchors, ceiling):
@@ -306,8 +306,13 @@ def test_base_chain_old_new_work(signed_repo, monkeypatch, fault, caller_anchors
     prefix = str(signed_repo.chain.prefix_relative)
     parent = state.rpartition("/")[0]
     extras = {"clean": (), "mode": ((state, "120000"),), "ancestor": ((parent, "120000"),),
-              "missing": (), "empty": ()}[fault]
+              "missing": (), "empty": (), "release-root-blob": (("releases", "100644"),)}[fault]
     remove = (state, prefix) if fault == "ancestor" else (state,) if fault in {"missing", "empty"} else ()
+    if fault == "release-root-blob":
+        # The outer regular prefix subsumes manifest/anchor requests. Preserve
+        # the facade's acceptance until the directory reader owns its refusal.
+        with signed_repo.snapshot() as original:
+            remove = tuple(original.entries("releases").as_dict())
     commit = signed_repo.commit(extras, remove=remove, empty=(state,) if fault == "empty" else ())
     monkeypatch.setattr(snapshot, "MAX_PATH_BYTES_TOTAL", ceiling)
     results = []
@@ -375,12 +380,21 @@ def test_overlapping_resumed_shapes_preserve_admission(raw_repo, tmp_path, monke
                     cost = evaluator.shape_work
                     evaluator.evaluate(value, stage="modes", previous=final)
                     assert evaluator.shape_work == cost
-                with snap.materialize(PREFIXES, tmp_path) as materialized:
+                with snap.materialize(PREFIXES, tmp_path, repertoire="portable") as materialized:
                     return sorted(materialized.entries)
             for _ in range(3):
                 calls.append((outcome(call), asdict(snap.work), tuple(events)))
             results.append(calls)
     assert results[0] == results[1]
+    if ceiling == 100000:
+        if fault in {"clean", "missing", "ancestor-blob"}:
+            expected = {"clean": ["protected/nested/leaf"], "missing": [], "ancestor-blob": ["protected"]}[fault]
+            assert all(call[0] == {"value": expected}
+                       for call in results[1])
+        else:
+            assert all(call[0]["exception"] == "receipt.snapshot.SnapshotError" for call in results[1])
+        print("resumed", fault, "paths", [c[1]["path_bytes"] for c in results[1]],
+              "walks", [sum(e[0] == "_charge_walk_records" for e in c[2]) for c in results[1]])
 
 
 def test_pr3a_legacy_bodies_match_recorded_sha256():
@@ -407,7 +421,7 @@ def test_append_equality_old_new_work(append_repo, monkeypatch, mode, supplied):
     for old in (True, False):
         with trace_reads(monkeypatch, old=old) as (events, subjects):
             with append_repo.snapshot() as base, append_repo.snapshot(commit) as snap:
-                candidate = append_repo_candidate = append_gate._CandidateTree(
+                candidate = append_gate._CandidateTree(
                     snap, GATE_SPEC, path, GATE_SPEC.chain.prefix_relative.as_posix())
                 entries = snap.entries("").as_dict() if supplied else None
                 function = legacy.check_state_modes if old else append_gate.check_state_modes

@@ -65,6 +65,7 @@ from receipt.release_chain import (
     _normalized_spec,
     _screen_protected_tree_names,
     _protected_name_error,
+    _base_shape_error,
     assert_no_redirecting_git_environment,
     verify_release_chain,
     verify_release_history_immutable,
@@ -717,8 +718,18 @@ def run_verification(
                     pathlib.Path(directory),
                     repertoire=chain_repertoire,
                 ) as materialized:
+                    # Selection and its admission/refusal schedule remain in
+                    # the materializer facade for PR3b. Consume its actual
+                    # paths, including the effect of overlapping prefixes.
+                    materialized_entries = materialized.entries
+                    selected_paths = tuple(sorted(materialized_entries))
+                    shape_plan = replace(custody_plan, obligations=("ancestors", "modes"),
+                                         ancestor_paths=selected_paths,
+                                         mode_roles=tuple((p, "export-leaf") for p in selected_paths))
+                    shapes = policy.evaluate(shape_plan, stage="modes")
+                    shapes.require(shape_plan.use, render=_base_shape_error)
                     candidate.refuse_transforming_attributes(
-                        materialized.entries.values()
+                        materialized_entries.values()
                     )
                     materialized_anchor_set = materialized.anchor_set_sha256(
                         normalized_chain
