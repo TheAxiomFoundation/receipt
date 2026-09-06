@@ -37,6 +37,12 @@ The supplied `issue-62.md` remains an untracked input. Nothing was pushed.
 - Used the requested co-author trailer on all design-lane commits.
 - Read the round-1 review and approval requirements. Delegated an independent
   source-locator audit and suite/F2 validation while folding the record.
+- Reproduced F1's four interleave cases: late bad-byte path loses to alias;
+  early bad-byte path wins with UTF-8 fold refusal. Added the executable appendix,
+  nested caller schedules, permanent PR1 fixture and same-stage risk probe.
+- Reproduced F2: reduced ceiling 40 gives work 28 on call 1 and refusal at
+  work 40 on call 2 (path bytes 27/40, attribute bytes/rules 22/1). Specified
+  exact-step replay for the single exhausting rule; normal work is 28/56.
 
 ## Next
 
