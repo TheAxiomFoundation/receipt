@@ -412,6 +412,11 @@ class _NameRun:
             self.completed.add(current)
 
 
+def folded_parts(path: str) -> tuple[str, ...]:
+    """Compatibility primitive for the retained chain helper import path."""
+    return _NameFacts().folded_parts(path)
+
+
 def evaluate_name_mapping(entries: Mapping[str, snapshot.GitEntry], plan: ProtectionPlan) -> Finding | None:
     """Compatibility evidence only: supplied mappings never certify payloads."""
     run = _NameRun(entries, plan, _NameFacts())
