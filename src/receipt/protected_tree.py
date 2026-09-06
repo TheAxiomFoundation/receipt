@@ -1,9 +1,9 @@
-"""Authenticated name evidence for receipt 0.7 M1.
+"""Authenticated name and shape evidence for receipt 0.7 M1.
 
 Names, configured aliases and scoped DOS suffixes are evaluated only at the
 caller's existing barriers. The snapshot still owns object authentication and
-structural/admission charges. Mode/ancestor policy, certified export and
-attributes belong to PR3/PR4; a completed name selection cannot certify them.
+structural/admission charges. Shape stages consume admitted metadata at the
+caller's barrier; certified export and attributes remain PR3b/PR4 work.
 
 The mapping and sibling compatibility adapters confer no payload authority.
 Only TreePolicy, over an entered snapshot, can issue a ProtectedTreeView.
@@ -677,10 +677,14 @@ class TreePolicy:
             exact = {path for path, _ in plan.mode_roles}
             ancestors = {"/".join(path.split("/")[:depth]) for path in plan.ancestor_paths
                          for depth in range(1, len(path.split("/")))}
-            selected = {path: entry for path, entry in self._entries.items() if path in exact | ancestors or any(
+            # Exact mode uses (notably each base-history comparison) must not
+            # rescan the entire admitted release listing for every leaf.
+            selected = {path: entry for path, entry in self._entries.items() if any(
                 not scope or path == scope or path.startswith(scope + "/")
                 for scope in plan.listing_scope
-            )}
+            )} if plan.listing_scope else {}
+            selected.update((path, self._entries[path]) for path in exact | ancestors
+                            if path in self._entries)
             run = _NameRun(MappingProxyType(selected), plan, self._facts)
             self._runs[plan] = run
         # The plan is the schedule: callers may stop after names, admit one
@@ -732,6 +736,9 @@ class TreePolicy:
             raise NotImplementedError("receipt 0.7 M1 PR3 mode evaluation requires a plan")
         if _run is None:
             return self.evaluate(plan, stage="modes", previous=previous)
+        self.snapshot._batch()
+        if self._runs.get(plan) is not _run:
+            raise PolicyUseError("mode run does not belong to this evaluator/plan")
         parents = {path.rpartition("/")[0] for path in _run.entries}
         for ordinal, (path, role) in enumerate(plan.mode_roles):
             entry = _run.entries.get(path)
@@ -756,6 +763,9 @@ class TreePolicy:
             raise NotImplementedError("receipt 0.7 M1 PR3 ancestor evaluation requires a plan")
         if _run is None:
             return self.evaluate(plan, stage="ancestors", previous=previous)
+        self.snapshot._batch()
+        if self._runs.get(plan) is not _run:
+            raise PolicyUseError("ancestor run does not belong to this evaluator/plan")
         for ordinal, path in enumerate(plan.ancestor_paths):
             # A leaf-only view cannot prove absent ancestors or tree emptiness.
             if "" not in self._scopes:
@@ -800,13 +810,14 @@ class ProtectedTreeView:
     listing_scopes: tuple[str, ...]
     listing_tree_ids: Mapping[str, str | None]
     fold_index: Mapping[str, str]
-    mode_facts: Mapping[tuple[str, str], ModeFact]
     findings: tuple[Finding, ...]
     completed: frozenset[str]
     refused: frozenset[str]
     unevaluated: frozenset[str]
     admission: tuple[tuple[str, int], ...]
     _evaluator: TreePolicy = field(repr=False, compare=False)
+    mode_facts: Mapping[tuple[str, str], ModeFact] = field(
+        default_factory=lambda: MappingProxyType({}), kw_only=True)
 
     @property
     def plan_fingerprint(self) -> str:
@@ -845,10 +856,10 @@ class ProtectedTreeView:
 
 @dataclass(frozen=True)
 class ProtectedSelection:
-    """Successful name selection bound to session, purpose and completed work.
+    """Successful metadata selection bound to session, purpose and completed work.
 
-    This PR certifies names only. PR3/PR4 must complete their own obligations
-    before handing certified exports or attributed payloads to a verifier.
+    Only the recorded obligations are certified. PR3b/PR4 must complete export
+    and attribute obligations before handing their selections to a verifier.
     Closing/abandoning a snapshot invalidates subsequent selection consumption.
     """
 
