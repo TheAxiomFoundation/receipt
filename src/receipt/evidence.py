@@ -119,6 +119,7 @@ import math
 import os
 import pathlib
 import re
+import stat
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, NoReturn
@@ -621,12 +622,124 @@ def _pae(payload_type: str, payload: bytes) -> bytes:
     )
 
 
+#: How a record, body or signature is opened: read-only, never through a link
+#: at the leaf, never blocking on whatever stands there, and not inherited by
+#: a child process. Each flag is guarded the way `release_chain` guards its
+#: ``STATE_OPEN_FLAGS``; `_regular_file_bytes` refuses outright when the one
+#: that matters, ``O_NOFOLLOW``, is not there.
+_RECORD_OPEN_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+)
+
+
+def _regular_file_bytes(
+    root: pathlib.Path, relative: pathlib.PurePosixPath, label: str
+) -> bytes:
+    """Read one record, body or signature: a component ``lstat`` walk, one
+    open of the leaf, and a descriptor held to the inode the walk approved.
+
+    A deliberate near-copy of `release_chain._regular_file_bytes` in this
+    module's words rather than an import of it, for the reason given above
+    `_fail_json_constant`. What it replaces was check-then-open:
+    ``path.is_symlink() or not path.is_file()`` and then ``path.read_bytes()``,
+    which opened the path by name a second time. A writer outside the lock
+    that swapped an approved record, body or signature for a link to a file
+    outside the root between the check and the read had the link followed,
+    and the directory verified green over bytes that were no part of it.
+
+    What it does. Refuses when ``os.O_NOFOLLOW`` is unavailable — the package
+    requires a POSIX platform. ``lstat``s every component of ``relative``
+    below ``root``, refusing a symlink or reparse point at any of them and a
+    non-directory at an intermediate one; requires the leaf's ``lstat`` to be
+    a regular file. Opens the leaf once with `_RECORD_OPEN_FLAGS`. ``fstat``s
+    the descriptor and requires a regular file with the ``(st_dev, st_ino)``
+    the walk approved. Reads exactly ``st_size`` bytes in bounded chunks and
+    requires one more read to return nothing. Closes in ``finally``. Two
+    refusals: the leaf is missing or is not a regular file — which is also
+    where a link planted at the leaf after the walk lands, as ``ELOOP`` from
+    the open — and the leaf was replaced while being read, which is where a
+    FIFO planted there lands, without blocking on it.
+
+    What it is not. It is not an ``openat`` walk through retained directory
+    descriptors: each component is ``lstat``-ed by path, the leaf is opened
+    by path once, and the ``fstat`` comparison is what ties the open to the
+    walk. It therefore does not cover an ancestor renamed between the walk
+    and the open; a write in place to the approved inode (same ``(st_dev,
+    st_ino)``, different bytes); the directory inode itself under the
+    advisory lock; or a sidecar write that follows a symlink planted after
+    enumeration, since emission's writes are by name. The lock in
+    `_exclusive_records_directory` rests on the assumption it always rested
+    on: every writer to this directory is an emitter, and takes it. Spelling
+    is not bound here; the directory's components are spelled by
+    `_assert_records_directory_is_confined`'s walk, and the leaf's name is the
+    directory listing's own.
+    """
+
+    path = root / relative
+    if not getattr(os, "O_NOFOLLOW", 0):
+        raise EvidenceRecordError(
+            f"{label} cannot be read without following links on this platform "
+            "(os.O_NOFOLLOW is unavailable); receipt requires a POSIX platform"
+        )
+    missing = f"{label} is missing or is not a regular file: {path}"
+    replaced = f"{label} was replaced while being read: {path}"
+    components = relative.parts
+    current = root
+    approved: os.stat_result | None = None
+    try:
+        for depth, segment in enumerate(components, start=1):
+            current = current / segment
+            approved = os.lstat(current)
+            if stat.S_ISLNK(approved.st_mode) or getattr(approved, "st_reparse_tag", 0):
+                raise EvidenceRecordError(missing)
+            if depth < len(components) and not stat.S_ISDIR(approved.st_mode):
+                raise EvidenceRecordError(missing)
+        if approved is None or not stat.S_ISREG(approved.st_mode):
+            raise EvidenceRecordError(missing)
+        descriptor = os.open(path, _RECORD_OPEN_FLAGS)
+    except EvidenceRecordError:
+        raise
+    except OSError as exc:
+        raise EvidenceRecordError(missing) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or (
+            opened.st_dev,
+            opened.st_ino,
+        ) != (approved.st_dev, approved.st_ino):
+            raise EvidenceRecordError(replaced)
+        chunks: list[bytes] = []
+        remaining = opened.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(1 << 20, remaining))
+            if not chunk:
+                raise EvidenceRecordError(replaced)
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise EvidenceRecordError(replaced)
+        return b"".join(chunks)
+    except OSError as exc:
+        raise EvidenceRecordError(missing) from exc
+    finally:
+        os.close(descriptor)
+
+
 def _load_canonical_json(
-    path: pathlib.Path, label: str
+    root: pathlib.Path, relative: pathlib.PurePosixPath, label: str
 ) -> tuple[dict[str, Any], bytes]:
-    if path.is_symlink() or not path.is_file():
-        raise EvidenceRecordError(f"{label} is not a regular file: {path}")
-    raw = path.read_bytes()
+    """Parse one record or body, its bytes taken through `_regular_file_bytes`.
+
+    Takes the root and the leaf's path below it, rather than one joined path,
+    because the reader walks the components and the walk has to know where
+    the root is. The refusals below name the joined path as they always did.
+    """
+
+    path = root / relative
+    raw = _regular_file_bytes(root, relative, label)
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -655,9 +768,21 @@ def load_evidence_record(
     the schema and re-escapes to the bytes it was read from, so before this
     check it verified green; a hand-written ``1e999`` in a numeric field was
     refused for being "not an integer" rather than for being infinite.
+
+    The record is read through `_regular_file_bytes`, which walks the path
+    below the root, so the root is derived here from the path handed in: it
+    has to end in the records directory the spec names followed by the
+    record's own name, and a path that does not is refused rather than
+    guessed at. Every caller in the package hands over exactly that path.
     """
 
-    parsed, raw = _load_canonical_json(path, "evidence record")
+    relative = spec.records_relative / path.name
+    if tuple(path.parts[-len(relative.parts) :]) != relative.parts:
+        raise EvidenceRecordError(
+            f"evidence record is not in the records directory the spec names: {path}"
+        )
+    root = path.parents[len(relative.parts) - 1]
+    parsed, raw = _load_canonical_json(root, relative, "evidence record")
     _canonical_strict(parsed, "evidence record")
     payload = validate_evidence_record_schema(parsed, spec)
     if raw != canonical_document_bytes(payload):
@@ -852,6 +977,11 @@ def _verify_records(
     string prefixed to the record; the frame puts the schema id inside the
     signed bytes with its own length, so a signature under another schema id,
     under the old prefix, or over the bare record is refused here alike.
+
+    The record, the body and the signature are each read through
+    `_regular_file_bytes` — one open of the leaf, held to the inode a
+    component walk approved — where they used to be checked by name and then
+    read by name. See that function for what the change covers and does not.
     """
 
     # Asked before enumeration, which cannot answer it: enumeration returns
@@ -882,7 +1012,9 @@ def _verify_records(
                 f"evidence record {path.name} does not link to its predecessor"
             )
 
-        parsed_body, body_raw = _load_canonical_json(body_path, "evidence body")
+        parsed_body, body_raw = _load_canonical_json(
+            root, spec.records_relative / body_path.name, "evidence body"
+        )
         # Held to strict canonical input before the canonical-equality check
         # below, which would otherwise pass a body carrying 2**53 or a lone
         # surrogate (canonical.py renders each back to the bytes it was read
@@ -906,11 +1038,9 @@ def _verify_records(
                 f"recorded {payload['body']['sha256']}, computed {body_digest}"
             )
 
-        if signature_path.is_symlink() or not signature_path.is_file():
-            raise EvidenceRecordError(
-                f"producer signature is not a regular file: {signature_path}"
-            )
-        signature = signature_path.read_bytes()
+        signature = _regular_file_bytes(
+            root, spec.records_relative / signature_path.name, "producer signature"
+        )
         try:
             # What makes this signature unusable as a manifest signature is
             # that the signed bytes are the frame, not the record: the

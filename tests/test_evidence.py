@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import io
 import json
+import os
 import pathlib
+import threading
 from dataclasses import FrozenInstanceError
 
 import pytest
@@ -2105,6 +2108,209 @@ def test_the_schema_check_refuses_a_non_string_key_at_every_layer(
     with pytest.raises(EvidenceRecordError) as exc:
         validate_evidence_record_schema(payload, spec)
     assert str(exc.value) == f"{label} has an object key that is not a string: 1"
+
+
+# --------------------------------------------------------------------------
+# The descriptor read: what stands at a leaf when it is opened, not before.
+# --------------------------------------------------------------------------
+
+
+def _emit_one(
+    root: pathlib.Path, spec: EvidenceSpec, private_pem: bytes
+) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
+    """One record under ``root``, as (record, body, signature) paths."""
+
+    record = emit_evidence_record(
+        root,
+        spec=spec,
+        private_key_pem=private_pem,
+        body=BODY,
+        body_schema=BODY_SCHEMA,
+        refs=[],
+        producer=PRODUCER,
+        emitted_at_utc=EMITTED,
+    )
+    return (
+        record,
+        record.with_name(f"{record.stem}.body.json"),
+        record.with_name(f"{record.stem}.producer.sig"),
+    )
+
+
+def _plant_at_first_open(monkeypatch, leaf: pathlib.Path, plant) -> list[str]:
+    """Arm the seam between the check and the read.
+
+    The first open of ``leaf`` — through ``os.open``, which the reader uses,
+    or through ``io.open``, which ``Path.read_bytes`` used before it — runs
+    ``plant()`` and then goes ahead with what now stands there. Every other
+    open passes straight through, so pytest's own files are never touched.
+    Deterministic: no timing, no second process. Returns the list the seam
+    records itself in, so a test can assert that it fired at all. Installed
+    on the caller's ``monkeypatch.context()``.
+    """
+
+    real_os_open = os.open
+    real_io_open = io.open
+    target = os.fspath(leaf)
+    fired: list[str] = []
+
+    def names_the_leaf(file) -> bool:
+        if isinstance(file, int):
+            return False
+        try:
+            return os.fspath(file) == target
+        except TypeError:
+            return False
+
+    def os_open(path, *args, **kwargs):
+        if not fired and names_the_leaf(path):
+            fired.append("os.open")
+            plant()
+        return real_os_open(path, *args, **kwargs)
+
+    def io_open(file, *args, **kwargs):
+        if not fired and names_the_leaf(file):
+            fired.append("io.open")
+            plant()
+        return real_io_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", os_open)
+    monkeypatch.setattr(io, "open", io_open)
+    return fired
+
+
+LEAVES = [
+    pytest.param(0, "evidence record", id="record"),
+    pytest.param(1, "evidence body", id="body"),
+    pytest.param(2, "producer signature", id="signature"),
+]
+
+
+@pytest.mark.parametrize("which, label", LEAVES)
+def test_a_leaf_swapped_for_an_outside_symlink_at_its_open_is_refused(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+    anchor_dir: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    which: int,
+    label: str,
+) -> None:
+    """Check-then-open: ``is_symlink()``, ``is_file()``, then ``read_bytes()``
+    opened the path by name a second time. A writer outside the lock that
+    swapped the approved leaf for a link to a file outside the root between
+    the two had the link followed, and the directory verified green over
+    bytes that were no part of it — for the record, the body and the
+    signature alike. The leaf is now opened once, without following, and the
+    descriptor is held to the inode the walk approved."""
+
+    private_pem, _ = keys
+    root = tmp_path / "root"
+    root.mkdir()
+    leaf = _emit_one(root, spec, private_pem)[which]
+    outside = tmp_path / "outside"  # beside the root, not below it
+    outside.write_bytes(leaf.read_bytes())
+
+    def plant() -> None:
+        leaf.unlink()
+        leaf.symlink_to(outside)
+
+    with monkeypatch.context() as patch:
+        fired = _plant_at_first_open(patch, leaf, plant)
+        with pytest.raises(EvidenceRecordError) as exc:
+            verify_evidence_records(root, spec=spec, anchor_dir=anchor_dir)
+    assert fired, "the seam never fired: nothing opened the leaf"
+    assert leaf.is_symlink()
+    assert str(exc.value).startswith(f"{label} is missing or is not a regular file: ")
+
+
+def test_a_fifo_planted_where_a_body_should_be_is_refused_without_blocking(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+    anchor_dir: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same seam, planting a FIFO. ``Path.read_bytes`` on a FIFO with no
+    writer blocks in ``open`` until one arrives, so before this change the
+    verifier hung on it; the reader now opens with ``O_NONBLOCK`` and refuses
+    what ``fstat`` shows. The fact under test is that the read returns, so it
+    runs on a worker thread under a bound, and a blocked worker is released
+    by giving its open the writer it is waiting for."""
+
+    private_pem, _ = keys
+    root = tmp_path / "root"
+    root.mkdir()
+    _, body, _ = _emit_one(root, spec, private_pem)
+
+    def plant() -> None:
+        body.unlink()
+        os.mkfifo(body)
+
+    outcome: list[BaseException | None] = []
+
+    def run() -> None:
+        try:
+            verify_evidence_records(root, spec=spec, anchor_dir=anchor_dir)
+            outcome.append(None)
+        except BaseException as exc:  # noqa: BLE001 — carried to the main thread
+            outcome.append(exc)
+
+    with monkeypatch.context() as patch:
+        fired = _plant_at_first_open(patch, body, plant)
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        worker.join(timeout=10)
+        blocked = worker.is_alive()
+        if blocked:
+            try:
+                os.close(os.open(body, os.O_WRONLY | os.O_NONBLOCK))
+            except OSError:
+                pass
+            worker.join(timeout=10)
+    assert fired, "the seam never fired: nothing opened the body"
+    assert not blocked, "the read blocked on the FIFO"
+    assert outcome and isinstance(outcome[0], EvidenceRecordError)
+    assert str(outcome[0]).startswith("evidence body was replaced while being read: ")
+
+
+def test_the_reader_returns_the_bytes_of_all_three_files(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+) -> None:
+    """The happy path, for the record, the body and the signature: the walk,
+    the open, the ``fstat`` and the bounded read hand back exactly the bytes
+    on disk."""
+
+    from receipt.evidence import _regular_file_bytes
+
+    private_pem, _ = keys
+    root = tmp_path / "root"
+    root.mkdir()
+    leaves = _emit_one(root, spec, private_pem)
+    for leaf, (_, label) in zip(leaves, (param.values for param in LEAVES)):
+        expected = leaf.read_bytes()
+        assert _regular_file_bytes(root, RECORDS / leaf.name, label) == expected
+
+
+def test_load_evidence_record_refuses_a_path_outside_the_records_directory(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    emitted: pathlib.Path,
+) -> None:
+    """The reader walks the record's path below the root, so the public loader
+    derives the root from the path it is handed — which has to spell the
+    records directory the spec names. A copy of the record elsewhere loaded
+    without complaint before this change."""
+
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_bytes(emitted.read_bytes())
+    with pytest.raises(EvidenceRecordError) as exc:
+        load_evidence_record(elsewhere, spec)
+    assert str(exc.value).startswith(
+        "evidence record is not in the records directory the spec names: "
+    )
 
 
 # --------------------------------------------------------------------------
