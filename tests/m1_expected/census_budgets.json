@@ -1,0 +1,86 @@
+{
+  "budget/entries": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree walk exceeds the budget of 1 entries"
+  },
+  "budget/name": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree entry name exceeds the budget of 2 bytes"
+  },
+  "budget/path": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path exceeds the budget of 2 bytes"
+  },
+  "budget/paths_total": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree paths exceed the snapshot budget of 2 bytes"
+  },
+  "budget/path_depth": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path exceeds the depth budget of 0"
+  },
+  "budget/tree_depth": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree depth exceeds the budget of 0"
+  },
+  "budget/tree_bytes": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree and commit bytes exceed the snapshot budget of <LIMIT> bytes"
+  },
+  "budget/selection_bytes": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "commit and tree bytes exceed the snapshot budget of 1 bytes"
+  },
+  "budget/blob": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "object <BLOB_OID> exceeds the payload budget of 1 bytes"
+  },
+  "budget/attribute_blob": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "object <ATTRIBUTE_OID> exceeds the payload budget of 1 bytes"
+  },
+  "budget/attribute_bytes": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "attribute bytes exceed the snapshot budget of 1 bytes"
+  },
+  "budget/attribute_rules": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "attribute rules exceed the snapshot budget of 1 rules"
+  },
+  "budget/attribute_states": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "attribute states at .gitattributes:1 exceed the per-line budget of 0 states"
+  },
+  "budget/attribute_work": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "attribute matching exceeds the work budget of 0 steps"
+  },
+  "budget/materialized_blob": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialized blob 'one' exceeds the budget of 1 bytes"
+  },
+  "budget/materialized_total": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialized bytes exceed the budget of 5 bytes"
+  },
+  "budget/content_blob": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "content blob 'one' exceeds the budget of 1 bytes"
+  },
+  "budget/content_total": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "content bytes exceed the budget of 5 bytes"
+  },
+  "budget/content_snapshot": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "content bytes exceed the snapshot budget of 5 bytes"
+  },
+  "budget/declarations/prefixes": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "declared paths visit more than 1 prefixes; the corpus cannot be bound safely"
+  },
+  "budget/declarations/index": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "declared paths name more than 1 distinct directories; declared paths exceed the alias index budget"
+  }
+}

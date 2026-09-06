@@ -21,3 +21,6 @@ paper/.gitignore
 paper/fonts/
 paper/index.aux
 paper/index.log
+
+# lane progress notes live in the worktree, never in the tree
+PROGRESS.md
