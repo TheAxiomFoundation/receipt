@@ -821,7 +821,13 @@ def _screen_candidate_tree_aliases(
 ) -> dict[str, GitEntry]:
     """Screen protected shapes, aliases and names over the complete tree."""
 
-    entries = candidate.snapshot.entries("").as_dict(include_trees=True)
+    from dataclasses import replace
+    from receipt.protected_tree import POLICY_VERSION, ProtectionPlan, TreePolicy
+    from receipt.release_chain import _protected_name_error
+
+    policy = TreePolicy(candidate.snapshot, policy_version=POLICY_VERSION,
+                        work=candidate.snapshot.work)
+    entries = policy.read_listing("")
     protected = _protected_paths(candidate)
     for path in protected:
         parts = path.split("/")
@@ -834,21 +840,22 @@ def _screen_candidate_tree_aliases(
                 raise SnapshotError(f"state path has a symlinked component: {prefix}")
             raise SnapshotError(f"tree path ancestor is not a directory: {prefix}")
 
-    # Gate-only proposals need the same listing screen before their early return.
+    # Gate-only proposals need the same name obligations before their return.
+    plan = ProtectionPlan.chain_names(
+        _materialization_prefixes(candidate),
+        repertoire=candidate.spec.chain.name_repertoire,
+        release_directories=(candidate.spec.chain.release_root_relative,
+                             candidate.spec.chain.manifest_relative),
+        alias_paths=protected, use="append-names", anchor_origin="caller",
+    )
+    plan = replace(plan, exact_state_paths=(candidate.ledger_relative, candidate.prefix_relative),
+                   attribute_target_selectors=_surface_alias_paths(candidate), phase="append")
+    view = policy.evaluate(plan, stage="suffixes")
     try:
-        _screen_protected_tree_names(
-            entries,
-            _materialization_prefixes(candidate),
-            repertoire=candidate.spec.chain.name_repertoire,
-            release_directories=(
-                candidate.spec.chain.release_root_relative,
-                candidate.spec.chain.manifest_relative,
-            ),
-            alias_paths=protected,
-        )
+        selection = view.require(plan.use, render=_protected_name_error)
     except ReleaseChainError as exc:
         raise AppendError(str(exc)) from exc
-    return entries
+    return dict(selection.entries_for(candidate.snapshot, use=plan.use))
 
 
 def _attribute_entries(

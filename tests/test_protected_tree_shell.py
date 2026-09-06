@@ -1,4 +1,5 @@
-"""PR1 exposes frozen contracts only; no production migration starts here."""
+"""The policy module's frozen surface, its later-stage stubs, and the production
+importers each migration step allows."""
 from __future__ import annotations
 
 import ast
@@ -37,45 +38,41 @@ def test_tree_policy_constructor_surface():
     assert policy.TreePolicy.__annotations__["snapshot"] == "snapshot.TreeSnapshot"
 
 
-@pytest.mark.parametrize("method", ("evaluate", "finding_for", "require"))
-def test_policy_methods_are_unimplemented(raw_repo, method):
+LATER_STAGE_METHODS = ("evaluate_modes", "evaluate_ancestors", "select_export", "evaluate_attributes")
+STEP_2_IMPORTERS = {"append_gate.py", "release_chain.py", "snapshot.py"}
+
+
+@pytest.mark.parametrize("method", LATER_STAGE_METHODS)
+def test_later_stage_methods_are_unimplemented(raw_repo, method):
     with raw_repo.snapshot() as snap:
-        evaluator = policy.TreePolicy(snap, policy_version="v0.6", work=snap.work)
-        view = policy.ProtectedTreeView()
-        calls = {"evaluate": lambda: evaluator.evaluate(policy.ProtectionPlan(), stage="custody", previous=view),
-                 "finding_for": lambda: view.finding_for("custody"),
-                 "require": lambda: view.require("custody", render=lambda finding: pytest.fail("renderer ran"))}
-        # record: migration step 1: shell only, PR2 owns evaluation
+        evaluator = policy.TreePolicy(snap, policy_version=policy.POLICY_VERSION, work=snap.work)
+        # record: migration steps 3 and 4 own modes, ancestors, export selection and attributes;
+        # step 2 implements names and aliases only
         with pytest.raises(NotImplementedError) as caught:
-            calls[method]()
+            getattr(evaluator, method)()
         assert type(caught.value) is NotImplementedError
-        assert str(caught.value) == "receipt 0.7 M1 PR2 introduces the evaluator"
+        assert str(caught.value).startswith("receipt 0.7 M1 PR")
 
 
-def test_production_callers_do_not_import_shell():
+def test_production_importers_are_the_step_2_sites():
     root = pathlib.Path(__file__).resolve().parents[1]
-    completed = subprocess.run(["git", "grep", "-l", "protected_tree", "--", "src"], cwd=root,
-                               capture_output=True, check=True, timeout=30)
-    # record: migration step 1: no production caller switches. The literal
-    # requested grep also matches the retained _screen_protected_tree_names
-    # symbol; it cannot yield only the shell without breaking compatibility.
-    assert completed.stdout.splitlines() == [
-        b"src/receipt/append_gate.py", b"src/receipt/protected_tree.py",
-        b"src/receipt/release_chain.py", b"src/receipt/verify.py",
-    ]
-    assert completed.stderr == b""
-    exact = subprocess.run(["git", "grep", "-lw", "protected_tree", "--", "src"], cwd=root,
-                           capture_output=True, check=True, timeout=30)
-    assert exact.stdout.splitlines() == [b"src/receipt/protected_tree.py"]
+    importers = set()
     for source in (root / "src/receipt").glob("*.py"):
         if source.name == "protected_tree.py":
             continue
         for node in ast.walk(ast.parse(source.read_text())):
             if isinstance(node, ast.Import):
-                assert all(alias.name != "receipt.protected_tree" for alias in node.names), source
+                if any(alias.name == "receipt.protected_tree" for alias in node.names):
+                    importers.add(source.name)
             elif isinstance(node, ast.ImportFrom):
-                assert node.module not in {"receipt.protected_tree", "protected_tree"}, source
-                assert all(alias.name != "protected_tree" for alias in node.names), source
+                if node.module in {"receipt.protected_tree", "protected_tree"} or any(
+                    alias.name == "protected_tree" for alias in node.names
+                ):
+                    importers.add(source.name)
+    # record: migration step 2 migrates the chain name helper, snapshot sibling names and
+    # append's alias screen; corpus, verify's composed custody and materialization wait
+    # for later steps and must not import the module yet
+    assert importers == STEP_2_IMPORTERS
 
 
 @pytest.mark.parametrize("first,second", (("receipt.snapshot", "receipt.protected_tree"),

@@ -2232,7 +2232,9 @@ def verify_release_history_immutable(
 
 
 def _folded_parts(path: str) -> tuple[str, ...]:
-    return tuple(ascii_fold_text(component) for component in path.split("/"))
+    from receipt.protected_tree import folded_parts
+
+    return folded_parts(path)
 
 
 def _screen_protected_tree_names(
@@ -2254,83 +2256,30 @@ def _screen_protected_tree_names(
     which also requires every listing component to be foldable.
     """
 
-    selected = tuple(relative.as_posix() for relative in prefixes)
-    descendants = tuple(f"{relative}/" for relative in selected)
-    ancestors = {
-        "/".join(relative.parts[:depth])
-        for relative in prefixes
-        for depth in range(len(relative.parts))
-    }
-    by_directory: dict[str, list[str]] = {}
-    screened: list[str] = []
-    try:
-        protected = selected if alias_paths is None else alias_paths
-        folded = {path: _folded_parts(path) for path in protected}
-        exact = {path: tuple(path.split("/")) for path in protected}
-        # Keep the legacy diagnostic's complete non-tree path when present;
-        # an empty tree alias is still covered after all non-tree entries.
-        for listed in sorted(
-            entries, key=lambda path: (entries[path].mode == "040000", path),
-        ):
-            parts = tuple(listed.split("/"))
-            listed_folded = _folded_parts(listed) if alias_paths is not None else ()
-            for path in protected:
-                for depth in range(1, len(folded[path]) + 1):
-                    if len(parts) < depth:
-                        break
-                    if len(listed_folded) < depth:
-                        # Do not fold unused descendants once their ancestor
-                        # differs from every selected protected prefix.
-                        listed_folded += (ascii_fold_text(parts[depth - 1]),)
-                    if listed_folded[:depth] != folded[path][:depth]:
-                        break
-                    if parts[:depth] == exact[path][:depth]:
-                        continue
-                    _folded_parts(listed)  # A quoted full path must be strict UTF-8 too.
-                    prefix = "/".join(exact[path][:depth])
-                    # "index" is retained wording for an authenticated tree entry.
-                    raise ReleaseChainError(
-                        f"index carries an alias of a protected path: {listed} "
-                        f"(for {path} at {prefix})"
-                    )
-        for relative in sorted(entries):
-            directory, _, name = relative.rpartition("/")
-            if not (
-                directory in ancestors
-                or relative in selected
-                or relative.startswith(descendants)
-            ):
-                continue
-            ascii_fold_text(name)
-            if repertoire == "portable":
-                assert_portable_name(name, f"tree entry {relative!r}")
-            else:
-                validate_component_text(
-                    name, repertoire=repertoire, label=f"tree entry {relative!r}"
-                )
-            by_directory.setdefault(directory, []).append(name)
-            screened.append(relative)
-        for directory, names in sorted(by_directory.items()):
-            assert_no_merging_entries(
-                names, repertoire=repertoire,
-                label=f"tree directory {directory or '.'!r}",
-            )
-        if repertoire == "portable":
-            suffixes = (".json", ".sig", ".tsr")
-            release_prefixes = tuple(f"{path.as_posix()}/" for path in release_directories)
-            for relative in screened:
-                if not relative.startswith(release_prefixes):
-                    continue
-                name = relative.rpartition("/")[2]
-                if not ascii_fold_text(name).endswith(suffixes) and (
-                    short_name_carries_pinned_suffix(name, suffixes)
-                ):
-                    raise ReleaseChainError(
-                        "release root contains an entry whose short-name alias "
-                        f"would carry a pinned suffix: {relative}"
-                    )
-    except NamePolicyError as exc:
-        raise ReleaseChainError(str(exc)) from exc
+    from receipt.protected_tree import ProtectionPlan, evaluate_name_mapping
+
+    plan = ProtectionPlan.chain_names(
+        prefixes, repertoire=repertoire, release_directories=release_directories,
+        alias_paths=alias_paths,
+    )
+    finding = evaluate_name_mapping(entries, plan)
+    if finding is not None:
+        raise _protected_name_error(finding)
+
+
+def _protected_name_error(finding) -> ReleaseChainError:
+    """Render shared name evidence with the legacy chain words and category."""
+    if finding.kind == "configured-alias":
+        return ReleaseChainError(
+            f"index carries an alias of a protected path: {finding.path} "
+            f"(for {finding.target} at {finding.prefix})"
+        )
+    if finding.kind == "short-suffix":
+        return ReleaseChainError(
+            "release root contains an entry whose short-name alias "
+            f"would carry a pinned suffix: {finding.path}"
+        )
+    return ReleaseChainError(finding.detail)
 
 
 def verify_base_release_chain(

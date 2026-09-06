@@ -116,7 +116,6 @@ from typing import BinaryIO, Callable
 
 from receipt._names import (
     NamePolicyError,
-    assert_no_merging_entries,
     validate_component_bytes,
     validate_repertoire,
 )
@@ -157,6 +156,16 @@ _CONTENT_MODES = frozenset({"100644", "100755"})
 _OID_RE = re.compile(rb"[0-9a-f]+\Z")
 _VERSION_RE = re.compile(r"\bgit version (\d+)\.(\d+)\.(\d+)")
 _SURROGATE_PAIR_RE = re.compile("[\ud800-\udbff][\udc00-\udfff]")
+
+
+def assert_no_merging_entries(
+    names: Iterable[bytes | str], *, repertoire: str,
+    materializing: bool = False, label: str = "tree directory",
+) -> None:
+    """Forward the existing local-name screen at its original caller barrier."""
+    from receipt.protected_tree import screen_siblings
+
+    screen_siblings(names, repertoire=repertoire, materializing=materializing, label=label)
 
 
 def _tree_path_decode(value: bytes) -> str:
