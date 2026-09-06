@@ -46,6 +46,10 @@ No -o argument was supplied; final report destination: M1-PR1-REPORT.md.
 - Host: macOS 26.6.2 arm64, APFS; case probe resolves CaseProbe/caseprobe
   to the same inode (case-insensitive).
 
+- Completed retained spec-path, redirecting-environment and bounded-quote
+  goldens (9 tests). Split captured expectations by census/D identifier; every
+  Python test and JSON expectation file is below 1,500 lines.
+
 ## Next
 
 - Run new files separately and under both fixture ignoreCase settings, run

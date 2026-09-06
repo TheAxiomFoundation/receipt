@@ -1,0 +1,652 @@
+{
+  "state/receipt/corpus-journal.jsonl/missing": {
+    "append_state": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "state file is missing or not a regular file: receipt/corpus-journal.jsonl"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "state file is missing or not a regular file: receipt/corpus-journal.jsonl"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "state/receipt/immutable-prefix.json/missing": {
+    "append_state": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "state file is missing or not a regular file: receipt/immutable-prefix.json"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "state file is missing or not a regular file: receipt/immutable-prefix.json"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "state/receipt/corpus-journal.jsonl/100644": {
+    "append_state": {
+      "value": {
+        "path": "receipt/corpus-journal.jsonl",
+        "mode": "100644",
+        "bytes": {
+          "bytes": "7b22656e747279496e646578223a302c226b696e64223a22636f6e74656e74222c2270617468223a2272756c65732f62656e656669742f616d6f756e742e79616d6c222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c22736861323536223a2230386536663334333033656636326537346539623834653134326338306266333135383531313332613066343366646130396135393061373866396661316630222c227374617465223a2270726573656e74227d0a7b22656e747279496e646578223a312c226b696e64223a22636f6e74656e74222c2270617468223a2272756c65732f7461782f726174652e746573742e79616d6c222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c22736861323536223a2236376664346363393164613763346436383730303439393831666564346433363733323761346262363837653733363636363532373936643830623533336238222c227374617465223a2270726573656e74227d0a7b22656e747279496e646578223a322c226b696e64223a22636f6e74656e74222c2270617468223a2272756c65732f7461782f726174652e79616d6c222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c22736861323536223a2265323138616336643266313236633736656236653734323033383134653036653366643532386166633830393537366365646532653262323534366264633439222c227374617465223a2270726573656e74227d0a7b22656e747279496e646578223a332c226b696e64223a226174746573746564222c2270617468223a222e6178696f6d2f746f6f6c636861696e2e746f6d6c222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c22736861323536223a2237353331326539313834663863313036633134653766626237643235386266353061353436373735316231366532643435363431363632303030353362363162222c227374617465223a2270726573656e74227d0a7b22656e747279496e646578223a342c2265766964656e6365223a7b22636f6d6d616e64223a226d616b652076616c6964617465227d2c22676174654964223a2272756c65737065632f636f6d70696c65222c226b696e64223a2267617465222c226f7574636f6d65223a2270617373222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c2274696572223a227075626c6963227d0a7b22656e747279496e646578223a352c2265766964656e6365223a7b2272657374726963746564496e707574223a226c6963656e7365642062756e646c65227d2c22676174654964223a226f7261636c652f6c6963656e7365642d706172697479222c226b696e64223a2267617465222c226f7574636f6d65223a2270617373222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c2274696572223a2272657374726963746564227d0a7b22656e747279496e646578223a362c2265766964656e6365223a7b22776f726b666c6f77223a227265706f7369746f72792d636865636b732e796d6c227d2c22676174654964223a2263692f7265706f7369746f72792d636865636b73222c226b696e64223a2267617465222c226f7574636f6d65223a2270617373222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c2274696572223a2263692d6174746573746564227d0a"
+        }
+      }
+    },
+    "cli": {
+      "exit": 0,
+      "verdict": "PASS",
+      "phases": [
+        [
+          "custody",
+          true,
+          null
+        ],
+        [
+          "binding",
+          true,
+          null
+        ],
+        [
+          "declaration",
+          true,
+          null
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "state/receipt/immutable-prefix.json/100644": {
+    "append_state": {
+      "value": {
+        "path": "receipt/immutable-prefix.json",
+        "mode": "100644",
+        "bytes": {
+          "bytes": "7b226c696e6553686132353673223a5b2263303439376630393331323138393534336332613033376638666438383761343439373061323263393265316466343334306461343339323338633336363663222c2233316166376466643165656233356139636639333766643164333937653138323132653335333262366262303135373838313266356433393362653065303032222c2264643961623931613862656130663634333532393661363337346438623465376537653337396638643235363064333338646237666633333364363061623063222c2234363931666539356263343139656462313131636531306466326461316563353831346135306564383937386132383135396163376134316263313662636239222c2237663134353462656163616237373261323162393736313937383933376566646632323462323766353564613463633561626163393065306335616637383038222c2233636232616531333563303362336531643238303566373566646463653064343064316337623862373964336432633765663830323362616131366334626264222c2239383436393436373538663062383937363232373737366138663663653936336263646165373436643135373362316532646365343633306265613639666163225d2c227072656669784c696e65436f756e74223a372c22707265666978536861323536223a2264663333386366316665373061613832363338613964383030353230326532643232663262333363326233383433373239396431363461346430333234306566222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d7072656669782f7631227d0a"
+        }
+      }
+    },
+    "cli": {
+      "exit": 0,
+      "verdict": "PASS",
+      "phases": [
+        [
+          "custody",
+          true,
+          null
+        ],
+        [
+          "binding",
+          true,
+          null
+        ],
+        [
+          "declaration",
+          true,
+          null
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "state/receipt/corpus-journal.jsonl/100755": {
+    "append_state": {
+      "value": {
+        "path": "receipt/corpus-journal.jsonl",
+        "mode": "100755",
+        "bytes": {
+          "bytes": "7b22656e747279496e646578223a302c226b696e64223a22636f6e74656e74222c2270617468223a2272756c65732f62656e656669742f616d6f756e742e79616d6c222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c22736861323536223a2230386536663334333033656636326537346539623834653134326338306266333135383531313332613066343366646130396135393061373866396661316630222c227374617465223a2270726573656e74227d0a7b22656e747279496e646578223a312c226b696e64223a22636f6e74656e74222c2270617468223a2272756c65732f7461782f726174652e746573742e79616d6c222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c22736861323536223a2236376664346363393164613763346436383730303439393831666564346433363733323761346262363837653733363636363532373936643830623533336238222c227374617465223a2270726573656e74227d0a7b22656e747279496e646578223a322c226b696e64223a22636f6e74656e74222c2270617468223a2272756c65732f7461782f726174652e79616d6c222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c22736861323536223a2265323138616336643266313236633736656236653734323033383134653036653366643532386166633830393537366365646532653262323534366264633439222c227374617465223a2270726573656e74227d0a7b22656e747279496e646578223a332c226b696e64223a226174746573746564222c2270617468223a222e6178696f6d2f746f6f6c636861696e2e746f6d6c222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c22736861323536223a2237353331326539313834663863313036633134653766626237643235386266353061353436373735316231366532643435363431363632303030353362363162222c227374617465223a2270726573656e74227d0a7b22656e747279496e646578223a342c2265766964656e6365223a7b22636f6d6d616e64223a226d616b652076616c6964617465227d2c22676174654964223a2272756c65737065632f636f6d70696c65222c226b696e64223a2267617465222c226f7574636f6d65223a2270617373222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c2274696572223a227075626c6963227d0a7b22656e747279496e646578223a352c2265766964656e6365223a7b2272657374726963746564496e707574223a226c6963656e7365642062756e646c65227d2c22676174654964223a226f7261636c652f6c6963656e7365642d706172697479222c226b696e64223a2267617465222c226f7574636f6d65223a2270617373222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c2274696572223a2272657374726963746564227d0a7b22656e747279496e646578223a362c2265766964656e6365223a7b22776f726b666c6f77223a227265706f7369746f72792d636865636b732e796d6c227d2c22676174654964223a2263692f7265706f7369746f72792d636865636b73222c226b696e64223a2267617465222c226f7574636f6d65223a2270617373222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d6a6f75726e616c2f7631222c2274696572223a2263692d6174746573746564227d0a"
+        }
+      }
+    },
+    "cli": {
+      "exit": 0,
+      "verdict": "PASS",
+      "phases": [
+        [
+          "custody",
+          true,
+          null
+        ],
+        [
+          "binding",
+          true,
+          null
+        ],
+        [
+          "declaration",
+          true,
+          null
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "state/receipt/immutable-prefix.json/100755": {
+    "append_state": {
+      "value": {
+        "path": "receipt/immutable-prefix.json",
+        "mode": "100755",
+        "bytes": {
+          "bytes": "7b226c696e6553686132353673223a5b2263303439376630393331323138393534336332613033376638666438383761343439373061323263393265316466343334306461343339323338633336363663222c2233316166376466643165656233356139636639333766643164333937653138323132653335333262366262303135373838313266356433393362653065303032222c2264643961623931613862656130663634333532393661363337346438623465376537653337396638643235363064333338646237666633333364363061623063222c2234363931666539356263343139656462313131636531306466326461316563353831346135306564383937386132383135396163376134316263313662636239222c2237663134353462656163616237373261323162393736313937383933376566646632323462323766353564613463633561626163393065306335616637383038222c2233636232616531333563303362336531643238303566373566646463653064343064316337623862373964336432633765663830323362616131366334626264222c2239383436393436373538663062383937363232373737366138663663653936336263646165373436643135373362316532646365343633306265613639666163225d2c227072656669784c696e65436f756e74223a372c22707265666978536861323536223a2264663333386366316665373061613832363338613964383030353230326532643232663262333363326233383433373239396431363461346430333234306566222c22736368656d6156657273696f6e223a22726563656970742f746573742d636f727075732d7072656669782f7631227d0a"
+        }
+      }
+    },
+    "cli": {
+      "exit": 0,
+      "verdict": "PASS",
+      "phases": [
+        [
+          "custody",
+          true,
+          null
+        ],
+        [
+          "binding",
+          true,
+          null
+        ],
+        [
+          "declaration",
+          true,
+          null
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "state/receipt/corpus-journal.jsonl/120000": {
+    "append_state": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "state file is a symlink: receipt/corpus-journal.jsonl"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "state file is a symlink: receipt/corpus-journal.jsonl"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "state/receipt/immutable-prefix.json/120000": {
+    "append_state": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "state file is a symlink: receipt/immutable-prefix.json"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "state file is a symlink: receipt/immutable-prefix.json"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "state/receipt/corpus-journal.jsonl/160000": {
+    "append_state": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "state file is not a regular file: receipt/corpus-journal.jsonl"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "state file is not a regular file: receipt/corpus-journal.jsonl"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "state/receipt/immutable-prefix.json/160000": {
+    "append_state": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "state file is not a regular file: receipt/immutable-prefix.json"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "state file is not a regular file: receipt/immutable-prefix.json"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "state/receipt/corpus-journal.jsonl/040000": {
+    "append_state": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "state file is not a regular file: receipt/corpus-journal.jsonl"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "state file is not a regular file: receipt/corpus-journal.jsonl"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "state/receipt/immutable-prefix.json/040000": {
+    "append_state": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "state file is not a regular file: receipt/immutable-prefix.json"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "state file is not a regular file: receipt/immutable-prefix.json"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "history/delete": {
+    "history": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "existing release file was deleted relative to <BASE>: releases/note"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "history",
+          false,
+          "release history is not immutable: existing release file was deleted relative to <BASE>: releases/note"
+        ],
+        [
+          "custody",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "history/mode": {
+    "history": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "existing release file mode changed relative to <BASE>: releases/note (100644 -> 100755)"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "history",
+          false,
+          "release history is not immutable: existing release file mode changed relative to <BASE>: releases/note (100644 -> 100755)"
+        ],
+        [
+          "custody",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "history/bytes": {
+    "history": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "existing release file bytes changed relative to <BASE>: releases/note"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "history",
+          false,
+          "release history is not immutable: existing release file bytes changed relative to <BASE>: releases/note"
+        ],
+        [
+          "custody",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "history/symlink": {
+    "history": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "release path is a symlink: releases/note"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "history",
+          false,
+          "release history is not immutable: release path is a symlink: releases/note"
+        ],
+        [
+          "custody",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "history/gitlink": {
+    "history": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "release path is not regular: releases/note"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "history",
+          false,
+          "release history is not immutable: release path is not regular: releases/note"
+        ],
+        [
+          "custody",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "history/base_mode": {
+    "history": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "base release entry has non-regular git mode 120000: releases/note"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "history",
+          false,
+          "release history is not immutable: base release entry has non-regular git mode 120000: releases/note"
+        ],
+        [
+          "custody",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "history/accept": {
+    "history": {
+      "value": {
+        "resolved": "<BASE>",
+        "added": [],
+        "entries": [
+          "releases/anchors/alpha-root.pem",
+          "releases/anchors/beta-root.pem",
+          "releases/anchors/producer-ed25519.pub",
+          "releases/manifests/<MANIFEST>.alpha.tsr",
+          "releases/manifests/<MANIFEST>.beta.tsr",
+          "releases/manifests/<MANIFEST>.json",
+          "releases/manifests/<MANIFEST>.producer.sig",
+          "releases/note"
+        ]
+      }
+    },
+    "cli": {
+      "exit": 0,
+      "verdict": "PASS",
+      "phases": [
+        [
+          "history",
+          true,
+          null
+        ],
+        [
+          "custody",
+          true,
+          null
+        ],
+        [
+          "binding",
+          true,
+          null
+        ],
+        [
+          "declaration",
+          true,
+          null
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "spec/chain_type": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "ChainSpec manifest_relative must be a pathlib.PurePosixPath, not str"
+  },
+  "spec/chain_relative": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "ChainSpec manifest_relative must be a relative path naming at least one component, with no '..': '../escape'"
+  },
+  "spec/chain_repertoire": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "name repertoire must be 'portable' or 'posix-bytes': 'Portable'"
+  },
+  "spec/corpus_repertoire": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "name repertoire must be 'portable' or 'posix-bytes': 'Portable'"
+  },
+  "spec/corpus_portable": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "CorpusSpec content root is not a portable name (ASCII letters, digits, '.', '_' and '-', not ending in '.', not a Win32 device name): 'bad?'"
+  },
+  "input/spec/missing": {
+    "exception": "receipt.verify.VerifySpecError",
+    "message": "spec is missing or not a regular file: <ROOT>/spec.py"
+  },
+  "input/spec/directory": {
+    "exception": "receipt.verify.VerifySpecError",
+    "message": "spec is missing or not a regular file: <ROOT>/spec.py"
+  },
+  "input/spec/symlink": {
+    "exception": "receipt.verify.VerifySpecError",
+    "message": "spec is a symlink; supply the regular file's path: <ROOT>/spec.py"
+  },
+  "input/environment/GIT_DIR": {
+    "direct": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "GIT_DIR is set in the environment and would redirect git reads; unset it"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "GIT_DIR is set in the environment and would redirect git reads; unset it"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "input/environment/GIT_WORK_TREE": {
+    "direct": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "GIT_WORK_TREE is set in the environment and would redirect git reads; unset it"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "GIT_WORK_TREE is set in the environment and would redirect git reads; unset it"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "input/environment/GIT_INDEX_FILE": {
+    "direct": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "GIT_INDEX_FILE is set in the environment and would redirect git reads; unset it"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "GIT_INDEX_FILE is set in the environment and would redirect git reads; unset it"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "input/environment/GIT_OBJECT_DIRECTORY": {
+    "direct": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "GIT_OBJECT_DIRECTORY is set in the environment and would redirect git reads; unset it"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "GIT_OBJECT_DIRECTORY is set in the environment and would redirect git reads; unset it"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "input/environment/GIT_ALTERNATE_OBJECT_DIRECTORIES": {
+    "direct": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "GIT_ALTERNATE_OBJECT_DIRECTORIES is set in the environment and would redirect git reads; unset it"
+    },
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "GIT_ALTERNATE_OBJECT_DIRECTORIES is set in the environment and would redirect git reads; unset it"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    }
+  },
+  "input/long_quote": {
+    "exception": "receipt.corpus.CorpusError",
+    "message": "fixture is not a portable name (ASCII letters, digits, '.', '_' and '-', not ending in '.', not a Win32 device name): 'bad?xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\u2026[950 more characters]"
+  }
+}

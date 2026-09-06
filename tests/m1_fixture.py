@@ -16,6 +16,7 @@ import subprocess
 import sys
 from collections.abc import Callable
 from typing import Any
+from functools import lru_cache
 
 import pytest
 
@@ -248,7 +249,16 @@ def stable(value, substitutions=()):
     return value
 
 
+@lru_cache(maxsize=1)
+def _goldens():
+    expected = {}
+    for source in sorted((pathlib.Path(__file__).parent / "m1_expected").glob("*.json")):
+        values = json.loads(source.read_text())
+        assert not expected.keys() & values.keys(), f"duplicate golden key in {source}"
+        expected.update(values)
+    return expected
+
+
 def assert_golden(key, actual, substitutions=()):
     """Compare the full captured value against committed, locally observed bytes."""
-    expected = json.loads((pathlib.Path(__file__).parent / "m1_compat_expected.json").read_text())
-    assert stable(actual, substitutions) == expected[key], key
+    assert stable(actual, substitutions) == _goldens()[key], key
