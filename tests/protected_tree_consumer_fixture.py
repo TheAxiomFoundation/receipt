@@ -17,6 +17,8 @@ def consumer_leg(monkeypatch, module, *, old):
     group = legacy.PR5Append if module is append_gate else legacy.PR5Corpus
     names = legacy.PR5_BODY_SHA256[group.__name__]
     namespace = dict(module.__dict__)
+    if old and module is corpus:
+        namespace["assert_no_merging_tree_names"] = legacy.assert_no_merging_entries
     counts = Counter()
     with monkeypatch.context() as patch:
         functions = {}

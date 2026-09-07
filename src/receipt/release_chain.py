@@ -174,6 +174,7 @@ class ChainSpec:
     anchors: Mapping[str, AnchorSpec]
     name_repertoire: Literal["portable", "posix-bytes"] = "portable"
 
+    # M1 record, ChainSpec row 177-204: configured-path/repertoire admission stays local.
     def __post_init__(self) -> None:
         """Refuse a spec that cannot pin what it claims to pin.
 
@@ -484,6 +485,7 @@ def producer_signature_path_for_manifest(path: pathlib.Path) -> pathlib.Path:
     return path.with_name(f"{path.stem}.producer.sig")
 
 
+# M1 record, directory row 487-568: physical component lstat and race refusals stay.
 def assert_manifest_directory_regular(root: pathlib.Path, spec: ChainSpec) -> None:
     """Decide what the manifest path *is*, for a caller about to ask if it has one.
 
@@ -568,6 +570,7 @@ def assert_manifest_directory_regular(root: pathlib.Path, spec: ChainSpec) -> No
         )
 
 
+# M1 record, schema row 571-607: retain closed filename grammar and physical leaf guards.
 def _enumerate_manifest_files(
     root: pathlib.Path, spec: ChainSpec
 ) -> list[tuple[pathlib.Path, dict[str, pathlib.Path], pathlib.Path]]:
@@ -1079,6 +1082,7 @@ def verify_receipt(
     if tsa not in spec.anchors:
         raise ReleaseChainError(f"unknown TSA receipt kind {tsa!r}")
     _sha256(manifest_digest, "manifest digest")
+    # M1 record, receipt/anchor row 1082-1112: physical preflight remains before each read.
     if receipt.is_symlink() or not receipt.is_file():
         raise ReleaseChainError(f"missing or non-regular RFC 3161 receipt: {receipt}")
     anchor_spec = spec.anchors[tsa]
@@ -1325,6 +1329,7 @@ def _symlinked_component_error(
     )
 
 
+# M1 record, directory rows 1311-1325/1435-1466: inspect current physical links.
 def _is_reparse_point(path: pathlib.Path) -> bool:
     """Whether one component is a symlink or, on Windows, a junction.
 
@@ -1340,6 +1345,7 @@ def _is_reparse_point(path: pathlib.Path) -> bool:
     return stat.S_ISLNK(entry.st_mode) or bool(getattr(entry, "st_reparse_tag", 0))
 
 
+# M1 record, spelling row 1343-1432: bind the actual directory listing at each read.
 def _assert_component_spelled(
     parent: pathlib.Path,
     segment: str,
@@ -1432,6 +1438,7 @@ def _assert_component_spelled(
     )
 
 
+# M1 record, directory row 1435-1466: retain the exported physical state guard.
 def assert_no_symlinked_state_component(
     root: pathlib.Path, relative: pathlib.PurePosixPath
 ) -> None:
@@ -1466,6 +1473,7 @@ def assert_no_symlinked_state_component(
         current = child
 
 
+# M1 record, directory row 1469-1542: walk configured physical paths before reading.
 def assert_no_symlinked_release_root(root: pathlib.Path, spec: ChainSpec) -> None:
     """Bind all configured release-path components before directory reads.
 
@@ -1485,6 +1493,7 @@ def assert_no_symlinked_release_root(root: pathlib.Path, spec: ChainSpec) -> Non
         )
 
 
+# M1 record, directory row 1469-1542: physical spelling/link order is reader-owned.
 def _walk_release_path(
     root: pathlib.Path,
     relative: pathlib.PurePosixPath,
@@ -1550,6 +1559,7 @@ STATE_OPEN_FLAGS = (
 )
 
 
+# M1 record, directory row 1553-1635: lstat/open/fstat/length guards protect read-once I/O.
 def _regular_file_bytes(
     root: pathlib.Path,
     relative: pathlib.PurePosixPath,
@@ -1982,6 +1992,7 @@ def verify_release_chain(
         raise ReleaseChainError(str(exc)) from exc
 
     root = root.resolve()
+    # M1 record, anchor row 1984-2015: physical link precedence excludes caller-owned trust.
     default_anchor_dir = root / spec.anchor_relative
     if anchor_dir is None:
         # The spec-pinned anchor path must be physically canonical: a
@@ -2166,6 +2177,7 @@ REDIRECTING_GIT_ENVIRONMENT = (
 )
 
 
+# M1 record, input-selection paragraph 2160-2182: Git environment is outside tree policy.
 def assert_no_redirecting_git_environment() -> None:
     """Refuse before snapshot selection when Git reads could be redirected.
 
@@ -2209,6 +2221,7 @@ def verify_release_history_immutable(
     # over the tree's modes, without opening any blob.
     modes.require(plan.use, render=_history_mode_error)
 
+    # M1 record, history row 2185-2231: comparisons consume facts in the retained order.
     for relative, prior in sorted(base_entries.items()):
         prior_plan = ProtectionPlan(listing_scope=(), obligations=("modes",),
                                    use="base-history", mode_roles=((relative, "release-leaf"),))

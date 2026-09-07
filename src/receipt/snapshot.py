@@ -843,6 +843,7 @@ def _parse_raw_tree(
     entries: list[_RawTreeEntry] = []
     names: set[bytes] = set()
     previous_key: bytes | None = None
+    # M1 record, raw-tree row 797-844: structural admission precedes policy facts.
     while position < len(payload):
         if len(entries) >= MAX_TREE_ENTRIES:
             raise SnapshotError(
@@ -1428,6 +1429,7 @@ class TreeListing:
     def tree_oid(self) -> str | None:
         return self._node.tree_oid
 
+    # M1 record, snapshot entry/listing APIs: tree/leaf iteration is reader metadata.
     def _walk_from(
         self,
         node: _TreeNode,
@@ -1575,7 +1577,10 @@ class _DigestIterator(Iterator[tuple[GitEntry, str]]):
                 f"object {entry.object_id} is a {entry.object_type}, not the blob "
                 "its reference requires"
             )
-        if entry.mode not in _CONTENT_MODES:
+        # M1 record, payload API row 2690-2703/1735-1759: retain admission, share modes.
+        from receipt.protected_tree import classify_mode
+
+        if not classify_mode(entry.mode, entry.object_type).regular:
             self.close()
             raise SnapshotError(
                 f"tree entry has non-regular mode {entry.mode}: {entry.path}"
@@ -2339,6 +2344,7 @@ class TreeSnapshot:
         return None
 
     @staticmethod
+    # M1 record, path API row 2514-2542: raw argument grammar and budgets stay here.
     def _path_parts(path: str | bytes, *, allow_empty: bool) -> tuple[bytes, ...]:
         if type(path) is str:
             try:
@@ -2514,7 +2520,10 @@ class TreeSnapshot:
                 f"object {entry.object_id} is a {entry.object_type}, not the blob "
                 "its reference requires"
             )
-        if entry.mode not in _CONTENT_MODES:
+        # M1 record, payload API row 2690-2703/1735-1759: retain admission, share modes.
+        from receipt.protected_tree import classify_mode
+
+        if not classify_mode(entry.mode, entry.object_type).regular:
             raise SnapshotError(
                 f"tree entry has non-regular mode {entry.mode}: {entry.path}"
             )
@@ -2744,6 +2753,7 @@ class TreeSnapshot:
             )
         return ObjectStoreReport(objects=objects, store_kib=store_kib, seconds=elapsed)
 
+    # M1 record, row 2931-2950: exact lookup retains authentication and delegates ancestors.
     def _raw_entry_at(self, parts: tuple[bytes, ...]) -> _RawTreeEntry | None:
         tree_oid = self.tree
         count = [0]
@@ -2803,6 +2813,7 @@ class TreeSnapshot:
 
         refuse_attributes(self, iterator)
 
+    # M1 record, materialization argument row 3112-3141: bounded public admission stays.
     def materialize(
         self,
         prefixes: Iterable[str | bytes | pathlib.PurePosixPath],
@@ -2903,6 +2914,7 @@ class Materialization:
         return dict(selected.entries_for(self._snapshot, use=self._export_plan.use,
                                          plan=self._export_plan))
 
+    # M1 record, Materialization row: actual partial writes own byte charges and cleanup.
     def _write_chunk(self, handle: BinaryIO, chunk: bytes) -> None:
         written = 0
         view = memoryview(chunk)
@@ -2945,6 +2957,7 @@ class Materialization:
                 )
             )
             created.chmod(stat.S_IRWXU)
+            # M1 record, materializer row: physical creation/modes/rehash remain writer duties.
             for relative, entry in sorted(selected.items()):
                 batch = self._snapshot._batch()
                 _kind, size = batch.info(entry.object_id, role="blob")
@@ -3020,6 +3033,7 @@ class Materialization:
                 raise cleanup_error
 
     @staticmethod
+    # M1 record, anchor filename row 3367-3387: evidence serialization admission stays.
     def _exact_filename(value: object) -> str:
         if not isinstance(value, (str, os.PathLike)):
             raise SnapshotError(
@@ -3066,6 +3080,7 @@ class Materialization:
             except Exception as exc:
                 raise SnapshotError("configured anchor does not carry a filename") from exc
 
+        # M1 record, anchor rows 3414-3456: recheck physical bytes and JSON key identity.
         per_file: dict[str, str] = {}
         for supplied in configured:
             filename = self._exact_filename(supplied)

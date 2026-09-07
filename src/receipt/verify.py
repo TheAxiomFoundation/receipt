@@ -344,6 +344,7 @@ def load_spec(
     # thing an auditor pins: they read the spec out of band and record its
     # digest against a path, and the link can be repointed at other bytes
     # afterwards without that path changing at all.
+    # M1 record, executable-spec paragraph: physical user input is outside the Git tree.
     if spec_path.is_symlink():
         raise VerifySpecError(
             f"spec is a symlink; supply the regular file's path: {spec_path}"
@@ -464,6 +465,7 @@ def _declaration_detail(verification: CorpusVerification) -> str:
     )
 
 
+# M1 record, verify row 658-709; PR3a/PR5: retain every substituted-reader facade branch.
 def run_verification(
     root: pathlib.Path,
     spec: LoadedSpec,

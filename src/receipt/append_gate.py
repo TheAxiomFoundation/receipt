@@ -134,6 +134,7 @@ def _assert_release_paths_are_subdirectories(spec: AppendGateSpec) -> None:
             raise AppendError(f"{label} must be a subdirectory of the candidate root")
 
 
+# M1 record, _is_protected row 149-170: append owns surface matching and confinement.
 def _matches_surface(path: str, surface: frozenset[str]) -> bool:
     for pattern in surface:
         if pattern.endswith("/**"):
@@ -158,6 +159,7 @@ def _classify_surfaces(
     return data_changes, gate_changes, changed - data_changes - gate_changes
 
 
+# M1 record, _is_protected row 149-170: compile append surface ancestors, not shape facts.
 def _release_root_ancestors(candidate: _CandidateTree) -> tuple[str, ...]:
     """Every proper ancestor of the configured release root, shallowest first.
 
@@ -171,6 +173,7 @@ def _release_root_ancestors(candidate: _CandidateTree) -> tuple[str, ...]:
     return tuple("/".join(parts[:depth]) for depth in range(1, len(parts)))
 
 
+# M1 record, _is_protected row 149-170: one selector feeds confinement and attributes.
 def _is_protected(path: str, candidate: _CandidateTree) -> bool:
     """Whether one path lies on a surface this verdict speaks for.
 
@@ -676,6 +679,7 @@ def check_state_modes(
 
     from receipt.protected_tree import classify_mode
 
+    # M1 record, state equality row 644-661/1170-1178: history compares admitted modes.
     selected = entries or {}
     for relative in (
         candidate.spec.chain.state_relative,
@@ -836,6 +840,7 @@ def _materialization_prefixes(
     )
 
 
+# M1 record, alias row 819-851: compile configured surface forms into ordered targets.
 def _surface_alias_paths(candidate: _CandidateTree) -> tuple[str, ...]:
     """Return the exact paths named by the two configured surface forms."""
 
@@ -891,12 +896,14 @@ def _attribute_entries(
 ) -> tuple[GitEntry, ...]:
     """Select regular attribute targets using append's shared surface predicate."""
 
+    # M1 record, attribute row 854-874: append compiles surface/export obligations here.
     paths = tuple(path for path in sorted(entries) if (
         _is_protected(path, candidate) or any(
             path == prefix or path.startswith(f"{prefix}/")
             for prefix in candidate._plan.export_prefixes)))
     from receipt.protected_tree import regular_entries
 
+    # M1 record, attribute facade row; PR3a/PR5: metadata-only callers need no entered reader.
     evaluator = candidate.__dict__.get("_policy")
     return (evaluator.regular_entries(entries, paths) if evaluator is not None
             else regular_entries(entries, paths))
@@ -909,6 +916,7 @@ def _candidate_release_entries_regular(candidate: _CandidateTree) -> None:
     manifest = candidate.spec.chain.manifest_relative.as_posix()
     entries = candidate.snapshot.entries(release_root).as_dict()
     candidate._policy.observe_entries(entries.values())
+    # M1 record, release row 877-891: defer the exact manifest to its directory renderer.
     plan = replace(candidate._plan, obligations=("modes",), listing_scope=(),
         ancestor_paths=(), use="append-release",
         mode_roles=tuple((path, "release-leaf") for path in sorted(entries) if path != manifest))
@@ -977,6 +985,7 @@ def check_release_proposal(
     )
     manifest_relative = candidate.spec.chain.manifest_relative.as_posix()
     manifest_children = candidate._policy.manifest_children(manifest_relative)
+    # M1 record, proposal row 962-967: .json is release schema over shared regular facts.
     candidate_has_chain = any(
         name.endswith(".json") and fact.regular
         for name, fact in manifest_children.items()
@@ -1070,6 +1079,7 @@ def check_release_chain_without_base(
 
     manifest_relative = candidate.spec.chain.manifest_relative.as_posix()
     initialized = candidate._policy.manifest_initialized(manifest_relative)
+    # M1 record, initialization row 1057-1068: append retains pre-genesis control flow.
     if not initialized:
         _candidate_release_entries_regular(candidate)
         _screen_candidate_materialization(candidate)
