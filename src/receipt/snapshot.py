@@ -112,7 +112,10 @@ from bisect import bisect_left
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import BinaryIO, Callable
+from typing import TYPE_CHECKING, BinaryIO, Callable
+
+if TYPE_CHECKING:
+    from receipt.protected_tree import _AttributeStore
 
 from receipt._names import (
     NamePolicyError,
@@ -291,6 +294,8 @@ class _WorkPool:
 
     works: list[SnapshotWork]
     parent: "_WorkPool | None" = None
+
+    attributes: "_AttributeStore | None" = None
 
     def root(self) -> "_WorkPool":
         if self.parent is None:
@@ -1627,6 +1632,7 @@ class _AttributeRule:
     has_slash: bool
     trailing_descendants: bool
     states: tuple[tuple[str, str], ...]
+    source_line: int = field(default=0, kw_only=True, compare=False)
 
 
 @dataclass(frozen=True)
@@ -2360,6 +2366,11 @@ class TreeSnapshot:
         for field_name, ceiling, message in limits:
             if sum(getattr(work, field_name) for work in combined) > ceiling:
                 raise SnapshotError(message)
+        if right.attributes is not None:
+            if left.attributes is None:
+                left.attributes = right.attributes
+            else:
+                left.attributes.merge(right.attributes)
         left.works.extend(right.works)
         right.parent = left
 
