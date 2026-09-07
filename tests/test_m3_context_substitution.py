@@ -3,6 +3,15 @@
 Factory replacements are characterized, including pre-import and simultaneous
 class/reference substitution. Acceptance at one public boundary does not grant
 concrete policy authority at a borrowed consumer boundary.
+
+Observed limits of the record's proposed substitution gate are explicit:
+accepted binding subclasses still fail direct history/base-chain policy admission
+with "policy subject/work mismatch". Replacing both snapshot.TreeSnapshot and
+verify.TreeSnapshot with the no-ledger fake reaches the current mutable-class
+comparison and renders "AttributeError: 'Fake' object has no attribute 'work'".
+The verify-only class patch and classmethod-to-fake control succeed without
+policy authority. Broad proposed substitution support is not a current universal
+acceptance claim; this freeze deliberately retains these different outcomes.
 """
 from collections import Counter
 from dataclasses import asdict
