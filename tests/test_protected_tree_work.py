@@ -98,42 +98,19 @@ def test_overlapping_export_inputs_keep_counter_and_refusal_locations(raw_repo, 
 
 @pytest.mark.parametrize("ceiling", (39, 40, 41, 100000))
 def test_d12_matching_checkpoints_unchanged(raw_repo, monkeypatch, ceiling):
+    # PR4 now switches the real attribute method, including independently frozen
+    # parsing and matching, and proves that each leg reached its intended body.
     commit = raw_repo.commit((("protected.txt", "100644"),
         (".gitattributes", "100644", b"protected.txt -filter\n")))
     monkeypatch.setattr(snapshot, "MAX_ATTRIBUTE_MATCH_WORK", ceiling)
-    results = []
-    original_match = snapshot._attribute_matches
-    for new in (False, True):
-        matches = []
-        def match(*args, **kwargs):
-            matches.append(1)
-            return original_match(*args, **kwargs)
-        monkeypatch.setattr(snapshot, "_attribute_matches", match)
-        with raw_repo.snapshot(commit) as snap:
-            value = plan()
-            if new:
-                subject = policy.TreePolicy(snap, policy_version=policy.POLICY_VERSION, work=snap.work)
-                view = subject.evaluate(value, stage="suffixes")
-                view.require(value.use, render=_protected_name_error)
-            else:
-                old_names(snap.entries("").as_dict(include_trees=True), value)
-            initial_paths = snap.work.path_bytes
-            calls = []
-            for _ in range(2):
-                if new:
-                    subject.evaluate(value, stage="suffixes", previous=view)
-                result = outcome(lambda: snap.refuse_transforming_attributes(("protected.txt",)))
-                counters = asdict(snap.work)
-                counters["path_bytes"] -= initial_paths
-                calls.append((result, counters))
-            results.append((calls, len(matches)))
-    assert results[0] == results[1]
-    calls, matches = results[1]
-    assert calls[0][1]["attribute_match_work"] == 28
-    assert calls[1][1]["attribute_match_work"] == min(56, ceiling)
-    assert calls[0][1]["path_bytes"] == 27
-    assert calls[1][1]["path_bytes"] == 40
-    assert matches == (4 if ceiling >= 56 else 3)
+    calls, costs = attribute_comparison(raw_repo, commit, monkeypatch, (("protected.txt",),) * 2)
+    assert [c[1]["attribute_match_work"] for c in calls] == [28, min(56, ceiling)]
+    assert [c[1]["path_bytes"] for c in calls] == [27, 40]
+    assert all(c[1]["attribute_bytes"] == 22 and c[1]["attribute_rules"] == 1 for c in calls)
+    assert costs[0][0]["matches"] == (4 if ceiling >= 56 else 3)
+    assert costs[1][0]["matches"] == (2 if ceiling >= 56 else 3)
+    assert costs[1][1].rule_evaluations == 2
+    assert costs[1][1].exhaustion_replays == int(ceiling < 56)
 
 
 @pytest.mark.parametrize("fault", ("clean", "alias", "ancestor", "unfoldable"))
@@ -608,3 +585,214 @@ def test_pr3b_legacy_bodies_match_recorded_sha256():
     for name, expected in legacy.PR3B_BODY_SHA256.items():
         body = textwrap.dedent(inspect.getsource(getattr(legacy, name)))
         assert hashlib.sha256(body.encode()).hexdigest() == expected
+
+
+@contextmanager
+def trace_attributes(monkeypatch, *, old):
+    """Reach independent old bodies or the real forwarding/evaluation seams."""
+    from types import FunctionType
+    with monkeypatch.context() as patch:
+        counts = dict(legacy=0, facade=0, policy=0, matches=0, parses=0)
+        if old:
+            for name in legacy.PR4_BODY_SHA256:
+                target = snapshot.TreeSnapshot if name in {
+                    "_attribute_rules", "_attribute_step", "refuse_transforming_attributes"
+                } else snapshot
+                patch.setattr(target, name, FunctionType(getattr(legacy, name).__code__, snapshot.__dict__))
+        original_call = snapshot.TreeSnapshot.refuse_transforming_attributes
+        def call(subject, paths):
+            counts["legacy" if old else "facade"] += 1
+            return original_call(subject, paths)
+        patch.setattr(snapshot.TreeSnapshot, "refuse_transforming_attributes", call)
+        original_policy = policy.refuse_attributes
+        def forward(*args, **kwargs):
+            counts["policy"] += 1
+            return original_policy(*args, **kwargs)
+        patch.setattr(policy, "refuse_attributes", forward)
+        original_match = snapshot._attribute_matches
+        current_rule = []
+        def match(rule, relative, step):
+            counts["matches"] += 1
+            current_rule[:] = [rule.pattern, relative]
+            return original_match(rule, relative, step)
+        patch.setattr(snapshot, "_attribute_matches", match)
+        original_parse = snapshot._parse_attribute_file
+        def parse(*args, **kwargs):
+            counts["parses"] += 1
+            return original_parse(*args, **kwargs)
+        patch.setattr(snapshot, "_parse_attribute_file", parse)
+        failed_steps = []
+        original_charge = snapshot.TreeSnapshot._charge_verification
+        def charge(subject, field, amount, **kwargs):
+            try:
+                return original_charge(subject, field, amount, **kwargs)
+            except snapshot.SnapshotError:
+                if field == "attribute_match_work":
+                    failed_steps.append((tuple(current_rule), amount, asdict(subject.work)))
+                raise
+        patch.setattr(snapshot.TreeSnapshot, "_charge_verification", charge)
+        with trace_reads(patch) as (events, _):
+            yield counts, events, failed_steps
+        assert counts["legacy"] > 0 if old else counts["facade"] > 0
+        assert counts["policy"] == (0 if old else counts["facade"])
+
+
+def attribute_comparison(repo, commit, monkeypatch, requests, *, shared=False, ceilings=None):
+    results, costs = [], []
+    for old in (True, False):
+        with trace_attributes(monkeypatch, old=old) as (counts, events, failures):
+            with repo.snapshot(commit) as first, repo.snapshot(commit) as second:
+                if shared:
+                    first._link_verification_work(second)
+                calls = []
+                for index, paths in enumerate(requests):
+                    if ceilings is not None:
+                        monkeypatch.setattr(snapshot, "MAX_ATTRIBUTE_MATCH_WORK", ceilings[index])
+                    subject = second if shared and index % 2 else first
+                    result = outcome(lambda: subject.refuse_transforming_attributes(paths))
+                    calls.append((result, asdict(first.work), asdict(second.work), tuple(events), tuple(failures)))
+                results.append(calls)
+                costs.append((dict(counts), None if old else policy._attribute_store(first).work))
+    assert results[0] == results[1]
+    return results[1], costs
+
+
+@pytest.mark.parametrize("budget,threshold,attributes,paths", (
+    ("MAX_ATTRIBUTE_BYTES", 22, b"protected.txt -filter\n", ("protected.txt",)),
+    ("MAX_ATTRIBUTE_BYTES_TOTAL", 22, b"protected.txt -filter\n", ("protected.txt",)),
+    ("MAX_ATTRIBUTE_RULES_TOTAL", 2, b"* -filter\n* -ident\n", ("protected.txt",)),
+    ("MAX_ATTRIBUTE_STATES_PER_LINE", 3, b"* binary\n", ("protected.txt",)),
+    ("MAX_ATTRIBUTE_MATCH_WORK", 28, b"protected.txt -filter\n", ("protected.txt",)),
+    ("MAX_TREE_ENTRIES", 3, b"", ("protected.txt",) * 3),
+    ("MAX_PATH_BYTES", 14, b"", ("protected.txt",)),
+    ("MAX_PATH_BYTES_TOTAL", 27, b"", ("protected.txt",)),
+    ("MAX_TREE_DEPTH", 2, b"", ("p/n/leaf",)),
+))
+@pytest.mark.parametrize("delta", (-1, 0, 1))
+def test_attribute_exact_budget_boundaries(raw_repo, monkeypatch, budget, threshold, attributes, paths, delta):
+    # The per-path ceiling also admits the 14-byte committed .gitattributes path.
+    commit = raw_repo.commit(((".gitattributes", "100644", attributes),))
+    monkeypatch.setattr(snapshot, budget, threshold + delta)
+    calls, _ = attribute_comparison(raw_repo, commit, monkeypatch, (paths,))
+    assert ("value" in calls[-1][0]) == (delta >= 0)
+
+
+@pytest.mark.parametrize("shared", (False, True))
+@pytest.mark.parametrize("delta", (-1, 0, 1))
+@pytest.mark.parametrize("budget,threshold", (("MAX_ATTRIBUTE_BYTES_TOTAL", 44),
+                                             ("MAX_ATTRIBUTE_RULES_TOTAL", 2),
+                                             ("MAX_ATTRIBUTE_MATCH_WORK", 56),
+                                             ("MAX_PATH_BYTES_TOTAL", 54)))
+def test_attribute_shared_ledger_boundaries(raw_repo, monkeypatch, shared, delta, budget, threshold):
+    commit = raw_repo.commit(((".gitattributes", "100644", b"protected.txt -filter\n"),))
+    # One snapshot loads once; linked candidate/base must each admit the source.
+    if not shared:
+        threshold = {"MAX_ATTRIBUTE_BYTES_TOTAL": 22, "MAX_ATTRIBUTE_RULES_TOTAL": 1,
+                     "MAX_ATTRIBUTE_MATCH_WORK": 56, "MAX_PATH_BYTES_TOTAL": 40}[budget]
+    monkeypatch.setattr(snapshot, budget, threshold + delta)
+    calls, costs = attribute_comparison(raw_repo, commit, monkeypatch,
+                                        (("protected.txt",),) * 2, shared=shared)
+    assert ("value" in calls[-1][0]) == (delta >= 0)
+    if delta >= 0:
+        assert costs[0][0]["matches"] == 4
+        assert costs[1][0]["matches"] == costs[1][1].rule_evaluations == 2
+        assert costs[1][1].exhaustion_replays == 0
+        assert costs[1][0]["parses"] == (2 if shared else 1)
+
+
+@pytest.mark.parametrize("ceilings", ((40, 40, 200, 400), (0, 12, 100, 400), (27, 55, 100, 400)))
+@pytest.mark.parametrize("shared", (False, True))
+def test_attribute_resumed_overlapping_requests(raw_repo, monkeypatch, ceilings, shared):
+    commit = raw_repo.commit(((".gitattributes", "100644", b"* -filter\n"),
+                              ("p/.gitattributes", "100755", b"**/leaf -ident\n")))
+    requests = (("p/leaf", "p/leaf"), ("p/leaf", "p/other"), ("p/other", "p/leaf"), ("p/leaf",))
+    calls, costs = attribute_comparison(raw_repo, commit, monkeypatch, requests,
+                                       shared=shared, ceilings=ceilings)
+    assert calls[-1][0] == {"value": None}
+    assert costs[1][1].checkpoint_entries <= costs[1][1].matching_steps
+    assert costs[1][0]["matches"] <= costs[0][0]["matches"]
+
+
+@pytest.mark.parametrize("ceiling", range(57))
+def test_every_d12_stopping_step_matches_legacy(raw_repo, monkeypatch, ceiling):
+    commit = raw_repo.commit(((".gitattributes", "100644", b"protected.txt -filter\n"),))
+    monkeypatch.setattr(snapshot, "MAX_ATTRIBUTE_MATCH_WORK", ceiling)
+    calls, costs = attribute_comparison(raw_repo, commit, monkeypatch, (("protected.txt",),) * 2)
+    assert calls[-1][1]["attribute_match_work"] == ceiling
+    if ceiling >= 28:
+        assert costs[1][1].rule_evaluations == 2
+        assert costs[1][1].exhaustion_replays == int(ceiling < 56)
+
+
+def test_attribute_legacy_bodies_match_recorded_sha256():
+    import ast
+    import hashlib
+    import inspect
+    import textwrap
+    source = inspect.getsource(legacy)
+    lines = source.splitlines(keepends=True)
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.FunctionDef) and node.name in legacy.PR4_BODY_SHA256:
+            body = textwrap.dedent("".join(lines[node.lineno - 1:node.end_lineno]))
+            assert hashlib.sha256(body.encode()).hexdigest() == legacy.PR4_BODY_SHA256[node.name]
+
+
+@pytest.mark.parametrize("length", (2047, 2048, 2049))
+def test_attribute_physical_line_boundary(raw_repo, monkeypatch, length):
+    payload = b"* custom=" + b"x" * (length - len(b"* custom=")) + b"\n"
+    commit = raw_repo.commit(((".gitattributes", "100644", payload),))
+    calls, _ = attribute_comparison(raw_repo, commit, monkeypatch, (("path",),))
+    assert ("value" in calls[0][0]) == (length < 2048)
+
+
+@pytest.mark.parametrize("states", (255, 256, 257))
+def test_attribute_production_state_boundary(raw_repo, monkeypatch, states):
+    commit = raw_repo.commit(((".gitattributes", "100644", b"* " + b" ".join([b"a"] * states) + b"\n"),))
+    calls, _ = attribute_comparison(raw_repo, commit, monkeypatch, (("path",),))
+    assert ("value" in calls[0][0]) == (states <= 256)
+
+
+@pytest.mark.parametrize("delta", (-1, 0, 1))
+def test_attribute_production_blob_boundary(raw_repo, monkeypatch, delta):
+    payload = b"#" + b"x" * (snapshot.MAX_ATTRIBUTE_BYTES + delta - 1)
+    commit = raw_repo.commit(((".gitattributes", "100644", payload),))
+    calls, _ = attribute_comparison(raw_repo, commit, monkeypatch, (("path",),))
+    assert ("value" in calls[0][0]) == (delta <= 0)
+
+
+def test_attribute_checkpoints_are_compact_and_shared_across_linked_subjects(raw_repo, monkeypatch):
+    payload = b"*.json " + b" ".join([b"a"] * 200) + b"\n"
+    commit = raw_repo.commit(((".gitattributes", "100644", payload),))
+    paths = tuple(f"p/{index}.json" for index in range(32))
+    requests = (paths + paths, paths, paths[::-1], paths)
+    calls, costs = attribute_comparison(raw_repo, commit, monkeypatch, requests, shared=True)
+    assert all(c[0] == {"value": None} for c in calls)
+    actual = costs[1][1]
+    assert actual.rule_evaluations == actual.checkpoint_entries == 64
+    assert actual.exhaustion_replays == 0
+    assert actual.applied_states == 64 * 200
+    assert actual.path_outcomes == 64  # 32 paths in each of two authenticated subjects
+    assert costs[0][0]["matches"] == 256 and costs[1][0]["matches"] == 64
+    # Applied states use two integers/boolean checkpoint fields, not 12,800
+    # objects representing individual matching and state-application charges.
+    assert tuple(policy._RuleCheckpoint.__dataclass_fields__) == ("cost", "matched")
+
+
+@pytest.mark.parametrize("link_after", (0, 1, 2))
+def test_linking_attribute_ledgers_retains_completed_facts(raw_repo, monkeypatch, link_after):
+    commit = raw_repo.commit(((".gitattributes", "100644", b"path -filter\n"),))
+    results, costs = [], []
+    for old in (True, False):
+        with trace_attributes(monkeypatch, old=old) as (counts, events, failures):
+            with raw_repo.snapshot(commit) as first, raw_repo.snapshot(commit) as second:
+                calls = []
+                for index, snap in enumerate((first, second, first, second)):
+                    if index == link_after:
+                        first._link_verification_work(second)
+                    calls.append((outcome(lambda: snap.refuse_transforming_attributes(("path",))),
+                                  asdict(first.work), asdict(second.work), tuple(events), tuple(failures)))
+                results.append(calls)
+                costs.append(dict(counts))
+    assert results[0] == results[1]
+    assert costs[0]["matches"] == 8
+    assert costs[1]["matches"] == (4 if link_after == 2 else 2)
