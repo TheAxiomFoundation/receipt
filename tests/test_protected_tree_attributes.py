@@ -212,6 +212,7 @@ def test_versions_plans_and_overlapping_requests_have_separate_acceptance(raw_re
         assert first.attribute_outcomes[b"a"] is second.attribute_outcomes[b"a"]
         assert a.attribute_work.rule_evaluations == 4
         assert a.attribute_work.plan_outcomes == 4
+        assert a.attribute_work.folded_paths == 2
         with pytest.raises(policy.PolicyUseError, match="incompatible plan"):
             a.evaluate_attributes(other_plan, previous=first)
         # Production admits one fixed version. Simulate a second compiled
@@ -222,6 +223,7 @@ def test_versions_plans_and_overlapping_requests_have_separate_acceptance(raw_re
         assert third.policy_version != first.policy_version
         assert third.attribute_outcomes[b"a"] is not first.attribute_outcomes[b"a"]
         assert b.attribute_work.rule_evaluations == 8
+        assert b.attribute_work.folded_paths == 4
         with pytest.raises(policy.PolicyUseError, match="unsupported"):
             policy.TreePolicy(snap, policy_version="repository-supplied", work=snap.work)
 

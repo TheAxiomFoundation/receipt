@@ -592,7 +592,7 @@ def trace_attributes(monkeypatch, *, old):
     """Reach independent old bodies or the real forwarding/evaluation seams."""
     from types import FunctionType
     with monkeypatch.context() as patch:
-        counts = dict(legacy=0, facade=0, policy=0, matches=0, parses=0)
+        counts = dict(legacy=0, facade=0, policy=0, matches=0, parses=0, path_folds=0)
         if old:
             for name in legacy.PR4_BODY_SHA256:
                 target = snapshot.TreeSnapshot if name in {
@@ -609,6 +609,11 @@ def trace_attributes(monkeypatch, *, old):
             counts["policy"] += 1
             return original_policy(*args, **kwargs)
         patch.setattr(policy, "refuse_attributes", forward)
+        original_fold = policy._fold_attribute_path
+        def fold(parts):
+            counts["path_folds"] += 1
+            return original_fold(parts)
+        patch.setattr(policy, "_fold_attribute_path", fold)
         original_match = snapshot._attribute_matches
         current_rule = []
         def match(rule, relative, step):
@@ -770,6 +775,8 @@ def test_attribute_checkpoints_are_compact_and_shared_across_linked_subjects(raw
     actual = costs[1][1]
     assert actual.rule_evaluations == actual.checkpoint_entries == 64
     assert actual.exhaustion_replays == 0
+    assert costs[0][0]["path_folds"] == 0
+    assert costs[1][0]["path_folds"] == actual.folded_paths == 32
     assert actual.applied_states == 64 * 200
     assert actual.path_outcomes == 64  # 32 paths in each of two authenticated subjects
     assert costs[0][0]["matches"] == 256 and costs[1][0]["matches"] == 64

@@ -989,6 +989,11 @@ class AttributeWork:
     path_outcomes: int
     plan_outcomes: int
     folded_rules: int
+    folded_paths: int
+
+
+def _fold_attribute_path(parts: tuple[bytes, ...]) -> tuple[bytes, ...]:
+    return tuple(segment.lower() for segment in parts)
 
 
 class _AttributeStore:
@@ -1002,6 +1007,7 @@ class _AttributeStore:
     def __init__(self):
         self.checkpoints: dict[tuple, _RuleCheckpoint] = {}
         self.folds: dict[tuple, snapshot._AttributeRule] = {}
+        self.folded_paths: dict[tuple, tuple[bytes, ...]] = {}
         self.paths: dict[tuple, AttributeOutcome] = {}
         self.plans: dict[tuple, AttributeOutcome] = {}
         self.attempted: set[tuple] = set()
@@ -1009,7 +1015,7 @@ class _AttributeStore:
         self.matching_steps = self.applied_states = 0
 
     def merge(self, other: _AttributeStore) -> None:
-        for name in ("checkpoints", "folds", "paths", "plans"):
+        for name in ("checkpoints", "folds", "folded_paths", "paths", "plans"):
             getattr(self, name).update(getattr(other, name))
         self.attempted.update(other.attempted)
         for name in ("rule_evaluations", "exhaustion_replays", "matching_steps", "applied_states"):
@@ -1019,7 +1025,16 @@ class _AttributeStore:
     def work(self) -> AttributeWork:
         return AttributeWork(self.rule_evaluations, self.exhaustion_replays,
                              self.matching_steps, self.applied_states,
-                             len(self.checkpoints), len(self.paths), len(self.plans), len(self.folds))
+                             len(self.checkpoints), len(self.paths), len(self.plans), len(self.folds),
+                             len(self.folded_paths))
+
+    def folded_path(self, version: str, parts: tuple[bytes, ...]) -> tuple[bytes, ...]:
+        key = version, parts
+        result = self.folded_paths.get(key)
+        if result is None:
+            result = _fold_attribute_path(parts)
+            self.folded_paths[key] = result
+        return result
 
     def rule(self, subject: snapshot.TreeSnapshot, version: str, fold: bool,
              rule: snapshot._AttributeRule, relative: tuple[bytes, ...]) -> _RuleCheckpoint:
@@ -1046,13 +1061,17 @@ class _AttributeStore:
         def step():
             subject._attribute_step()
             self.matching_steps += 1
-            self.attempted.add(key)
 
-        matched = snapshot._attribute_matches(rule, relative, step)
-        if matched:
-            for _ in rule.states:
-                subject._attribute_step()
-                self.applied_states += 1
+        try:
+            matched = snapshot._attribute_matches(rule, relative, step)
+            if matched:
+                for _ in rule.states:
+                    subject._attribute_step()
+                    self.applied_states += 1
+        finally:
+            # Hash the potentially large rule key once per attempt, including
+            # partial exhaustion, rather than once per matching/applied step.
+            if subject.work.attribute_match_work > start:
                 self.attempted.add(key)
         checkpoint = _RuleCheckpoint(subject.work.attribute_match_work - start, matched)
         self.checkpoints[key] = checkpoint
@@ -1494,7 +1513,7 @@ class TreePolicy:
                         sources.append(source)
                     relative = parts[depth:]
                     if fold:
-                        relative = tuple(segment.lower() for segment in relative)
+                        relative = store.folded_path(self.policy_version, parts)[depth:]
                     for rule in rules:
                         source_line = rule.source_line
                         if fold:
