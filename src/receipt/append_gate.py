@@ -1107,9 +1107,16 @@ def _verify_selected_tree(
     ledger_entry = _state_entry(candidate, spec.chain.state_relative)
     prefix_entry = _state_entry(candidate, spec.chain.prefix_relative)
     tree_entries = _screen_candidate_tree_aliases(candidate)
-    candidate.snapshot.refuse_transforming_attributes(
-        _attribute_entries(candidate, tree_entries)
-    )
+    from receipt.protected_tree import POLICY_VERSION, ProtectionPlan, TreePolicy, attribute_error
+
+    attribute_plan = ProtectionPlan(obligations=("attributes",), listing_scope=(),
+        use="append-attributes", phase="attributes", anchor_origin="caller",
+        attribute_target_selectors=tuple(
+            entry.path for entry in _attribute_entries(candidate, tree_entries)))
+    policy = TreePolicy(candidate.snapshot, policy_version=POLICY_VERSION,
+                        work=candidate.snapshot.work)
+    attributes = policy.evaluate_attributes(attribute_plan)
+    attributes.require(attribute_plan.use, render=attribute_error)
     if base is not None:
         _data_changes, gate_changes, unclassified = check_surface_separation(
             base,

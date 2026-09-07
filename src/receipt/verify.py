@@ -45,7 +45,7 @@ from datetime import datetime
 from typing import Any
 
 from receipt import __version__, snapshot as snapshot_module
-from receipt.protected_tree import POLICY_VERSION, ProtectionPlan, TreePolicy, classify_mode
+from receipt.protected_tree import POLICY_VERSION, ProtectionPlan, TreePolicy, classify_mode, attribute_error
 from receipt.corpus import (
     CI_ATTESTED_TIER,
     GATE_TIERS,
@@ -748,9 +748,14 @@ def run_verification(
                                              mode_roles=tuple((p, "export-leaf") for p in selected_paths))
                         shapes = policy.evaluate(shape_plan, stage="modes")
                         shapes.require(shape_plan.use, render=_base_shape_error)
-                    candidate.refuse_transforming_attributes(
-                        materialized_entries.values()
-                    )
+                    if policy is None:
+                        candidate.refuse_transforming_attributes(materialized_entries.values())
+                    else:
+                        attribute_plan = replace(custody_plan, obligations=("attributes",),
+                            listing_scope=(), phase="attributes", attribute_target_selectors=tuple(
+                                entry.path for entry in materialized_entries.values()))
+                        attributes = policy.evaluate_attributes(attribute_plan)
+                        attributes.require(attribute_plan.use, render=attribute_error)
                     materialized_anchor_set = materialized.anchor_set_sha256(
                         normalized_chain
                     )

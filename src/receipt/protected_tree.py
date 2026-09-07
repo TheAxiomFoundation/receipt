@@ -1,9 +1,10 @@
-"""Authenticated name and shape evidence for receipt 0.7 M1.
+"""Authenticated name, shape and attribute evidence for receipt 0.7 M1.
 
 Names, configured aliases and scoped DOS suffixes are evaluated only at the
 caller's existing barriers. The snapshot still owns object authentication and
 structural/admission charges. Shape stages consume admitted metadata at the
-caller's barrier; export certification precedes writing. Attributes remain PR4 work.
+caller's barrier; export certification precedes writing. Attributes are lazy and
+use the fixed v0.6 exact-plus-ASCII-fold policy, independent of Git settings.
 
 The mapping and sibling compatibility adapters confer no payload authority.
 Only TreePolicy, over an entered snapshot, can issue a ProtectedTreeView.
@@ -11,6 +12,7 @@ Only TreePolicy, over an entered snapshot, can issue a ProtectedTreeView.
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, fields, replace
 from pathlib import PurePosixPath
@@ -148,6 +150,8 @@ class Finding:
     mode: str = ""
     object_type: str = ""
     role: str = ""
+    source: str = ""
+    line: int = 0
 
 
 MODE_ROLES = frozenset(("release-leaf", "state-leaf", "manifest-child", "ancestor", "export-leaf"))
@@ -560,6 +564,7 @@ class _NameRun:
                  facts: _NameFacts):
         self.entries = entries
         self.plan = plan
+        self.attribute_outcomes: dict[bytes, AttributeOutcome] = {}
         self.facts = facts
         self.completed: set[str] = set()
         self.findings: list[Finding] = []
@@ -628,6 +633,503 @@ class SubjectIdentity:
     tree: str
 
 
+def _unsupported_attribute(path: str, line: int, construct: str) -> snapshot.SnapshotError:
+    return snapshot.SnapshotError(
+        f"unsupported .gitattributes construct at {path}:{line}: {construct}"
+    )
+
+
+def _attribute_pattern(
+    token: bytes, *, path: str, line: int
+) -> tuple[bytes, tuple[bytes, ...], bool]:
+    try:
+        shown = token.decode("ascii", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise snapshot._unsupported_attribute(path, line, "non-ASCII pattern") from exc
+    if not token:
+        raise snapshot._unsupported_attribute(path, line, "empty pattern")
+    if token.startswith(b'"'):
+        raise snapshot._unsupported_attribute(path, line, "C-quoted pattern")
+    if token.startswith(b"!"):
+        raise snapshot._unsupported_attribute(path, line, "negative pattern")
+    for byte, description in (
+        (b"?", "?"),
+        (b"[", "bracket expression"),
+        (b"]", "bracket expression"),
+        (b"\\", "backslash escape"),
+    ):
+        if byte in token:
+            raise snapshot._unsupported_attribute(path, line, description)
+    if token.endswith(b"/"):
+        raise snapshot._unsupported_attribute(path, line, "trailing slash")
+    if re.fullmatch(rb"[A-Za-z0-9._*/-]+", token) is None:
+        raise snapshot._unsupported_attribute(path, line, f"pattern {shown!r}")
+    anchored = token[1:] if token.startswith(b"/") else token
+    if not anchored:
+        raise snapshot._unsupported_attribute(path, line, "empty pattern")
+    segments = anchored.split(b"/")
+    if any(not segment for segment in segments):
+        raise snapshot._unsupported_attribute(path, line, "empty pattern segment")
+    for segment in segments:
+        if b"**" in segment and segment != b"**":
+            raise snapshot._unsupported_attribute(path, line, "misplaced **")
+    if token == b"**":
+        raise snapshot._unsupported_attribute(path, line, "misplaced **")
+    return anchored, tuple(segments), token.startswith(b"/") or b"/" in anchored
+
+
+def _parse_attribute_file(
+    path: str, payload: bytes, *, rule_limit: int
+) -> tuple[snapshot._AttributeRule, ...]:
+    rules: list[snapshot._AttributeRule] = []
+    rule_overflow = False
+    line_number = 0
+    position = 0
+    while True:
+        line_number += 1
+        line_end = payload.find(b"\n", position)
+        if line_end < 0:
+            original = payload[position:]
+        else:
+            original = payload[position:line_end]
+        # Git 2.53.0's read_attr_from_buf() stops reading the blob at an
+        # embedded NUL, so every rule after one is unseen by git: refuse the
+        # blob on any line rather than honour rules git never reads.
+        if b"\0" in original:
+            raise snapshot._unsupported_attribute(path, line_number, "control byte")
+        # attr.c's parse_attr_line() skips leading blanks (space, tab and CR,
+        # measured on git 2.53.0) and returns before any other test on an
+        # empty line or a '#' comment, whatever the line's length or contents;
+        # the reader skips those lines the same way (peer review, round 4).
+        line = original.strip(b" \t\r")
+        if line and not line.startswith(b"#"):
+            # attr.h fixes ATTR_MAX_LINE_LENGTH at 2048 and parse_attr_line()
+            # drops a rule line whose strlen(), leading blanks included, is at
+            # least that; parse_attr() drops the whole rule when
+            # attr_name_valid() or attr_name_reserved() rejects one state
+            # name; and git splits fields at CR as well as at space and tab
+            # (measured). Refuse these cases rather than disagreeing about
+            # precedence.
+            if len(original) >= 2048:
+                raise snapshot._unsupported_attribute(
+                    path, line_number, "line longer than 2048 bytes"
+                )
+            if any(byte < 0x20 and byte != 0x09 for byte in original):
+                raise snapshot._unsupported_attribute(path, line_number, "control byte")
+            fields = re.split(rb"[ \t]+", line)
+            if len(fields) < 2:
+                raise snapshot._unsupported_attribute(
+                    path, line_number, "line has no attribute state"
+                )
+            if fields[0].startswith(b"[attr]"):
+                raise snapshot._unsupported_attribute(
+                    path, line_number, "attribute macro definition"
+                )
+            pattern, segments, has_slash = snapshot._attribute_pattern(
+                fields[0], path=path, line=line_number
+            )
+            states: list[tuple[str, str]] = []
+
+            def add_states(additions: tuple[tuple[str, str], ...]) -> None:
+                if len(states) + len(additions) > snapshot.MAX_ATTRIBUTE_STATES_PER_LINE:
+                    raise snapshot.SnapshotError(
+                        f"attribute states at {path}:{line_number} exceed the "
+                        f"per-line budget of {snapshot.MAX_ATTRIBUTE_STATES_PER_LINE} states"
+                    )
+                states.extend(additions)
+
+            for raw_state in fields[1:]:
+                try:
+                    state = raw_state.decode("ascii", errors="strict")
+                except UnicodeDecodeError as exc:
+                    raise snapshot._unsupported_attribute(
+                        path, line_number, "non-ASCII attribute state"
+                    ) from exc
+                if state == "binary":
+                    add_states(
+                        (
+                            ("diff", "unset"),
+                            ("merge", "unset"),
+                            ("text", "unset"),
+                        )
+                    )
+                    continue
+                disposition = "set"
+                name = state
+                if state.startswith("-"):
+                    disposition, name = "unset", state[1:]
+                elif state.startswith("!"):
+                    disposition, name = "unspecified", state[1:]
+                elif "=" in state:
+                    name, value = state.split("=", 1)
+                    disposition = "value"
+                if name.startswith(("-", "builtin_")) or re.fullmatch(
+                    r"[A-Za-z0-9_.-]+", name
+                ) is None:
+                    raise snapshot._unsupported_attribute(
+                        path, line_number, f"attribute name {name!r}"
+                    )
+                add_states(((name, disposition),))
+            trailing_globstars = 0
+            for segment in reversed(segments):
+                if segment != b"**":
+                    break
+                trailing_globstars += 1
+            trailing_descendants = bool(
+                trailing_globstars and trailing_globstars < len(segments)
+            )
+            match_segments = (
+                segments[:-trailing_globstars]
+                if trailing_descendants
+                else segments
+            )
+            rule = snapshot._AttributeRule(
+                pattern,
+                segments,
+                match_segments,
+                has_slash,
+                trailing_descendants,
+                tuple(states), source_line=line_number,
+            )
+            if len(rules) >= rule_limit:
+                rule_overflow = True
+            else:
+                rules.append(rule)
+        if line_end < 0:
+            break
+        position = line_end + 1
+    if rule_overflow:
+        raise snapshot.SnapshotError(
+            f"attribute rules exceed the snapshot budget of "
+            f"{snapshot.MAX_ATTRIBUTE_RULES_TOTAL} rules"
+        )
+    return tuple(rules)
+
+
+def _segment_matches(
+    pattern: bytes, value: bytes, step: Callable[[], None]
+) -> bool:
+    pattern_index = value_index = 0
+    star = -1
+    retry = 0
+    while value_index < len(value):
+        step()
+        if (
+            pattern_index < len(pattern)
+            and pattern[pattern_index] != ord("*")
+            and pattern[pattern_index] == value[value_index]
+        ):
+            pattern_index += 1
+            value_index += 1
+        elif pattern_index < len(pattern) and pattern[pattern_index] == ord("*"):
+            star = pattern_index
+            pattern_index += 1
+            retry = value_index
+        elif star >= 0:
+            retry += 1
+            value_index = retry
+            pattern_index = star + 1
+        else:
+            return False
+    while pattern_index < len(pattern) and pattern[pattern_index] == ord("*"):
+        step()
+        pattern_index += 1
+    return pattern_index == len(pattern)
+
+
+def _attribute_matches(
+    rule: snapshot._AttributeRule, relative: tuple[bytes, ...], step: Callable[[], None]
+) -> bool:
+    if not rule.has_slash:
+        return bool(relative) and snapshot._segment_matches(
+            rule.segments[0], relative[-1], step
+        )
+    pattern_index = value_index = 0
+    globstar = -1
+    retry = 0
+    while value_index < len(relative):
+        if (
+            rule.trailing_descendants
+            and pattern_index == len(rule.match_segments)
+        ):
+            # The non-globstar prefix matched and at least one descendant
+            # remains. Git's trailing ``/**`` excludes the directory itself.
+            return True
+        step()
+        if (
+            pattern_index < len(rule.match_segments)
+            and rule.match_segments[pattern_index] == b"**"
+        ):
+            globstar = pattern_index
+            pattern_index += 1
+            retry = value_index
+        elif (
+            pattern_index < len(rule.match_segments)
+            and snapshot._segment_matches(
+                rule.match_segments[pattern_index],
+                relative[value_index],
+                step,
+            )
+        ):
+            pattern_index += 1
+            value_index += 1
+        elif globstar >= 0:
+            retry += 1
+            value_index = retry
+            pattern_index = globstar + 1
+        else:
+            return False
+    while (
+        pattern_index < len(rule.match_segments)
+        and rule.match_segments[pattern_index] == b"**"
+    ):
+        step()
+        pattern_index += 1
+    if rule.trailing_descendants:
+        return False
+    return pattern_index == len(rule.match_segments)
+
+
+def load_attribute_rules(
+    self, parts: tuple[bytes, ...]
+) -> tuple[snapshot._AttributeRule, ...]:
+    path_bytes = b"/".join(parts)
+    path = snapshot._tree_path_decode(path_bytes)
+    cached = self._state.attribute_cache.get(path)
+    if cached is not None:
+        return cached
+    raw = self._raw_entry_at(parts)
+    if raw is None:
+        self._state.attribute_cache[path] = ()
+        return ()
+    if raw.mode not in {b"100644", b"100755"}:
+        raise snapshot.SnapshotError(
+            f"unsupported .gitattributes entry at {path}: mode {raw.display_mode}"
+        )
+    _kind, size = self._batch().info(raw.oid, role="blob")
+    if self._verification_total("attribute_bytes") + size > snapshot.MAX_ATTRIBUTE_BYTES_TOTAL:
+        raise snapshot.SnapshotError(
+            f"attribute bytes exceed the snapshot budget of "
+            f"{snapshot.MAX_ATTRIBUTE_BYTES_TOTAL} bytes"
+        )
+    entry = self._public_entry(parts, raw)
+    payload = self.blob(entry, limit=snapshot.MAX_ATTRIBUTE_BYTES)
+    self._charge_verification(
+        "attribute_bytes",
+        size,
+        ceiling=snapshot.MAX_ATTRIBUTE_BYTES_TOTAL,
+        message=f"attribute bytes exceed the snapshot budget of {snapshot.MAX_ATTRIBUTE_BYTES_TOTAL} bytes",
+    )
+    remaining_rules = (
+        snapshot.MAX_ATTRIBUTE_RULES_TOTAL
+        - self._verification_total("attribute_rules")
+    )
+    rules = snapshot._parse_attribute_file(
+        path, payload, rule_limit=max(0, remaining_rules)
+    )
+    if self._verification_total("attribute_rules") + len(rules) > snapshot.MAX_ATTRIBUTE_RULES_TOTAL:
+        raise snapshot.SnapshotError(
+            f"attribute rules exceed the snapshot budget of "
+            f"{snapshot.MAX_ATTRIBUTE_RULES_TOTAL} rules"
+        )
+    self._charge_verification(
+        "attribute_rules",
+        len(rules),
+        ceiling=snapshot.MAX_ATTRIBUTE_RULES_TOTAL,
+        message=f"attribute rules exceed the snapshot budget of {snapshot.MAX_ATTRIBUTE_RULES_TOTAL} rules",
+    )
+    self._state.attribute_cache[path] = rules
+    return rules
+
+
+
+@dataclass(frozen=True)
+class AttributeState:
+    """One final disposition and its committed source, independently per reading."""
+
+    disposition: str
+    source: str
+    line: int
+
+
+@dataclass(frozen=True)
+class AttributeOutcome:
+    """Completed exact and ASCII-folded readings for one admitted raw path."""
+
+    exact: Mapping[str, AttributeState]
+    folded: Mapping[str, AttributeState]
+    sources: tuple[str, ...]
+
+    def finding(self, path: bytes, ordinal: int) -> Finding | None:
+        for name in ("filter", "ident", "working-tree-encoding"):
+            for reading, states in (("exact", self.exact), ("folded", self.folded)):
+                state = states.get(name)
+                if state is not None and state.disposition in {"set", "value"}:
+                    return Finding("transforming-attribute", "attributes", (ordinal,),
+                                   path=snapshot._tree_path_decode(path), raw_path=path,
+                                   name=name, operation=reading, source=state.source,
+                                   line=state.line)
+        return None
+
+
+@dataclass(frozen=True)
+class _RuleCheckpoint:
+    # One checkpoint per rule/reading, never one object per matching step.
+    cost: int
+    matched: bool
+
+
+@dataclass(frozen=True)
+class AttributeWork:
+    rule_evaluations: int
+    exhaustion_replays: int
+    matching_steps: int
+    applied_states: int
+    checkpoint_entries: int
+    path_outcomes: int
+    plan_outcomes: int
+    folded_rules: int
+    folded_paths: int
+
+
+def _fold_attribute_path(parts: tuple[bytes, ...]) -> tuple[bytes, ...]:
+    return tuple(segment.lower() for segment in parts)
+
+
+class _AttributeStore:
+    """Verification-local facts; acceptance keys also bind subject and full plan.
+
+    Linked candidate/base readers still load and admit their own committed
+    sources. Only pure rule/relative-path facts can be shared after those reads;
+    an OID never authorizes an outcome in another subject or scope.
+    """
+
+    def __init__(self):
+        self.checkpoints: dict[tuple, _RuleCheckpoint] = {}
+        self.folds: dict[tuple, snapshot._AttributeRule] = {}
+        self.folded_paths: dict[tuple, tuple[bytes, ...]] = {}
+        self.paths: dict[tuple, AttributeOutcome] = {}
+        self.plans: dict[tuple, AttributeOutcome] = {}
+        self.attempted: set[tuple] = set()
+        self.rule_evaluations = self.exhaustion_replays = 0
+        self.matching_steps = self.applied_states = 0
+
+    def merge(self, other: _AttributeStore) -> None:
+        for name in ("checkpoints", "folds", "folded_paths", "paths", "plans"):
+            getattr(self, name).update(getattr(other, name))
+        self.attempted.update(other.attempted)
+        for name in ("rule_evaluations", "exhaustion_replays", "matching_steps", "applied_states"):
+            setattr(self, name, getattr(self, name) + getattr(other, name))
+
+    @property
+    def work(self) -> AttributeWork:
+        return AttributeWork(self.rule_evaluations, self.exhaustion_replays,
+                             self.matching_steps, self.applied_states,
+                             len(self.checkpoints), len(self.paths), len(self.plans), len(self.folds),
+                             len(self.folded_paths))
+
+    def folded_path(self, version: str, parts: tuple[bytes, ...]) -> tuple[bytes, ...]:
+        key = version, parts
+        result = self.folded_paths.get(key)
+        if result is None:
+            result = _fold_attribute_path(parts)
+            self.folded_paths[key] = result
+        return result
+
+    def rule(self, subject: snapshot.TreeSnapshot, version: str, fold: bool,
+             rule: snapshot._AttributeRule, relative: tuple[bytes, ...]) -> _RuleCheckpoint:
+        # Resolve legacy hooks after import. Including the matcher hooks in the
+        # fact key also observes a replacement made after a completed request.
+        key = (version, fold, rule, relative, snapshot._attribute_matches,
+               snapshot._segment_matches, type(subject)._attribute_step)
+        checkpoint = self.checkpoints.get(key)
+        if checkpoint is not None:
+            remaining = (snapshot.MAX_ATTRIBUTE_MATCH_WORK
+                         - subject._verification_total("attribute_match_work"))
+            if checkpoint.cost <= remaining or not checkpoint.cost:
+                if checkpoint.cost:
+                    _charge_attribute_work(subject, checkpoint.cost)
+                return checkpoint
+        # A partial first attempt has no completed checkpoint. A resumed call
+        # can revisit that one unfinished rule; earlier successes are arithmetic.
+        if key in self.attempted:
+            self.exhaustion_replays += 1
+        else:
+            self.rule_evaluations += 1
+        start = subject.work.attribute_match_work
+
+        def step():
+            subject._attribute_step()
+            self.matching_steps += 1
+
+        try:
+            matched = snapshot._attribute_matches(rule, relative, step)
+            if matched:
+                for _ in rule.states:
+                    subject._attribute_step()
+                    self.applied_states += 1
+        finally:
+            # Hash the potentially large rule key once per attempt, including
+            # partial exhaustion, rather than once per matching/applied step.
+            if subject.work.attribute_match_work > start:
+                self.attempted.add(key)
+        checkpoint = _RuleCheckpoint(subject.work.attribute_match_work - start, matched)
+        self.checkpoints[key] = checkpoint
+        return checkpoint
+
+
+def _attribute_store(subject: snapshot.TreeSnapshot) -> _AttributeStore:
+    pool = subject._state.work_pool.root()
+    if pool.attributes is None:
+        pool.attributes = _AttributeStore()
+    return pool.attributes
+
+
+def _charge_attribute_work(subject: snapshot.TreeSnapshot, amount: int = 1) -> None:
+    subject._charge_verification(
+        "attribute_match_work", amount, ceiling=snapshot.MAX_ATTRIBUTE_MATCH_WORK,
+        message=f"attribute matching exceeds the work budget of {snapshot.MAX_ATTRIBUTE_MATCH_WORK} steps",
+    )
+
+
+def _admit_attribute_paths(subject: snapshot.TreeSnapshot, paths: Iterable) -> tuple[tuple[str, ...], dict[bytes, tuple[bytes, ...]]]:
+    ordered = []
+    unique = {}
+    for count, supplied in enumerate(paths, start=1):
+        if count > snapshot.MAX_TREE_ENTRIES:
+            raise snapshot.SnapshotError(
+                f"attribute paths exceed the budget of {snapshot.MAX_TREE_ENTRIES} entries")
+        value = supplied.path if isinstance(supplied, snapshot.GitEntry) else supplied
+        parts = subject._path_parts(value, allow_empty=False)
+        raw = b"/".join(parts)
+        subject._charge_path_bytes(raw)
+        ordered.append(snapshot._tree_path_decode(raw))
+        unique.setdefault(raw, parts)
+    return tuple(ordered), unique
+
+
+def attribute_error(finding: Finding) -> snapshot.SnapshotError:
+    """The retained snapshot refusal renderer, also used at verifier barriers."""
+    if finding.kind != "transforming-attribute" or finding.raw_path is None:
+        raise PolicyUseError("not an attribute finding")
+    try:
+        path = finding.raw_path.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return snapshot.SnapshotError("tree entry name is not valid UTF-8 for quoting")
+    return snapshot.SnapshotError(
+        f"transforming attribute {finding.name} applies to protected path {path}")
+
+
+def refuse_attributes(subject: snapshot.TreeSnapshot, paths: Iterable) -> None:
+    """Forward already checked collection arguments without pre-consuming them."""
+    ordered, unique = _admit_attribute_paths(subject, paths)
+    plan = ProtectionPlan(attribute_target_selectors=ordered, listing_scope=(),
+                          obligations=("attributes",), use="snapshot-attributes", phase="attributes")
+    evaluator = TreePolicy(subject, policy_version=POLICY_VERSION, work=subject.work)
+    view = evaluator.evaluate_attributes(plan, _admitted=unique)
+    view.require(plan.use, render=attribute_error)
+
+
 @dataclass(frozen=True)
 class TreePolicy:
     """Verification-local evaluator over an entered authenticated TreeSnapshot.
@@ -669,6 +1171,10 @@ class TreePolicy:
     @property
     def shape_work(self) -> ShapeWork:
         return self._shapes.work
+
+    @property
+    def attribute_work(self) -> AttributeWork:
+        return _attribute_store(self.snapshot).work
 
     @property
     def export_work(self) -> ExportWork:
@@ -783,19 +1289,26 @@ class TreePolicy:
 
     def evaluate(self, plan: ProtectionPlan, *, stage: str,
                  previous: ProtectedTreeView | None = None) -> ProtectedTreeView:
-        """Evaluate newly required names at the caller's existing barrier.
+        """Evaluate newly required obligations at the caller's existing barrier.
 
-        Earlier completed facts are reused. Repeated explicit listing reads
-        retain reader admission charges; evaluating a completed fact adds none.
-        Previous evidence must be issued by this evaluator for this exact plan,
-        including anchor origin and later obligations. No later-stage I/O occurs.
+        Stages: names and aliases, modes and ancestors, export names, and
+        attributes. Earlier completed facts are reused. Repeated explicit
+        listing reads retain reader admission charges; evaluating a completed
+        name, shape or export fact adds none. Attributes are the exception: a
+        repeated attribute plan replays its admission under the record's D12
+        compatibility charge schedule (input counts and path bytes charged
+        before deduplication, checkpoint blocks replayed arithmetically, a
+        single exhausting rule re-executed from its checkpoint), so the public
+        counters land where the legacy path left them. Previous evidence must
+        be issued by this evaluator for this exact plan, including anchor origin
+        and later obligations. No later-stage I/O occurs.
         """
         self.snapshot._batch()
         if previous is not None:
             self._validate_view(previous)
             if previous.plan != plan:
                 raise PolicyUseError("protected view has an incompatible plan")
-        if stage not in (*NAME_STAGES, *SHAPE_STAGES, "export-names"):
+        if stage not in (*NAME_STAGES, *SHAPE_STAGES, "export-names", "attributes"):
             raise NotImplementedError(f"protected-tree stage {stage!r} belongs to a later migration")
         exporting = "export-names" in plan.obligations
         if exporting and (
@@ -831,6 +1344,10 @@ class TreePolicy:
         # state lookup/payload, then request a separate shape obligation.
         stages = plan.obligations[:plan.obligations.index(stage) + 1] if stage in plan.obligations else (stage,)
         for current in stages:
+            if current == "attributes":
+                if not any(f.stage != "attributes" for f in run.findings):
+                    self.evaluate_attributes(plan, _run=run)
+                continue
             if current in run.completed or run.findings:
                 continue
             if current in NAME_STAGES:
@@ -843,6 +1360,9 @@ class TreePolicy:
                 self._export_names(run)
             else:
                 raise NotImplementedError(f"protected-tree stage {current!r} belongs to a later migration")
+        return self._view(plan, run)
+
+    def _view(self, plan: ProtectionPlan, run: _NameRun) -> ProtectedTreeView:
         entries = MappingProxyType(dict(run.entries))
         children: dict[str, dict[str, snapshot.GitEntry]] = {p: {} for p in plan.listing_scope}
         for path, entry in entries.items():
@@ -860,6 +1380,7 @@ class TreePolicy:
             listing_tree_ids=MappingProxyType({p: self._scopes[p] for p in plan.listing_scope}),
             fold_index=MappingProxyType({p: f for p, f in self._facts.folds.items() if isinstance(f, str)}),
             mode_facts=MappingProxyType(dict(run.mode_facts)),
+            attribute_outcomes=MappingProxyType(dict(run.attribute_outcomes)),
             findings=tuple(run.findings), completed=frozenset(run.completed),
             refused=frozenset(f.stage for f in run.findings),
             unevaluated=frozenset(plan.obligations) - run.completed - {f.stage for f in run.findings},
@@ -947,15 +1468,84 @@ class TreePolicy:
             raise PolicyUseError("protected view lacks export obligations")
         return view.require(view.plan.use, render=render)
 
-    def evaluate_attributes(self) -> None:
-        """PR4: independent exact/folded readings and D12 admission checkpoints.
+    def evaluate_attributes(self, plan: ProtectionPlan | None = None, *,
+                            previous: ProtectedTreeView | None = None,
+                            _run: _NameRun | None = None,
+                            _admitted: dict[bytes, tuple[bytes, ...]] | None = None) -> ProtectedTreeView | None:
+        """Evaluate committed sources at this barrier, replaying D12 admission.
 
-        Replay successful costs arithmetically; on exhaustion replay only the
-        single exhausting rule from its checkpoint, refusing before increment.
-        Source loads, path bytes, late hooks and shared ledgers remain unchanged.
+        Completed path outcomes are subject/version bound; acceptance additionally
+        binds the complete plan fingerprint. Repeated and overlapping requests
+        replay each source read and rule checkpoint in the old exact/fold order.
+        Only an exhausting rule reexecutes matching and applied-state steps.
         """
-        raise NotImplementedError("receipt 0.7 M1 PR4 introduces attribute evaluation")
-
+        if plan is None:
+            # PR2 freezes the no-plan call, as it does for modes and ancestors.
+            raise NotImplementedError("receipt 0.7 M1 PR4 attribute evaluation requires a plan")
+        self.snapshot._batch()
+        if _run is None:
+            if _admitted is None:
+                return self.evaluate(plan, stage="attributes", previous=previous)
+            # Only the collection facade has already charged the ordered input.
+            if plan.obligations != ("attributes",) or plan.listing_scope:
+                raise PolicyUseError("attribute facade has incompatible obligations")
+            run = _NameRun(MappingProxyType({}), plan, self._facts)
+            self.evaluate_attributes(plan, _run=run, _admitted=_admitted)
+            return self._view(plan, run)
+        run = _run
+        if _admitted is None:
+            _, _admitted = _admit_attribute_paths(self.snapshot, plan.attribute_target_selectors)
+        run.completed.discard("attributes")
+        run.findings[:] = [f for f in run.findings if f.stage != "attributes"]
+        run.attribute_outcomes.clear()
+        store = _attribute_store(self.snapshot)
+        fingerprint = plan.fingerprint
+        for ordinal, (raw, parts) in enumerate(_admitted.items()):
+            path_key = (self.subject, self.policy_version, raw,
+                        snapshot._attribute_matches, snapshot._segment_matches,
+                        type(self.snapshot)._attribute_step, type(self.snapshot)._attribute_rules)
+            plan_key = (*path_key, fingerprint)
+            cached = store.plans.get(plan_key) or store.paths.get(path_key)
+            readings = []
+            sources = []
+            for fold in (False, True):
+                final = {}
+                for depth in range(len(parts)):
+                    attribute_parts = (*parts[:depth], b".gitattributes")
+                    # Keep this hook even on outcome reuse: the source loader
+                    # owns its snapshot-local cache, authentication and charges.
+                    rules = self.snapshot._attribute_rules(attribute_parts)
+                    source = snapshot._tree_path_decode(b"/".join(attribute_parts))
+                    if not fold:
+                        sources.append(source)
+                    relative = parts[depth:]
+                    if fold:
+                        relative = store.folded_path(self.policy_version, parts)[depth:]
+                    for rule in rules:
+                        source_line = rule.source_line
+                        if fold:
+                            fold_key = (self.policy_version, rule)
+                            folded = store.folds.get(fold_key)
+                            if folded is None:
+                                folded = replace(rule, pattern=rule.pattern.lower(),
+                                                 segments=tuple(s.lower() for s in rule.segments),
+                                                 match_segments=tuple(s.lower() for s in rule.match_segments))
+                                store.folds[fold_key] = folded
+                            rule = folded
+                        checkpoint = store.rule(self.snapshot, self.policy_version, fold, rule, relative)
+                        if cached is None and checkpoint.matched:
+                            for name, disposition in rule.states:
+                                final[name] = AttributeState(disposition, source, source_line)
+                readings.append(MappingProxyType(final))
+            result = cached or AttributeOutcome(readings[0], readings[1], tuple(sources))
+            store.paths[path_key] = store.plans[plan_key] = result
+            run.attribute_outcomes[raw] = result
+            finding = result.finding(raw, ordinal)
+            if finding is not None:
+                run.findings.append(finding)
+                return None
+        run.completed.add("attributes")
+        return None
 
 @dataclass(frozen=True)
 class ProtectedTreeView:
@@ -983,6 +1573,9 @@ class ProtectedTreeView:
     admission: tuple[tuple[str, int], ...]
     _evaluator: TreePolicy = field(repr=False, compare=False)
     mode_facts: Mapping[tuple[str, str], ModeFact] = field(
+        default_factory=lambda: MappingProxyType({}), kw_only=True)
+
+    attribute_outcomes: Mapping[bytes, AttributeOutcome] = field(
         default_factory=lambda: MappingProxyType({}), kw_only=True)
 
     # Raw directory records preserve selected empty trees and actual ancestor

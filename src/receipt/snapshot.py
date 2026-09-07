@@ -112,7 +112,10 @@ from bisect import bisect_left
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import BinaryIO, Callable
+from typing import TYPE_CHECKING, BinaryIO, Callable
+
+if TYPE_CHECKING:
+    from receipt.protected_tree import _AttributeStore
 
 from receipt._names import (
     NamePolicyError,
@@ -291,6 +294,8 @@ class _WorkPool:
 
     works: list[SnapshotWork]
     parent: "_WorkPool | None" = None
+
+    attributes: "_AttributeStore | None" = None
 
     def root(self) -> "_WorkPool":
         if self.parent is None:
@@ -984,260 +989,41 @@ def _canonical_commit(
 
 
 def _unsupported_attribute(path: str, line: int, construct: str) -> SnapshotError:
-    return SnapshotError(
-        f"unsupported .gitattributes construct at {path}:{line}: {construct}"
-    )
+    from receipt import protected_tree
+
+    return protected_tree._unsupported_attribute(path, line, construct)
 
 
 def _attribute_pattern(
     token: bytes, *, path: str, line: int
 ) -> tuple[bytes, tuple[bytes, ...], bool]:
-    try:
-        shown = token.decode("ascii", errors="strict")
-    except UnicodeDecodeError as exc:
-        raise _unsupported_attribute(path, line, "non-ASCII pattern") from exc
-    if not token:
-        raise _unsupported_attribute(path, line, "empty pattern")
-    if token.startswith(b'"'):
-        raise _unsupported_attribute(path, line, "C-quoted pattern")
-    if token.startswith(b"!"):
-        raise _unsupported_attribute(path, line, "negative pattern")
-    for byte, description in (
-        (b"?", "?"),
-        (b"[", "bracket expression"),
-        (b"]", "bracket expression"),
-        (b"\\", "backslash escape"),
-    ):
-        if byte in token:
-            raise _unsupported_attribute(path, line, description)
-    if token.endswith(b"/"):
-        raise _unsupported_attribute(path, line, "trailing slash")
-    if re.fullmatch(rb"[A-Za-z0-9._*/-]+", token) is None:
-        raise _unsupported_attribute(path, line, f"pattern {shown!r}")
-    anchored = token[1:] if token.startswith(b"/") else token
-    if not anchored:
-        raise _unsupported_attribute(path, line, "empty pattern")
-    segments = anchored.split(b"/")
-    if any(not segment for segment in segments):
-        raise _unsupported_attribute(path, line, "empty pattern segment")
-    for segment in segments:
-        if b"**" in segment and segment != b"**":
-            raise _unsupported_attribute(path, line, "misplaced **")
-    if token == b"**":
-        raise _unsupported_attribute(path, line, "misplaced **")
-    return anchored, tuple(segments), token.startswith(b"/") or b"/" in anchored
+    from receipt import protected_tree
+
+    return protected_tree._attribute_pattern(token, path=path, line=line)
 
 
 def _parse_attribute_file(
     path: str, payload: bytes, *, rule_limit: int
 ) -> tuple[_AttributeRule, ...]:
-    rules: list[_AttributeRule] = []
-    rule_overflow = False
-    line_number = 0
-    position = 0
-    while True:
-        line_number += 1
-        line_end = payload.find(b"\n", position)
-        if line_end < 0:
-            original = payload[position:]
-        else:
-            original = payload[position:line_end]
-        # Git 2.53.0's read_attr_from_buf() stops reading the blob at an
-        # embedded NUL, so every rule after one is unseen by git: refuse the
-        # blob on any line rather than honour rules git never reads.
-        if b"\0" in original:
-            raise _unsupported_attribute(path, line_number, "control byte")
-        # attr.c's parse_attr_line() skips leading blanks (space, tab and CR,
-        # measured on git 2.53.0) and returns before any other test on an
-        # empty line or a '#' comment, whatever the line's length or contents;
-        # the reader skips those lines the same way (peer review, round 4).
-        line = original.strip(b" \t\r")
-        if line and not line.startswith(b"#"):
-            # attr.h fixes ATTR_MAX_LINE_LENGTH at 2048 and parse_attr_line()
-            # drops a rule line whose strlen(), leading blanks included, is at
-            # least that; parse_attr() drops the whole rule when
-            # attr_name_valid() or attr_name_reserved() rejects one state
-            # name; and git splits fields at CR as well as at space and tab
-            # (measured). Refuse these cases rather than disagreeing about
-            # precedence.
-            if len(original) >= 2048:
-                raise _unsupported_attribute(
-                    path, line_number, "line longer than 2048 bytes"
-                )
-            if any(byte < 0x20 and byte != 0x09 for byte in original):
-                raise _unsupported_attribute(path, line_number, "control byte")
-            fields = re.split(rb"[ \t]+", line)
-            if len(fields) < 2:
-                raise _unsupported_attribute(
-                    path, line_number, "line has no attribute state"
-                )
-            if fields[0].startswith(b"[attr]"):
-                raise _unsupported_attribute(
-                    path, line_number, "attribute macro definition"
-                )
-            pattern, segments, has_slash = _attribute_pattern(
-                fields[0], path=path, line=line_number
-            )
-            states: list[tuple[str, str]] = []
+    from receipt import protected_tree
 
-            def add_states(additions: tuple[tuple[str, str], ...]) -> None:
-                if len(states) + len(additions) > MAX_ATTRIBUTE_STATES_PER_LINE:
-                    raise SnapshotError(
-                        f"attribute states at {path}:{line_number} exceed the "
-                        f"per-line budget of {MAX_ATTRIBUTE_STATES_PER_LINE} states"
-                    )
-                states.extend(additions)
-
-            for raw_state in fields[1:]:
-                try:
-                    state = raw_state.decode("ascii", errors="strict")
-                except UnicodeDecodeError as exc:
-                    raise _unsupported_attribute(
-                        path, line_number, "non-ASCII attribute state"
-                    ) from exc
-                if state == "binary":
-                    add_states(
-                        (
-                            ("diff", "unset"),
-                            ("merge", "unset"),
-                            ("text", "unset"),
-                        )
-                    )
-                    continue
-                disposition = "set"
-                name = state
-                if state.startswith("-"):
-                    disposition, name = "unset", state[1:]
-                elif state.startswith("!"):
-                    disposition, name = "unspecified", state[1:]
-                elif "=" in state:
-                    name, value = state.split("=", 1)
-                    disposition = "value"
-                if name.startswith(("-", "builtin_")) or re.fullmatch(
-                    r"[A-Za-z0-9_.-]+", name
-                ) is None:
-                    raise _unsupported_attribute(
-                        path, line_number, f"attribute name {name!r}"
-                    )
-                add_states(((name, disposition),))
-            trailing_globstars = 0
-            for segment in reversed(segments):
-                if segment != b"**":
-                    break
-                trailing_globstars += 1
-            trailing_descendants = bool(
-                trailing_globstars and trailing_globstars < len(segments)
-            )
-            match_segments = (
-                segments[:-trailing_globstars]
-                if trailing_descendants
-                else segments
-            )
-            rule = _AttributeRule(
-                pattern,
-                segments,
-                match_segments,
-                has_slash,
-                trailing_descendants,
-                tuple(states),
-            )
-            if len(rules) >= rule_limit:
-                rule_overflow = True
-            else:
-                rules.append(rule)
-        if line_end < 0:
-            break
-        position = line_end + 1
-    if rule_overflow:
-        raise SnapshotError(
-            f"attribute rules exceed the snapshot budget of "
-            f"{MAX_ATTRIBUTE_RULES_TOTAL} rules"
-        )
-    return tuple(rules)
+    return protected_tree._parse_attribute_file(path, payload, rule_limit=rule_limit)
 
 
 def _segment_matches(
     pattern: bytes, value: bytes, step: Callable[[], None]
 ) -> bool:
-    pattern_index = value_index = 0
-    star = -1
-    retry = 0
-    while value_index < len(value):
-        step()
-        if (
-            pattern_index < len(pattern)
-            and pattern[pattern_index] != ord("*")
-            and pattern[pattern_index] == value[value_index]
-        ):
-            pattern_index += 1
-            value_index += 1
-        elif pattern_index < len(pattern) and pattern[pattern_index] == ord("*"):
-            star = pattern_index
-            pattern_index += 1
-            retry = value_index
-        elif star >= 0:
-            retry += 1
-            value_index = retry
-            pattern_index = star + 1
-        else:
-            return False
-    while pattern_index < len(pattern) and pattern[pattern_index] == ord("*"):
-        step()
-        pattern_index += 1
-    return pattern_index == len(pattern)
+    from receipt import protected_tree
+
+    return protected_tree._segment_matches(pattern, value, step)
 
 
 def _attribute_matches(
     rule: _AttributeRule, relative: tuple[bytes, ...], step: Callable[[], None]
 ) -> bool:
-    if not rule.has_slash:
-        return bool(relative) and _segment_matches(
-            rule.segments[0], relative[-1], step
-        )
-    pattern_index = value_index = 0
-    globstar = -1
-    retry = 0
-    while value_index < len(relative):
-        if (
-            rule.trailing_descendants
-            and pattern_index == len(rule.match_segments)
-        ):
-            # The non-globstar prefix matched and at least one descendant
-            # remains. Git's trailing ``/**`` excludes the directory itself.
-            return True
-        step()
-        if (
-            pattern_index < len(rule.match_segments)
-            and rule.match_segments[pattern_index] == b"**"
-        ):
-            globstar = pattern_index
-            pattern_index += 1
-            retry = value_index
-        elif (
-            pattern_index < len(rule.match_segments)
-            and _segment_matches(
-                rule.match_segments[pattern_index],
-                relative[value_index],
-                step,
-            )
-        ):
-            pattern_index += 1
-            value_index += 1
-        elif globstar >= 0:
-            retry += 1
-            value_index = retry
-            pattern_index = globstar + 1
-        else:
-            return False
-    while (
-        pattern_index < len(rule.match_segments)
-        and rule.match_segments[pattern_index] == b"**"
-    ):
-        step()
-        pattern_index += 1
-    if rule.trailing_descendants:
-        return False
-    return pattern_index == len(rule.match_segments)
+    from receipt import protected_tree
+
+    return protected_tree._attribute_matches(rule, relative, step)
 
 
 class _BatchReader:
@@ -1627,6 +1413,7 @@ class _AttributeRule:
     has_slash: bool
     trailing_descendants: bool
     states: tuple[tuple[str, str], ...]
+    source_line: int = field(default=0, kw_only=True, compare=False)
 
 
 @dataclass(frozen=True)
@@ -2360,6 +2147,11 @@ class TreeSnapshot:
         for field_name, ceiling, message in limits:
             if sum(getattr(work, field_name) for work in combined) > ceiling:
                 raise SnapshotError(message)
+        if right.attributes is not None:
+            if left.attributes is None:
+                left.attributes = right.attributes
+            else:
+                left.attributes.merge(right.attributes)
         left.works.extend(right.works)
         right.parent = left
 
@@ -2972,64 +2764,14 @@ class TreeSnapshot:
     def _attribute_rules(
         self, parts: tuple[bytes, ...]
     ) -> tuple[_AttributeRule, ...]:
-        path_bytes = b"/".join(parts)
-        path = _tree_path_decode(path_bytes)
-        cached = self._state.attribute_cache.get(path)
-        if cached is not None:
-            return cached
-        raw = self._raw_entry_at(parts)
-        if raw is None:
-            self._state.attribute_cache[path] = ()
-            return ()
-        if raw.mode not in {b"100644", b"100755"}:
-            raise SnapshotError(
-                f"unsupported .gitattributes entry at {path}: mode {raw.display_mode}"
-            )
-        _kind, size = self._batch().info(raw.oid, role="blob")
-        if self._verification_total("attribute_bytes") + size > MAX_ATTRIBUTE_BYTES_TOTAL:
-            raise SnapshotError(
-                f"attribute bytes exceed the snapshot budget of "
-                f"{MAX_ATTRIBUTE_BYTES_TOTAL} bytes"
-            )
-        entry = self._public_entry(parts, raw)
-        payload = self.blob(entry, limit=MAX_ATTRIBUTE_BYTES)
-        self._charge_verification(
-            "attribute_bytes",
-            size,
-            ceiling=MAX_ATTRIBUTE_BYTES_TOTAL,
-            message=f"attribute bytes exceed the snapshot budget of {MAX_ATTRIBUTE_BYTES_TOTAL} bytes",
-        )
-        remaining_rules = (
-            MAX_ATTRIBUTE_RULES_TOTAL
-            - self._verification_total("attribute_rules")
-        )
-        rules = _parse_attribute_file(
-            path, payload, rule_limit=max(0, remaining_rules)
-        )
-        if self._verification_total("attribute_rules") + len(rules) > MAX_ATTRIBUTE_RULES_TOTAL:
-            raise SnapshotError(
-                f"attribute rules exceed the snapshot budget of "
-                f"{MAX_ATTRIBUTE_RULES_TOTAL} rules"
-            )
-        self._charge_verification(
-            "attribute_rules",
-            len(rules),
-            ceiling=MAX_ATTRIBUTE_RULES_TOTAL,
-            message=f"attribute rules exceed the snapshot budget of {MAX_ATTRIBUTE_RULES_TOTAL} rules",
-        )
-        self._state.attribute_cache[path] = rules
-        return rules
+        from receipt import protected_tree
+
+        return protected_tree.load_attribute_rules(self, parts)
 
     def _attribute_step(self) -> None:
-        self._charge_verification(
-            "attribute_match_work",
-            1,
-            ceiling=MAX_ATTRIBUTE_MATCH_WORK,
-            message=(
-                f"attribute matching exceeds the work budget of "
-                f"{MAX_ATTRIBUTE_MATCH_WORK} steps"
-            ),
-        )
+        from receipt import protected_tree
+
+        return protected_tree._charge_attribute_work(self)
 
     def refuse_transforming_attributes(
         self, paths: Iterable[str | bytes | GitEntry]
@@ -3057,68 +2799,9 @@ class TreeSnapshot:
             iterator = iter(paths)
         except TypeError as exc:
             raise SnapshotError("attribute paths must be an iterable of paths") from exc
-        unique: dict[bytes, tuple[bytes, ...]] = {}
-        for count, supplied in enumerate(iterator, start=1):
-            if count > MAX_TREE_ENTRIES:
-                raise SnapshotError(
-                    f"attribute paths exceed the budget of {MAX_TREE_ENTRIES} entries"
-                )
-            value: str | bytes
-            if isinstance(supplied, GitEntry):
-                value = supplied.path
-            else:
-                value = supplied
-            parts = self._path_parts(value, allow_empty=False)
-            path_bytes = b"/".join(parts)
-            self._charge_path_bytes(path_bytes)
-            unique.setdefault(path_bytes, parts)
+        from receipt.protected_tree import refuse_attributes
 
-        transforms = {"filter", "ident", "working-tree-encoding"}
-        # bytes.lower folds only ASCII letters, as git's WM_CASEFOLD does.
-        # Keep the readings separate so a fold-only reset cannot cancel an
-        # exact transforming rule before the refusal is decided.
-        folded_rules: dict[int, _AttributeRule] = {}
-        for path_bytes, parts in unique.items():
-            readings: list[dict[str, str]] = []
-            for fold in (False, True):
-                final: dict[str, str] = {}
-                for depth in range(len(parts)):
-                    attribute_parts = (*parts[:depth], b".gitattributes")
-                    rules = self._attribute_rules(attribute_parts)
-                    relative = parts[depth:]
-                    if fold:
-                        relative = tuple(segment.lower() for segment in relative)
-                    for rule in rules:
-                        if fold:
-                            candidate_rule = folded_rules.get(id(rule))
-                            if candidate_rule is None:
-                                candidate_rule = _AttributeRule(
-                                    rule.pattern.lower(),
-                                    tuple(s.lower() for s in rule.segments),
-                                    tuple(s.lower() for s in rule.match_segments),
-                                    rule.has_slash,
-                                    rule.trailing_descendants,
-                                    rule.states,
-                                )
-                                folded_rules[id(rule)] = candidate_rule
-                            rule = candidate_rule
-                        if _attribute_matches(rule, relative, self._attribute_step):
-                            for name, disposition in rule.states:
-                                self._attribute_step()
-                                final[name] = disposition
-                readings.append(final)
-            for name in sorted(transforms):
-                if any(final.get(name) in {"set", "value"} for final in readings):
-                    try:
-                        path = path_bytes.decode("utf-8", errors="strict")
-                    except UnicodeDecodeError as exc:
-                        raise SnapshotError(
-                            "tree entry name is not valid UTF-8 for quoting"
-                        ) from exc
-                    raise SnapshotError(
-                        f"transforming attribute {name} applies to protected "
-                        f"path {path}"
-                    )
+        refuse_attributes(self, iterator)
 
     def materialize(
         self,
