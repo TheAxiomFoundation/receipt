@@ -42,7 +42,7 @@ def test_tree_policy_constructor_surface():
 
 
 LATER_STAGE_METHODS = ()
-STEP_3A_IMPORTERS = {"append_gate.py", "release_chain.py", "snapshot.py", "verify.py"}
+STEP_3A_IMPORTERS = {"append_gate.py", "corpus.py", "release_chain.py", "snapshot.py", "verify.py"}
 
 
 def test_no_later_stage_methods_remain():
