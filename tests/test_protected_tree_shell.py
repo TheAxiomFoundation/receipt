@@ -1,5 +1,8 @@
-"""The policy module's frozen surface, its later-stage stubs, and the production
-importers each migration step allows."""
+"""The policy module's frozen surface and production importer contract.
+
+PR4 completes the last stage: the later-stage list is now empty. Test that
+contract directly so an empty parametrization does not introduce a skip.
+"""
 from __future__ import annotations
 
 import ast
@@ -38,19 +41,12 @@ def test_tree_policy_constructor_surface():
     assert policy.TreePolicy.__annotations__["snapshot"] == "snapshot.TreeSnapshot"
 
 
-LATER_STAGE_METHODS = ("evaluate_attributes",)
+LATER_STAGE_METHODS = ()
 STEP_3A_IMPORTERS = {"append_gate.py", "release_chain.py", "snapshot.py", "verify.py"}
 
 
-@pytest.mark.parametrize("method", LATER_STAGE_METHODS)
-def test_later_stage_methods_are_unimplemented(raw_repo, method):
-    with raw_repo.snapshot() as snap:
-        evaluator = policy.TreePolicy(snap, policy_version=policy.POLICY_VERSION, work=snap.work)
-        # record: PR3b owns export selection; PR4 owns attributes.
-        with pytest.raises(NotImplementedError) as caught:
-            getattr(evaluator, method)()
-        assert type(caught.value) is NotImplementedError
-        assert str(caught.value).startswith("receipt 0.7 M1 PR")
+def test_no_later_stage_methods_remain():
+    assert LATER_STAGE_METHODS == ()
 
 
 def test_production_importers_are_the_step_3a_sites():
