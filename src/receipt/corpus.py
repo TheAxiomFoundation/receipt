@@ -1333,17 +1333,16 @@ def _under(directory: str, name: str) -> str:
 
 
 def _path_fold(relative: str) -> str:
-    """Fold ASCII letters per component and preserve every other code point.
-
-    This deliberately narrows 0.5.x's ``NFC(casefold)`` key: neither Unicode
-    normalization nor Unicode casefolding participates under either name
-    repertoire.
-    """
+    """Forward the legacy ASCII-only whole-path fold and exception boundary."""
+    from receipt.protected_tree import folded_parts
 
     try:
-        return "/".join(ascii_fold_text(component) for component in relative.split("/"))
+        return "/".join(folded_parts(relative))
     except NamePolicyError as exc:
         raise CorpusError(str(exc)) from exc
+
+
+_DEFAULT_PATH_FOLD = _path_fold
 
 
 def _has_pinned_suffix(relative: str, suffixes: tuple[str, ...]) -> bool:
@@ -1353,126 +1352,38 @@ def _has_pinned_suffix(relative: str, suffixes: tuple[str, ...]) -> bool:
     return any(folded.endswith(_path_fold(suffix)) for suffix in suffixes)
 
 
+
+def _binding_error(finding) -> CorpusError:
+    """Render shared findings without changing corpus quotation or public text."""
+    if finding.kind == "declared-alias":
+        return CorpusError(
+            "two declared paths would alias on a case- or "
+            "normalization-insensitive filesystem, so the closed-world set "
+            f"is ambiguous: {_quoted(finding.target)} and {_quoted(finding.path)}")
+    if finding.kind == "declared-prefix-alias":
+        return CorpusError("two declared paths would alias at a directory: "
+                           f"{_quoted(finding.target)} and {_quoted(finding.path)}")
+    if finding.kind == "declared-index-budget":
+        return CorpusError(f"declared paths name more than {finding.target} "
+                           "distinct directories; declared paths exceed the alias index budget")
+    return CorpusError(finding.detail)
+
+
 def _reject_aliasing_paths(
     relatives: list[str], *, work: _PathPrefixWork
 ) -> int:
-    """Refuse two declared paths a real filesystem would treat as one.
+    """Forward whole-path-before-prefix obligations with their original budgets.
 
-    Two passes, because a path can alias another in two places and the
-    second one was missed.
-
-    The first compares whole paths, which is what "the closed-world set is
-    ambiguous" is about: a journal binding both ``rules/x.yaml`` and
-    ``rules/X.yaml`` says two different digests about one file on APFS, and
-    an auditor cannot say which one they have.
-
-    The second compares every *prefix* of every path — each ancestor
-    directory and the path itself — at the depth it sits. Comparing whole
-    paths alone missed the case where the collision is a directory:
-    ``rules/A/x.yaml`` and ``rules/a/y.yaml`` are two distinct paths whose
-    fold keys differ, so the first pass passes them, while an insensitive
-    clone merges ``A`` and ``a`` into one directory holding both files —
-    and the closed-world sweep, which descends the spellings the journal
-    named, walks two directories on the auditor's host and one on the
-    consumer's (peer review, Sol round 3). The path itself is included at
-    its own depth as well, so a directory in one path colliding with a file
-    in another is caught too.
-
-    Under the portable-name policy the fold key over a declared path is
-    ASCII case-insensitivity, so what both passes are asking is whether two
-    spellings differ only in case.
-
-    **The prefix pass holds no index.** It used to build one — first a
-    cumulative string per visit, then a component trie of one node per
-    distinct prefix — and a trie is an index whose size is the thing an
-    adversary chooses. 4,096 portable 1,023-character paths with distinct
-    three-character first components and 510 one-character descendants are
-    inside ``MAX_JOURNAL_ROWS``, inside ``MAX_PATH_TEXT`` and inside half of
-    :data:`MAX_PATH_COMPONENTS_TOTAL`, and they name 2,093,056 distinct
-    prefixes: 594 MB of trie nodes and 4.8 seconds, measured, for a journal
-    the budget waved through (peer review, Sol round 7, round 3). Compacting
-    the node — ``__slots__``, one shared child dictionary, interned spellings
-    — cannot fix that. A Python object plus its dictionary entry is on the
-    order of 150 bytes whatever is done to it, so the *representation* was
-    never the choice worth making; holding one at all was.
-
-    So the pass sorts instead. Each path is folded a component at a time and
-    the folded components are joined by a NUL — a character no portable name
-    can hold and one that sorts below every character one can — so
-    ordering the keys as strings orders the paths by their folded component
-    *sequences*. Two facts make neighbour comparison sufficient:
-
-    - every path sharing a folded prefix occupies a contiguous run of that
-      order, which is what sorting by a sequence means;
-    - so if two paths in such a run disagree about the spelling of a
-      component inside their shared prefix, then some *adjacent* pair in the
-      run disagrees about it too — agreement between neighbours is
-      transitive along the chain that joins them, and every neighbour in the
-      run shares at least that prefix.
-
-    Each adjacent pair is therefore compared for as many components as their
-    folded keys agree on, and the first disagreement in spelling is the
-    refusal. What is live at any moment is two paths' components and one
-    string key per declared path, so the pass allocates a small multiple of
-    the declared path text — the text the journal already carries — instead
-    of a structure whose size is the adversary's to choose. The same 4,096
-    maximum-depth paths now peak at 9.0 MB and 0.6 seconds.
-
-    The number of distinct folded prefixes is the number of components the
-    first path contributes plus, for every later path, the components below
-    what it shares with its predecessor. Every component visit and every
-    counted prefix charges ``work`` before folding or comparison.
-
-    The whole-path pass runs first and completely, so a journal with both
-    kinds of collision keeps the message that names the more specific one.
+    Each visit and newly counted prefix retains its charge. A substituted
+    _path_fold observes the original calls; ordinary calls reuse component facts.
     """
+    from receipt.protected_tree import DeclarationObligations, evaluate_declarations
 
-    seen: dict[str, str] = {}
-    for relative in relatives:
-        key = _path_fold(relative)
-        if key in seen and seen[key] != relative:
-            raise CorpusError(
-                "two declared paths would alias on a case- or "
-                "normalization-insensitive filesystem, so the closed-world set "
-                f"is ambiguous: {_quoted(seen[key])} and {_quoted(relative)}"
-            )
-        seen[key] = relative
-
-    keys: list[str] = []
-    for relative in relatives:
-        components = relative.split("/")
-        # Charged before the components are folded, so the fold work and the
-        # key it builds are both inside the budget rather than beside it.
-        work.charge(len(components))
-        keys.append("\x00".join(_path_fold(component) for component in components))
-
-    nodes = 0
-    previous_folded: list[str] = []
-    previous_spelled: list[str] = []
-    for index in sorted(range(len(relatives)), key=keys.__getitem__):
-        folded = keys[index].split("\x00")
-        spelled = relatives[index].split("/")
-        shared = 0
-        limit = min(len(folded), len(previous_folded))
-        while shared < limit and folded[shared] == previous_folded[shared]:
-            shared += 1
-        for depth in range(shared):
-            if spelled[depth] != previous_spelled[depth]:
-                raise CorpusError(
-                    "two declared paths would alias at a directory: "
-                    f"{_quoted('/'.join(previous_spelled[: depth + 1]))} and "
-                    f"{_quoted('/'.join(spelled[: depth + 1]))}"
-                )
-        work.charge(len(folded) - shared)
-        nodes += len(folded) - shared
-        if nodes > MAX_ALIAS_INDEX_NODES:
-            raise CorpusError(
-                f"declared paths name more than {MAX_ALIAS_INDEX_NODES} "
-                "distinct directories; declared paths exceed the alias index "
-                "budget"
-            )
-        previous_folded, previous_spelled = folded, spelled
-    return nodes
+    return evaluate_declarations(
+        DeclarationObligations(tuple(relatives), MAX_ALIAS_INDEX_NODES), work=work,
+        render=_binding_error,
+        fold=_path_fold if _path_fold is not _DEFAULT_PATH_FOLD else None,
+        facts=getattr(work, "_facts", None))
 
 
 _REGULAR_BLOB_MODES = frozenset({"100644", "100755"})

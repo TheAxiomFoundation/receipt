@@ -623,6 +623,69 @@ def screen_siblings(names: Iterable[bytes | str], *, repertoire: str,
 
 
 @dataclass(frozen=True)
+class DeclarationObligations:
+    """Parsed declaration order and the caller's live alias-index ceiling."""
+
+    paths: tuple[str, ...]
+    alias_index_limit: int
+
+    def __post_init__(self):
+        object.__setattr__(self, "paths", _paths(self.paths))
+
+
+def evaluate_declarations(obligations: DeclarationObligations, *, work,
+                          render: Callable[[Finding], BaseException],
+                          fold: Callable[[str], str] | None = None,
+                          facts: _NameFacts | None = None) -> int:
+    """Whole paths precede charged prefix keys and adjacent-prefix comparisons.
+
+    Admission is per original visit and counted prefix, even when component
+    folds are reused. A substituted legacy fold hook observes each original
+    call. Keys hold one string per declaration, never one trie node per prefix.
+    """
+    facts = facts or _NameFacts()
+    fold = fold or (lambda path: "/".join(facts.folded_parts(path)))
+    relatives = obligations.paths
+    try:
+        seen: dict[str, str] = {}
+        for ordinal, relative in enumerate(relatives):
+            key = fold(relative)
+            if key in seen and seen[key] != relative:
+                raise render(Finding("declared-alias", "declarations", (0, ordinal),
+                                     path=relative, target=seen[key]))
+            seen[key] = relative
+        keys = []
+        for relative in relatives:
+            components = relative.split("/")
+            work.charge(len(components))
+            keys.append("\x00".join(fold(component) for component in components))
+        nodes = 0
+        previous_folded: list[str] = []
+        previous_spelled: list[str] = []
+        for ordinal, index in enumerate(sorted(range(len(relatives)), key=keys.__getitem__)):
+            folded = keys[index].split("\x00")
+            spelled = relatives[index].split("/")
+            shared = 0
+            limit = min(len(folded), len(previous_folded))
+            while shared < limit and folded[shared] == previous_folded[shared]:
+                shared += 1
+            for depth in range(shared):
+                if spelled[depth] != previous_spelled[depth]:
+                    raise render(Finding("declared-prefix-alias", "declarations", (1, ordinal, depth),
+                        path="/".join(spelled[:depth + 1]),
+                        target="/".join(previous_spelled[:depth + 1])))
+            work.charge(len(folded) - shared)
+            nodes += len(folded) - shared
+            if nodes > obligations.alias_index_limit:
+                raise render(Finding("declared-index-budget", "declarations", (1, ordinal),
+                                     target=str(obligations.alias_index_limit)))
+            previous_folded, previous_spelled = folded, spelled
+        return nodes
+    except _names.NamePolicyError as exc:
+        raise render(Finding("name", "declarations", (), detail=str(exc))) from exc
+
+
+@dataclass(frozen=True)
 class SubjectIdentity:
     """Session provenance, repository and immutable object identity."""
 
