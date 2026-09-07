@@ -68,15 +68,31 @@ def test_overlapping_export_inputs_keep_counter_and_refusal_locations(raw_repo, 
         "siblings": (("protected/A", "100644"), ("protected/a", "100644"))}[fault]
     commit = raw_repo.commit((("protected/nested/leaf", "100644"),) + extras)
     monkeypatch.setattr(snapshot, "MAX_PATH_BYTES_TOTAL", ceiling)
-    current = snapshot.assert_no_merging_entries
+    # PR3b round 1 (low): this comparison used to switch snapshot.assert_no_merging_entries,
+    # a hook the exporter stopped reaching once selection moved into the policy, so both
+    # legs ran the new path. The legs now switch the selector itself, and each leg proves
+    # that its intended body ran.
+    # The new leg is proven at prefix admission, which every export reaches, including
+    # the ones the path-byte ceiling refuses before a selection is certified.
+    admitted = []
+    original_prefixes = policy.export_prefixes
+    def export_prefixes(*args, **kwargs):
+        admitted.append(1)
+        return original_prefixes(*args, **kwargs)
+    monkeypatch.setattr(policy, "export_prefixes", export_prefixes)
     results = []
-    for screen in (_names.assert_no_merging_entries, current):
-        monkeypatch.setattr(snapshot, "assert_no_merging_entries", screen)
-        with raw_repo.snapshot(commit) as snap:
-            def call():
-                with snap.materialize(PREFIXES, tmp_path, repertoire="portable") as exported:
-                    return sorted(exported.entries)
-            results.append((outcome(call), asdict(snap.work)))
+    for old in (True, False):
+        admitted.clear()
+        with trace_exports(monkeypatch, old=old):
+            legacy_leg = (snapshot.Materialization._selected_entries.__code__
+                          is legacy._selected_entries.__code__)
+            assert legacy_leg == old
+            with raw_repo.snapshot(commit) as snap:
+                def call():
+                    with snap.materialize(PREFIXES, tmp_path, repertoire="portable") as exported:
+                        return sorted(exported.entries)
+                results.append((outcome(call), asdict(snap.work)))
+        assert bool(admitted) == (not old)
     assert results[0] == results[1]
 
 
@@ -462,3 +478,133 @@ def test_actual_mode_and_ancestor_work_is_bounded_and_reused(raw_repo, monkeypat
         assert work.ancestor_cache_entries == 64
         assert asdict(snap.work) == before
         print("bounded shape work", asdict(work), "public", before)
+
+
+@contextmanager
+def trace_exports(monkeypatch, *, old):
+    from types import FunctionType
+    with monkeypatch.context() as patch:
+        if old:
+            namespace = dict(legacy.__dict__, MAX_TREE_ENTRIES=snapshot.MAX_TREE_ENTRIES,
+                             _CONTENT_MODES=snapshot._CONTENT_MODES)
+            patch.setattr(snapshot.Materialization, "_selected_entries",
+                          FunctionType(legacy._selected_entries.__code__, namespace))
+            patch.setattr(snapshot.Materialization, "_deduplicated_prefixes",
+                          legacy._deduplicated_prefixes)
+        with trace_reads(patch) as (events, subjects):
+            original = snapshot.TreeListing._walk_from
+            def walk(listing, node, prefix, **kwargs):
+                events.append(("listing-walk", prefix, len(node.records)))
+                yield from original(listing, node, prefix, **kwargs)
+            patch.setattr(snapshot.TreeListing, "_walk_from", walk)
+            original_charge = snapshot.TreeSnapshot._charge_verification
+            def charge(subject, counter, amount, **kwargs):
+                if counter == "materialized_bytes":
+                    events.append(("write-charge", amount, asdict(subject.work)))
+                return original_charge(subject, counter, amount, **kwargs)
+            patch.setattr(snapshot.TreeSnapshot, "_charge_verification", charge)
+            yield events
+
+
+def export_comparison(repo, commit, scratch, monkeypatch, prefixes, *, repeats=1, shared=False):
+    results = []
+    for old in (True, False):
+        with trace_exports(monkeypatch, old=old) as events:
+            with repo.snapshot(commit) as first, repo.snapshot(commit) as second:
+                if shared:
+                    first._link_verification_work(second)
+                calls = []
+                for snap in ((first, second) if shared else (first,) * repeats):
+                    def call():
+                        with snap.materialize(prefixes, scratch, repertoire="portable") as materialized:
+                            return [(p, e.mode, (materialized.path / p).read_bytes())
+                                    for p, e in sorted(materialized.entries.items())]
+                    calls.append((outcome(call), asdict(snap.work), tuple(events)))
+                    assert list(scratch.iterdir()) == []
+                results.append(calls)
+    assert results[0] == results[1]
+    return results[1]
+
+
+@pytest.mark.parametrize("budget", ("MAX_PATH_BYTES_TOTAL", "MAX_MATERIALIZED_BYTES"))
+@pytest.mark.parametrize("delta", (-1, 0, 1))
+@pytest.mark.parametrize("shared", (False, True))
+def test_export_exact_budget_boundaries(raw_repo, tmp_path, monkeypatch, budget, delta, shared):
+    commit = raw_repo.commit((("p/n/a", "100644", b"abc"), ("p/n/b", "100755", b"defgh")))
+    scratch = tmp_path / "exports"
+    scratch.mkdir()
+    prefixes = ("p", "p/n", "p/n/a", "p")
+    # 10 supplied prefix bytes + 10 emitted leaf path bytes; 8 written bytes.
+    threshold = (20 if budget == "MAX_PATH_BYTES_TOTAL" else 8) * (2 if shared else 1)
+    monkeypatch.setattr(snapshot, budget, threshold + delta)
+    calls = export_comparison(raw_repo, commit, scratch, monkeypatch, prefixes, shared=shared)
+    assert ("value" in calls[-1][0]) == (delta >= 0)
+    print("export boundary", budget, threshold + delta, "shared", shared,
+          "result", calls[-1][0], "work", calls[-1][1])
+
+
+@pytest.mark.parametrize("fault", ("clean", "empty", "alias", "mode", "name-mode", "name", "ancestor"))
+@pytest.mark.parametrize("prefixes", (("p", "p/n", "p", "p/n/a"), ("", "p/n", ""),
+                                      (b"p/n/a", b"p/n/a", b"missing")))
+def test_export_overlapping_and_repeated_admission(raw_repo, tmp_path, monkeypatch, fault, prefixes):
+    entries = [("p/n/a", "100755", b"abc")]
+    empty = ()
+    if fault == "empty":
+        empty = ("p/n/A", "p/empty")
+    if fault == "alias":
+        entries.append(("P/unselected", "120000", b"target"))
+    if fault in {"mode", "name-mode"}:
+        entries.append(("p/z-link", "120000", b"target"))
+    if fault in {"name", "name-mode"}:
+        entries.append(("p/bad?", "100644", b"name"))
+    if fault == "ancestor":
+        entries = [("p/n", "120000", b"target")]
+    commit = raw_repo.commit(entries, empty=empty)
+    scratch = tmp_path / "exports"
+    scratch.mkdir()
+    export_comparison(raw_repo, commit, scratch, monkeypatch, prefixes, repeats=3)
+
+
+@pytest.mark.parametrize("ceiling", (2, 3, 4))
+def test_export_tree_walk_boundary(raw_repo, tmp_path, monkeypatch, ceiling):
+    commit = raw_repo.commit((("p/a", "100644"), ("p/b", "100644")))
+    scratch = tmp_path / "exports"
+    scratch.mkdir()
+    monkeypatch.setattr(snapshot, "MAX_TREE_ENTRIES", ceiling)
+    export_comparison(raw_repo, commit, scratch, monkeypatch, ("p",))
+
+
+def test_export_actual_work_is_bounded_and_reused(raw_repo, monkeypatch):
+    paths = tuple(f"root/p{i}/leaf" for i in range(64))
+    commit = raw_repo.commit(tuple((p, "100755") for p in paths), empty=("root/empty",))
+    prefixes = tuple(p.rpartition("/")[0] for p in paths) * 32 + ("root",)
+    value = policy.ProtectionPlan.materialization(prefixes, repertoire="portable")
+    with raw_repo.snapshot(commit) as snap:
+        evaluator = policy.TreePolicy(snap, policy_version=policy.POLICY_VERSION, work=snap.work)
+        early = evaluator.evaluate(value, stage="modes")
+        with pytest.raises(policy.PolicyUseError, match="unevaluated"):
+            evaluator.select_export(early, render=snapshot.Materialization._export_error)
+        final = evaluator.evaluate(value, stage="export-names", previous=early)
+        costs = evaluator.export_work, evaluator.name_work, evaluator.shape_work, asdict(snap.work)
+        for _ in range(3):
+            again = evaluator.evaluate(value, stage="export-names", previous=final)
+            selected = evaluator.select_export(again, render=snapshot.Materialization._export_error)
+            assert set(selected.entries_for(snap, use=value.use, plan=value)) == set(paths)
+        assert (evaluator.export_work, evaluator.name_work, evaluator.shape_work, asdict(snap.work)) == costs
+        assert asdict(evaluator.export_work) == dict(prefixes=1, leaves=64, components=192, directory_records=130)
+        assert evaluator.name_work.sibling_steps == 129
+        assert evaluator.name_work.folds == 66
+        assert evaluator.shape_work.mode_classifications == 130
+        assert len(final.raw_listings) == 67
+        assert len(prefixes) == 2049
+        print("bounded exports", asdict(evaluator.export_work), asdict(evaluator.name_work),
+              asdict(evaluator.shape_work), "public", asdict(snap.work))
+
+
+def test_pr3b_legacy_bodies_match_recorded_sha256():
+    import hashlib
+    import inspect
+    import textwrap
+    for name, expected in legacy.PR3B_BODY_SHA256.items():
+        body = textwrap.dedent(inspect.getsource(getattr(legacy, name)))
+        assert hashlib.sha256(body.encode()).hexdigest() == expected
