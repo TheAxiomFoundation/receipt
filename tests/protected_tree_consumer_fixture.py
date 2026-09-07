@@ -6,7 +6,7 @@ from types import FunctionType
 import tempfile
 from pathlib import Path
 
-from receipt import append_gate, corpus, protected_tree
+from receipt import append_gate, corpus, protected_tree, verify
 import protected_tree_legacy as legacy
 from test_protected_tree_work import trace_reads
 
@@ -37,9 +37,13 @@ def consumer_leg(monkeypatch, module, *, old):
         for name, function in functions.items():
             patch.setattr(module, name, function)
         if module is corpus:
+            # Keep the imported callable and its source aligned so the real
+            # composition takes its evaluator-sharing branch in both legs.
+            patch.setattr(verify, 'verify_corpus_binding', functions['verify_corpus_binding'])
             original = corpus._verify_corpus_binding
             def composed(*args, **kwargs):
                 counts['composed-binding'] += 1
+                counts['shared-custody'] += int(kwargs.get('policy') is not None)
                 if old:
                     kwargs.pop('policy', None)
                     return functions['verify_corpus_binding'](*args, **kwargs)
