@@ -518,37 +518,16 @@ class _NameFacts:
 
     def siblings(self, names: Iterable[bytes | str], *, repertoire: str,
                  materializing: bool, label: str) -> None:
-        # Admission, fold and collision are interleaved per local name. This
-        # also serves snapshot's narrower materializing sibling facade.
-        selected = _names.validate_repertoire(repertoire)
-        seen: dict[str, tuple[bytes, str]] = {}
-        for ordinal, value in enumerate(names):
-            self.counts["sibling_steps"] += 1
-            if type(value) is bytes:
-                raw = _names.validate_component_bytes(value, label="tree entry name")
-                text = _names.decode_component(raw, repertoire=selected,
-                                              materializing=materializing)
-            elif type(value) is str:
-                text = _names.validate_component_text(value, repertoire=selected,
-                                                     materializing=materializing)
-                raw = text.encode("utf-8", "surrogateescape")
-            else:
-                raise _names.NamePolicyError(f"tree entry name must be bytes or text: {value!r}")
-            folded = self.fold(text)
-            previous = seen.get(folded)
-            if previous is not None:
-                prior_raw, prior_text = previous
-                if prior_raw == raw:
-                    raise _SiblingCollision(
-                        f"{label} contains a duplicate entry name: {text!r}",
-                        name=text, other=prior_text, ordinal=ordinal, duplicate=True,
-                    )
-                raise _SiblingCollision(
-                    f"{label} contains names that merge under ASCII case folding: "
-                    f"{prior_text!r} and {text!r}", name=text, other=prior_text,
-                    ordinal=ordinal, duplicate=False,
-                )
-            seen[folded] = (raw, text)
+        # M1 record, shared name primitive row 323-386: one ordered decision loop.
+        def counted_names():
+            for value in names:
+                self.counts["sibling_steps"] += 1
+                yield value
+
+        _names._screen_sibling_names(
+            counted_names(), repertoire=repertoire, materializing=materializing,
+            label=label, fold=self.fold, collision=_SiblingCollision,
+        )
 
     def sibling_paths(self, paths: tuple[str, ...], plan: ProtectionPlan) -> None:
         by_directory: dict[str, list[str]] = {}

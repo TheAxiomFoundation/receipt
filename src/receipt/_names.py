@@ -335,9 +335,27 @@ def assert_no_merging_entries(
     before the caller may create any host path.
     """
 
+    _screen_sibling_names(
+        names, repertoire=repertoire, materializing=materializing, label=label,
+        fold=None, collision=_plain_sibling_error,
+    )
+
+
+def _plain_sibling_error(message: str, **_witness) -> NamePolicyError:
+    return NamePolicyError(message)
+
+
+def _screen_sibling_names(names, *, repertoire, materializing, label, fold, collision):
+    """Admit, fold and compare each sibling in order, retaining caller evidence.
+
+    M1's shared-name-primitive census assigns this decision loop to _names.
+    The evaluator supplies cached folding and a typed collision renderer;
+    the legacy primitive retains its raw-byte fold and exact exception class.
+    """
+
     selected = validate_repertoire(repertoire)
-    seen: dict[bytes, tuple[bytes, str]] = {}
-    for value in names:
+    seen: dict[bytes | str, tuple[bytes, str]] = {}
+    for ordinal, value in enumerate(names):
         if type(value) is bytes:
             raw = validate_component_bytes(value, label="tree entry name")
             text = decode_component(
@@ -346,12 +364,6 @@ def assert_no_merging_entries(
                 materializing=materializing,
                 label="tree entry name",
             )
-            try:
-                raw.decode("utf-8", errors="strict")
-            except UnicodeDecodeError as exc:
-                raise NamePolicyError(
-                    "tree entry name is not valid UTF-8 for folding"
-                ) from exc
         elif type(value) is str:
             text = validate_component_text(
                 value,
@@ -360,28 +372,33 @@ def assert_no_merging_entries(
                 label="tree entry name",
             )
             raw = _text_as_tree_bytes(text, "tree entry name")
+        else:
+            raise NamePolicyError(
+                f"tree entry name must be bytes or text: {value!r}"
+            )
+
+        if fold is None:
             try:
                 raw.decode("utf-8", errors="strict")
             except UnicodeDecodeError as exc:
                 raise NamePolicyError(
                     "tree entry name is not valid UTF-8 for folding"
                 ) from exc
+            folded = raw.translate(_ASCII_LOWER)
         else:
-            raise NamePolicyError(
-                f"tree entry name must be bytes or text: {value!r}"
-            )
-
-        folded = raw.translate(_ASCII_LOWER)
+            folded = fold(text)
         previous = seen.get(folded)
         if previous is not None:
             previous_raw, previous_text = previous
             if previous_raw == raw:
-                raise NamePolicyError(
-                    f"{label} contains a duplicate entry name: {text!r}"
+                raise collision(
+                    f"{label} contains a duplicate entry name: {text!r}",
+                    name=text, other=previous_text, ordinal=ordinal, duplicate=True,
                 )
-            raise NamePolicyError(
+            raise collision(
                 f"{label} contains names that merge under ASCII case folding: "
-                f"{previous_text!r} and {text!r}"
+                f"{previous_text!r} and {text!r}",
+                name=text, other=previous_text, ordinal=ordinal, duplicate=False,
             )
         seen[folded] = (raw, text)
 
