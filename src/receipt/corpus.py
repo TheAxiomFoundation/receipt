@@ -1333,17 +1333,16 @@ def _under(directory: str, name: str) -> str:
 
 
 def _path_fold(relative: str) -> str:
-    """Fold ASCII letters per component and preserve every other code point.
-
-    This deliberately narrows 0.5.x's ``NFC(casefold)`` key: neither Unicode
-    normalization nor Unicode casefolding participates under either name
-    repertoire.
-    """
+    """Forward the legacy ASCII-only whole-path fold and exception boundary."""
+    from receipt.protected_tree import folded_parts
 
     try:
-        return "/".join(ascii_fold_text(component) for component in relative.split("/"))
+        return "/".join(folded_parts(relative))
     except NamePolicyError as exc:
         raise CorpusError(str(exc)) from exc
+
+
+_DEFAULT_PATH_FOLD = _path_fold
 
 
 def _has_pinned_suffix(relative: str, suffixes: tuple[str, ...]) -> bool:
@@ -1353,126 +1352,66 @@ def _has_pinned_suffix(relative: str, suffixes: tuple[str, ...]) -> bool:
     return any(folded.endswith(_path_fold(suffix)) for suffix in suffixes)
 
 
+
+def _binding_error(finding) -> CorpusError:
+    """Render shared findings without changing corpus quotation or public text."""
+    if finding.kind == "declared-alias":
+        return CorpusError(
+            "two declared paths would alias on a case- or "
+            "normalization-insensitive filesystem, so the closed-world set "
+            f"is ambiguous: {_quoted(finding.target)} and {_quoted(finding.path)}")
+    if finding.kind == "declared-prefix-alias":
+        return CorpusError("two declared paths would alias at a directory: "
+                           f"{_quoted(finding.target)} and {_quoted(finding.path)}")
+    if finding.kind == "declared-index-budget":
+        return CorpusError(f"declared paths name more than {finding.target} "
+                           "distinct directories; declared paths exceed the alias index budget")
+    if finding.kind == "sibling-alias":
+        return CorpusError("directory holds two entries a case-insensitive filesystem "
+            f"would merge: {_quoted(_under(finding.parent, finding.other_name))} and "
+            f"{_quoted(_under(finding.parent, finding.name))}")
+    if finding.operation == "binding-portable":
+        return CorpusError(f"tree entry {_quoted(finding.path)} is not a portable name "
+            "(ASCII letters, digits, '.', '_' and '-', not ending in '.', "
+            f"not a Win32 device name): {_quoted(finding.name)}")
+    if finding.kind == "content-root-alias":
+        return CorpusError(f"tree entry {_quoted(finding.name)} aliases the pinned content "
+            f"root component {_quoted(finding.target)} on a case- or "
+            "normalization-insensitive filesystem")
+    if finding.kind == "content-root-missing":
+        return CorpusError(f"pinned content root is absent from the tree: {finding.path}")
+    if finding.kind == "content-root-mode":
+        return CorpusError(f"pinned content root is not a directory: {finding.path}")
+    if finding.kind == "content-gitlink":
+        return CorpusError(f"content root contains a gitlink: {_quoted(finding.path)}")
+    if finding.kind == "content-short-suffix":
+        return CorpusError("content root contains a file whose short-name alias "
+                           f"would carry a pinned suffix: {_quoted(finding.path)}")
+    if finding.kind == "content-symlink":
+        return CorpusError("content root contains a symlink where a regular file was "
+                           f"recorded: {_quoted(finding.path)}")
+    if finding.kind == "content-mode":
+        return CorpusError(f"content root contains a non-regular file: {_quoted(finding.path)}")
+    if finding.role == "attested-leaf":
+        return CorpusError(f"bound file is not a regular file: {finding.path}")
+    return CorpusError(finding.detail)
+
+
 def _reject_aliasing_paths(
     relatives: list[str], *, work: _PathPrefixWork
 ) -> int:
-    """Refuse two declared paths a real filesystem would treat as one.
+    """Forward whole-path-before-prefix obligations with their original budgets.
 
-    Two passes, because a path can alias another in two places and the
-    second one was missed.
-
-    The first compares whole paths, which is what "the closed-world set is
-    ambiguous" is about: a journal binding both ``rules/x.yaml`` and
-    ``rules/X.yaml`` says two different digests about one file on APFS, and
-    an auditor cannot say which one they have.
-
-    The second compares every *prefix* of every path — each ancestor
-    directory and the path itself — at the depth it sits. Comparing whole
-    paths alone missed the case where the collision is a directory:
-    ``rules/A/x.yaml`` and ``rules/a/y.yaml`` are two distinct paths whose
-    fold keys differ, so the first pass passes them, while an insensitive
-    clone merges ``A`` and ``a`` into one directory holding both files —
-    and the closed-world sweep, which descends the spellings the journal
-    named, walks two directories on the auditor's host and one on the
-    consumer's (peer review, Sol round 3). The path itself is included at
-    its own depth as well, so a directory in one path colliding with a file
-    in another is caught too.
-
-    Under the portable-name policy the fold key over a declared path is
-    ASCII case-insensitivity, so what both passes are asking is whether two
-    spellings differ only in case.
-
-    **The prefix pass holds no index.** It used to build one — first a
-    cumulative string per visit, then a component trie of one node per
-    distinct prefix — and a trie is an index whose size is the thing an
-    adversary chooses. 4,096 portable 1,023-character paths with distinct
-    three-character first components and 510 one-character descendants are
-    inside ``MAX_JOURNAL_ROWS``, inside ``MAX_PATH_TEXT`` and inside half of
-    :data:`MAX_PATH_COMPONENTS_TOTAL`, and they name 2,093,056 distinct
-    prefixes: 594 MB of trie nodes and 4.8 seconds, measured, for a journal
-    the budget waved through (peer review, Sol round 7, round 3). Compacting
-    the node — ``__slots__``, one shared child dictionary, interned spellings
-    — cannot fix that. A Python object plus its dictionary entry is on the
-    order of 150 bytes whatever is done to it, so the *representation* was
-    never the choice worth making; holding one at all was.
-
-    So the pass sorts instead. Each path is folded a component at a time and
-    the folded components are joined by a NUL — a character no portable name
-    can hold and one that sorts below every character one can — so
-    ordering the keys as strings orders the paths by their folded component
-    *sequences*. Two facts make neighbour comparison sufficient:
-
-    - every path sharing a folded prefix occupies a contiguous run of that
-      order, which is what sorting by a sequence means;
-    - so if two paths in such a run disagree about the spelling of a
-      component inside their shared prefix, then some *adjacent* pair in the
-      run disagrees about it too — agreement between neighbours is
-      transitive along the chain that joins them, and every neighbour in the
-      run shares at least that prefix.
-
-    Each adjacent pair is therefore compared for as many components as their
-    folded keys agree on, and the first disagreement in spelling is the
-    refusal. What is live at any moment is two paths' components and one
-    string key per declared path, so the pass allocates a small multiple of
-    the declared path text — the text the journal already carries — instead
-    of a structure whose size is the adversary's to choose. The same 4,096
-    maximum-depth paths now peak at 9.0 MB and 0.6 seconds.
-
-    The number of distinct folded prefixes is the number of components the
-    first path contributes plus, for every later path, the components below
-    what it shares with its predecessor. Every component visit and every
-    counted prefix charges ``work`` before folding or comparison.
-
-    The whole-path pass runs first and completely, so a journal with both
-    kinds of collision keeps the message that names the more specific one.
+    Each visit and newly counted prefix retains its charge. A substituted
+    _path_fold observes the original calls; ordinary calls reuse component facts.
     """
+    from receipt.protected_tree import DeclarationObligations, evaluate_declarations
 
-    seen: dict[str, str] = {}
-    for relative in relatives:
-        key = _path_fold(relative)
-        if key in seen and seen[key] != relative:
-            raise CorpusError(
-                "two declared paths would alias on a case- or "
-                "normalization-insensitive filesystem, so the closed-world set "
-                f"is ambiguous: {_quoted(seen[key])} and {_quoted(relative)}"
-            )
-        seen[key] = relative
-
-    keys: list[str] = []
-    for relative in relatives:
-        components = relative.split("/")
-        # Charged before the components are folded, so the fold work and the
-        # key it builds are both inside the budget rather than beside it.
-        work.charge(len(components))
-        keys.append("\x00".join(_path_fold(component) for component in components))
-
-    nodes = 0
-    previous_folded: list[str] = []
-    previous_spelled: list[str] = []
-    for index in sorted(range(len(relatives)), key=keys.__getitem__):
-        folded = keys[index].split("\x00")
-        spelled = relatives[index].split("/")
-        shared = 0
-        limit = min(len(folded), len(previous_folded))
-        while shared < limit and folded[shared] == previous_folded[shared]:
-            shared += 1
-        for depth in range(shared):
-            if spelled[depth] != previous_spelled[depth]:
-                raise CorpusError(
-                    "two declared paths would alias at a directory: "
-                    f"{_quoted('/'.join(previous_spelled[: depth + 1]))} and "
-                    f"{_quoted('/'.join(spelled[: depth + 1]))}"
-                )
-        work.charge(len(folded) - shared)
-        nodes += len(folded) - shared
-        if nodes > MAX_ALIAS_INDEX_NODES:
-            raise CorpusError(
-                f"declared paths name more than {MAX_ALIAS_INDEX_NODES} "
-                "distinct directories; declared paths exceed the alias index "
-                "budget"
-            )
-        previous_folded, previous_spelled = folded, spelled
-    return nodes
+    return evaluate_declarations(
+        DeclarationObligations(tuple(relatives), MAX_ALIAS_INDEX_NODES), work=work,
+        render=_binding_error,
+        fold=_path_fold if _path_fold is not _DEFAULT_PATH_FOLD else None,
+        facts=getattr(work, "_facts", None))
 
 
 _REGULAR_BLOB_MODES = frozenset({"100644", "100755"})
@@ -1485,81 +1424,23 @@ def _screen_tree_listing(
     *,
     repertoire: str,
 ) -> None:
-    """Validate every component and every tree directory's sibling set.
+    """Forward all-name-before-sibling obligations over an authenticated mapping."""
+    from receipt.protected_tree import ProtectionPlan, evaluate_binding_mapping
 
-    ``TreeListing.as_dict`` has already materialized each authenticated full
-    path exactly once.  Deriving local names from that flat view avoids a
-    second charged path traversal through ``TreeListing.children``.
-    """
-
-    for relative in sorted(entries):
-        name = relative.rpartition("/")[2]
-        if repertoire == "portable":
-            # The portable operation supplies the retained corpus diagnostic.
-            # Ask the strict fold first so undecodable surrogateescaped tree
-            # bytes are still refused as undecodable under both repertoires.
-            try:
-                ascii_fold_text(name)
-            except NamePolicyError as exc:
-                raise CorpusError(str(exc)) from exc
-            _assert_portable_name(name, f"tree entry {_quoted(relative)}")
-        else:
-            try:
-                validate_component_text(
-                    name,
-                    repertoire=repertoire,
-                    label=f"tree entry {_quoted(relative)}",
-                )
-                # Folding is required under both repertoires. In particular,
-                # this refuses surrogateescaped non-UTF-8 bytes before a
-                # verdict could quote or fold them.
-                ascii_fold_text(name)
-            except NamePolicyError as exc:
-                raise CorpusError(str(exc)) from exc
-
-    directories = {""}
-    directories.update(
-        path for path, entry in entries.items() if entry.mode == _TREE_MODE
-    )
-    for directory in sorted(directories):
-        names = tuple(sorted(by_directory.get(directory, {})))
-
-        # Keep the established corpus refusal text. The shared helper still
-        # runs for every directory; this pre-check only supplies the retained
-        # path-rich diagnostic when the sibling pair itself is the fault.
-        seen: dict[str, str] = {}
-        for name in names:
-            folded = _path_fold(name)
-            previous = seen.get(folded)
-            if previous is not None:
-                raise CorpusError(
-                    "directory holds two entries a case-insensitive filesystem "
-                    f"would merge: {_quoted(_under(directory, previous))} and "
-                    f"{_quoted(_under(directory, name))}"
-                )
-            seen[folded] = name
-        try:
-            assert_no_merging_tree_names(
-                names,
-                repertoire=repertoire,
-                label=f"tree directory {_quoted(directory or '.')}",
-            )
-        except NamePolicyError as exc:
-            raise CorpusError(str(exc)) from exc
+    plan = ProtectionPlan(repertoire=repertoire, whole_tree_name_scope=True,
+        phase="binding", use="binding-names", obligations=("names", "siblings"))
+    run = evaluate_binding_mapping(entries, plan, stage="siblings", by_directory=by_directory)
+    if run.findings:
+        raise _binding_error(run.findings[0])
 
 
 def _entries_by_directory(
     entries: Mapping[str, GitEntry],
 ) -> dict[str, dict[str, GitEntry]]:
-    """Index an authenticated flat listing by each entry's immediate parent."""
+    """Forward the retained immediate-parent index, excluding empty buckets."""
+    from receipt.protected_tree import index_children
 
-    result: dict[str, dict[str, GitEntry]] = {}
-    for path, entry in entries.items():
-        parent, separator, name = path.rpartition("/")
-        if not separator:
-            parent, name = "", path
-        result.setdefault(parent, {})[name] = entry
-    return result
+    return {parent: children for parent, children in index_children(entries).items() if children}
 
 
 def _assert_content_root_spellings(
@@ -1567,80 +1448,25 @@ def _assert_content_root_spellings(
     by_directory: Mapping[str, Mapping[str, GitEntry]],
     spec: CorpusSpec,
 ) -> None:
-    """Retain the pinned-root alias refusal over immutable listing names."""
+    """Forward pinned-root component aliases without adding other obligations."""
+    from receipt.protected_tree import evaluate_binding_mapping
 
-    for root in spec.content_roots:
-        relative = root.as_posix()
-        parent = ""
-        for component in relative.split("/"):
-            for name in sorted(by_directory.get(parent, {})):
-                if name != component and _path_fold(name) == _path_fold(component):
-                    raise CorpusError(
-                        f"tree entry {_quoted(name)} aliases the pinned content "
-                        f"root component {_quoted(component)} on a case- or "
-                        "normalization-insensitive filesystem"
-                    )
-            exact = _under(parent, component)
-            entry = entries.get(exact)
-            if entry is None or entry.mode != _TREE_MODE:
-                break
-            parent = exact
+    run = evaluate_binding_mapping(entries, _binding_plan(spec, ("content-roots",)),
+                                   stage="content-roots", by_directory=by_directory)
+    if run.findings:
+        raise _binding_error(run.findings[0])
 
 
 def _content_entries_from_listing(
     entries: Mapping[str, GitEntry], spec: CorpusSpec
 ) -> dict[str, GitEntry]:
-    """Return the exact closed-world content set from one tree listing."""
+    """Forward root/mode/suffix selection with the suffixless-link exception."""
+    from receipt.protected_tree import evaluate_binding_mapping
 
-    found: dict[str, GitEntry] = {}
-    for content_root in spec.content_roots:
-        base_relative = content_root.as_posix()
-        root_entry = entries.get(base_relative)
-        if root_entry is None:
-            raise CorpusError(
-                f"pinned content root is absent from the tree: {base_relative}"
-            )
-        if root_entry.mode != _TREE_MODE:
-            raise CorpusError(
-                f"pinned content root is not a directory: {base_relative}"
-            )
-
-        prefix = base_relative + "/"
-        for relative in sorted(entries):
-            if not relative.startswith(prefix):
-                continue
-            entry = entries[relative]
-            if entry.mode == "160000":
-                raise CorpusError(
-                    f"content root contains a gitlink: {_quoted(relative)}"
-                )
-
-            carries_suffix = _has_pinned_suffix(relative, spec.content_suffixes)
-            if not carries_suffix:
-                if (
-                    spec.name_repertoire == "portable"
-                    and _short_name_carries_pinned_suffix(
-                        relative.rpartition("/")[2], spec.content_suffixes
-                    )
-                ):
-                    raise CorpusError(
-                        "content root contains a file whose short-name alias "
-                        "would carry a pinned suffix: "
-                        f"{_quoted(relative)}"
-                    )
-                continue
-
-            if entry.mode == "120000":
-                raise CorpusError(
-                    "content root contains a symlink where a regular file was "
-                    f"recorded: {_quoted(relative)}"
-                )
-            if entry.mode not in _REGULAR_BLOB_MODES or entry.object_type != "blob":
-                raise CorpusError(
-                    f"content root contains a non-regular file: {_quoted(relative)}"
-                )
-            found[relative] = entry
-    return found
+    run = evaluate_binding_mapping(entries, _binding_plan(spec, ("content",)), stage="content")
+    if run.findings:
+        raise _binding_error(run.findings[0])
+    return {path: entries[path] for path in run.selected_paths}
 
 
 def _assert_tombstones_absent_from_listing(
@@ -1648,13 +1474,21 @@ def _assert_tombstones_absent_from_listing(
 ) -> None:
     """Ask exact and ASCII-fold indexes once whether a removed path survives."""
 
-    folded: dict[str, str] = {}
-    for path in sorted(entries):
-        folded.setdefault(_path_fold(path), path)
+    from receipt.protected_tree import folded_path_index
+
+    try:
+        folded = folded_path_index(entries)
+    except NamePolicyError as exc:
+        raise CorpusError(str(exc)) from exc
+    _assert_tombstones(entries, removed, folded, _path_fold)
+
+
+def _assert_tombstones(entries, removed, folded, fold):
+    """Apply corpus tombstones to exact and first-witness folded indexes."""
     for path in removed:
         if path in entries:
             raise CorpusError(f"removed path is still present in the tree: {path}")
-        survivor = folded.get(_path_fold(path))
+        survivor = folded.get(fold(path))
         if survivor is not None:
             raise CorpusError(
                 "removed path is still present in the tree under a spelling "
@@ -1666,20 +1500,47 @@ def _assert_tombstones_absent_from_listing(
 def _attested_entries_from_snapshot(
     snapshot: TreeSnapshot, attested: Mapping[str, FileBinding]
 ) -> dict[str, GitEntry]:
-    """Resolve every attested path exactly and require a regular blob."""
+    """Admit exact attested lookups, preserving masked reader failures and modes."""
+    return _attested_selections(snapshot, attested, None)
+
+
+def _attested_selections(snapshot, attested, policy):
+    from receipt.protected_tree import POLICY_VERSION, ProtectionPlan, TreePolicy, classify_mode
 
     result: dict[str, GitEntry] = {}
     for path in sorted(attested):
         try:
             entry = snapshot.entry(path)
         except SnapshotError as exc:
-            raise CorpusError(
-                f"bound file is missing or not a regular file: {path}"
-            ) from exc
-        if entry.mode not in _REGULAR_BLOB_MODES or entry.object_type != "blob":
-            raise CorpusError(f"bound file is not a regular file: {path}")
-        result[path] = entry
+            raise CorpusError(f"bound file is missing or not a regular file: {path}") from exc
+        if policy is None and type(snapshot) is not TreeSnapshot:
+            # The accepted reader supplies metadata; only concrete readers can
+            # receive an authenticated policy view or certified selection.
+            finding = classify_mode(entry.mode, entry.object_type).finding(path, "attested-leaf")
+            if finding is not None:
+                raise _binding_error(finding)
+            result[path] = entry
+            continue
+        if policy is None:
+            policy = TreePolicy(snapshot, policy_version=POLICY_VERSION, work=snapshot.work)
+        policy.observe_entries((entry,))
+        plan = ProtectionPlan(obligations=("modes",), listing_scope=(),
+            mode_roles=((path, "attested-leaf"),), exact_attested_paths=(path,),
+            phase="binding", use="binding-attested")
+        view = policy.evaluate(plan, stage="modes")
+        selected = view.require(plan.use, render=_binding_error)
+        result[path] = selected.entries_for(snapshot, use=plan.use, plan=plan)[path]
     return result
+
+
+def _binding_plan(spec, obligations):
+    """Compile binding's admitted roots and suffixes without adding attributes."""
+    from receipt.protected_tree import ProtectionPlan
+
+    return ProtectionPlan(repertoire=spec.name_repertoire, whole_tree_name_scope=True,
+        content_roots=tuple(root.as_posix() for root in spec.content_roots),
+        content_suffixes=spec.content_suffixes, phase="binding", use="binding",
+        obligations=obligations)
 
 
 def _verify_binding_digests(
@@ -1761,28 +1622,52 @@ def verify_corpus_binding(
             "TreeSnapshot.select"
         )
 
+    return _verify_corpus_binding(snapshot, journal_bytes, spec=spec)
+
+
+#: The public entry point as defined here. Composition shares its candidate policy
+#: with the private implementation only while the name bound in ``receipt.verify``
+#: is still this object, so a public function patched at any time, including
+#: before ``receipt.verify`` is imported, keeps governing the binding pass.
+_VERIFY_CORPUS_BINDING_ORIGINAL = verify_corpus_binding
+
+
+def _verify_corpus_binding(snapshot, journal_bytes, *, spec, policy=None):
+    """Bind with an optional custody evaluator; journal and semantic order stay local."""
+    from dataclasses import replace
+    from receipt.protected_tree import PolicyUseError, folded_path_index, read_binding_listing
+
     content, attested, gates, removed = parse_journal(journal_bytes, spec=spec)
 
+    if policy is not None and policy.snapshot is not snapshot:
+        raise PolicyUseError("binding evaluator has a different subject")
     prefix_work = _PathPrefixWork()
+    if policy is not None:
+        prefix_work._facts = policy._facts
     _reject_aliasing_paths(list(content) + list(attested), work=prefix_work)
 
     try:
-        listing = snapshot.entries("")
+        policy, entries = read_binding_listing(snapshot, evaluator=policy)
     except SnapshotError as exc:
         raise CorpusError(str(exc)) from exc
-    try:
-        entries = listing.as_dict(include_trees=True)
-    except SnapshotError as exc:
-        raise CorpusError(str(exc)) from exc
-
-    by_directory = _entries_by_directory(entries)
-    _screen_tree_listing(
-        entries,
-        by_directory,
-        repertoire=spec.name_repertoire,
-    )
-    _assert_content_root_spellings(entries, by_directory, spec)
-    tree = _content_entries_from_listing(entries, spec)
+    if policy is None:
+        # Subclasses retain their own listing and reader admission. These shared
+        # mapping decisions confer no authority to select authenticated payloads.
+        by_directory = _entries_by_directory(entries)
+        _screen_tree_listing(entries, by_directory, repertoire=spec.name_repertoire)
+        _assert_content_root_spellings(entries, by_directory, spec)
+        tree = _content_entries_from_listing(entries, spec)
+    else:
+        plan = _binding_plan(spec, ("names", "siblings"))
+        names = policy.evaluate(plan, stage="siblings")
+        names.require(plan.use, render=_binding_error)
+        roots_plan = replace(plan, obligations=("content-roots",))
+        roots = policy.evaluate(roots_plan, stage="content-roots")
+        roots.require(roots_plan.use, render=_binding_error)
+        content_plan = replace(plan, obligations=("content",))
+        content_view = policy.evaluate(content_plan, stage="content")
+        content_selection = content_view.require(content_plan.use, render=_binding_error)
+        tree = content_selection.entries_for(snapshot, use=content_plan.use, plan=content_plan)
 
     journal_paths = set(content)
     tree_paths = set(tree)
@@ -1799,7 +1684,11 @@ def verify_corpus_binding(
             f"from the tree, starting with {_quoted(absent[0])}"
         )
 
-    _assert_tombstones_absent_from_listing(entries, removed)
+    if policy is None:
+        _assert_tombstones_absent_from_listing(entries, removed)
+    else:
+        _assert_tombstones(entries, removed, folded_path_index(entries, facts=policy._facts),
+                           policy._facts.full_fold)
 
     missing_required = sorted(spec.required_attested_paths - set(attested))
     if missing_required:
@@ -1807,7 +1696,7 @@ def verify_corpus_binding(
             "the witnessed journal does not attest a path the pinned spec "
             f"requires: {_quoted(missing_required[0])}"
         )
-    attested_entries = _attested_entries_from_snapshot(snapshot, attested)
+    attested_entries = _attested_selections(snapshot, attested, policy)
 
     _verify_binding_digests(
         snapshot,

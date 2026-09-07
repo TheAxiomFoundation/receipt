@@ -1253,3 +1253,825 @@ def refuse_transforming_attributes(
 
 
 PR4_BODY_SHA256 = {'_unsupported_attribute': '8f3c08c4f49d8048fd28b0e3439cfcb5b74f2d5780304dae552c1f42ddf17b12', '_attribute_pattern': 'a1e0544c431baf5d8645e59016e979888a753301523397ebe6c1178b18d462b3', '_parse_attribute_file': '1cb73b995ff3fd2269cc230222c8eedfd62ab3e9e7aaf16223776734259ddd98', '_segment_matches': '00c5b18ab3b52d136e3b175af9618d5edb7f97a104ba28edfbf672f3d043eeb9', '_attribute_matches': '3a41087cba394989bbdd3efc37c0b0e02e22bed67ea33f139892284825fdf8bb', '_attribute_rules': '36b1d410c7e5d40b3dd2c68771f6d2c3052af8cc5466472197d0d08693bb8c5e', '_attribute_step': 'a0dcb636dd37a36a2c11003087a697c1b433702f19705840c0ac9750943a1ae9', 'refuse_transforming_attributes': '184012d440939ff2b9c15eca1858d54317969952cc962d8e5b0e460baf6d4f9d'}
+
+
+# PR5 baseline bodies, verbatim from 22132516b623e9f095b93f52aae33df2eaadd7ea.
+class PR5Append:
+    def _state_entry(
+        candidate: _CandidateTree,
+        relative: pathlib.PurePosixPath,
+    ) -> GitEntry:
+        """Select one regular state entry without fetching its payload."""
+
+        display = relative.as_posix()
+        try:
+            entry = candidate.snapshot.entry(display)
+        except SnapshotError as exc:
+            if str(exc) == f"tree entry does not exist: {display}":
+                raise AppendError(
+                    f"state file is missing or not a regular file: {display}"
+                ) from exc
+            raise
+        if entry.mode == "120000":
+            raise AppendError(f"state file is a symlink: {display}")
+        if entry.mode not in {"100644", "100755"}:
+            raise AppendError(f"state file is not a regular file: {display}")
+        return entry
+
+    def _screen_candidate_tree_aliases(
+        candidate: _CandidateTree,
+    ) -> dict[str, GitEntry]:
+        """Screen protected shapes, aliases and names over the complete tree."""
+
+        from dataclasses import replace
+        from receipt.protected_tree import POLICY_VERSION, ProtectionPlan, TreePolicy
+        from receipt.release_chain import _protected_name_error
+
+        policy = TreePolicy(candidate.snapshot, policy_version=POLICY_VERSION,
+                            work=candidate.snapshot.work)
+        entries = policy.read_listing("")
+        protected = _protected_paths(candidate)
+        for path in protected:
+            parts = path.split("/")
+            for depth in range(1, len(parts)):
+                prefix = "/".join(parts[:depth])
+                entry = entries.get(prefix)
+                if entry is None or entry.mode == "040000":
+                    continue
+                if entry.mode == "120000":
+                    raise SnapshotError(f"state path has a symlinked component: {prefix}")
+                raise SnapshotError(f"tree path ancestor is not a directory: {prefix}")
+
+        # Gate-only proposals need the same name obligations before their return.
+        plan = ProtectionPlan.chain_names(
+            _materialization_prefixes(candidate),
+            repertoire=candidate.spec.chain.name_repertoire,
+            release_directories=(candidate.spec.chain.release_root_relative,
+                                 candidate.spec.chain.manifest_relative),
+            alias_paths=protected, use="append-names", anchor_origin="caller",
+        )
+        plan = replace(plan, exact_state_paths=(candidate.ledger_relative, candidate.prefix_relative),
+                       attribute_target_selectors=_surface_alias_paths(candidate), phase="append")
+        view = policy.evaluate(plan, stage="suffixes")
+        try:
+            selection = view.require(plan.use, render=_protected_name_error)
+        except ReleaseChainError as exc:
+            raise AppendError(str(exc)) from exc
+        return dict(selection.entries_for(candidate.snapshot, use=plan.use))
+
+    def _attribute_entries(
+        candidate: _CandidateTree,
+        entries: Mapping[str, GitEntry],
+    ) -> tuple[GitEntry, ...]:
+        """Return regular blobs on every explicit or configured protected path."""
+
+        materialized = tuple(
+            relative.as_posix() for relative in _materialization_prefixes(candidate)
+        )
+        return tuple(
+            entry
+            for path, entry in sorted(entries.items())
+            if entry.mode in {"100644", "100755"}
+            and (
+                _is_protected(path, candidate)
+                or any(
+                    path == prefix or path.startswith(f"{prefix}/")
+                    for prefix in materialized
+                )
+            )
+        )
+
+    def _candidate_release_entries_regular(candidate: _CandidateTree) -> None:
+        """Preserve the release-leaf shape refusals on the push path."""
+
+        release_root = candidate.spec.chain.release_root_relative.as_posix()
+        manifest = candidate.spec.chain.manifest_relative.as_posix()
+        for relative, entry in sorted(
+            candidate.snapshot.entries(release_root).as_dict().items()
+        ):
+            # The manifest leaf has its own established directory diagnostic.
+            if relative == manifest:
+                continue
+            if entry.mode == "120000":
+                raise AppendError(f"release path is a symlink: {relative}")
+            if entry.mode not in {"100644", "100755"}:
+                raise AppendError(f"release path is not regular: {relative}")
+
+    def _screen_candidate_materialization(candidate: _CandidateTree) -> None:
+        """Rehash every protected candidate blob when no chain is present."""
+
+        with tempfile.TemporaryDirectory(prefix="receipt-append-candidate-") as directory:
+            with candidate.snapshot.materialize(
+                _materialization_prefixes(candidate),
+                pathlib.Path(directory),
+                repertoire=candidate.spec.chain.name_repertoire,
+            ):
+                pass
+
+    def _verify_candidate_release_chain(
+        *,
+        candidate: _CandidateTree,
+        ledger_bytes: bytes,
+        prefix_bytes: bytes,
+        anchor_dir: pathlib.Path,
+        enforce_production_pins: bool,
+    ) -> ChainVerification:
+        """Verify the selected candidate chain through a private materialization."""
+
+        with tempfile.TemporaryDirectory(prefix="receipt-append-candidate-") as directory:
+            with candidate.snapshot.materialize(
+                _materialization_prefixes(candidate),
+                pathlib.Path(directory),
+                repertoire=candidate.spec.chain.name_repertoire,
+            ) as materialized:
+                return verify_release_chain(
+                    materialized.path,
+                    spec=candidate.spec.chain,
+                    anchor_dir=anchor_dir,
+                    require_chain=True,
+                    verify_state=True,
+                    enforce_production_pins=enforce_production_pins,
+                    state_bytes=_state_snapshot_bytes(
+                        candidate,
+                        ledger_bytes,
+                        prefix_bytes,
+                    ),
+                )
+
+    def check_release_proposal(
+        base: _BaseCommit,
+        *,
+        candidate: _CandidateTree,
+        ledger_bytes: bytes,
+        prefix_bytes: bytes,
+        anchor_dir: pathlib.Path,
+        enforce_production_pins: bool,
+    ) -> int | None:
+        """Verify base custody and the one transition the candidate may add."""
+
+        try:
+            _commit, new_files, base_release_entries = verify_release_history_immutable(
+                candidate.spec.chain,
+                candidate=candidate.snapshot,
+                base=base.tree,
+            )
+        except ReleaseChainError as exc:
+            raise AppendError(str(exc)) from exc
+
+        base_has_chain = any(
+            relative.startswith(candidate.spec.release_manifest_prefix)
+            for relative in base_release_entries
+        )
+        manifest_relative = candidate.spec.chain.manifest_relative.as_posix()
+        manifest_children = candidate.snapshot.entries(manifest_relative).children
+        candidate_has_chain = any(
+            name.endswith(".json")
+            and isinstance(child, GitEntry)
+            and child.mode in {"100644", "100755"}
+            for name, child in manifest_children.items()
+        )
+        base_bytes = _base_ledger_bytes(base, candidate)
+        appended_bytes = _check_exact_byte_append(base_bytes, ledger_bytes)
+        ledger_changed = bool(appended_bytes)
+
+        if not base_has_chain:
+            if not candidate_has_chain:
+                if new_files:
+                    raise AppendError(
+                        "legacy pre-genesis proposal must not change releases/; "
+                        "add a complete genesis manifest, producer signature, and "
+                        "both receipts or no release files at all "
+                        f"(changed={sorted(new_files)})"
+                    )
+                _screen_candidate_materialization(candidate)
+                return None
+            _release_triple(
+                new_files,
+                0,
+                candidate=candidate,
+                allowed_support_files=set(candidate.spec.genesis_support_files),
+            )
+            try:
+                verification = _verify_candidate_release_chain(
+                    candidate=candidate,
+                    ledger_bytes=ledger_bytes,
+                    prefix_bytes=prefix_bytes,
+                    anchor_dir=anchor_dir,
+                    enforce_production_pins=enforce_production_pins,
+                )
+            except ReleaseChainError as exc:
+                raise AppendError(str(exc)) from exc
+            if len(verification.releases) != 1:
+                raise AppendError(
+                    "genesis proposal must create exactly one release at index 0"
+                )
+            return 0
+
+        try:
+            base_verification = verify_base_release_chain(
+                candidate.spec.chain,
+                base=base.tree,
+                anchor_dir=anchor_dir,
+                enforce_production_pins=enforce_production_pins,
+            )
+        except ReleaseChainError as exc:
+            raise AppendError(f"base release chain is invalid: {exc}") from exc
+        assert base_verification.head is not None
+        expected_index = base_verification.head.release_index + 1
+
+        if ledger_changed:
+            _release_triple(new_files, expected_index, candidate=candidate)
+        elif new_files:
+            raise AppendError(
+                "release-only proposal is forbidden after genesis; a next release "
+                "must witness an actual ledger byte append"
+            )
+
+        try:
+            candidate_verification = _verify_candidate_release_chain(
+                candidate=candidate,
+                ledger_bytes=ledger_bytes,
+                prefix_bytes=prefix_bytes,
+                anchor_dir=anchor_dir,
+                enforce_production_pins=enforce_production_pins,
+            )
+        except ReleaseChainError as exc:
+            raise AppendError(str(exc)) from exc
+        expected_length = len(base_verification.releases) + (1 if ledger_changed else 0)
+        if len(candidate_verification.releases) != expected_length:
+            raise AppendError(
+                f"release chain length must be {expected_length} for this proposal; "
+                f"found {len(candidate_verification.releases)}"
+            )
+        assert candidate_verification.head is not None
+        return candidate_verification.head.release_index
+
+    def check_release_chain_without_base(
+        *,
+        candidate: _CandidateTree,
+        ledger_bytes: bytes,
+        prefix_bytes: bytes,
+        anchor_dir: pathlib.Path,
+        enforce_production_pins: bool,
+    ) -> int | None:
+        """Verify an initialized chain from the selected pushed commit."""
+
+        manifest_relative = candidate.spec.chain.manifest_relative.as_posix()
+        manifest_listing = candidate.snapshot.entries(manifest_relative)
+        initialized = bool(manifest_listing)
+        if not initialized:
+            _candidate_release_entries_regular(candidate)
+            _screen_candidate_materialization(candidate)
+            return None
+        manifest_entry = candidate.snapshot.entry(manifest_relative)
+        if manifest_entry.mode != "040000":
+            raise AppendError(
+                "release manifest path is not a regular directory: "
+                f"{candidate.snapshot.root / candidate.spec.chain.manifest_relative}"
+            )
+        _candidate_release_entries_regular(candidate)
+        try:
+            verification = _verify_candidate_release_chain(
+                candidate=candidate,
+                ledger_bytes=ledger_bytes,
+                prefix_bytes=prefix_bytes,
+                anchor_dir=anchor_dir,
+                enforce_production_pins=enforce_production_pins,
+            )
+        except ReleaseChainError as exc:
+            raise AppendError(str(exc)) from exc
+        assert verification.head is not None
+        return verification.head.release_index
+
+    def _verify_selected_tree(
+        candidate: _CandidateTree,
+        *,
+        base: _BaseCommit | None,
+        trusted_code_root: pathlib.Path,
+        release_anchor_dir: pathlib.Path | None,
+    ) -> str:
+        """Run reader preflights, then retained checks, over entered snapshots."""
+
+        spec = candidate.spec
+        ledger_entry = _state_entry(candidate, spec.chain.state_relative)
+        prefix_entry = _state_entry(candidate, spec.chain.prefix_relative)
+        tree_entries = _screen_candidate_tree_aliases(candidate)
+        from receipt.protected_tree import POLICY_VERSION, ProtectionPlan, TreePolicy, attribute_error
+
+        attribute_plan = ProtectionPlan(obligations=("attributes",), listing_scope=(),
+            use="append-attributes", phase="attributes", anchor_origin="caller",
+            attribute_target_selectors=tuple(
+                entry.path for entry in _attribute_entries(candidate, tree_entries)))
+        policy = TreePolicy(candidate.snapshot, policy_version=POLICY_VERSION,
+                            work=candidate.snapshot.work)
+        attributes = policy.evaluate_attributes(attribute_plan)
+        attributes.require(attribute_plan.use, render=attribute_error)
+        if base is not None:
+            _data_changes, gate_changes, unclassified = check_surface_separation(
+                base,
+                candidate,
+            )
+            if gate_changes:
+                reported = check_gate_only_confinement(unclassified, candidate)
+                unclassified_suffix = (
+                    f"; unclassified changes={sorted(reported)}" if reported else ""
+                )
+                base_suffix = (
+                    f"; base {base.ref} ({base.commit})" if base.ref != base.commit else ""
+                )
+                return (
+                    "thesis-facts append check OK: gate-only proposal; "
+                    "DATA_SURFACE unchanged; GATE_SURFACE changes="
+                    f"{sorted(gate_changes)}{unclassified_suffix}{base_suffix}"
+                )
+
+        _, ledger_bytes = _read_state_blob(
+            candidate,
+            spec.chain.state_relative,
+            entry=ledger_entry,
+        )
+        _, prefix_bytes = _read_state_blob(
+            candidate,
+            spec.chain.prefix_relative,
+            entry=prefix_entry,
+        )
+
+        text = _as_text(ledger_bytes, candidate.ledger_relative)
+        reject_non_append_bytes(text)
+        lines = _lines(text)
+
+        prefix = check_prefix(
+            lines, _as_text(prefix_bytes, candidate.prefix_relative), candidate
+        )
+        binding_boundary = int(prefix["prefixLineCount"])
+        appended = None
+        if base is not None:
+            binding_boundary = check_prefix_anchored_to_base(
+                base,
+                prefix,
+                candidate,
+            )
+            appended = check_append_only(base, lines, candidate)
+        check_rows(lines, binding_boundary, spec)
+
+        production_pins = release_anchor_dir is None
+        anchor_dir = release_anchor_dir or (trusted_code_root / spec.chain.anchor_relative)
+        release_index = (
+            check_release_proposal(
+                base,
+                candidate=candidate,
+                ledger_bytes=ledger_bytes,
+                prefix_bytes=prefix_bytes,
+                anchor_dir=anchor_dir,
+                enforce_production_pins=production_pins,
+            )
+            if base is not None
+            else check_release_chain_without_base(
+                candidate=candidate,
+                ledger_bytes=ledger_bytes,
+                prefix_bytes=prefix_bytes,
+                anchor_dir=anchor_dir,
+                enforce_production_pins=production_pins,
+            )
+        )
+
+        check_binding_shapes(lines, binding_boundary)
+        if base is not None:
+            check_state_modes(
+                base,
+                candidate,
+                entries={
+                    ledger_entry.path: ledger_entry,
+                    prefix_entry.path: prefix_entry,
+                },
+            )
+
+        resolved = (
+            f" {base.ref} ({base.commit})"
+            if base is not None and base.ref != base.commit
+            else ""
+        )
+        suffix = f", +{appended} appended vs base{resolved}" if appended is not None else ""
+        release_suffix = f", release {release_index}" if release_index is not None else ""
+        return (
+            f"thesis-facts append check OK: {len(lines)} rows, immutable prefix "
+            f"{prefix['prefixLineCount']}{suffix}{release_suffix}"
+        )
+
+class PR5Corpus:
+    def _path_fold(relative: str) -> str:
+        """Fold ASCII letters per component and preserve every other code point.
+
+        This deliberately narrows 0.5.x's ``NFC(casefold)`` key: neither Unicode
+        normalization nor Unicode casefolding participates under either name
+        repertoire.
+        """
+
+        try:
+            return "/".join(ascii_fold_text(component) for component in relative.split("/"))
+        except NamePolicyError as exc:
+            raise CorpusError(str(exc)) from exc
+
+    def _reject_aliasing_paths(
+        relatives: list[str], *, work: _PathPrefixWork
+    ) -> int:
+        """Refuse two declared paths a real filesystem would treat as one.
+
+        Two passes, because a path can alias another in two places and the
+        second one was missed.
+
+        The first compares whole paths, which is what "the closed-world set is
+        ambiguous" is about: a journal binding both ``rules/x.yaml`` and
+        ``rules/X.yaml`` says two different digests about one file on APFS, and
+        an auditor cannot say which one they have.
+
+        The second compares every *prefix* of every path — each ancestor
+        directory and the path itself — at the depth it sits. Comparing whole
+        paths alone missed the case where the collision is a directory:
+        ``rules/A/x.yaml`` and ``rules/a/y.yaml`` are two distinct paths whose
+        fold keys differ, so the first pass passes them, while an insensitive
+        clone merges ``A`` and ``a`` into one directory holding both files —
+        and the closed-world sweep, which descends the spellings the journal
+        named, walks two directories on the auditor's host and one on the
+        consumer's (peer review, Sol round 3). The path itself is included at
+        its own depth as well, so a directory in one path colliding with a file
+        in another is caught too.
+
+        Under the portable-name policy the fold key over a declared path is
+        ASCII case-insensitivity, so what both passes are asking is whether two
+        spellings differ only in case.
+
+        **The prefix pass holds no index.** It used to build one — first a
+        cumulative string per visit, then a component trie of one node per
+        distinct prefix — and a trie is an index whose size is the thing an
+        adversary chooses. 4,096 portable 1,023-character paths with distinct
+        three-character first components and 510 one-character descendants are
+        inside ``MAX_JOURNAL_ROWS``, inside ``MAX_PATH_TEXT`` and inside half of
+        :data:`MAX_PATH_COMPONENTS_TOTAL`, and they name 2,093,056 distinct
+        prefixes: 594 MB of trie nodes and 4.8 seconds, measured, for a journal
+        the budget waved through (peer review, Sol round 7, round 3). Compacting
+        the node — ``__slots__``, one shared child dictionary, interned spellings
+        — cannot fix that. A Python object plus its dictionary entry is on the
+        order of 150 bytes whatever is done to it, so the *representation* was
+        never the choice worth making; holding one at all was.
+
+        So the pass sorts instead. Each path is folded a component at a time and
+        the folded components are joined by a NUL — a character no portable name
+        can hold and one that sorts below every character one can — so
+        ordering the keys as strings orders the paths by their folded component
+        *sequences*. Two facts make neighbour comparison sufficient:
+
+        - every path sharing a folded prefix occupies a contiguous run of that
+          order, which is what sorting by a sequence means;
+        - so if two paths in such a run disagree about the spelling of a
+          component inside their shared prefix, then some *adjacent* pair in the
+          run disagrees about it too — agreement between neighbours is
+          transitive along the chain that joins them, and every neighbour in the
+          run shares at least that prefix.
+
+        Each adjacent pair is therefore compared for as many components as their
+        folded keys agree on, and the first disagreement in spelling is the
+        refusal. What is live at any moment is two paths' components and one
+        string key per declared path, so the pass allocates a small multiple of
+        the declared path text — the text the journal already carries — instead
+        of a structure whose size is the adversary's to choose. The same 4,096
+        maximum-depth paths now peak at 9.0 MB and 0.6 seconds.
+
+        The number of distinct folded prefixes is the number of components the
+        first path contributes plus, for every later path, the components below
+        what it shares with its predecessor. Every component visit and every
+        counted prefix charges ``work`` before folding or comparison.
+
+        The whole-path pass runs first and completely, so a journal with both
+        kinds of collision keeps the message that names the more specific one.
+        """
+
+        seen: dict[str, str] = {}
+        for relative in relatives:
+            key = _path_fold(relative)
+            if key in seen and seen[key] != relative:
+                raise CorpusError(
+                    "two declared paths would alias on a case- or "
+                    "normalization-insensitive filesystem, so the closed-world set "
+                    f"is ambiguous: {_quoted(seen[key])} and {_quoted(relative)}"
+                )
+            seen[key] = relative
+
+        keys: list[str] = []
+        for relative in relatives:
+            components = relative.split("/")
+            # Charged before the components are folded, so the fold work and the
+            # key it builds are both inside the budget rather than beside it.
+            work.charge(len(components))
+            keys.append("\x00".join(_path_fold(component) for component in components))
+
+        nodes = 0
+        previous_folded: list[str] = []
+        previous_spelled: list[str] = []
+        for index in sorted(range(len(relatives)), key=keys.__getitem__):
+            folded = keys[index].split("\x00")
+            spelled = relatives[index].split("/")
+            shared = 0
+            limit = min(len(folded), len(previous_folded))
+            while shared < limit and folded[shared] == previous_folded[shared]:
+                shared += 1
+            for depth in range(shared):
+                if spelled[depth] != previous_spelled[depth]:
+                    raise CorpusError(
+                        "two declared paths would alias at a directory: "
+                        f"{_quoted('/'.join(previous_spelled[: depth + 1]))} and "
+                        f"{_quoted('/'.join(spelled[: depth + 1]))}"
+                    )
+            work.charge(len(folded) - shared)
+            nodes += len(folded) - shared
+            if nodes > MAX_ALIAS_INDEX_NODES:
+                raise CorpusError(
+                    f"declared paths name more than {MAX_ALIAS_INDEX_NODES} "
+                    "distinct directories; declared paths exceed the alias index "
+                    "budget"
+                )
+            previous_folded, previous_spelled = folded, spelled
+        return nodes
+
+    def _screen_tree_listing(
+        entries: Mapping[str, GitEntry],
+        by_directory: Mapping[str, Mapping[str, GitEntry]],
+        *,
+        repertoire: str,
+    ) -> None:
+        """Validate every component and every tree directory's sibling set.
+
+        ``TreeListing.as_dict`` has already materialized each authenticated full
+        path exactly once.  Deriving local names from that flat view avoids a
+        second charged path traversal through ``TreeListing.children``.
+        """
+
+        for relative in sorted(entries):
+            name = relative.rpartition("/")[2]
+            if repertoire == "portable":
+                # The portable operation supplies the retained corpus diagnostic.
+                # Ask the strict fold first so undecodable surrogateescaped tree
+                # bytes are still refused as undecodable under both repertoires.
+                try:
+                    ascii_fold_text(name)
+                except NamePolicyError as exc:
+                    raise CorpusError(str(exc)) from exc
+                _assert_portable_name(name, f"tree entry {_quoted(relative)}")
+            else:
+                try:
+                    validate_component_text(
+                        name,
+                        repertoire=repertoire,
+                        label=f"tree entry {_quoted(relative)}",
+                    )
+                    # Folding is required under both repertoires. In particular,
+                    # this refuses surrogateescaped non-UTF-8 bytes before a
+                    # verdict could quote or fold them.
+                    ascii_fold_text(name)
+                except NamePolicyError as exc:
+                    raise CorpusError(str(exc)) from exc
+
+        directories = {""}
+        directories.update(
+            path for path, entry in entries.items() if entry.mode == _TREE_MODE
+        )
+        for directory in sorted(directories):
+            names = tuple(sorted(by_directory.get(directory, {})))
+
+            # Keep the established corpus refusal text. The shared helper still
+            # runs for every directory; this pre-check only supplies the retained
+            # path-rich diagnostic when the sibling pair itself is the fault.
+            seen: dict[str, str] = {}
+            for name in names:
+                folded = _path_fold(name)
+                previous = seen.get(folded)
+                if previous is not None:
+                    raise CorpusError(
+                        "directory holds two entries a case-insensitive filesystem "
+                        f"would merge: {_quoted(_under(directory, previous))} and "
+                        f"{_quoted(_under(directory, name))}"
+                    )
+                seen[folded] = name
+            try:
+                assert_no_merging_tree_names(
+                    names,
+                    repertoire=repertoire,
+                    label=f"tree directory {_quoted(directory or '.')}",
+                )
+            except NamePolicyError as exc:
+                raise CorpusError(str(exc)) from exc
+
+    def _entries_by_directory(
+        entries: Mapping[str, GitEntry],
+    ) -> dict[str, dict[str, GitEntry]]:
+        """Index an authenticated flat listing by each entry's immediate parent."""
+
+        result: dict[str, dict[str, GitEntry]] = {}
+        for path, entry in entries.items():
+            parent, separator, name = path.rpartition("/")
+            if not separator:
+                parent, name = "", path
+            result.setdefault(parent, {})[name] = entry
+        return result
+
+    def _assert_content_root_spellings(
+        entries: Mapping[str, GitEntry],
+        by_directory: Mapping[str, Mapping[str, GitEntry]],
+        spec: CorpusSpec,
+    ) -> None:
+        """Retain the pinned-root alias refusal over immutable listing names."""
+
+        for root in spec.content_roots:
+            relative = root.as_posix()
+            parent = ""
+            for component in relative.split("/"):
+                for name in sorted(by_directory.get(parent, {})):
+                    if name != component and _path_fold(name) == _path_fold(component):
+                        raise CorpusError(
+                            f"tree entry {_quoted(name)} aliases the pinned content "
+                            f"root component {_quoted(component)} on a case- or "
+                            "normalization-insensitive filesystem"
+                        )
+                exact = _under(parent, component)
+                entry = entries.get(exact)
+                if entry is None or entry.mode != _TREE_MODE:
+                    break
+                parent = exact
+
+    def _content_entries_from_listing(
+        entries: Mapping[str, GitEntry], spec: CorpusSpec
+    ) -> dict[str, GitEntry]:
+        """Return the exact closed-world content set from one tree listing."""
+
+        found: dict[str, GitEntry] = {}
+        for content_root in spec.content_roots:
+            base_relative = content_root.as_posix()
+            root_entry = entries.get(base_relative)
+            if root_entry is None:
+                raise CorpusError(
+                    f"pinned content root is absent from the tree: {base_relative}"
+                )
+            if root_entry.mode != _TREE_MODE:
+                raise CorpusError(
+                    f"pinned content root is not a directory: {base_relative}"
+                )
+
+            prefix = base_relative + "/"
+            for relative in sorted(entries):
+                if not relative.startswith(prefix):
+                    continue
+                entry = entries[relative]
+                if entry.mode == "160000":
+                    raise CorpusError(
+                        f"content root contains a gitlink: {_quoted(relative)}"
+                    )
+
+                carries_suffix = _has_pinned_suffix(relative, spec.content_suffixes)
+                if not carries_suffix:
+                    if (
+                        spec.name_repertoire == "portable"
+                        and _short_name_carries_pinned_suffix(
+                            relative.rpartition("/")[2], spec.content_suffixes
+                        )
+                    ):
+                        raise CorpusError(
+                            "content root contains a file whose short-name alias "
+                            "would carry a pinned suffix: "
+                            f"{_quoted(relative)}"
+                        )
+                    continue
+
+                if entry.mode == "120000":
+                    raise CorpusError(
+                        "content root contains a symlink where a regular file was "
+                        f"recorded: {_quoted(relative)}"
+                    )
+                if entry.mode not in _REGULAR_BLOB_MODES or entry.object_type != "blob":
+                    raise CorpusError(
+                        f"content root contains a non-regular file: {_quoted(relative)}"
+                    )
+                found[relative] = entry
+        return found
+
+    def _assert_tombstones_absent_from_listing(
+        entries: Mapping[str, GitEntry], removed: tuple[str, ...]
+    ) -> None:
+        """Ask exact and ASCII-fold indexes once whether a removed path survives."""
+
+        folded: dict[str, str] = {}
+        for path in sorted(entries):
+            folded.setdefault(_path_fold(path), path)
+        for path in removed:
+            if path in entries:
+                raise CorpusError(f"removed path is still present in the tree: {path}")
+            survivor = folded.get(_path_fold(path))
+            if survivor is not None:
+                raise CorpusError(
+                    "removed path is still present in the tree under a spelling "
+                    "that aliases it on a case- or normalization-insensitive "
+                    f"filesystem: {path} ({_quoted(survivor)})"
+                )
+
+    def _attested_entries_from_snapshot(
+        snapshot: TreeSnapshot, attested: Mapping[str, FileBinding]
+    ) -> dict[str, GitEntry]:
+        """Resolve every attested path exactly and require a regular blob."""
+
+        result: dict[str, GitEntry] = {}
+        for path in sorted(attested):
+            try:
+                entry = snapshot.entry(path)
+            except SnapshotError as exc:
+                raise CorpusError(
+                    f"bound file is missing or not a regular file: {path}"
+                ) from exc
+            if entry.mode not in _REGULAR_BLOB_MODES or entry.object_type != "blob":
+                raise CorpusError(f"bound file is not a regular file: {path}")
+            result[path] = entry
+        return result
+
+    def verify_corpus_binding(
+        snapshot: TreeSnapshot,
+        journal_bytes: bytes,
+        *,
+        spec: CorpusSpec,
+    ) -> CorpusVerification:
+        """Prove the journal describes the immutable tree selected by ``snapshot``.
+
+        ``journal_bytes`` are the bytes already authenticated by the custody pass.
+        The tree is listed once as an immutable object; membership, tombstones,
+        exact attested lookups, and streamed digests are all derived from that
+        object. Checkout fidelity is outside this binding claim.
+        """
+
+        if not isinstance(snapshot, TreeSnapshot):
+            raise CorpusError(
+                "verify_corpus_binding requires a TreeSnapshot; select one with "
+                "TreeSnapshot.select"
+            )
+
+        content, attested, gates, removed = parse_journal(journal_bytes, spec=spec)
+
+        prefix_work = _PathPrefixWork()
+        _reject_aliasing_paths(list(content) + list(attested), work=prefix_work)
+
+        try:
+            listing = snapshot.entries("")
+        except SnapshotError as exc:
+            raise CorpusError(str(exc)) from exc
+        try:
+            entries = listing.as_dict(include_trees=True)
+        except SnapshotError as exc:
+            raise CorpusError(str(exc)) from exc
+
+        by_directory = _entries_by_directory(entries)
+        _screen_tree_listing(
+            entries,
+            by_directory,
+            repertoire=spec.name_repertoire,
+        )
+        _assert_content_root_spellings(entries, by_directory, spec)
+        tree = _content_entries_from_listing(entries, spec)
+
+        journal_paths = set(content)
+        tree_paths = set(tree)
+        unlisted = sorted(tree_paths - journal_paths)
+        if unlisted:
+            raise CorpusError(
+                f"{len(unlisted)} content file(s) in the tree are not bound by the "
+                f"witnessed journal, starting with {_quoted(unlisted[0])}"
+            )
+        absent = sorted(journal_paths - tree_paths)
+        if absent:
+            raise CorpusError(
+                f"{len(absent)} content file(s) bound by the journal are missing "
+                f"from the tree, starting with {_quoted(absent[0])}"
+            )
+
+        _assert_tombstones_absent_from_listing(entries, removed)
+
+        missing_required = sorted(spec.required_attested_paths - set(attested))
+        if missing_required:
+            raise CorpusError(
+                "the witnessed journal does not attest a path the pinned spec "
+                f"requires: {_quoted(missing_required[0])}"
+            )
+        attested_entries = _attested_entries_from_snapshot(snapshot, attested)
+
+        _verify_binding_digests(
+            snapshot,
+            content,
+            tree,
+            attested,
+            attested_entries,
+        )
+
+        return CorpusVerification(
+            content=tuple(content[path] for path in sorted(content)),
+            attested=tuple(attested[path] for path in sorted(attested)),
+            gates=gates,
+            removed_paths=removed,
+            name_repertoire=spec.name_repertoire,
+        )
+
+PR5_BODY_SHA256 = {'PR5Append': {'_state_entry': '7c7b1d2ecdcc45b1a65d7ef9e766107617b334a3839805a2accf584ac66220ed', '_screen_candidate_tree_aliases': 'd71170dacdebd782a026977b48e471a2c682476063eee01aaf30af4b43765df6', '_attribute_entries': 'd00623c0c560ff2f862a7c9b8d2bace83060d0822f486aceb40d9da782cea698', '_candidate_release_entries_regular': '3ab34473c1ee5f9c8c5c8f5cca10927d99258a48d353cf73546b5e72d1304b7b', '_screen_candidate_materialization': '8328781ce6c7b24d5db731b1259844a082e54b2d1f6696f83803914aa6ddaf95', '_verify_candidate_release_chain': '4779a3d5d10485dff8c072b8c39cbfcb6fe25cd9aab35e2ed9ced6d66a29fa1a', 'check_release_proposal': 'dcf1af93218807c07755b1efe4da6760e84f22f69dfd4a616a094236df0e9d7d', 'check_release_chain_without_base': '5e6d17a1f63eee32cd8621993a916a3039dd10d9077bd8acc2e7be2995dcdde7', '_verify_selected_tree': 'bc8eef49ac8e9462bdde6f09691486352c07c328e6d3ad23a12c4569735504e7'}, 'PR5Corpus': {'_path_fold': 'ab1b0855760740ea63f7a79b845b1705528a9a31bed8a59dbd22b646d3f09401', '_reject_aliasing_paths': 'f9d8ac5f602931db4c176f4eb974913516ea842c5c703d8df003b32c60e1c08a', '_screen_tree_listing': 'bad1d7596bf4f5544696df316b8459ee8bc44c026f041e61464e139a3b147fc7', '_entries_by_directory': '861cf5c7b7a315fab969eebf79fb1bd0de614e2ba61b006c1d0c480c0b820eda', '_assert_content_root_spellings': 'be90893262b73ca44e805a70b8880bcab8d179e6e9d814ef0b70436482f26317', '_content_entries_from_listing': 'e8b80b482aab2ef3c0a56b3810afa2de56ff134985a3215087a4235dbdd383e4', '_assert_tombstones_absent_from_listing': 'a24667effc94c94279e62a2a7c4d42fd4bfc6b5c6335772aed3380d867ce2e20', '_attested_entries_from_snapshot': '7e5e1d8e59b3bc103d55171673da34f32133843af1c945a56e2ca96604e8bad8', 'verify_corpus_binding': '8211d7bacd8e4495e4e6430c305f04eea32604290d2ee91e01aed1bb1ff78101'}}
