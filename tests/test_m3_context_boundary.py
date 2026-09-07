@@ -5,6 +5,18 @@ corrections awaiting separate maintainer approval. These tests pin TODAY'S movin
 environment and independent-owner behavior. The independent-owner pair adapter
 is the compatibility boundary: pairing admits six totals, without adopting a
 process, config baseline, entry capability, policy outcome or failure domain.
+
+Decision record for the next migration steps:
+- D1 is a pending capture-once correction. D1-False records the actual sequence
+  ["select", "select", "enter", "close"]; D1-True additionally records the store
+  capture and every Git child. Neither trace is a capture-once guarantee.
+- A7 is a separate pending availability correction. The 288 D7 cases retain the
+  independent warm/cold refusal split, including both read orders and selection
+  warmth. No successful payload is substituted for a cold-owner refusal.
+- Independent owners retain the admitted pair adapter: six shared totals and
+  attribute facts, distinct accounts/capabilities/PIDs/audit baselines, and
+  independent closure/abandonment. D3/D4/D5/D6/D9/D11/D13 pin both sides.
+These tests grant neither approval and introduce no ownership/linkage removal.
 """
 from dataclasses import asdict, replace
 from pathlib import Path, PurePosixPath
