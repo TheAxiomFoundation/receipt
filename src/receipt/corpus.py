@@ -399,6 +399,7 @@ class CorpusSpec:
             )
         if type(self.content_roots) is not tuple or not self.content_roots:
             raise CorpusError("CorpusSpec must declare at least one content root")
+        # M1 record, CorpusSpec row 385-414: construction-time path admission stays.
         for root in self.content_roots:
             if not isinstance(root, pathlib.PurePosixPath):
                 raise CorpusError("CorpusSpec content_roots must be PurePosixPath")
@@ -880,6 +881,7 @@ def _short_name_carries_pinned_suffix(name: str, suffixes: tuple[str, ...]) -> b
     return short_name_carries_pinned_suffix(name, suffixes)
 
 
+# M1 record, declaration grammar row 883-934: schema paths precede tree policy.
 def _validate_relative_path(
     value: Any, label: str, *, repertoire: str = "portable"
 ) -> str:
@@ -1317,6 +1319,7 @@ class _PathPrefixWork:
     def charge(self, units: int = 1) -> None:
         """Charge path-prefix work before it folds or allocates a key."""
 
+        # M1 record, declaration budget row 1317-1326: retain the live admission ceiling.
         self._work += units
         if self._work > MAX_PATH_COMPONENTS_TOTAL:
             raise CorpusError(
@@ -1346,10 +1349,10 @@ _DEFAULT_PATH_FOLD = _path_fold
 
 
 def _has_pinned_suffix(relative: str, suffixes: tuple[str, ...]) -> bool:
-    """Whether a path ends in a pinned suffix after the policy's ASCII fold."""
+    """Forward suffix membership while preserving caller-ordered fold hooks."""
+    from receipt.protected_tree import has_folded_suffix
 
-    folded = _path_fold(relative)
-    return any(folded.endswith(_path_fold(suffix)) for suffix in suffixes)
+    return has_folded_suffix(_path_fold(relative), (_path_fold(suffix) for suffix in suffixes))
 
 
 
@@ -1440,6 +1443,7 @@ def _entries_by_directory(
     """Forward the retained immediate-parent index, excluding empty buckets."""
     from receipt.protected_tree import index_children
 
+    # M1 record, binding mapping facade row: omit empty buckets in the legacy projection.
     return {parent: children for parent, children in index_children(entries).items() if children}
 
 
@@ -1485,6 +1489,7 @@ def _assert_tombstones_absent_from_listing(
 
 def _assert_tombstones(entries, removed, folded, fold):
     """Apply corpus tombstones to exact and first-witness folded indexes."""
+    # M1 record, tombstone row 1646-1663: journal semantics consume the shared fold index.
     for path in removed:
         if path in entries:
             raise CorpusError(f"removed path is still present in the tree: {path}")
@@ -1513,6 +1518,7 @@ def _attested_selections(snapshot, attested, policy):
             entry = snapshot.entry(path)
         except SnapshotError as exc:
             raise CorpusError(f"bound file is missing or not a regular file: {path}") from exc
+        # M1 record, attested row 1666-1682; PR3a/PR5: retain substituted/subclass metadata.
         if policy is None and type(snapshot) is not TreeSnapshot:
             # The accepted reader supplies metadata; only concrete readers can
             # receive an authenticated policy view or certified selection.
@@ -1650,6 +1656,7 @@ def _verify_corpus_binding(snapshot, journal_bytes, *, spec, policy=None):
         policy, entries = read_binding_listing(snapshot, evaluator=policy)
     except SnapshotError as exc:
         raise CorpusError(str(exc)) from exc
+    # M1 record, binding consumer row; PR3a/PR5: subclass mappings cannot issue views.
     if policy is None:
         # Subclasses retain their own listing and reader admission. These shared
         # mapping decisions confer no authority to select authenticated payloads.
@@ -1669,6 +1676,7 @@ def _verify_corpus_binding(snapshot, journal_bytes, *, spec, policy=None):
         content_selection = content_view.require(content_plan.use, render=_binding_error)
         tree = content_selection.entries_for(snapshot, use=content_plan.use, plan=content_plan)
 
+    # M1 record, binding orchestration row 1764-1817: closed-world membership stays local.
     journal_paths = set(content)
     tree_paths = set(tree)
     unlisted = sorted(tree_paths - journal_paths)

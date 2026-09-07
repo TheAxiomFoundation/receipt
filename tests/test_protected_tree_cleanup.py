@@ -9,7 +9,7 @@ from types import FunctionType
 
 import pytest
 
-from receipt import _names, protected_tree, snapshot
+from receipt import _names, corpus, protected_tree, snapshot
 from m1_fixture import outcome, raw_repo
 import protected_tree_legacy as legacy
 
@@ -95,3 +95,43 @@ def test_payload_facades_delegate_modes_with_v061_outcomes(raw_repo, monkeypatch
             assert (body.__code__ is frozen.__code__) == old
             assert len(classifications) == int(not old and entry.object_type == "blob")
     assert results[0] == results[1]
+
+
+@pytest.mark.parametrize("path,suffixes", (
+    ("file.YML", (".yml", "bad\udcff")), ("file.txt", (".yml", "bad\udcff")),
+    ("bad\udcff", ()), ("file.txt", ()), ("file.txt", (".yml", ".TXT")),
+))
+def test_suffix_facade_preserves_v061_lazy_fold_hook(monkeypatch, path, suffixes):
+    frozen = legacy.PR6Corpus._has_pinned_suffix
+    old = FunctionType(frozen.__code__, corpus.__dict__)
+    original_fold = corpus._path_fold
+    shared = protected_tree.has_folded_suffix
+    results = []
+    for body in (old, corpus._has_pinned_suffix):
+        with monkeypatch.context() as patch:
+            folds, delegated, reached = [], [], []
+
+            def fold(value):
+                folds.append(value)
+                return original_fold(value)
+
+            def match(*args):
+                delegated.append(1)
+                return shared(*args)
+
+            def call():
+                reached.append(body.__code__)
+                return body(path, suffixes)
+
+            patch.setattr(corpus, "_path_fold", fold)
+            patch.setattr(protected_tree, "has_folded_suffix", match)
+            results.append((outcome(call), folds))
+            assert reached == [body.__code__]
+            assert len(delegated) == int(body is not old and "\udcff" not in path)
+    assert results[0] == results[1]
+
+
+def test_cached_suffix_membership_keeps_eager_suffix_folds():
+    facts = protected_tree._NameFacts()
+    assert facts.carries_suffix("file.yml", (".yml", ".txt"))
+    assert set(facts.full_folds) == {"file.yml", ".yml", ".txt"}

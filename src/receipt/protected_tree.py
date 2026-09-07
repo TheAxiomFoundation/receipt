@@ -377,7 +377,7 @@ class _NameFacts:
         return self.full_folds[path]
 
     def carries_suffix(self, path: str, suffixes: tuple[str, ...]) -> bool:
-        return self.full_fold(path).endswith(tuple(self.full_fold(s) for s in suffixes))
+        return has_folded_suffix(self.full_fold(path), tuple(self.full_fold(s) for s in suffixes))
 
     def short_suffix(self, name: str, suffixes: tuple[str, ...]) -> bool:
         key = name, suffixes
@@ -732,6 +732,11 @@ def read_binding_listing(subject: snapshot.TreeSnapshot, *, evaluator=None):
     evaluator._scopes[""] = listing.tree_oid
     evaluator._empty_roots[""] = not listing._node.records
     return evaluator, entries
+
+
+def has_folded_suffix(path: str, suffixes: Iterable[str]) -> bool:
+    """Match folded suffixes in caller order without pre-consuming a lazy input."""
+    return any(path.endswith(suffix) for suffix in suffixes)
 
 
 def folded_parts(path: str) -> tuple[str, ...]:
