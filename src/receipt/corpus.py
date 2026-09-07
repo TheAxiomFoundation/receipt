@@ -1501,14 +1501,11 @@ def _attested_entries_from_snapshot(
     snapshot: TreeSnapshot, attested: Mapping[str, FileBinding]
 ) -> dict[str, GitEntry]:
     """Admit exact attested lookups, preserving masked reader failures and modes."""
-    from receipt.protected_tree import POLICY_VERSION, TreePolicy
-
-    policy = TreePolicy(snapshot, policy_version=POLICY_VERSION, work=snapshot.work)
-    return _attested_selections(snapshot, attested, policy)
+    return _attested_selections(snapshot, attested, None)
 
 
 def _attested_selections(snapshot, attested, policy):
-    from receipt.protected_tree import ProtectionPlan
+    from receipt.protected_tree import POLICY_VERSION, ProtectionPlan, TreePolicy
 
     result: dict[str, GitEntry] = {}
     for path in sorted(attested):
@@ -1516,6 +1513,8 @@ def _attested_selections(snapshot, attested, policy):
             entry = snapshot.entry(path)
         except SnapshotError as exc:
             raise CorpusError(f"bound file is missing or not a regular file: {path}") from exc
+        if policy is None:
+            policy = TreePolicy(snapshot, policy_version=POLICY_VERSION, work=snapshot.work)
         policy.observe_entries((entry,))
         plan = ProtectionPlan(obligations=("modes",), listing_scope=(),
             mode_roles=((path, "attested-leaf"),), exact_attested_paths=(path,),
@@ -1621,21 +1620,19 @@ def verify_corpus_binding(
 def _verify_corpus_binding(snapshot, journal_bytes, *, spec, policy=None):
     """Bind with an optional custody evaluator; journal and semantic order stay local."""
     from dataclasses import replace
-    from receipt.protected_tree import POLICY_VERSION, PolicyUseError, TreePolicy, folded_path_index
+    from receipt.protected_tree import PolicyUseError, folded_path_index, read_binding_listing
 
     content, attested, gates, removed = parse_journal(journal_bytes, spec=spec)
 
-    policy = policy or TreePolicy(snapshot, policy_version=POLICY_VERSION, work=snapshot.work)
-    if policy.snapshot is not snapshot:
+    if policy is not None and policy.snapshot is not snapshot:
         raise PolicyUseError("binding evaluator has a different subject")
     prefix_work = _PathPrefixWork()
-    prefix_work._facts = policy._facts
+    if policy is not None:
+        prefix_work._facts = policy._facts
     _reject_aliasing_paths(list(content) + list(attested), work=prefix_work)
 
     try:
-        # This explicit binding read keeps its legacy admission even when the
-        # custody evaluator already knows the same immutable listing.
-        entries = policy.read_listing("")
+        policy, entries = read_binding_listing(snapshot, evaluator=policy)
     except SnapshotError as exc:
         raise CorpusError(str(exc)) from exc
     plan = _binding_plan(spec, ("names", "siblings"))

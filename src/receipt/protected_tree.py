@@ -256,6 +256,14 @@ class _ShapeFacts:
         return self.ancestors[target]
 
 
+
+def regular_entries(entries: Mapping[str, snapshot.GitEntry], paths: Iterable[str],
+                    *, facts: _ShapeFacts | None = None) -> tuple[snapshot.GitEntry, ...]:
+    """Select regular metadata without requiring or granting payload authority."""
+    facts = facts or _ShapeFacts()
+    return tuple(entries[path] for path in paths if facts.mode(path, entries[path]).regular)
+
+
 def export_prefixes(subject: snapshot.TreeSnapshot,
                     prefixes: Iterable[str | bytes]) -> tuple[tuple[bytes, ...], ...]:
     """Legacy supplied-path charges precede prefix deduplication."""
@@ -724,6 +732,24 @@ def folded_path_index(entries: Mapping[str, snapshot.GitEntry], *,
     for path in sorted(entries):
         folded.setdefault(facts.full_fold(path), path)
     return folded
+
+
+def read_binding_listing(subject: snapshot.TreeSnapshot, *, evaluator=None):
+    """Admit binding's exact reader call before creating a standalone evaluator.
+
+    Declaration prerequisites belong to the caller. This explicit read preserves
+    lifecycle refusals at entries(), as well as repeated listing/path charges
+    when a custody evaluator already holds the same immutable metadata.
+    """
+    if evaluator is not None and evaluator.snapshot is not subject:
+        raise PolicyUseError("binding evaluator has a different subject")
+    listing = subject.entries("")
+    entries = listing.as_dict(include_trees=True)
+    evaluator = evaluator or TreePolicy(subject, policy_version=POLICY_VERSION, work=subject.work)
+    evaluator._entries.update(entries)
+    evaluator._scopes[""] = listing.tree_oid
+    evaluator._empty_roots[""] = not listing._node.records
+    return evaluator, entries
 
 
 def folded_parts(path: str) -> tuple[str, ...]:
@@ -1451,8 +1477,7 @@ class TreePolicy:
     def regular_entries(self, entries: Mapping[str, snapshot.GitEntry],
                         paths: Iterable[str]) -> tuple[snapshot.GitEntry, ...]:
         """Classify a caller's ordered attribute targets without payload authority."""
-        return tuple(entries[path] for path in paths
-                     if self._shapes.mode(path, entries[path]).regular)
+        return regular_entries(entries, paths, facts=self._shapes)
 
     def manifest_children(self, prefix: str) -> Mapping[str, ModeFact]:
         """Admit immediate children at append's proposal barrier, including trees."""

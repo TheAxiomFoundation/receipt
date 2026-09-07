@@ -895,7 +895,11 @@ def _attribute_entries(
         _is_protected(path, candidate) or any(
             path == prefix or path.startswith(f"{prefix}/")
             for prefix in candidate._plan.export_prefixes)))
-    return candidate._policy.regular_entries(entries, paths)
+    from receipt.protected_tree import regular_entries
+
+    evaluator = candidate.__dict__.get("_policy")
+    return (evaluator.regular_entries(entries, paths) if evaluator is not None
+            else regular_entries(entries, paths))
 
 
 def _candidate_release_entries_regular(candidate: _CandidateTree) -> None:

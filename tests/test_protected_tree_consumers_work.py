@@ -13,7 +13,7 @@ import pytest
 from receipt import append_gate, corpus, snapshot, verify
 from corpus_fixture import CONTENT, JOURNAL_RELATIVE, PREFIX_RELATIVE, journal_rows, render_journal
 from m1_append_fixture import append_repo, GATE_SPEC
-from m1_fixture import signed_repo, outcome
+from m1_fixture import raw_repo, signed_repo, outcome
 from protected_tree_consumer_fixture import consumer_leg, work_observation, deterministic_exports
 import protected_tree_legacy as legacy
 
@@ -199,4 +199,90 @@ def test_supplied_journal_and_attested_refusal_work(signed_repo,monkeypatch,faul
                 if fault=='clean':
                     assert 'value' in result
                 results.append((result,work_observation(events,subjects)))
+    assert results[0]==results[1]
+
+
+@pytest.mark.parametrize('lifecycle',('unentered','closed'))
+@pytest.mark.parametrize('fault',('whole','prefix','budget','clean'))
+def test_declarations_precede_snapshot_lifecycle_admission(raw_repo,monkeypatch,lifecycle,fault):
+    from corpus_fixture import corpus_spec
+    rows=journal_rows()
+    paths={'whole':('rules/Z/z.yaml','rules/z/z.yaml'),
+           'prefix':('rules/A/x.yaml','rules/a/y.yaml'),'budget':(),'clean':()}[fault]
+    for path in paths:
+        rows.append(dict(rows[0],path=path,entryIndex=len(rows)))
+    if fault=='budget':
+        monkeypatch.setattr(corpus,'MAX_PATH_COMPONENTS_TOTAL',0)
+    results=[]
+    for old in (True,False):
+        with consumer_leg(monkeypatch,corpus,old=old) as (counts,events,subjects):
+            snap=raw_repo.snapshot()
+            if lifecycle=='closed':
+                with snap:
+                    pass
+            result=outcome(lambda:corpus.verify_corpus_binding(snap,render_journal(rows),spec=corpus_spec()))
+            assert counts['verify_corpus_binding']==1 and counts['_reject_aliasing_paths']==1
+            assert result['exception']=='receipt.corpus.CorpusError'
+            results.append((result,work_observation(events,subjects)))
+    assert results[0]==results[1]
+
+
+@pytest.mark.parametrize('lifecycle',('unentered','closed'))
+@pytest.mark.parametrize('paths',((),('.axiom/toolchain.toml',)))
+def test_attested_facade_keeps_empty_and_masked_lifecycle_contract(raw_repo,monkeypatch,lifecycle,paths):
+    results=[]
+    for old in (True,False):
+        with consumer_leg(monkeypatch,corpus,old=old) as (counts,events,subjects):
+            snap=raw_repo.snapshot()
+            if lifecycle=='closed':
+                with snap:
+                    pass
+            result=outcome(lambda:corpus._attested_entries_from_snapshot(snap,dict.fromkeys(paths)))
+            assert counts['_attested_entries_from_snapshot']==1
+            results.append((result,work_observation(events,subjects)))
+    assert results[0]==results[1]
+    assert results[0][0]==({'exception':'receipt.corpus.CorpusError',
+        'message':'bound file is missing or not a regular file: .axiom/toolchain.toml'} if paths else {'value':{}})
+
+
+@pytest.mark.parametrize('branch',('actual-data-append','gate-with-unparsed-state'))
+def test_changed_data_and_gate_only_payload_barriers(append_repo,monkeypatch,branch):
+    from test_append_gate import observation_row,jsonl_line
+    state=GATE_SPEC.chain.state_relative.as_posix()
+    base=append_repo.base
+    if branch=='actual-data-append':
+        with append_repo.snapshot() as snap:
+            ledger=snap.blob(snap.entry(state),limit=1<<20)
+        commit=append_repo.commit(((state,'100644',ledger+(jsonl_line(observation_row(3))+'\n').encode()),))
+        spec=GATE_SPEC
+    else:
+        base=append_repo.commit(((state,'100644',b'not a journal\n'),))
+        commit=append_repo.commit((('verification/policy.py','100644'),),base=base)
+        spec=replace(GATE_SPEC,gate_surface=GATE_SPEC.gate_surface|{'verification/**'})
+    results=[]
+    for old in (True,False):
+        with consumer_leg(monkeypatch,append_gate,old=old) as (counts,events,subjects):
+            result=outcome(lambda:append_gate.verify_append_gate(append_repo.root,spec=spec,commit=commit,base_ref=base))
+            assert counts['_verify_selected_tree']==1 and 'value' in result
+            assert counts['_read_state_blob']==(2 if branch=='actual-data-append' else 0)
+            assert counts['_screen_candidate_materialization']==(1 if branch=='actual-data-append' else 0)
+            assert ('+1 appended' if branch=='actual-data-append' else 'gate-only proposal') in result['value']
+            results.append((result,work_observation(events,subjects)))
+    assert results[0]==results[1]
+
+
+@pytest.mark.parametrize('empty',(False,True))
+def test_attribute_target_facade_remains_metadata_only(append_repo,monkeypatch,empty):
+    with append_repo.snapshot() as source:
+        entries={} if empty else source.entries('').as_dict(include_trees=True)
+    results=[]
+    for old in (True,False):
+        with consumer_leg(monkeypatch,append_gate,old=old) as (counts,events,subjects):
+            unentered=append_repo.snapshot()
+            candidate=append_gate._CandidateTree(unentered,GATE_SPEC,str(GATE_SPEC.chain.state_relative),
+                                                str(GATE_SPEC.chain.prefix_relative))
+            result=outcome(lambda:tuple(entry.path for entry in append_gate._attribute_entries(candidate,entries)))
+            assert counts['_attribute_entries']==1 and 'value' in result
+            assert '_policy' not in candidate.__dict__
+            results.append((result,work_observation(events,subjects)))
     assert results[0]==results[1]

@@ -33,6 +33,14 @@ def consumer_leg(monkeypatch, module, *, old):
                 counts[_name] += 1
                 return _body(*args, **kwargs)
             functions[name] = counted
+        if module is append_gate:
+            # This unchanged payload facade is counted to prove gate-only
+            # return versus actual data-append reads, in both root bodies.
+            read_state = module._read_state_blob
+            def counted_state(*args, **kwargs):
+                counts['_read_state_blob'] += 1
+                return read_state(*args, **kwargs)
+            functions['_read_state_blob'] = counted_state
         namespace.update(functions)
         for name, function in functions.items():
             patch.setattr(module, name, function)
