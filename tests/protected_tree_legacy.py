@@ -757,3 +757,84 @@ def run_verification(
 
 
 PR3A_BODY_SHA256 = {'entry': '59229d84bfab0635b368bfc959d8441a78c2e87c4eb5388144f9d1bf0c9b00fc', 'entries': 'ef35faaa3340c61da980fd7aabc01cea017877e7a21b9e8598a6cb6c093c0370', '_raw_entry_at': 'cd0c10ac57d90e4541863429973493867376c46c165cb71776d19dde9d1f780c', 'verify_release_history_immutable': '4eaf64dfd926a57330eb8eadae815a16949e6737708bf888733a44a6666e383d', 'verify_base_release_chain': '4ad7b328dc953bb625c4fe125b9a5fa8639c44699b93b32d88550bce4dd5698f', 'check_state_modes': 'a25b7fd45e8b3c7523313fd7a31df3cf187cfe5f1c0cd15eb1537d7261e591c4', 'run_verification': '11495ec44fb71bdd10dffc73472cb4e9738c629ba7436bd55e2fcb204613296c'}
+
+
+# PR3b: verbatim origin/main (6c1a3f3) materializer selection and prefix admission.
+def _deduplicated_prefixes(self) -> tuple[tuple[bytes, ...], ...]:
+    parts: set[tuple[bytes, ...]] = set()
+    for prefix in self._prefixes:
+        parsed = self._snapshot._path_parts(prefix, allow_empty=True)
+        path_bytes = b"/".join(parsed)
+        self._snapshot._charge_path_bytes(path_bytes)
+        parts.add(parsed)
+    # Lexicographic tuple order places an ancestor immediately before all
+    # of its descendants. Keeping only the last retained prefix therefore
+    # avoids the quadratic all-parents scan for many disjoint prefixes.
+    ordered = sorted(parts)
+    kept: list[tuple[bytes, ...]] = []
+    for candidate in ordered:
+        if kept and candidate[: len(kept[-1])] == kept[-1]:
+            continue
+        kept.append(candidate)
+    return tuple(kept)
+
+
+def _selected_entries(self) -> dict[str, GitEntry]:
+    selected: dict[str, GitEntry] = {}
+    for parts in self._deduplicated_prefixes():
+        if not parts:
+            for entry in self._snapshot.entries(""):
+                selected[entry.path] = entry
+                if len(selected) > MAX_TREE_ENTRIES:
+                    raise SnapshotError(
+                        f"tree walk exceeds the budget of "
+                        f"{MAX_TREE_ENTRIES} entries"
+                    )
+            continue
+        raw = self._snapshot._raw_entry_at(parts)
+        if raw is None:
+            continue
+        if raw.mode == b"40000":
+            for entry in self._snapshot.entries(b"/".join(parts)):
+                selected[entry.path] = entry
+                if len(selected) > MAX_TREE_ENTRIES:
+                    raise SnapshotError(
+                        f"tree walk exceeds the budget of "
+                        f"{MAX_TREE_ENTRIES} entries"
+                    )
+        else:
+            entry = self._snapshot._public_entry(parts, raw)
+            selected[entry.path] = entry
+            if len(selected) > MAX_TREE_ENTRIES:
+                raise SnapshotError(
+                    f"tree walk exceeds the budget of "
+                    f"{MAX_TREE_ENTRIES} entries"
+                )
+
+    sibling_names: dict[tuple[bytes, ...], set[bytes]] = {}
+    for path, entry in sorted(selected.items()):
+        if entry.mode not in _CONTENT_MODES:
+            # "base tree" is legacy text; this may be any selected snapshot.
+            raise SnapshotError(
+                f"base tree entry has non-regular mode {entry.mode}: {path}"
+            )
+        raw_parts = self._snapshot._path_parts(path, allow_empty=False)
+        for index, name in enumerate(raw_parts):
+            sibling_names.setdefault(raw_parts[:index], set()).add(name)
+    for parent, names in sibling_names.items():
+        label = (
+            _tree_path_decode(b"/".join(parent)) if parent else "tree root"
+        )
+        try:
+            assert_no_merging_entries(
+                sorted(names),
+                repertoire=self._repertoire,
+                materializing=True,
+                label=label,
+            )
+        except NamePolicyError as exc:
+            raise SnapshotError(str(exc)) from exc
+    return selected
+
+
+PR3B_BODY_SHA256 = {'_deduplicated_prefixes': '1fa613697f8175b89a4636b4d7461022abb04a35a1fa6b706c17b31c04fcce3f', '_selected_entries': '00fc70ddda9e48f7513d8db2ff064a0d0da04266ab4b5a44f563253c3f941ffc'}
