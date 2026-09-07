@@ -1992,6 +1992,7 @@ def verify_release_chain(
         raise ReleaseChainError(str(exc)) from exc
 
     root = root.resolve()
+    # M1 record, anchor row 1984-2015: physical link precedence excludes caller-owned trust.
     default_anchor_dir = root / spec.anchor_relative
     if anchor_dir is None:
         # The spec-pinned anchor path must be physically canonical: a
