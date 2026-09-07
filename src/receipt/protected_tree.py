@@ -1289,12 +1289,19 @@ class TreePolicy:
 
     def evaluate(self, plan: ProtectionPlan, *, stage: str,
                  previous: ProtectedTreeView | None = None) -> ProtectedTreeView:
-        """Evaluate newly required names at the caller's existing barrier.
+        """Evaluate newly required obligations at the caller's existing barrier.
 
-        Earlier completed facts are reused. Repeated explicit listing reads
-        retain reader admission charges; evaluating a completed fact adds none.
-        Previous evidence must be issued by this evaluator for this exact plan,
-        including anchor origin and later obligations. No later-stage I/O occurs.
+        Stages: names and aliases, modes and ancestors, export names, and
+        attributes. Earlier completed facts are reused. Repeated explicit
+        listing reads retain reader admission charges; evaluating a completed
+        name, shape or export fact adds none. Attributes are the exception: a
+        repeated attribute plan replays its admission under the record's D12
+        compatibility charge schedule (input counts and path bytes charged
+        before deduplication, checkpoint blocks replayed arithmetically, a
+        single exhausting rule re-executed from its checkpoint), so the public
+        counters land where the legacy path left them. Previous evidence must
+        be issued by this evaluator for this exact plan, including anchor origin
+        and later obligations. No later-stage I/O occurs.
         """
         self.snapshot._batch()
         if previous is not None:
