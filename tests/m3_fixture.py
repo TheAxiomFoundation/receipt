@@ -86,8 +86,8 @@ def reached(m):
             if hasattr(body, "__code__"):
                 selected[body.__code__] = f"{name}.{method}"
     for module, names in (
-        (m.snapshot, ("_parse_tree", "_parse_commit", "_git_environment", "_git_run")),
-        (m.protected_tree, ("_attribute_step", "export_prefixes", "_parse_attribute_rules")),
+        (m.snapshot, ("_parse_raw_tree", "_canonical_commit", "_git_environment", "_git_run")),
+        (m.protected_tree, ("_charge_attribute_work", "export_prefixes", "_parse_attribute_file", "_attribute_matches", "_segment_matches", "load_attribute_rules")),
         (m.verify, ("run_verification",)),
         (m.corpus, ("verify_corpus_binding", "_verify_corpus_binding")),
         (m.release_chain, ("verify_release_history_immutable", "verify_base_release_chain")),
@@ -98,10 +98,18 @@ def reached(m):
             if hasattr(body, "__code__"):
                 selected[body.__code__] = module.__name__.split(".")[-1] + "." + name
     counts = Counter()
+    hash_new = m.snapshot.hashlib.new
+    hash_code = getattr(hash_new, "__code__", None)
     old = sys.getprofile()
     def profile(frame, event, arg):
         if event == "call" and frame.f_code in selected:
             counts[selected[frame.f_code]] += 1
+        if ((event == "call" and frame.f_code is hash_code
+             and frame.f_back.f_code in selected
+             and selected[frame.f_back.f_code] == "_BatchReader.consume")
+            or (event == "c_call" and arg is hash_new
+                and selected.get(frame.f_code) == "_BatchReader.consume")):
+            counts["objects.hash"] += 1
     sys.setprofile(profile)
     try:
         yield counts
@@ -120,7 +128,7 @@ def compare(probe, repo, monkeypatch, *args, expected=None):
                 result = probe(m, repo, patch, *args)
             results.append(plain({"trace": result, "bodies": dict(sorted(counts.items()))}))
     assert codes[0] is not codes[1]
-    assert results[0] == results[1]
+    assert results[0] == results[1], (results[0], results[1])
     if expected is not None:
         assert results[1] == expected
     return results[1]
