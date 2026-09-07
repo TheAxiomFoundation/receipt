@@ -1258,6 +1258,38 @@ class TreePolicy:
                 return
         run.completed.add("export-names")
 
+    def regular_entries(self, entries: Mapping[str, snapshot.GitEntry],
+                        paths: Iterable[str]) -> tuple[snapshot.GitEntry, ...]:
+        """Classify a caller's ordered attribute targets without payload authority."""
+        return tuple(entries[path] for path in paths
+                     if self._shapes.mode(path, entries[path]).regular)
+
+    def manifest_children(self, prefix: str) -> Mapping[str, ModeFact]:
+        """Admit immediate children at append's proposal barrier, including trees."""
+        children = self.snapshot.entries(prefix).children
+        return MappingProxyType({name: (
+            self._shapes.mode(child.path, child) if isinstance(child, snapshot.GitEntry)
+            else self._shapes.metadata(prefix + "/" + name, "040000", "tree")
+        ) for name, child in children.items()})
+
+    def manifest_initialized(self, prefix: str) -> bool:
+        """Retain non-tree iteration and path charges in append's push probe."""
+        return bool(self.snapshot.entries(prefix))
+
+    def materialize(self, plan: ProtectionPlan, destination) -> snapshot.Materialization:
+        """Admit a conditional export, then certify it at the writer's old barrier.
+
+        Each explicit materialization repeats reader admission; its name and
+        shape facts share this evaluator. Physical writes and guards stay in
+        the snapshot writer. Attributes are a separate earlier append barrier.
+        """
+        admitted = self.snapshot.materialize(plan.export_prefixes, destination,
+                                              repertoire=plan.repertoire)
+        export = replace(plan, obligations=EXPORT_STAGES, listing_scope=(),
+                         use="materialize", phase="export", ancestor_paths=(), mode_roles=(),
+                         export_requests=admitted._prefixes)
+        return _PolicyMaterialization(self, admitted, export)
+
     def observe_entries(self, entries: Iterable[snapshot.GitEntry]) -> None:
         """Retain entries already admitted at a legacy read, with no new walk."""
         self.snapshot._batch()
@@ -1663,3 +1695,23 @@ class DirectoryEvidence:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "observations", tuple(tuple(item) for item in self.observations))
+
+
+class _PolicyMaterialization(snapshot.Materialization):
+    """Use an existing evaluator while retaining the snapshot's physical writer."""
+
+    def __init__(self, policy: TreePolicy, admitted: snapshot.Materialization,
+                 plan: ProtectionPlan):
+        super().__init__(policy.snapshot, admitted._prefixes,
+                         admitted._destination, admitted._repertoire)
+        self._policy = policy
+        self._export_plan = plan
+
+    def _selected_entries(self) -> dict[str, snapshot.GitEntry]:
+        # An explicit new writer use admits its reads again, even if an earlier
+        # materialization used this same plan. Stage-only reuse still adds none.
+        self._policy._runs[self._export_plan] = self._policy._read_export(self._export_plan)
+        view = self._policy.evaluate(self._export_plan, stage="export-names")
+        selection = self._policy.select_export(view, render=self._export_error)
+        return dict(selection.entries_for(self._snapshot, use=self._export_plan.use,
+                                           plan=self._export_plan))

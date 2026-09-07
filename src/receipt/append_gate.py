@@ -17,7 +17,8 @@ import pathlib
 import re
 import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import cached_property
 from datetime import datetime
 from typing import Any
 
@@ -61,6 +62,30 @@ class _CandidateTree:
     spec: AppendGateSpec
     ledger_relative: str
     prefix_relative: str
+
+    @cached_property
+    def _policy(self):
+        from receipt.protected_tree import POLICY_VERSION, TreePolicy
+
+        return TreePolicy(self.snapshot, policy_version=POLICY_VERSION, work=self.snapshot.work)
+
+    @cached_property
+    def _plan(self):
+        """Compile one append schedule; each facade selects its reached barrier."""
+        from receipt.protected_tree import NAME_STAGES, ProtectionPlan
+
+        names = ProtectionPlan.chain_names(
+            _materialization_prefixes(self), repertoire=self.spec.chain.name_repertoire,
+            release_directories=(self.spec.chain.release_root_relative,
+                                 self.spec.chain.manifest_relative),
+            alias_paths=_protected_paths(self), use="append", anchor_origin="caller",
+        )
+        return replace(names, phase="append",
+            obligations=("modes", "ancestors", *NAME_STAGES, "attributes", "export-names"),
+            exact_state_paths=(self.ledger_relative, self.prefix_relative),
+            ancestor_paths=_protected_paths(self),
+            attribute_target_selectors=_surface_alias_paths(self),
+            export_requests=names.export_prefixes)
 
 
 @dataclass(frozen=True)
@@ -749,11 +774,26 @@ def _state_snapshot_bytes(
     }
 
 
+def _append_shape_error(finding):
+    """Render shared ancestor/state/release facts with the retained append text."""
+    if finding.stage == "ancestors":
+        if finding.kind == "symlink":
+            return SnapshotError(f"state path has a symlinked component: {finding.path}")
+        return SnapshotError(f"tree path ancestor is not a directory: {finding.path}")
+    if finding.role == "state-leaf":
+        if finding.kind == "symlink":
+            return AppendError(f"state file is a symlink: {finding.path}")
+        return AppendError(f"state file is not a regular file: {finding.path}")
+    if finding.kind == "symlink":
+        return AppendError(f"release path is a symlink: {finding.path}")
+    return AppendError(f"release path is not regular: {finding.path}")
+
+
 def _state_entry(
     candidate: _CandidateTree,
     relative: pathlib.PurePosixPath,
 ) -> GitEntry:
-    """Select one regular state entry without fetching its payload."""
+    """Admit one exact lookup, then consume its regular-state selection."""
 
     display = relative.as_posix()
     try:
@@ -764,11 +804,12 @@ def _state_entry(
                 f"state file is missing or not a regular file: {display}"
             ) from exc
         raise
-    if entry.mode == "120000":
-        raise AppendError(f"state file is a symlink: {display}")
-    if entry.mode not in {"100644", "100755"}:
-        raise AppendError(f"state file is not a regular file: {display}")
-    return entry
+    plan = replace(candidate._plan, obligations=("modes",), listing_scope=(),
+                   mode_roles=((display, "state-leaf"),), ancestor_paths=(), use="append-state")
+    candidate._policy.observe_entries((entry,))
+    view = candidate._policy.evaluate(plan, stage="modes")
+    selection = view.require(plan.use, render=_append_shape_error)
+    return selection.entries_for(candidate.snapshot, use=plan.use, plan=plan)[display]
 
 
 def _read_state_blob(
@@ -825,94 +866,57 @@ def _protected_paths(candidate: _CandidateTree) -> tuple[str, ...]:
 def _screen_candidate_tree_aliases(
     candidate: _CandidateTree,
 ) -> dict[str, GitEntry]:
-    """Screen protected shapes, aliases and names over the complete tree."""
+    """Consume protected ancestors, complete-path folds and scoped names."""
 
-    from dataclasses import replace
-    from receipt.protected_tree import POLICY_VERSION, ProtectionPlan, TreePolicy
+    from receipt.protected_tree import NAME_STAGES
     from receipt.release_chain import _protected_name_error
 
-    policy = TreePolicy(candidate.snapshot, policy_version=POLICY_VERSION,
-                        work=candidate.snapshot.work)
-    entries = policy.read_listing("")
-    protected = _protected_paths(candidate)
-    for path in protected:
-        parts = path.split("/")
-        for depth in range(1, len(parts)):
-            prefix = "/".join(parts[:depth])
-            entry = entries.get(prefix)
-            if entry is None or entry.mode == "040000":
-                continue
-            if entry.mode == "120000":
-                raise SnapshotError(f"state path has a symlinked component: {prefix}")
-            raise SnapshotError(f"tree path ancestor is not a directory: {prefix}")
-
-    # Gate-only proposals need the same name obligations before their return.
-    plan = ProtectionPlan.chain_names(
-        _materialization_prefixes(candidate),
-        repertoire=candidate.spec.chain.name_repertoire,
-        release_directories=(candidate.spec.chain.release_root_relative,
-                             candidate.spec.chain.manifest_relative),
-        alias_paths=protected, use="append-names", anchor_origin="caller",
-    )
-    plan = replace(plan, exact_state_paths=(candidate.ledger_relative, candidate.prefix_relative),
-                   attribute_target_selectors=_surface_alias_paths(candidate), phase="append")
+    policy = candidate._policy
+    policy.read_listing("")
+    plan = replace(candidate._plan, obligations=("ancestors",), use="append-ancestors")
+    ancestors = policy.evaluate(plan, stage="ancestors")
+    ancestors.require(plan.use, render=_append_shape_error)
+    plan = replace(candidate._plan, obligations=NAME_STAGES, use="append-names")
     view = policy.evaluate(plan, stage="suffixes")
     try:
         selection = view.require(plan.use, render=_protected_name_error)
     except ReleaseChainError as exc:
         raise AppendError(str(exc)) from exc
-    return dict(selection.entries_for(candidate.snapshot, use=plan.use))
+    return dict(selection.entries_for(candidate.snapshot, use=plan.use, plan=plan))
 
 
 def _attribute_entries(
     candidate: _CandidateTree,
     entries: Mapping[str, GitEntry],
 ) -> tuple[GitEntry, ...]:
-    """Return regular blobs on every explicit or configured protected path."""
+    """Select regular attribute targets using append's shared surface predicate."""
 
-    materialized = tuple(
-        relative.as_posix() for relative in _materialization_prefixes(candidate)
-    )
-    return tuple(
-        entry
-        for path, entry in sorted(entries.items())
-        if entry.mode in {"100644", "100755"}
-        and (
-            _is_protected(path, candidate)
-            or any(
-                path == prefix or path.startswith(f"{prefix}/")
-                for prefix in materialized
-            )
-        )
-    )
+    paths = tuple(path for path in sorted(entries) if (
+        _is_protected(path, candidate) or any(
+            path == prefix or path.startswith(f"{prefix}/")
+            for prefix in candidate._plan.export_prefixes)))
+    return candidate._policy.regular_entries(entries, paths)
 
 
 def _candidate_release_entries_regular(candidate: _CandidateTree) -> None:
-    """Preserve the release-leaf shape refusals on the push path."""
+    """Consume the ordered release-leaf mode selection at the push barrier."""
 
     release_root = candidate.spec.chain.release_root_relative.as_posix()
     manifest = candidate.spec.chain.manifest_relative.as_posix()
-    for relative, entry in sorted(
-        candidate.snapshot.entries(release_root).as_dict().items()
-    ):
-        # The manifest leaf has its own established directory diagnostic.
-        if relative == manifest:
-            continue
-        if entry.mode == "120000":
-            raise AppendError(f"release path is a symlink: {relative}")
-        if entry.mode not in {"100644", "100755"}:
-            raise AppendError(f"release path is not regular: {relative}")
+    entries = candidate.snapshot.entries(release_root).as_dict()
+    candidate._policy.observe_entries(entries.values())
+    plan = replace(candidate._plan, obligations=("modes",), listing_scope=(),
+        ancestor_paths=(), use="append-release",
+        mode_roles=tuple((path, "release-leaf") for path in sorted(entries) if path != manifest))
+    view = candidate._policy.evaluate(plan, stage="modes")
+    view.require(plan.use, render=_append_shape_error)
 
 
 def _screen_candidate_materialization(candidate: _CandidateTree) -> None:
     """Rehash every protected candidate blob when no chain is present."""
 
     with tempfile.TemporaryDirectory(prefix="receipt-append-candidate-") as directory:
-        with candidate.snapshot.materialize(
-            _materialization_prefixes(candidate),
-            pathlib.Path(directory),
-            repertoire=candidate.spec.chain.name_repertoire,
-        ):
+        with candidate._policy.materialize(candidate._plan, pathlib.Path(directory)):
             pass
 
 
@@ -927,11 +931,7 @@ def _verify_candidate_release_chain(
     """Verify the selected candidate chain through a private materialization."""
 
     with tempfile.TemporaryDirectory(prefix="receipt-append-candidate-") as directory:
-        with candidate.snapshot.materialize(
-            _materialization_prefixes(candidate),
-            pathlib.Path(directory),
-            repertoire=candidate.spec.chain.name_repertoire,
-        ) as materialized:
+        with candidate._policy.materialize(candidate._plan, pathlib.Path(directory)) as materialized:
             return verify_release_chain(
                 materialized.path,
                 spec=candidate.spec.chain,
@@ -972,12 +972,10 @@ def check_release_proposal(
         for relative in base_release_entries
     )
     manifest_relative = candidate.spec.chain.manifest_relative.as_posix()
-    manifest_children = candidate.snapshot.entries(manifest_relative).children
+    manifest_children = candidate._policy.manifest_children(manifest_relative)
     candidate_has_chain = any(
-        name.endswith(".json")
-        and isinstance(child, GitEntry)
-        and child.mode in {"100644", "100755"}
-        for name, child in manifest_children.items()
+        name.endswith(".json") and fact.regular
+        for name, fact in manifest_children.items()
     )
     base_bytes = _base_ledger_bytes(base, candidate)
     appended_bytes = _check_exact_byte_append(base_bytes, ledger_bytes)
@@ -1067,18 +1065,19 @@ def check_release_chain_without_base(
     """Verify an initialized chain from the selected pushed commit."""
 
     manifest_relative = candidate.spec.chain.manifest_relative.as_posix()
-    manifest_listing = candidate.snapshot.entries(manifest_relative)
-    initialized = bool(manifest_listing)
+    initialized = candidate._policy.manifest_initialized(manifest_relative)
     if not initialized:
         _candidate_release_entries_regular(candidate)
         _screen_candidate_materialization(candidate)
         return None
     manifest_entry = candidate.snapshot.entry(manifest_relative)
-    if manifest_entry.mode != "040000":
-        raise AppendError(
-            "release manifest path is not a regular directory: "
-            f"{candidate.snapshot.root / candidate.spec.chain.manifest_relative}"
-        )
+    candidate._policy.observe_entries((manifest_entry,))
+    plan = replace(candidate._plan, obligations=("modes",), listing_scope=(),
+        ancestor_paths=(), mode_roles=((manifest_relative, "ancestor"),), use="append-manifest")
+    manifest = candidate._policy.evaluate(plan, stage="modes")
+    manifest.require(plan.use, render=lambda finding: AppendError(
+        "release manifest path is not a regular directory: "
+        f"{candidate.snapshot.root / candidate.spec.chain.manifest_relative}"))
     _candidate_release_entries_regular(candidate)
     try:
         verification = _verify_candidate_release_chain(
@@ -1107,15 +1106,13 @@ def _verify_selected_tree(
     ledger_entry = _state_entry(candidate, spec.chain.state_relative)
     prefix_entry = _state_entry(candidate, spec.chain.prefix_relative)
     tree_entries = _screen_candidate_tree_aliases(candidate)
-    from receipt.protected_tree import POLICY_VERSION, ProtectionPlan, TreePolicy, attribute_error
+    from receipt.protected_tree import attribute_error
 
-    attribute_plan = ProtectionPlan(obligations=("attributes",), listing_scope=(),
-        use="append-attributes", phase="attributes", anchor_origin="caller",
+    attribute_plan = replace(candidate._plan, obligations=("attributes",), listing_scope=(),
+        ancestor_paths=(), use="append-attributes", phase="attributes",
         attribute_target_selectors=tuple(
             entry.path for entry in _attribute_entries(candidate, tree_entries)))
-    policy = TreePolicy(candidate.snapshot, policy_version=POLICY_VERSION,
-                        work=candidate.snapshot.work)
-    attributes = policy.evaluate_attributes(attribute_plan)
+    attributes = candidate._policy.evaluate_attributes(attribute_plan)
     attributes.require(attribute_plan.use, render=attribute_error)
     if base is not None:
         _data_changes, gate_changes, unclassified = check_surface_separation(
