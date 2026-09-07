@@ -2075,3 +2075,212 @@ class PR5Corpus:
         )
 
 PR5_BODY_SHA256 = {'PR5Append': {'_state_entry': '7c7b1d2ecdcc45b1a65d7ef9e766107617b334a3839805a2accf584ac66220ed', '_screen_candidate_tree_aliases': 'd71170dacdebd782a026977b48e471a2c682476063eee01aaf30af4b43765df6', '_attribute_entries': 'd00623c0c560ff2f862a7c9b8d2bace83060d0822f486aceb40d9da782cea698', '_candidate_release_entries_regular': '3ab34473c1ee5f9c8c5c8f5cca10927d99258a48d353cf73546b5e72d1304b7b', '_screen_candidate_materialization': '8328781ce6c7b24d5db731b1259844a082e54b2d1f6696f83803914aa6ddaf95', '_verify_candidate_release_chain': '4779a3d5d10485dff8c072b8c39cbfcb6fe25cd9aab35e2ed9ced6d66a29fa1a', 'check_release_proposal': 'dcf1af93218807c07755b1efe4da6760e84f22f69dfd4a616a094236df0e9d7d', 'check_release_chain_without_base': '5e6d17a1f63eee32cd8621993a916a3039dd10d9077bd8acc2e7be2995dcdde7', '_verify_selected_tree': 'bc8eef49ac8e9462bdde6f09691486352c07c328e6d3ad23a12c4569735504e7'}, 'PR5Corpus': {'_path_fold': 'ab1b0855760740ea63f7a79b845b1705528a9a31bed8a59dbd22b646d3f09401', '_reject_aliasing_paths': 'f9d8ac5f602931db4c176f4eb974913516ea842c5c703d8df003b32c60e1c08a', '_screen_tree_listing': 'bad1d7596bf4f5544696df316b8459ee8bc44c026f041e61464e139a3b147fc7', '_entries_by_directory': '861cf5c7b7a315fab969eebf79fb1bd0de614e2ba61b006c1d0c480c0b820eda', '_assert_content_root_spellings': 'be90893262b73ca44e805a70b8880bcab8d179e6e9d814ef0b70436482f26317', '_content_entries_from_listing': 'e8b80b482aab2ef3c0a56b3810afa2de56ff134985a3215087a4235dbdd383e4', '_assert_tombstones_absent_from_listing': 'a24667effc94c94279e62a2a7c4d42fd4bfc6b5c6335772aed3380d867ce2e20', '_attested_entries_from_snapshot': '7e5e1d8e59b3bc103d55171673da34f32133843af1c945a56e2ca96604e8bad8', 'verify_corpus_binding': '8211d7bacd8e4495e4e6430c305f04eea32604290d2ee91e01aed1bb1ff78101'}}
+
+
+# PR6 bodies copied verbatim with git show v0.6.1 (3a7ee943817786671535f17ebd4fbb207730eace).
+
+class PR6Names:
+    def assert_no_merging_entries(
+        names: Iterable[bytes | str],
+        *,
+        repertoire: str,
+        materializing: bool = False,
+        label: str = "tree directory",
+    ) -> None:
+        """Refuse siblings whose raw names agree after ASCII case folding.
+
+        ``names`` is one directory's immediate children, not full paths.  Each
+        component is validated before it enters the fold index.  Passing
+        ``materializing=True`` applies the portable screen to every component
+        before the caller may create any host path.
+        """
+
+        selected = validate_repertoire(repertoire)
+        seen: dict[bytes, tuple[bytes, str]] = {}
+        for value in names:
+            if type(value) is bytes:
+                raw = validate_component_bytes(value, label="tree entry name")
+                text = decode_component(
+                    raw,
+                    repertoire=selected,
+                    materializing=materializing,
+                    label="tree entry name",
+                )
+                try:
+                    raw.decode("utf-8", errors="strict")
+                except UnicodeDecodeError as exc:
+                    raise NamePolicyError(
+                        "tree entry name is not valid UTF-8 for folding"
+                    ) from exc
+            elif type(value) is str:
+                text = validate_component_text(
+                    value,
+                    repertoire=selected,
+                    materializing=materializing,
+                    label="tree entry name",
+                )
+                raw = _text_as_tree_bytes(text, "tree entry name")
+                try:
+                    raw.decode("utf-8", errors="strict")
+                except UnicodeDecodeError as exc:
+                    raise NamePolicyError(
+                        "tree entry name is not valid UTF-8 for folding"
+                    ) from exc
+            else:
+                raise NamePolicyError(
+                    f"tree entry name must be bytes or text: {value!r}"
+                )
+
+            folded = raw.translate(_ASCII_LOWER)
+            previous = seen.get(folded)
+            if previous is not None:
+                previous_raw, previous_text = previous
+                if previous_raw == raw:
+                    raise NamePolicyError(
+                        f"{label} contains a duplicate entry name: {text!r}"
+                    )
+                raise NamePolicyError(
+                    f"{label} contains names that merge under ASCII case folding: "
+                    f"{previous_text!r} and {text!r}"
+                )
+            seen[folded] = (raw, text)
+
+class PR6Snapshot:
+    def blob(self, entry: GitEntry, *, limit: int) -> bytes:
+        """Return one authenticated blob payload under a required caller limit."""
+
+        object_id = self._require_entry(entry)
+        if type(limit) is not int or limit < 0:
+            raise SnapshotError("blob limit must be a non-negative integer")
+        if entry.object_type != "blob":
+            raise SnapshotError(
+                f"object {entry.object_id} is a {entry.object_type}, not the blob "
+                "its reference requires"
+            )
+        if entry.mode not in _CONTENT_MODES:
+            raise SnapshotError(
+                f"tree entry has non-regular mode {entry.mode}: {entry.path}"
+            )
+        payload = self._batch().consume(
+            object_id,
+            role="blob",
+            limit=limit,
+            hold=True,
+        )
+        assert payload is not None
+        return payload
+
+class PR6Digest:
+    def __next__(self) -> tuple[GitEntry, str]:
+        if self._done or self._closed:
+            raise StopIteration
+        try:
+            self._snapshot._batch(digest_token=self._token)
+        except BaseException:
+            self.close()
+            raise
+        try:
+            entry = next(self._entries)
+        except StopIteration:
+            self._done = True
+            if self._snapshot._state.active_digest_token is self._token:
+                self._snapshot._state.active_digest_token = None
+            raise
+        except BaseException:
+            self.close()
+            raise
+        self._count += 1
+        if self._count > MAX_TREE_ENTRIES:
+            self.close()
+            raise SnapshotError(
+                f"content entries exceed the budget of {MAX_TREE_ENTRIES} entries"
+            )
+        if not isinstance(entry, GitEntry):
+            self.close()
+            raise SnapshotError("digests entries must all be GitEntry objects")
+        try:
+            object_id = self._snapshot._require_entry(entry)
+        except BaseException:
+            self.close()
+            raise
+        if entry.object_type != "blob":
+            self.close()
+            raise SnapshotError(
+                f"object {entry.object_id} is a {entry.object_type}, not the blob "
+                "its reference requires"
+            )
+        if entry.mode not in _CONTENT_MODES:
+            self.close()
+            raise SnapshotError(
+                f"tree entry has non-regular mode {entry.mode}: {entry.path}"
+            )
+        batch = self._snapshot._batch(digest_token=self._token)
+        try:
+            _object_type, size = batch.info(object_id, role="blob")
+        except BaseException:
+            self.close()
+            raise
+        per_blob_limit = min(self._per_blob, MAX_CONTENT_BLOB_BYTES)
+        if size > per_blob_limit:
+            self.close()
+            raise SnapshotError(
+                f"content blob {entry.path!r} exceeds the budget of "
+                f"{per_blob_limit} bytes"
+            )
+        work = self._snapshot._state.work
+        if self._charged + size > self._total:
+            self.close()
+            raise SnapshotError(
+                f"content bytes exceed the budget of {self._total} bytes"
+            )
+        if self._snapshot._verification_total("content_bytes") + size > MAX_CONTENT_BYTES_TOTAL:
+            self.close()
+            raise SnapshotError(
+                f"content bytes exceed the snapshot budget of "
+                f"{MAX_CONTENT_BYTES_TOTAL} bytes"
+            )
+        digest = hashlib.sha256()
+
+        def consume(chunk: bytes) -> None:
+            digest.update(chunk)
+            self._snapshot._charge_verification(
+                "content_bytes",
+                len(chunk),
+                ceiling=MAX_CONTENT_BYTES_TOTAL,
+                message=(
+                    f"content bytes exceed the snapshot budget of "
+                    f"{MAX_CONTENT_BYTES_TOTAL} bytes"
+                ),
+            )
+
+        try:
+            batch.consume(
+                object_id,
+                role="blob",
+                limit=per_blob_limit,
+                consumer=consume,
+            )
+        except BaseException:
+            self.close()
+            raise
+        self._charged += size
+        work.max_content_blob_bytes = max(work.max_content_blob_bytes, size)
+        return entry, digest.hexdigest()
+
+class PR6Corpus:
+    def _has_pinned_suffix(relative: str, suffixes: tuple[str, ...]) -> bool:
+        """Whether a path ends in a pinned suffix after the policy's ASCII fold."""
+
+        folded = _path_fold(relative)
+        return any(folded.endswith(_path_fold(suffix)) for suffix in suffixes)
+
+
+PR6_BODY_SHA256 = {'PR6Names': {'assert_no_merging_entries': '063e3a8cbfb7e4a2471e2f39d970d1ce5fa54b86c0772c902b18fa93756828e4'}, 'PR6Snapshot': {'blob': '9b7c0c58fd9e7f1ab57469866079a66795ae370c43016a41c223c413750577df'}, 'PR6Digest': {'__next__': '490d613f4a4711a78badce40afc3a69b37ac39142c7246e5bd11519850f2e145'}, 'PR6Corpus': {'_has_pinned_suffix': '81dcc36394024c169a87232611953b33d194cd6af4c76d20382e661062c4bb13'}}
+
+# Keep old name/export comparisons independent of the migrated primitive facade.
+from types import FunctionType as _LegacyFunctionType
+from receipt import _names as _legacy_names_namespace
+assert_no_merging_entries = _LegacyFunctionType(
+    PR6Names.assert_no_merging_entries.__code__, _legacy_names_namespace.__dict__,
+    argdefs=PR6Names.assert_no_merging_entries.__defaults__)
+assert_no_merging_entries.__kwdefaults__ = PR6Names.assert_no_merging_entries.__kwdefaults__
