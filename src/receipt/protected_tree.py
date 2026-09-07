@@ -3,7 +3,7 @@
 Names, configured aliases and scoped DOS suffixes are evaluated only at the
 caller's existing barriers. The snapshot still owns object authentication and
 structural/admission charges. Shape stages consume admitted metadata at the
-caller's barrier; certified export and attributes remain PR3b/PR4 work.
+caller's barrier; export certification precedes writing. Attributes remain PR4 work.
 
 The mapping and sibling compatibility adapters confer no payload authority.
 Only TreePolicy, over an entered snapshot, can issue a ProtectedTreeView.
@@ -22,6 +22,7 @@ from receipt import _names, snapshot
 POLICY_VERSION = "v0.6"
 NAME_STAGES = ("aliases", "names", "siblings", "suffixes")
 SHAPE_STAGES = ("ancestors", "modes")
+EXPORT_STAGES = ("ancestors", "modes", "export-names")
 
 
 class PolicyUseError(RuntimeError):
@@ -66,6 +67,8 @@ class ProtectionPlan:
     mode_roles: tuple[tuple[str, str], ...] = ()
     ancestor_paths: tuple[str, ...] = ()
     require_ancestors: bool = False
+    # Preserve bytes/text argument spelling until the legacy enter-time admission.
+    export_requests: tuple[str | bytes, ...] = ()
 
     def __post_init__(self) -> None:
         for item in fields(self):
@@ -77,6 +80,7 @@ class ProtectionPlan:
                 "attribute_target_selectors", "obligations", "listing_scope", "ancestor_paths",
             }:
                 object.__setattr__(self, item.name, _paths(value))
+        object.__setattr__(self, "export_requests", tuple(self.export_requests))
         roles = tuple((_paths((path,))[0], role) for path, role in self.mode_roles)
         if any(role not in MODE_ROLES for _, role in roles):
             raise PolicyUseError("unknown protected entry role")
@@ -103,6 +107,15 @@ class ProtectionPlan:
             fold_whole_alias_paths=alias_paths is not None,
             anchor_origin=anchor_origin, use=use,
         )
+
+    @classmethod
+    def materialization(cls, prefixes: tuple[str | bytes, ...], *, repertoire: str) -> ProtectionPlan:
+        """Compile admitted collection arguments; path admission stays lazy."""
+        return cls(repertoire=repertoire,
+                   export_prefixes=tuple(snapshot._tree_path_decode(p) if type(p) is bytes else p
+                                         for p in prefixes),
+                   export_requests=prefixes, listing_scope=(), obligations=EXPORT_STAGES,
+                   use="materialize", phase="export")
 
     @property
     def fingerprint(self) -> str:
@@ -236,6 +249,32 @@ class _ShapeFacts:
                     break
             self.ancestors[target] = result
         return self.ancestors[target]
+
+
+def export_prefixes(subject: snapshot.TreeSnapshot,
+                    prefixes: Iterable[str | bytes]) -> tuple[tuple[bytes, ...], ...]:
+    """Legacy supplied-path charges precede prefix deduplication."""
+    parts: set[tuple[bytes, ...]] = set()
+    for prefix in prefixes:
+        parsed = subject._path_parts(prefix, allow_empty=True)
+        subject._charge_path_bytes(b"/".join(parsed))
+        parts.add(parsed)
+    kept: list[tuple[bytes, ...]] = []
+    for candidate in sorted(parts):
+        if kept and candidate[:len(kept[-1])] == kept[-1]:
+            continue
+        kept.append(candidate)
+    return tuple(kept)
+
+
+@dataclass(frozen=True)
+class ExportWork:
+    """Actual export work, independent of the retained reader admission ledger."""
+
+    prefixes: int = 0
+    leaves: int = 0
+    components: int = 0
+    directory_records: int = 0
 
 
 @dataclass(frozen=True)
@@ -526,6 +565,9 @@ class _NameRun:
         self.findings: list[Finding] = []
         self.paths: tuple[str, ...] | None = None
         self.mode_facts: dict[tuple[str, str], ModeFact] = {}
+        self.raw_listings: dict[str, tuple[snapshot._RawTreeEntry, ...]] = {}
+        self.tree_ids: dict[str, str | None] = {}
+        self.export_siblings: dict[tuple[bytes, ...], set[bytes]] = {}
 
     def evaluate(self, stage: str) -> None:
         if stage not in NAME_STAGES:
@@ -604,6 +646,7 @@ class TreePolicy:
     _scopes: dict[str, str | None] = field(default_factory=dict, init=False, repr=False, compare=False)
     _empty_roots: dict[str, bool] = field(default_factory=dict, init=False, repr=False, compare=False)
     _runs: dict[ProtectionPlan, _NameRun] = field(default_factory=dict, init=False, repr=False, compare=False)
+    _export_counts: dict[str, int] = field(default_factory=lambda: dict(prefixes=0, leaves=0, components=0, directory_records=0), init=False, repr=False, compare=False)
     _views: WeakValueDictionary = field(default_factory=WeakValueDictionary, init=False, repr=False, compare=False)
     _selections: WeakValueDictionary = field(default_factory=WeakValueDictionary, init=False, repr=False, compare=False)
 
@@ -626,6 +669,88 @@ class TreePolicy:
     @property
     def shape_work(self) -> ShapeWork:
         return self._shapes.work
+
+    @property
+    def export_work(self) -> ExportWork:
+        return ExportWork(**self._export_counts)
+
+    def _read_export(self, plan: ProtectionPlan) -> _NameRun:
+        """Acquire exactly the old export reads, retaining uncharged raw topology.
+
+        Immediate ancestor records prove spellings/declared modes only: their
+        off-scope object types have not been probed. Selected TreeListing nodes
+        additionally authenticate tree objects, including empty trees. Neither
+        kind of directory observation creates a payload-capable GitEntry.
+        """
+        selected: dict[str, snapshot.GitEntry] = {}
+        run = _NameRun(MappingProxyType(selected), plan, self._facts)
+
+        def remember(parts, records, oid):
+            path = snapshot._tree_path_decode(b"/".join(parts))
+            if path not in run.raw_listings:
+                run.raw_listings[path] = records
+                run.tree_ids[path] = oid
+                self._export_counts["directory_records"] += len(records)
+
+        def topology(parts, node):
+            remember(parts, tuple(r.raw for r in node.records), node.tree_oid)
+            path = snapshot._tree_path_decode(b"/".join(parts))
+            run.mode_facts[path, "ancestor"] = self._shapes.metadata(
+                path, "040000", "tree", empty=not node.records)
+            for record in node.records:
+                if record.child is not None:
+                    topology((*parts, record.raw.name), record.child)
+
+        def add(entry):
+            selected[entry.path] = entry
+            self._export_counts["leaves"] += 1
+            if len(selected) > snapshot.MAX_TREE_ENTRIES:
+                raise snapshot.SnapshotError(
+                    f"tree walk exceeds the budget of {snapshot.MAX_TREE_ENTRIES} entries")
+
+        for parts in export_prefixes(self.snapshot, plan.export_requests):
+            self._export_counts["prefixes"] += 1
+            raw = self.snapshot._raw_entry_at(parts) if parts else None
+            if parts:
+                # The exact lookup just authenticated these tree records. Reuse
+                # them without another reader call, path charge or object probe.
+                oid = self.snapshot.tree
+                for depth, component in enumerate(parts):
+                    records = self.snapshot._state.tree_cache[oid]
+                    remember(parts[:depth], records, oid)
+                    reached = self.snapshot._find_raw_entry(records, component)
+                    if reached is None or reached.mode != b"40000":
+                        break
+                    oid = reached.oid
+                if raw is None:
+                    continue
+            if not parts or raw.mode == b"40000":
+                listing = self.snapshot.entries(b"/".join(parts) if parts else "")
+                for entry in listing:
+                    add(entry)
+                topology(parts, listing._node)
+            else:
+                add(self.snapshot._public_entry(parts, raw))
+        # Successful exact lookups discharge ancestors at the reader's existing
+        # barrier, with its missing-prefix and wrong-shape behavior unchanged.
+        run.completed.add("ancestors")
+        return run
+
+    def _export_names(self, run: _NameRun) -> None:
+        for ordinal, (parent, names) in enumerate(run.export_siblings.items()):
+            path = snapshot._tree_path_decode(b"/".join(parent))
+            try:
+                self._facts.siblings(sorted(names), repertoire=run.plan.repertoire,
+                                     materializing=True, label=path or "tree root")
+            except _names.NamePolicyError as exc:
+                run.findings.append(Finding(
+                    "sibling-alias" if isinstance(exc, _SiblingCollision) else "name",
+                    "export-names", (ordinal, getattr(exc, "ordinal", 0)),
+                    parent=path, name=getattr(exc, "name", ""),
+                    other_name=getattr(exc, "other", ""), operation="export-siblings",
+                    detail=str(exc)))
+                return
+        run.completed.add("export-names")
 
     def observe_entries(self, entries: Iterable[snapshot.GitEntry]) -> None:
         """Retain entries already admitted at a legacy read, with no new walk."""
@@ -670,12 +795,22 @@ class TreePolicy:
             self._validate_view(previous)
             if previous.plan != plan:
                 raise PolicyUseError("protected view has an incompatible plan")
-        if stage not in (*NAME_STAGES, *SHAPE_STAGES):
+        if stage not in (*NAME_STAGES, *SHAPE_STAGES, "export-names"):
             raise NotImplementedError(f"protected-tree stage {stage!r} belongs to a later migration")
+        exporting = "export-names" in plan.obligations
+        if exporting and (
+            plan.obligations != EXPORT_STAGES or plan.listing_scope
+            or tuple(snapshot._tree_path_decode(p) if type(p) is bytes else p
+                     for p in plan.export_requests) != plan.export_prefixes
+        ):
+            raise PolicyUseError("export plan has incompatible obligations/listing scope")
         for scope in plan.listing_scope:
             if scope not in self._scopes:
                 self.read_listing(scope)
         run = self._runs.get(plan)
+        if run is None and exporting:
+            run = self._read_export(plan)
+            self._runs[plan] = run
         if run is None:
             # The run owns a stable copy; unrelated later listing extensions do
             # not silently widen its obligations or mutate an already issued view.
@@ -704,6 +839,8 @@ class TreePolicy:
                 self.evaluate_modes(plan, _run=run)
             elif current == "ancestors":
                 self.evaluate_ancestors(plan, _run=run)
+            elif current == "export-names":
+                self._export_names(run)
             else:
                 raise NotImplementedError(f"protected-tree stage {current!r} belongs to a later migration")
         entries = MappingProxyType(dict(run.entries))
@@ -728,6 +865,8 @@ class TreePolicy:
             unevaluated=frozenset(plan.obligations) - run.completed - {f.stage for f in run.findings},
             admission=tuple((f.name, getattr(self.work, f.name)) for f in fields(self.work)),
             _evaluator=self,
+            raw_listings=MappingProxyType(dict(run.raw_listings)),
+            raw_listing_tree_ids=MappingProxyType(dict(run.tree_ids)),
         )
         self._views[id(view)] = view
         return view
@@ -745,7 +884,9 @@ class TreePolicy:
         if self._runs.get(plan) is not _run:
             raise PolicyUseError("mode run does not belong to this evaluator/plan")
         parents = {path.rpartition("/")[0] for path in _run.entries}
-        for ordinal, (path, role) in enumerate(plan.mode_roles):
+        exporting = "export-names" in plan.obligations
+        roles = tuple((path, "export-leaf") for path in sorted(_run.entries)) if exporting else plan.mode_roles
+        for ordinal, (path, role) in enumerate(roles):
             entry = _run.entries.get(path)
             # Only complete listings establish tree emptiness; exact entries
             # alone establish directory shape, without an extra subtree read.
@@ -763,6 +904,11 @@ class TreePolicy:
             if finding is not None:
                 _run.findings.append(finding)
                 return None
+            if exporting:
+                raw_parts = self.snapshot._path_parts(path, allow_empty=False)
+                self._export_counts["components"] += len(raw_parts)
+                for index, name in enumerate(raw_parts):
+                    _run.export_siblings.setdefault(raw_parts[:index], set()).add(name)
         _run.completed.add("modes")
         return None
 
@@ -788,9 +934,13 @@ class TreePolicy:
         _run.completed.add("ancestors")
         return None
 
-    def select_export(self) -> None:
-        """PR3: certify exports after mode-before-name selection, before writing."""
-        raise NotImplementedError("receipt 0.7 M1 PR3 introduces export selection")
+    def select_export(self, view: ProtectedTreeView, *,
+                      render: Callable[[Finding], BaseException]) -> ProtectedSelection:
+        """Certify regular exports from this subject's completed export view."""
+        self._validate_view(view)
+        if view.plan.obligations != EXPORT_STAGES:
+            raise PolicyUseError("protected view lacks export obligations")
+        return view.require(view.plan.use, render=render)
 
     def evaluate_attributes(self) -> None:
         """PR4: independent exact/folded readings and D12 admission checkpoints.
@@ -828,6 +978,13 @@ class ProtectedTreeView:
     admission: tuple[tuple[str, int], ...]
     _evaluator: TreePolicy = field(repr=False, compare=False)
     mode_facts: Mapping[tuple[str, str], ModeFact] = field(
+        default_factory=lambda: MappingProxyType({}), kw_only=True)
+
+    # Raw directory records preserve selected empty trees and actual ancestor
+    # spellings without manufacturing or charging public tree entries.
+    raw_listings: Mapping[str, tuple[snapshot._RawTreeEntry, ...]] = field(
+        default_factory=lambda: MappingProxyType({}), kw_only=True)
+    raw_listing_tree_ids: Mapping[str, str | None] = field(
         default_factory=lambda: MappingProxyType({}), kw_only=True)
 
     @property
@@ -869,8 +1026,8 @@ class ProtectedTreeView:
 class ProtectedSelection:
     """Successful metadata selection bound to session, purpose and completed work.
 
-    Only the recorded obligations are certified. PR3b/PR4 must complete export
-    and attribute obligations before handing their selections to a verifier.
+    Only the recorded obligations are certified. Export selections require all
+    export stages; attribute obligations remain a separate later barrier.
     Closing/abandoning a snapshot invalidates subsequent selection consumption.
     """
 
