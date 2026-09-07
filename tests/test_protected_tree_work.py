@@ -68,15 +68,31 @@ def test_overlapping_export_inputs_keep_counter_and_refusal_locations(raw_repo, 
         "siblings": (("protected/A", "100644"), ("protected/a", "100644"))}[fault]
     commit = raw_repo.commit((("protected/nested/leaf", "100644"),) + extras)
     monkeypatch.setattr(snapshot, "MAX_PATH_BYTES_TOTAL", ceiling)
-    current = snapshot.assert_no_merging_entries
+    # PR3b round 1 (low): this comparison used to switch snapshot.assert_no_merging_entries,
+    # a hook the exporter stopped reaching once selection moved into the policy, so both
+    # legs ran the new path. The legs now switch the selector itself, and each leg proves
+    # that its intended body ran.
+    # The new leg is proven at prefix admission, which every export reaches, including
+    # the ones the path-byte ceiling refuses before a selection is certified.
+    admitted = []
+    original_prefixes = policy.export_prefixes
+    def export_prefixes(*args, **kwargs):
+        admitted.append(1)
+        return original_prefixes(*args, **kwargs)
+    monkeypatch.setattr(policy, "export_prefixes", export_prefixes)
     results = []
-    for screen in (_names.assert_no_merging_entries, current):
-        monkeypatch.setattr(snapshot, "assert_no_merging_entries", screen)
-        with raw_repo.snapshot(commit) as snap:
-            def call():
-                with snap.materialize(PREFIXES, tmp_path, repertoire="portable") as exported:
-                    return sorted(exported.entries)
-            results.append((outcome(call), asdict(snap.work)))
+    for old in (True, False):
+        admitted.clear()
+        with trace_exports(monkeypatch, old=old):
+            legacy_leg = (snapshot.Materialization._selected_entries.__code__
+                          is legacy._selected_entries.__code__)
+            assert legacy_leg == old
+            with raw_repo.snapshot(commit) as snap:
+                def call():
+                    with snap.materialize(PREFIXES, tmp_path, repertoire="portable") as exported:
+                        return sorted(exported.entries)
+                results.append((outcome(call), asdict(snap.work)))
+        assert bool(admitted) == (not old)
     assert results[0] == results[1]
 
 
