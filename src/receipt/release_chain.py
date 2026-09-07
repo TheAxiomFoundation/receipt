@@ -2315,7 +2315,7 @@ def verify_base_release_chain(
     """
 
     from dataclasses import replace
-    from receipt.protected_tree import POLICY_VERSION, ProtectionPlan, TreePolicy
+    from receipt.protected_tree import POLICY_VERSION, ProtectionPlan, TreePolicy, attribute_error
 
     normalized = _normalized_spec(spec)
     prefixes = (
@@ -2355,7 +2355,11 @@ def verify_base_release_chain(
                                  mode_roles=tuple((p, "export-leaf") for p in selected))
             shapes = policy.evaluate(shape_plan, stage="modes")
             shapes.require(shape_plan.use, render=_base_shape_error)
-            base.refuse_transforming_attributes(materialized_entries.values())
+            attribute_plan = replace(plan, obligations=("attributes",), listing_scope=(),
+                phase="attributes", attribute_target_selectors=tuple(
+                    entry.path for entry in materialized_entries.values()))
+            attributes = policy.evaluate_attributes(attribute_plan)
+            attributes.require(attribute_plan.use, render=attribute_error)
             if anchor_dir is None:
                 materialized.anchor_set_sha256(normalized)
             return verify_release_chain(
