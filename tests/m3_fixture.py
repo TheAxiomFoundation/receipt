@@ -1,0 +1,126 @@
+"""Synchronous raw-index probes and exact reached-body observations for M3."""
+from collections import Counter
+from contextlib import contextmanager
+from dataclasses import asdict, is_dataclass
+import hashlib
+from pathlib import Path
+import sys
+
+import pytest
+
+from m1_fixture import RawRepo
+from m3_legacy import authenticate, modules, source_tree
+
+
+@pytest.fixture(scope="session", autouse=True)
+def authenticated_m3_oracle():
+    return authenticate()
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    # Commit bytes/OIDs, including initial selection charges, are deterministic.
+    monkeypatch.setenv("GIT_AUTHOR_DATE", "2001-01-01T00:00:00+0000")
+    monkeypatch.setenv("GIT_COMMITTER_DATE", "2001-01-01T00:00:00+0000")
+    value = RawRepo(tmp_path / "repo")
+    assert value.git("config", "core.precomposeUnicode") == b"false"
+    return value
+
+
+def plain(value):
+    if isinstance(value, bytes):
+        return {"bytes": value.hex()}
+    if is_dataclass(value):
+        return plain(asdict(value))
+    if isinstance(value, dict):
+        return {str(k): plain(v) for k, v in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [plain(v) for v in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted(plain(v) for v in value)
+    if isinstance(value, Path):
+        return str(value)
+    assert value is None or isinstance(value, (str, int, float, bool)), type(value)
+    return value
+
+
+def outcome(call):
+    try:
+        return {"value": plain(call())}
+    except BaseException as exc:
+        return {"exception": f"{type(exc).__module__}.{type(exc).__qualname__}",
+                "message": str(exc), "notes": list(getattr(exc, "__notes__", ()))}
+
+
+def work(*subjects):
+    return [asdict(s.work) for s in subjects]
+
+
+class Trace:
+    def __init__(self, *subjects):
+        self.subjects, self.events = subjects, []
+
+    def call(self, label, call):
+        result = outcome(call)
+        self.events.append([label, result, work(*self.subjects)])
+        return result
+
+
+def policy(m, subject):
+    p = m.protected_tree
+    return p.TreePolicy(subject, policy_version=p.POLICY_VERSION, work=subject.work)
+
+
+@contextmanager
+def reached(m):
+    """Count actual code objects, not wrappers or similarly named live globals."""
+    selected = {}
+    for name in ("TreeSnapshot", "_BatchReader", "_WorkPool", "TreeListing",
+                 "_DigestIterator", "Materialization"):
+        cls = getattr(m.snapshot, name, None)
+        if cls is None:
+            continue
+        for method, descriptor in vars(cls).items():
+            body = (descriptor.__func__ if isinstance(descriptor, (classmethod, staticmethod))
+                    else descriptor.fget if isinstance(descriptor, property) else descriptor)
+            if hasattr(body, "__code__"):
+                selected[body.__code__] = f"{name}.{method}"
+    for module, names in (
+        (m.snapshot, ("_parse_tree", "_parse_commit", "_git_environment", "_git_run")),
+        (m.protected_tree, ("_attribute_step", "export_prefixes", "_parse_attribute_rules")),
+        (m.verify, ("run_verification",)),
+        (m.corpus, ("verify_corpus_binding", "_verify_corpus_binding")),
+        (m.release_chain, ("verify_release_history_immutable", "verify_base_release_chain")),
+        (m.append_gate, ("verify_append_gate", "verify_append_gate_verdict")),
+    ):
+        for name in names:
+            body = getattr(module, name, None)
+            if hasattr(body, "__code__"):
+                selected[body.__code__] = module.__name__.split(".")[-1] + "." + name
+    counts = Counter()
+    old = sys.getprofile()
+    def profile(frame, event, arg):
+        if event == "call" and frame.f_code in selected:
+            counts[selected[frame.f_code]] += 1
+    sys.setprofile(profile)
+    try:
+        yield counts
+    finally:
+        sys.setprofile(old)
+
+
+def compare(probe, repo, monkeypatch, *args, expected=None):
+    """Compare both independently reached implementations and a captured value."""
+    results, codes = [], []
+    for old in (True, False):
+        with source_tree(old=old), monkeypatch.context() as patch:
+            m = modules()
+            codes.append(m.snapshot.TreeSnapshot.select.__func__.__code__)
+            with reached(m) as counts:
+                result = probe(m, repo, patch, *args)
+            results.append(plain({"trace": result, "bodies": dict(sorted(counts.items()))}))
+    assert codes[0] is not codes[1]
+    assert results[0] == results[1]
+    if expected is not None:
+        assert results[1] == expected
+    return results[1]
