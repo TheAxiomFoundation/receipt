@@ -740,11 +740,14 @@ def read_binding_listing(subject: snapshot.TreeSnapshot, *, evaluator=None):
     Declaration prerequisites belong to the caller. This explicit read preserves
     lifecycle refusals at entries(), as well as repeated listing/path charges
     when a custody evaluator already holds the same immutable metadata.
+    Subclass listings remain mapping evidence, without policy-view authority.
     """
     if evaluator is not None and evaluator.snapshot is not subject:
         raise PolicyUseError("binding evaluator has a different subject")
     listing = subject.entries("")
     entries = listing.as_dict(include_trees=True)
+    if evaluator is None and type(subject) is not snapshot.TreeSnapshot:
+        return None, entries
     evaluator = evaluator or TreePolicy(subject, policy_version=POLICY_VERSION, work=subject.work)
     evaluator._entries.update(entries)
     evaluator._scopes[""] = listing.tree_oid

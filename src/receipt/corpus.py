@@ -1505,7 +1505,7 @@ def _attested_entries_from_snapshot(
 
 
 def _attested_selections(snapshot, attested, policy):
-    from receipt.protected_tree import POLICY_VERSION, ProtectionPlan, TreePolicy
+    from receipt.protected_tree import POLICY_VERSION, ProtectionPlan, TreePolicy, classify_mode
 
     result: dict[str, GitEntry] = {}
     for path in sorted(attested):
@@ -1513,6 +1513,14 @@ def _attested_selections(snapshot, attested, policy):
             entry = snapshot.entry(path)
         except SnapshotError as exc:
             raise CorpusError(f"bound file is missing or not a regular file: {path}") from exc
+        if policy is None and type(snapshot) is not TreeSnapshot:
+            # The accepted reader supplies metadata; only concrete readers can
+            # receive an authenticated policy view or certified selection.
+            finding = classify_mode(entry.mode, entry.object_type).finding(path, "attested-leaf")
+            if finding is not None:
+                raise _binding_error(finding)
+            result[path] = entry
+            continue
         if policy is None:
             policy = TreePolicy(snapshot, policy_version=POLICY_VERSION, work=snapshot.work)
         policy.observe_entries((entry,))
@@ -1642,16 +1650,24 @@ def _verify_corpus_binding(snapshot, journal_bytes, *, spec, policy=None):
         policy, entries = read_binding_listing(snapshot, evaluator=policy)
     except SnapshotError as exc:
         raise CorpusError(str(exc)) from exc
-    plan = _binding_plan(spec, ("names", "siblings"))
-    names = policy.evaluate(plan, stage="siblings")
-    names.require(plan.use, render=_binding_error)
-    roots_plan = replace(plan, obligations=("content-roots",))
-    roots = policy.evaluate(roots_plan, stage="content-roots")
-    roots.require(roots_plan.use, render=_binding_error)
-    content_plan = replace(plan, obligations=("content",))
-    content_view = policy.evaluate(content_plan, stage="content")
-    content_selection = content_view.require(content_plan.use, render=_binding_error)
-    tree = content_selection.entries_for(snapshot, use=content_plan.use, plan=content_plan)
+    if policy is None:
+        # Subclasses retain their own listing and reader admission. These shared
+        # mapping decisions confer no authority to select authenticated payloads.
+        by_directory = _entries_by_directory(entries)
+        _screen_tree_listing(entries, by_directory, repertoire=spec.name_repertoire)
+        _assert_content_root_spellings(entries, by_directory, spec)
+        tree = _content_entries_from_listing(entries, spec)
+    else:
+        plan = _binding_plan(spec, ("names", "siblings"))
+        names = policy.evaluate(plan, stage="siblings")
+        names.require(plan.use, render=_binding_error)
+        roots_plan = replace(plan, obligations=("content-roots",))
+        roots = policy.evaluate(roots_plan, stage="content-roots")
+        roots.require(roots_plan.use, render=_binding_error)
+        content_plan = replace(plan, obligations=("content",))
+        content_view = policy.evaluate(content_plan, stage="content")
+        content_selection = content_view.require(content_plan.use, render=_binding_error)
+        tree = content_selection.entries_for(snapshot, use=content_plan.use, plan=content_plan)
 
     journal_paths = set(content)
     tree_paths = set(tree)
@@ -1668,8 +1684,11 @@ def _verify_corpus_binding(snapshot, journal_bytes, *, spec, policy=None):
             f"from the tree, starting with {_quoted(absent[0])}"
         )
 
-    _assert_tombstones(entries, removed, folded_path_index(entries, facts=policy._facts),
-                       policy._facts.full_fold)
+    if policy is None:
+        _assert_tombstones_absent_from_listing(entries, removed)
+    else:
+        _assert_tombstones(entries, removed, folded_path_index(entries, facts=policy._facts),
+                           policy._facts.full_fold)
 
     missing_required = sorted(spec.required_attested_paths - set(attested))
     if missing_required:
