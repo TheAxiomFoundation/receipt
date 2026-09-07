@@ -934,10 +934,15 @@ class TreePolicy:
         _run.completed.add("ancestors")
         return None
 
-    def select_export(self, view: ProtectedTreeView, *,
-                      render: Callable[[Finding], BaseException]) -> ProtectedSelection:
+    def select_export(self, view: ProtectedTreeView | None = None, *,
+                      render: Callable[[Finding], BaseException] | None = None) -> ProtectedSelection:
         """Certify regular exports from this subject's completed export view."""
+        if view is None:
+            # PR2 pins the unsupported no-view call, like the no-plan shape APIs.
+            raise NotImplementedError("receipt 0.7 M1 PR3 export selection requires a view")
         self._validate_view(view)
+        if render is None:
+            raise PolicyUseError("export selection requires a compatibility renderer")
         if view.plan.obligations != EXPORT_STAGES:
             raise PolicyUseError("protected view lacks export obligations")
         return view.require(view.plan.use, render=render)
