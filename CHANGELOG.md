@@ -4,6 +4,56 @@ Every entry says what changed and what an auditor can conclude from it that
 they could not before. Refusals are named as refusals: a check added here is an
 input the package used to accept, or accept for the wrong reason.
 
+## 0.7.0 (unreleased)
+
+### One protected-tree policy (M1 of #62; #64 to #71)
+
+An auditor can now conclude that the protected-tree screens every pass applies
+are one decision procedure, not five. Before, `verify.py`, `release_chain.py`,
+`append_gate.py`, `corpus.py` and `snapshot.py` each carried their own
+decisions over names, aliases, modes and ancestors (attribute matching lived in
+`snapshot.py` alone), and the twelve places where those decisions disagreed
+(D1 to D12 in the design record) were observable as differences in which pass
+refused, with which words, in what order, and with what public admission work.
+Those duplicate decisions are gone. Every pass compiles a plan, evaluates it
+through `receipt.protected_tree` at the barrier it always used, and renders
+through its own words and exception classes.
+
+- Every refusal text, phase and public work counter is the same, input for
+  input. Each census refusal is a full-string golden captured from a run; the
+  twelve disagreements are permanent raw-index fixtures asserting each site's
+  current text; the same-stage two-way swap and the D12 charge example are
+  fixtures too. Those files entered with #65 and are byte-identical through
+  #71. The 108 differential cases (two legs, zero skips) passed at the merged
+  head of every pull request from #65 on; Chronicle's byte-transparency and
+  isolation suites (52 cases, run against a wheel built from the head and
+  installed in a copy of the shim with its pin refreshed to the candidate
+  version) passed at every head from #66 on; the thesis and axiom-encode
+  signing suites, run the same way at their mains, passed at #70 and #71.
+  The commands and results are recorded on each pull request.
+- One policy is not one universal verdict. Each pass keeps its obligations,
+  its scope, its order and its renderer: a case-fold collision still refuses
+  in custody under the five pinned chain paths and their ancestors, and in
+  binding elsewhere, with each pass's own text.
+- Attribute evaluation is one fixed, versioned policy (item 2 of #62 landed
+  here): exact and ASCII-folded readings computed independently, a transform
+  under either refused, committed sources only, no repository setting as
+  input. Repeated evaluation follows the compatibility charge schedule, so
+  public work counters land where 0.6 left them: a repeated
+  `protected.txt -filter` line still reaches 28 then 56 matching steps and
+  refuses at a ceiling of 40 with the counter at 40.
+- A public `verify_corpus_binding` patched at any time governs the binding
+  pass, including a patch installed before `receipt.verify` is imported: the
+  composed command shares its evaluator with corpus only while its bound name
+  is corpus's original definition. A `TreeSnapshot` subclass selected through
+  the inherited public API binds through the shared mapping decisions and
+  never receives a policy view or a certified selection. Both contracts are
+  pinned by tests.
+- Consumers keep every old name and module path; nothing was retired. Retiring
+  the forwarding names needs a separately agreed compatibility policy.
+- Design record: `docs/design/0.7-m1-protected-tree-policy.md`, with the two
+  review rounds beside it.
+
 ## 0.6.1
 
 Two keyring corrections. Both are refusals: values 0.6.0 accepted, one of them
