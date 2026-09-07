@@ -1,9 +1,9 @@
-"""Authenticated name evidence for receipt 0.7 M1.
+"""Authenticated name and shape evidence for receipt 0.7 M1.
 
 Names, configured aliases and scoped DOS suffixes are evaluated only at the
 caller's existing barriers. The snapshot still owns object authentication and
-structural/admission charges. Mode/ancestor policy, certified export and
-attributes belong to PR3/PR4; a completed name selection cannot certify them.
+structural/admission charges. Shape stages consume admitted metadata at the
+caller's barrier; certified export and attributes remain PR3b/PR4 work.
 
 The mapping and sibling compatibility adapters confer no payload authority.
 Only TreePolicy, over an entered snapshot, can issue a ProtectedTreeView.
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from pathlib import PurePosixPath
 from types import MappingProxyType
 from weakref import WeakValueDictionary
@@ -21,6 +21,7 @@ from receipt import _names, snapshot
 
 POLICY_VERSION = "v0.6"
 NAME_STAGES = ("aliases", "names", "siblings", "suffixes")
+SHAPE_STAGES = ("ancestors", "modes")
 
 
 class PolicyUseError(RuntimeError):
@@ -62,6 +63,9 @@ class ProtectionPlan:
     obligations: tuple[str, ...] = NAME_STAGES
     listing_scope: tuple[str, ...] = ("",)
     fold_whole_alias_paths: bool = False
+    mode_roles: tuple[tuple[str, str], ...] = ()
+    ancestor_paths: tuple[str, ...] = ()
+    require_ancestors: bool = False
 
     def __post_init__(self) -> None:
         for item in fields(self):
@@ -70,9 +74,13 @@ class ProtectionPlan:
                 "selected_prefixes", "configured_alias_targets",
                 "ancestor_listing_scope", "content_roots", "content_suffixes",
                 "exact_state_paths", "exact_attested_paths", "export_prefixes",
-                "attribute_target_selectors", "obligations", "listing_scope",
+                "attribute_target_selectors", "obligations", "listing_scope", "ancestor_paths",
             }:
                 object.__setattr__(self, item.name, _paths(value))
+        roles = tuple((_paths((path,))[0], role) for path, role in self.mode_roles)
+        if any(role not in MODE_ROLES for _, role in roles):
+            raise PolicyUseError("unknown protected entry role")
+        object.__setattr__(self, "mode_roles", roles)
 
     @classmethod
     def chain_names(
@@ -124,6 +132,110 @@ class Finding:
     suffixes: tuple[str, ...] = ()
     operation: str = ""
     detail: str = ""
+    mode: str = ""
+    object_type: str = ""
+    role: str = ""
+
+
+MODE_ROLES = frozenset(("release-leaf", "state-leaf", "manifest-child", "ancestor", "export-leaf"))
+
+
+@dataclass(frozen=True)
+class ModeFact:
+    """Object/leaf classification, independent of a caller's refusal text."""
+
+    mode: str
+    object_type: str
+    shape: str
+
+    @property
+    def regular(self) -> bool:
+        return self.shape in {"regular", "executable"}
+
+    @property
+    def directory(self) -> bool:
+        return self.shape in {"tree", "empty-tree"}
+
+    def finding(self, path: str, role: str, *, position: tuple[int, ...] = ()) -> Finding | None:
+        if role not in MODE_ROLES:
+            raise PolicyUseError("unknown protected entry role")
+        if self.directory if role == "ancestor" else self.regular:
+            return None
+        kind = ("missing" if self.shape == "missing" else
+                "symlink" if self.shape == "symlink" else
+                "non-directory" if role == "ancestor" else "non-regular")
+        return Finding(kind, "modes", position, path=path,
+                       raw_path=path.encode("utf-8", "surrogateescape"),
+                       parent=path.rpartition("/")[0], name=path.rpartition("/")[2],
+                       mode=self.mode, object_type=self.object_type, role=role)
+
+
+def classify_mode(mode: str, object_type: str, *, empty: bool = False) -> ModeFact:
+    """Classify already authenticated metadata; never probe a Git object."""
+    shapes = {("100644", "blob"): "regular", ("100755", "blob"): "executable",
+              ("120000", "blob"): "symlink", ("160000", "commit"): "gitlink",
+              ("040000", "tree"): "empty-tree" if empty else "tree",
+              ("", ""): "missing"}
+    return ModeFact(mode, object_type, shapes.get((mode, object_type), "object-type"))
+
+
+def ancestor_finding(target: str, prefix: str, mode: str, object_type: str,
+                     *, position: tuple[int, ...] = ()) -> Finding | None:
+    """One reached component, also used by the reader's three walk facades.
+
+    Missing witnesses keep both the requested path and first absent component.
+    The reader decides whether absence is optional at its existing barrier.
+    """
+    fact = classify_mode(mode, object_type)
+    finding = fact.finding(prefix, "ancestor", position=position)
+    if finding is None:
+        return None
+    return replace(finding, stage="ancestors", target=target, prefix=prefix)
+
+
+@dataclass(frozen=True)
+class ShapeWork:
+    mode_classifications: int = 0
+    ancestor_steps: int = 0
+    mode_cache_entries: int = 0
+    ancestor_cache_entries: int = 0
+
+
+class _ShapeFacts:
+    def __init__(self):
+        self.modes: dict[tuple[str, str, str, bool], ModeFact] = {}
+        self.ancestors: dict[str, Finding | None] = {}
+        self.steps = 0
+
+    @property
+    def work(self) -> ShapeWork:
+        return ShapeWork(len(self.modes), self.steps, len(self.modes), len(self.ancestors))
+
+    def mode(self, path: str, entry: snapshot.GitEntry | None, *, empty: bool = False) -> ModeFact:
+        mode, kind = (entry.mode, entry.object_type) if entry is not None else ("", "")
+        return self.metadata(path, mode, kind, empty=empty)
+
+    def metadata(self, path: str, mode: str, kind: str, *, empty: bool = False) -> ModeFact:
+        key = path, mode, kind, empty
+        if key not in self.modes:
+            self.modes[key] = classify_mode(mode, kind, empty=empty)
+        return self.modes[key]
+
+    def ancestor(self, target: str, entries: Mapping[str, snapshot.GitEntry]) -> Finding | None:
+        if target not in self.ancestors:
+            result = None
+            parts = target.split("/")
+            for depth in range(1, len(parts)):
+                self.steps += 1
+                prefix = "/".join(parts[:depth])
+                entry = entries.get(prefix)
+                fact = self.mode(prefix, entry)
+                finding = fact.finding(prefix, "ancestor", position=(depth,))
+                if finding is not None:
+                    result = replace(finding, stage="ancestors", target=target, prefix=prefix)
+                    break
+            self.ancestors[target] = result
+        return self.ancestors[target]
 
 
 @dataclass(frozen=True)
@@ -413,6 +525,7 @@ class _NameRun:
         self.completed: set[str] = set()
         self.findings: list[Finding] = []
         self.paths: tuple[str, ...] | None = None
+        self.mode_facts: dict[tuple[str, str], ModeFact] = {}
 
     def evaluate(self, stage: str) -> None:
         if stage not in NAME_STAGES:
@@ -486,8 +599,10 @@ class TreePolicy:
     policy_version: str = field(kw_only=True)
     work: snapshot.SnapshotWork = field(kw_only=True)
     _facts: _NameFacts = field(default_factory=_NameFacts, init=False, repr=False, compare=False)
+    _shapes: _ShapeFacts = field(default_factory=_ShapeFacts, init=False, repr=False, compare=False)
     _entries: dict[str, snapshot.GitEntry] = field(default_factory=dict, init=False, repr=False, compare=False)
     _scopes: dict[str, str | None] = field(default_factory=dict, init=False, repr=False, compare=False)
+    _empty_roots: dict[str, bool] = field(default_factory=dict, init=False, repr=False, compare=False)
     _runs: dict[ProtectionPlan, _NameRun] = field(default_factory=dict, init=False, repr=False, compare=False)
     _views: WeakValueDictionary = field(default_factory=WeakValueDictionary, init=False, repr=False, compare=False)
     _selections: WeakValueDictionary = field(default_factory=WeakValueDictionary, init=False, repr=False, compare=False)
@@ -508,6 +623,17 @@ class TreePolicy:
     def name_work(self) -> NameWork:
         return self._facts.work
 
+    @property
+    def shape_work(self) -> ShapeWork:
+        return self._shapes.work
+
+    def observe_entries(self, entries: Iterable[snapshot.GitEntry]) -> None:
+        """Retain entries already admitted at a legacy read, with no new walk."""
+        self.snapshot._batch()
+        for entry in entries:
+            self.snapshot._require_entry(entry)
+            self._entries[entry.path] = entry
+
     def read_listing(self, prefix: str = "") -> dict[str, snapshot.GitEntry]:
         """Admit a legacy listing use, including repeated path/walk charges.
 
@@ -520,6 +646,7 @@ class TreePolicy:
         entries = listing.as_dict(include_trees=True)
         self._entries.update(entries)
         self._scopes[prefix] = listing.tree_oid
+        self._empty_roots[prefix] = not listing._node.records
         return entries
 
     def _validate_view(self, view: ProtectedTreeView) -> None:
@@ -543,7 +670,7 @@ class TreePolicy:
             self._validate_view(previous)
             if previous.plan != plan:
                 raise PolicyUseError("protected view has an incompatible plan")
-        if stage not in NAME_STAGES:
+        if stage not in (*NAME_STAGES, *SHAPE_STAGES):
             raise NotImplementedError(f"protected-tree stage {stage!r} belongs to a later migration")
         for scope in plan.listing_scope:
             if scope not in self._scopes:
@@ -552,13 +679,33 @@ class TreePolicy:
         if run is None:
             # The run owns a stable copy; unrelated later listing extensions do
             # not silently widen its obligations or mutate an already issued view.
+            exact = {path for path, _ in plan.mode_roles}
+            ancestors = {"/".join(path.split("/")[:depth]) for path in plan.ancestor_paths
+                         for depth in range(1, len(path.split("/")))}
+            # Exact mode uses (notably each base-history comparison) must not
+            # rescan the entire admitted release listing for every leaf.
             selected = {path: entry for path, entry in self._entries.items() if any(
                 not scope or path == scope or path.startswith(scope + "/")
                 for scope in plan.listing_scope
-            )}
+            )} if plan.listing_scope else {}
+            selected.update((path, self._entries[path]) for path in exact | ancestors
+                            if path in self._entries)
             run = _NameRun(MappingProxyType(selected), plan, self._facts)
             self._runs[plan] = run
-        run.evaluate(stage)
+        # The plan is the schedule: callers may stop after names, admit one
+        # state lookup/payload, then request a separate shape obligation.
+        stages = plan.obligations[:plan.obligations.index(stage) + 1] if stage in plan.obligations else (stage,)
+        for current in stages:
+            if current in run.completed or run.findings:
+                continue
+            if current in NAME_STAGES:
+                run.evaluate(current)
+            elif current == "modes":
+                self.evaluate_modes(plan, _run=run)
+            elif current == "ancestors":
+                self.evaluate_ancestors(plan, _run=run)
+            else:
+                raise NotImplementedError(f"protected-tree stage {current!r} belongs to a later migration")
         entries = MappingProxyType(dict(run.entries))
         children: dict[str, dict[str, snapshot.GitEntry]] = {p: {} for p in plan.listing_scope}
         for path, entry in entries.items():
@@ -575,6 +722,7 @@ class TreePolicy:
             listing_scopes=plan.listing_scope,
             listing_tree_ids=MappingProxyType({p: self._scopes[p] for p in plan.listing_scope}),
             fold_index=MappingProxyType({p: f for p, f in self._facts.folds.items() if isinstance(f, str)}),
+            mode_facts=MappingProxyType(dict(run.mode_facts)),
             findings=tuple(run.findings), completed=frozenset(run.completed),
             refused=frozenset(f.stage for f in run.findings),
             unevaluated=frozenset(plan.obligations) - run.completed - {f.stage for f in run.findings},
@@ -584,13 +732,61 @@ class TreePolicy:
         self._views[id(view)] = view
         return view
 
-    def evaluate_modes(self) -> None:
-        """PR3: classify regular leaves/object types at each caller's barrier."""
-        raise NotImplementedError("receipt 0.7 M1 PR3 introduces mode evaluation")
+    def evaluate_modes(self, plan: ProtectionPlan | None = None, *,
+                       previous: ProtectedTreeView | None = None,
+                       _run: _NameRun | None = None) -> ProtectedTreeView | None:
+        """Classify the plan's ordered roles using only admitted metadata."""
+        if plan is None:
+            # PR2 pinned the unsupported no-plan call in its unchanged suite.
+            raise NotImplementedError("receipt 0.7 M1 PR3 mode evaluation requires a plan")
+        if _run is None:
+            return self.evaluate(plan, stage="modes", previous=previous)
+        self.snapshot._batch()
+        if self._runs.get(plan) is not _run:
+            raise PolicyUseError("mode run does not belong to this evaluator/plan")
+        parents = {path.rpartition("/")[0] for path in _run.entries}
+        for ordinal, (path, role) in enumerate(plan.mode_roles):
+            entry = _run.entries.get(path)
+            # Only complete listings establish tree emptiness; exact entries
+            # alone establish directory shape, without an extra subtree read.
+            complete = any(not p or path == p or path.startswith(p + "/") for p in plan.listing_scope)
+            if entry is None and self._scopes.get(path) is not None:
+                # A subtree listing carries its root OID separately, including
+                # empty roots. Do not manufacture/charge a public GitEntry or
+                # confuse that authenticated directory with an absent leaf.
+                fact = self._shapes.metadata(path, "040000", "tree", empty=self._empty_roots[path])
+            else:
+                fact = self._shapes.mode(path, entry, empty=complete and path not in parents
+                                         and entry is not None and entry.mode == "040000")
+            _run.mode_facts[path, role] = fact
+            finding = fact.finding(path, role, position=(ordinal,))
+            if finding is not None:
+                _run.findings.append(finding)
+                return None
+        _run.completed.add("modes")
+        return None
 
-    def evaluate_ancestors(self) -> None:
-        """PR3: share ancestor shapes without changing the reader's physical guards."""
-        raise NotImplementedError("receipt 0.7 M1 PR3 introduces ancestor evaluation")
+    def evaluate_ancestors(self, plan: ProtectionPlan | None = None, *,
+                           previous: ProtectedTreeView | None = None,
+                           _run: _NameRun | None = None) -> ProtectedTreeView | None:
+        """Find the first wrong component without reading beyond this barrier."""
+        if plan is None:
+            raise NotImplementedError("receipt 0.7 M1 PR3 ancestor evaluation requires a plan")
+        if _run is None:
+            return self.evaluate(plan, stage="ancestors", previous=previous)
+        self.snapshot._batch()
+        if self._runs.get(plan) is not _run:
+            raise PolicyUseError("ancestor run does not belong to this evaluator/plan")
+        for ordinal, path in enumerate(plan.ancestor_paths):
+            # A leaf-only view cannot prove absent ancestors or tree emptiness.
+            if "" not in self._scopes:
+                raise PolicyUseError("ancestor evaluation requires a complete ancestor listing")
+            finding = self._shapes.ancestor(path, _run.entries)
+            if finding is not None and (finding.kind != "missing" or plan.require_ancestors):
+                _run.findings.append(replace(finding, position=(ordinal, *finding.position)))
+                return None
+        _run.completed.add("ancestors")
+        return None
 
     def select_export(self) -> None:
         """PR3: certify exports after mode-before-name selection, before writing."""
@@ -631,6 +827,8 @@ class ProtectedTreeView:
     unevaluated: frozenset[str]
     admission: tuple[tuple[str, int], ...]
     _evaluator: TreePolicy = field(repr=False, compare=False)
+    mode_facts: Mapping[tuple[str, str], ModeFact] = field(
+        default_factory=lambda: MappingProxyType({}), kw_only=True)
 
     @property
     def plan_fingerprint(self) -> str:
@@ -645,7 +843,7 @@ class ProtectedTreeView:
         self._evaluator._validate_view(self)
         if use != self.plan.use:
             raise PolicyUseError("protected view has a different purpose")
-        return min(self.findings, key=lambda f: (NAME_STAGES.index(f.stage), f.position), default=None)
+        return min(self.findings, key=lambda f: (self.plan.obligations.index(f.stage), f.position), default=None)
 
     def require(self, use: str, *, render: Callable[[Finding], BaseException]) -> ProtectedSelection:
         """Render a refusal or issue a selection bound to completed obligations.
@@ -669,10 +867,10 @@ class ProtectedTreeView:
 
 @dataclass(frozen=True)
 class ProtectedSelection:
-    """Successful name selection bound to session, purpose and completed work.
+    """Successful metadata selection bound to session, purpose and completed work.
 
-    This PR certifies names only. PR3/PR4 must complete their own obligations
-    before handing certified exports or attributed payloads to a verifier.
+    Only the recorded obligations are certified. PR3b/PR4 must complete export
+    and attribute obligations before handing their selections to a verifier.
     Closing/abandoning a snapshot invalidates subsequent selection consumption.
     """
 
@@ -684,11 +882,14 @@ class ProtectedSelection:
     completed: frozenset[str]
     _evaluator: TreePolicy = field(repr=False, compare=False)
 
-    def entries_for(self, subject: snapshot.TreeSnapshot, *, use: str) -> Mapping[str, snapshot.GitEntry]:
+    def entries_for(self, subject: snapshot.TreeSnapshot, *, use: str,
+                    plan: ProtectionPlan | None = None) -> Mapping[str, snapshot.GitEntry]:
         subject._batch()
         if (subject is not self._evaluator.snapshot or use != self.purpose
                 or self._evaluator._selections.get(id(self)) is not self):
             raise PolicyUseError("protected selection subject/purpose mismatch")
+        if plan is not None and (plan.fingerprint != self.plan_fingerprint or plan.use != use):
+            raise PolicyUseError("protected selection has an incompatible plan")
         return self.entries
 
 

@@ -2190,21 +2190,31 @@ def verify_release_history_immutable(
 ) -> tuple[str, set[str], dict[str, GitEntry]]:
     """Compare release entries in two entered, authenticated tree snapshots."""
 
+    from receipt.protected_tree import POLICY_VERSION, ProtectionPlan, TreePolicy
+
     release_root = spec.release_root_relative.as_posix()
     base_entries = base.entries(release_root).as_dict()
     candidate_entries = candidate.entries(release_root).as_dict()
+    candidate_policy = TreePolicy(candidate, policy_version=POLICY_VERSION, work=candidate.work)
+    base_policy = TreePolicy(base, policy_version=POLICY_VERSION, work=base.work)
+    candidate_policy.observe_entries(candidate_entries.values())
+    base_policy.observe_entries(base_entries.values())
+    plan = ProtectionPlan(selected_prefixes=(release_root,), listing_scope=(),
+                          obligations=("modes",), use="release-history",
+                          mode_roles=tuple((p, "release-leaf") for p in sorted(candidate_entries)))
+    modes = candidate_policy.evaluate(plan, stage="modes")
 
     # The old working-directory enumeration refused every candidate link or
     # non-regular entry before comparing base bytes. Preserve that ordering
     # over the tree's modes, without opening any blob.
-    for relative, entry in sorted(candidate_entries.items()):
-        if entry.mode == "120000":
-            raise ReleaseChainError(f"release path is a symlink: {relative}")
-        if entry.mode not in {"100644", "100755"}:
-            raise ReleaseChainError(f"release path is not regular: {relative}")
+    modes.require(plan.use, render=_history_mode_error)
 
     for relative, prior in sorted(base_entries.items()):
-        if prior.mode not in {"100644", "100755"}:
+        prior_plan = ProtectionPlan(listing_scope=(), obligations=("modes",),
+                                   use="base-history", mode_roles=((relative, "release-leaf"),))
+        prior_view = base_policy.evaluate(prior_plan, stage="modes")
+        prior_mode = prior_view.mode_facts[relative, "release-leaf"]
+        if prior_view.finding_for(prior_plan.use) is not None:
             raise ReleaseChainError(
                 f"base release entry has non-regular git mode {prior.mode}: {relative}"
             )
@@ -2214,7 +2224,7 @@ def verify_release_history_immutable(
                 f"existing release file was deleted relative to "
                 f"{base.commit}: {relative}"
             )
-        if current.mode != prior.mode:
+        if modes.mode_facts[relative, "release-leaf"].mode != prior_mode.mode:
             raise ReleaseChainError(
                 f"existing release file mode changed relative to {base.commit}: "
                 f"{relative} ({prior.mode} -> {current.mode})"
@@ -2229,6 +2239,12 @@ def verify_release_history_immutable(
         set(candidate_entries) - set(base_entries),
         base_entries,
     )
+
+
+def _history_mode_error(finding) -> ReleaseChainError:
+    if finding.kind == "symlink":
+        return ReleaseChainError(f"release path is a symlink: {finding.path}")
+    return ReleaseChainError(f"release path is not regular: {finding.path}")
 
 
 def _folded_parts(path: str) -> tuple[str, ...]:
@@ -2298,6 +2314,9 @@ def verify_base_release_chain(
     materialized nor screened, and caller anchors are not bound to the base tree.
     """
 
+    from dataclasses import replace
+    from receipt.protected_tree import POLICY_VERSION, ProtectionPlan, TreePolicy
+
     normalized = _normalized_spec(spec)
     prefixes = (
         normalized.release_root_relative,
@@ -2307,14 +2326,17 @@ def verify_base_release_chain(
     )
     if anchor_dir is None:
         prefixes += (normalized.anchor_relative,)
-    _screen_protected_tree_names(
-        base.entries("").as_dict(include_trees=True),
+    policy = TreePolicy(base, policy_version=POLICY_VERSION, work=base.work)
+    plan = ProtectionPlan.chain_names(
         prefixes,
         repertoire=normalized.name_repertoire,
         release_directories=(
             normalized.release_root_relative, normalized.manifest_relative
         ),
+        use="base-chain", anchor_origin="tree" if anchor_dir is None else "caller",
     )
+    names = policy.evaluate(plan, stage="suffixes")
+    names.require(plan.use, render=_protected_name_error)
     with tempfile.TemporaryDirectory(prefix="receipt-release-base-") as name:
         destination = pathlib.Path(name)
         with base.materialize(
@@ -2322,7 +2344,18 @@ def verify_base_release_chain(
             destination,
             repertoire=normalized.name_repertoire,
         ) as materialized:
-            base.refuse_transforming_attributes(materialized.entries.values())
+            # PR3b owns export selection, including subsumed prefixes. Consume
+            # only its actual result: a selected regular outer prefix can mask
+            # a requested descendant. Snapshot renders reached ancestors during
+            # selection, before any write; no speculative obligation may win.
+            materialized_entries = materialized.entries
+            selected = tuple(sorted(materialized_entries))
+            shape_plan = replace(plan, obligations=("ancestors", "modes"),
+                                 ancestor_paths=selected,
+                                 mode_roles=tuple((p, "export-leaf") for p in selected))
+            shapes = policy.evaluate(shape_plan, stage="modes")
+            shapes.require(shape_plan.use, render=_base_shape_error)
+            base.refuse_transforming_attributes(materialized_entries.values())
             if anchor_dir is None:
                 materialized.anchor_set_sha256(normalized)
             return verify_release_chain(
@@ -2338,6 +2371,16 @@ def verify_base_release_chain(
                 enforce_production_pins=enforce_production_pins,
                 clock_skew_seconds=clock_skew_seconds,
             )
+
+
+def _base_shape_error(finding) -> SnapshotError:
+    from receipt.snapshot import _ancestor_shape_error
+
+    if finding.stage == "ancestors":
+        return _ancestor_shape_error(finding, protected=True)
+    return SnapshotError(
+        f"base tree entry has non-regular mode {finding.mode}: {finding.path}"
+    )
 
 
 def _format_time(value: datetime) -> str:

@@ -1,15 +1,16 @@
 """Differential PR2 admission/cost probes; legacy bodies stay frozen."""
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
+from contextlib import contextmanager
 from itertools import product
 from pathlib import PurePosixPath
 
 import pytest
 
-from receipt import _names, protected_tree as policy, snapshot, append_gate
+from receipt import _names, protected_tree as policy, snapshot, append_gate, release_chain, verify
 from receipt.release_chain import _protected_name_error
-from m1_fixture import raw_repo, outcome
+from m1_fixture import raw_repo, signed_repo, outcome
 from m1_append_fixture import append_repo, GATE_SPEC
 import protected_tree_legacy as legacy
 
@@ -221,3 +222,243 @@ def test_indexed_aliases_match_legacy_order_over_many_target_combinations(append
                 if finding is not None:
                     raise _protected_name_error(finding)
             assert outcome(old) == outcome(new), (chosen, listed, append)
+
+
+@contextmanager
+def trace_reads(monkeypatch, *, old=False):
+    """Record admission attempts before the increment, including failed ones."""
+    with monkeypatch.context() as patch:
+        if old:
+            for name in ("entry", "entries", "_raw_entry_at"):
+                patch.setattr(snapshot.TreeSnapshot, name, getattr(legacy, name))
+        events, subjects = [], []
+        def wrap(name, witness):
+            original = getattr(snapshot.TreeSnapshot, name)
+            def call(subject, *args, **kwargs):
+                if all(subject is not previous for previous in subjects):
+                    subjects.append(subject)
+                events.append((name, witness(*args, **kwargs), asdict(subject.work)))
+                return original(subject, *args, **kwargs)
+            patch.setattr(snapshot.TreeSnapshot, name, call)
+        wrap("_charge_path_bytes", lambda raw: raw)
+        wrap("_charge_walk_records", lambda records, count: (len(records), count[0]))
+        wrap("entries", lambda prefix="": prefix)
+        wrap("entry", lambda path: path)
+        wrap("blob", lambda entry, **kw: entry.path)
+        wrap("_attribute_rules", lambda parts: parts)
+        original_consume = snapshot._BatchReader.consume
+        def consume(batch, oid, **kwargs):
+            if kwargs.get("role") == "blob":
+                owner = next((s for s in subjects if s._state.batch is batch), None)
+                events.append(("payload", oid, asdict(owner.work) if owner else None))
+            return original_consume(batch, oid, **kwargs)
+        patch.setattr(snapshot._BatchReader, "consume", consume)
+        yield events, subjects
+
+
+def public_result(result):
+    # Temporary materialization directories are absent from successful phase
+    # details. Compare all phases, including full failure and success wording.
+    return [(p.name, p.ok, p.detail, p.failure) for p in result.passes]
+
+
+@pytest.mark.parametrize("fault", ("clean", "alias", "state-link", "ancestor-link", "ancestor-blob",
+                                    "missing", "mode", "attributes", "history"))
+@pytest.mark.parametrize("ceiling", (80, 10000000))
+def test_composed_old_new_work_and_read_barriers(signed_repo, monkeypatch, fault, ceiling):
+    journal = str(signed_repo.chain.state_relative)
+    prefix = str(signed_repo.chain.prefix_relative)
+    parent = journal.rpartition("/")[0]
+    extras = {"clean": (), "alias": (("Releases/other", "100644"),),
+              "state-link": ((journal, "120000"),), "ancestor-link": ((parent, "120000"),),
+              "ancestor-blob": ((parent, "100644"),), "missing": (),
+              "mode": (("releases/link", "120000"),),
+              "attributes": ((".gitattributes", "100644", b"* filter=probe\n"),),
+              "history": (("releases/link", "120000"), ("Releases/other", "100644"))}[fault]
+    remove = (journal, prefix) if fault.startswith("ancestor-") else (journal,) if fault == "missing" else ()
+    commit = signed_repo.commit(extras, remove=remove)
+    monkeypatch.setattr(snapshot, "MAX_PATH_BYTES_TOTAL", ceiling)
+    results = []
+    for old in (True, False):
+        with trace_reads(monkeypatch, old=old) as (events, subjects):
+            function = legacy.run_verification if old else verify.run_verification
+            result = function(signed_repo.root, signed_repo.loaded, commit=commit,
+                              base_ref=signed_repo.base if fault == "history" else None,
+                              expect_commit=commit if fault == "history" else None)
+            results.append((public_result(result), events, [asdict(s.work) for s in subjects]))
+    assert results[0] == results[1]
+    events = results[1][1]
+    if fault in {"alias", "state-link", "ancestor-link", "ancestor-blob", "missing", "history"}:
+        assert not [event for event in events if event[0] in {"blob", "payload", "_attribute_rules"}]
+    if fault == "history":
+        assert not [event for event in events if event[:2] == ("entries", "")]
+    if fault == "mode":
+        assert not [event for event in events if event[0] == "_attribute_rules"]
+    if ceiling == 10000000:
+        print("composed", fault, "events", len(events), "work", results[1][2])
+
+
+@pytest.mark.parametrize("fault", ("clean", "mode", "ancestor", "missing", "empty", "release-root-blob"))
+@pytest.mark.parametrize("caller_anchors", (False, True))
+@pytest.mark.parametrize("ceiling", (80, 10000000))
+def test_base_chain_old_new_work(signed_repo, monkeypatch, fault, caller_anchors, ceiling):
+    state = str(signed_repo.chain.state_relative)
+    prefix = str(signed_repo.chain.prefix_relative)
+    parent = state.rpartition("/")[0]
+    extras = {"clean": (), "mode": ((state, "120000"),), "ancestor": ((parent, "120000"),),
+              "missing": (), "empty": (), "release-root-blob": (("releases", "100644"),)}[fault]
+    remove = (state, prefix) if fault == "ancestor" else (state,) if fault in {"missing", "empty"} else ()
+    if fault == "release-root-blob":
+        # The outer regular prefix subsumes manifest/anchor requests. Preserve
+        # the facade's acceptance until the directory reader owns its refusal.
+        with signed_repo.snapshot() as original:
+            remove = tuple(original.entries("releases").as_dict())
+    commit = signed_repo.commit(extras, remove=remove, empty=(state,) if fault == "empty" else ())
+    monkeypatch.setattr(snapshot, "MAX_PATH_BYTES_TOTAL", ceiling)
+    results = []
+    for old in (True, False):
+        with trace_reads(monkeypatch, old=old) as (events, subjects), signed_repo.snapshot(commit) as snap:
+            # Stop at the directory/crypto boundary: its unchanged guards are
+            # covered by PR1, and its absolute temporary paths are not stable.
+            with monkeypatch.context() as patch:
+                owner = legacy if old else release_chain
+                patch.setattr(owner, "verify_release_chain", lambda *a, **kw: "directory boundary")
+                anchor = signed_repo.root / signed_repo.chain.anchor_relative if caller_anchors else None
+                result = outcome(lambda: owner.verify_base_release_chain(signed_repo.chain, base=snap, anchor_dir=anchor))
+            results.append((result, events, asdict(snap.work)))
+    assert results[0] == results[1]
+    if fault in {"mode", "ancestor"}:
+        assert not [e for e in results[1][1] if e[0] in {"blob", "payload", "_attribute_rules"}]
+
+
+@pytest.mark.parametrize("fault", ("clean", "candidate-link", "base-link", "delete", "change-mode", "change-bytes"))
+@pytest.mark.parametrize("ceiling", (20, 100000))
+def test_history_old_new_work_without_full_listing(raw_repo, monkeypatch, fault, ceiling):
+    base = raw_repo.commit((("releases/a", "120000" if fault == "base-link" else "100644"),))
+    mode = "120000" if fault == "candidate-link" else "100755" if fault == "change-mode" else "100644"
+    candidate = raw_repo.commit(() if fault == "delete" else (("releases/a", mode,
+                               b"different" if fault == "change-bytes" else b"probe\n"),))
+    monkeypatch.setattr(snapshot, "MAX_PATH_BYTES_TOTAL", ceiling)
+    results = []
+    for old in (True, False):
+        with trace_reads(monkeypatch, old=old) as (events, subjects):
+            with raw_repo.snapshot(base) as prior, raw_repo.snapshot(candidate) as current:
+                current._link_verification_work(prior)
+                function = legacy.verify_release_history_immutable if old else release_chain.verify_release_history_immutable
+                result = outcome(lambda: function(GATE_SPEC.chain, candidate=current, base=prior))
+                results.append((result, events, asdict(current.work), asdict(prior.work)))
+    assert results[0] == results[1]
+    assert not [e for e in results[1][1] if e[0] in {"blob", "payload", "_attribute_rules"} or e[:2] == ("entries", "")]
+
+
+@pytest.mark.parametrize("fault", ("clean", "ancestor-link", "ancestor-blob", "mode", "missing"))
+@pytest.mark.parametrize("ceiling", (20, 70, 100000))
+def test_overlapping_resumed_shapes_preserve_admission(raw_repo, tmp_path, monkeypatch, fault, ceiling):
+    extras = {"clean": (("protected/nested/leaf", "100644"),),
+              "ancestor-link": (("protected", "120000"),),
+              "ancestor-blob": (("protected", "100644"),),
+              "mode": (("protected/nested/leaf", "120000"),), "missing": ()}[fault]
+    commit = raw_repo.commit(extras)
+    monkeypatch.setattr(snapshot, "MAX_PATH_BYTES_TOTAL", ceiling)
+    results = []
+    for old in (True, False):
+        with trace_reads(monkeypatch, old=old) as (events, subjects), raw_repo.snapshot(commit) as snap:
+            evaluator = policy.TreePolicy(snap, policy_version=policy.POLICY_VERSION, work=snap.work)
+            calls = []
+            def call():
+                entries = snap.entries("").as_dict(include_trees=True)
+                old_names(entries, plan())
+                if not old:
+                    evaluator.observe_entries(entries.values())
+                    # The explicit full listing above owns this legacy charge.
+                    evaluator._scopes[""] = snap.tree
+                    value = replace(plan(), obligations=("ancestors", "modes"),
+                                    ancestor_paths=("protected/nested/leaf",) * 3,
+                                    mode_roles=(("protected/nested/leaf", "state-leaf"),))
+                    first = evaluator.evaluate(value, stage="ancestors")
+                    final = evaluator.evaluate(value, stage="modes", previous=first)
+                    cost = evaluator.shape_work
+                    evaluator.evaluate(value, stage="modes", previous=final)
+                    assert evaluator.shape_work == cost
+                with snap.materialize(PREFIXES, tmp_path, repertoire="portable") as materialized:
+                    return sorted(materialized.entries)
+            for _ in range(3):
+                calls.append((outcome(call), asdict(snap.work), tuple(events)))
+            results.append(calls)
+    assert results[0] == results[1]
+    if ceiling == 100000:
+        if fault in {"clean", "missing", "ancestor-blob"}:
+            expected = {"clean": ["protected/nested/leaf"], "missing": [], "ancestor-blob": ["protected"]}[fault]
+            assert all(call[0] == {"value": expected}
+                       for call in results[1])
+        else:
+            assert all(call[0]["exception"] == "receipt.snapshot.SnapshotError" for call in results[1])
+        print("resumed", fault, "paths", [c[1]["path_bytes"] for c in results[1]],
+              "walks", [sum(e[0] == "_charge_walk_records" for e in c[2]) for c in results[1]])
+
+
+def test_pr3a_legacy_bodies_match_recorded_sha256():
+    import ast
+    import hashlib
+    import inspect
+    import textwrap
+    source = inspect.getsource(legacy)
+    nodes = {node.name: node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.FunctionDef)}
+    lines = source.splitlines(keepends=True)
+    for name, expected in legacy.PR3A_BODY_SHA256.items():
+        node = nodes[name]
+        body = textwrap.dedent("".join(lines[node.lineno - 1:node.end_lineno]))
+        assert hashlib.sha256(body.encode()).hexdigest() == expected, name
+
+
+@pytest.mark.parametrize("mode", ("100644", "100755", "120000", "160000"))
+@pytest.mark.parametrize("supplied", (False, True))
+def test_append_equality_old_new_work(append_repo, monkeypatch, mode, supplied):
+    from types import SimpleNamespace
+    path = GATE_SPEC.chain.state_relative.as_posix()
+    commit = append_repo.commit(((path, mode),))
+    results = []
+    for old in (True, False):
+        with trace_reads(monkeypatch, old=old) as (events, subjects):
+            with append_repo.snapshot() as base, append_repo.snapshot(commit) as snap:
+                candidate = append_gate._CandidateTree(
+                    snap, GATE_SPEC, path, GATE_SPEC.chain.prefix_relative.as_posix())
+                entries = snap.entries("").as_dict() if supplied else None
+                function = legacy.check_state_modes if old else append_gate.check_state_modes
+                result = outcome(lambda: function(SimpleNamespace(tree=base), candidate, entries=entries))
+                results.append((result, events, asdict(base.work), asdict(snap.work)))
+    assert results[0] == results[1]
+
+
+def test_actual_mode_and_ancestor_work_is_bounded_and_reused(raw_repo, monkeypatch):
+    paths = tuple(f"root/p{i}/leaf" for i in range(64))
+    commit = raw_repo.commit(tuple((p, "100644") for p in paths))
+    with raw_repo.snapshot(commit) as snap:
+        evaluator = policy.TreePolicy(snap, policy_version=policy.POLICY_VERSION, work=snap.work)
+        evaluator.read_listing("")
+        before = asdict(snap.work)
+        original = policy.classify_mode
+        calls = []
+        def classify(*args, **kwargs):
+            calls.append((args, kwargs))
+            return original(*args, **kwargs)
+        monkeypatch.setattr(policy, "classify_mode", classify)
+        def forbidden(*args, **kwargs):
+            pytest.fail("shape reuse performed listing or payload I/O")
+        monkeypatch.setattr(snapshot.TreeSnapshot, "entries", forbidden)
+        monkeypatch.setattr(snapshot.TreeSnapshot, "blob", forbidden)
+        monkeypatch.setattr(snapshot.TreeSnapshot, "_attribute_rules", forbidden)
+        value = policy.ProtectionPlan(obligations=("ancestors", "modes"),
+            ancestor_paths=paths * 32, mode_roles=tuple((p, "release-leaf") for p in paths) * 32)
+        early = evaluator.evaluate(value, stage="ancestors")
+        final = evaluator.evaluate(value, stage="modes", previous=early)
+        work = evaluator.shape_work
+        selected = final.require(value.use, render=_protected_name_error)
+        assert set(selected.entries_for(snap, use=value.use, plan=value)) == set(final.entries)
+        evaluator.evaluate(value, stage="modes", previous=final)
+        assert evaluator.shape_work == work
+        assert len(calls) == work.mode_classifications == work.mode_cache_entries == 129
+        assert work.ancestor_steps == 128
+        assert work.ancestor_cache_entries == 64
+        assert asdict(snap.work) == before
+        print("bounded shape work", asdict(work), "public", before)
