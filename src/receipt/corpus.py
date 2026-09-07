@@ -1617,6 +1617,13 @@ def verify_corpus_binding(
     return _verify_corpus_binding(snapshot, journal_bytes, spec=spec)
 
 
+#: The public entry point as defined here. Composition shares its candidate policy
+#: with the private implementation only while the name bound in ``receipt.verify``
+#: is still this object, so a public function patched at any time, including
+#: before ``receipt.verify`` is imported, keeps governing the binding pass.
+_VERIFY_CORPUS_BINDING_ORIGINAL = verify_corpus_binding
+
+
 def _verify_corpus_binding(snapshot, journal_bytes, *, spec, policy=None):
     """Bind with an optional custody evaluator; journal and semantic order stay local."""
     from dataclasses import replace

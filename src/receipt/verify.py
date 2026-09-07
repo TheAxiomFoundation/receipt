@@ -800,7 +800,7 @@ def run_verification(
                 )
             from receipt import corpus as corpus_module
 
-            if policy is None or verify_corpus_binding is not corpus_module.verify_corpus_binding:
+            if policy is None or verify_corpus_binding is not corpus_module._VERIFY_CORPUS_BINDING_ORIGINAL:
                 corpus = verify_corpus_binding(
                     candidate, journal_bytes, spec=verification_spec.corpus)
             else:

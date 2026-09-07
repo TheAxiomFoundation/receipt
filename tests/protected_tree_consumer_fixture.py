@@ -45,9 +45,13 @@ def consumer_leg(monkeypatch, module, *, old):
         for name, function in functions.items():
             patch.setattr(module, name, function)
         if module is corpus:
-            # Keep the imported callable and its source aligned so the real
-            # composition takes its evaluator-sharing branch in both legs.
+            # Keep the imported callable and its source aligned, and make the
+            # counted public body corpus's original for the leg, so the real
+            # composition takes its evaluator-sharing branch in both legs. The
+            # seam itself (a public patch that is not the original governs)
+            # is covered by tests/test_verify_binding_seam.py.
             patch.setattr(verify, 'verify_corpus_binding', functions['verify_corpus_binding'])
+            patch.setattr(corpus, '_VERIFY_CORPUS_BINDING_ORIGINAL', functions['verify_corpus_binding'])
             original = corpus._verify_corpus_binding
             def composed(*args, **kwargs):
                 counts['composed-binding'] += 1
