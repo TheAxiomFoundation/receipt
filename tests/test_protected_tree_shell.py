@@ -38,7 +38,7 @@ def test_tree_policy_constructor_surface():
     assert policy.TreePolicy.__annotations__["snapshot"] == "snapshot.TreeSnapshot"
 
 
-LATER_STAGE_METHODS = ("select_export", "evaluate_attributes")
+LATER_STAGE_METHODS = ("evaluate_attributes",)
 STEP_3A_IMPORTERS = {"append_gate.py", "release_chain.py", "snapshot.py", "verify.py"}
 
 
