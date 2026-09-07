@@ -798,11 +798,14 @@ def run_verification(
                     "journal bytes do not match the custody pass: "
                     f"{actual_digest} != witnessed {witnessed_digest}"
                 )
-            corpus = verify_corpus_binding(
-                candidate,
-                journal_bytes,
-                spec=verification_spec.corpus,
-            )
+            if policy is None:
+                corpus = verify_corpus_binding(
+                    candidate, journal_bytes, spec=verification_spec.corpus)
+            else:
+                from receipt.corpus import _verify_corpus_binding
+
+                corpus = _verify_corpus_binding(
+                    candidate, journal_bytes, spec=verification_spec.corpus, policy=policy)
             binding_detail = _binding_detail(corpus)
             passes.append(PassResult("binding", True, binding_detail))
 

@@ -24,6 +24,7 @@ from receipt import _names, snapshot
 POLICY_VERSION = "v0.6"
 NAME_STAGES = ("aliases", "names", "siblings", "suffixes")
 SHAPE_STAGES = ("ancestors", "modes")
+BINDING_STAGES = ("content-roots", "content")
 EXPORT_STAGES = ("ancestors", "modes", "export-names")
 
 
@@ -154,7 +155,7 @@ class Finding:
     line: int = 0
 
 
-MODE_ROLES = frozenset(("release-leaf", "state-leaf", "manifest-child", "ancestor", "export-leaf"))
+MODE_ROLES = frozenset(("release-leaf", "state-leaf", "manifest-child", "ancestor", "export-leaf", "attested-leaf"))
 
 
 @dataclass(frozen=True)
@@ -338,6 +339,8 @@ class _NameFacts:
 
     def __init__(self) -> None:
         self.folds: dict[str, str | _names.NamePolicyError] = {}
+        self.full_folds: dict[str, str] = {}
+        self.suffix_index: dict[tuple[str, tuple[str, ...]], bool] = {}
         self.counts = dict(folds=0, alias_steps=0, scope_steps=0,
                            sibling_steps=0, suffix_checks=0, alias_index_nodes=0)
 
@@ -359,6 +362,21 @@ class _NameFacts:
 
     def folded_parts(self, path: str) -> tuple[str, ...]:
         return tuple(self.fold(part) for part in path.split("/"))
+
+    def full_fold(self, path: str) -> str:
+        if path not in self.full_folds:
+            self.full_folds[path] = "/".join(self.folded_parts(path))
+        return self.full_folds[path]
+
+    def carries_suffix(self, path: str, suffixes: tuple[str, ...]) -> bool:
+        return self.full_fold(path).endswith(tuple(self.full_fold(s) for s in suffixes))
+
+    def short_suffix(self, name: str, suffixes: tuple[str, ...]) -> bool:
+        key = name, suffixes
+        if key not in self.suffix_index:
+            self.counts["suffix_checks"] += 1
+            self.suffix_index[key] = _names.short_name_carries_pinned_suffix(name, suffixes)
+        return self.suffix_index[key]
 
     def path_fold(self, path: str, *, operation: str,
                   position: tuple[int, ...]) -> tuple[str, ...]:
@@ -466,18 +484,29 @@ class _NameFacts:
         ))
 
     def names(self, paths: tuple[str, ...], plan: ProtectionPlan) -> None:
+        binding = plan.phase == "binding"
         for ordinal, path in enumerate(paths):
             name = path.rpartition("/")[2]
-            self.primitive("local-fold", lambda: self.fold(name), stage="names",
-                           position=(ordinal, 0), path=path, name=name)
-            self.primitive(
-                "component", lambda: (
-                    _names.assert_portable_name(name, f"tree entry {path!r}")
+            validate = _names.validate_component_text
+            label = f"tree entry {path!r}"
+            if binding:
+                # Retain the renderer and late primitive hook at the corpus
+                # boundary. The order and all decisions belong to this stage.
+                from receipt import corpus
+                label = f"tree entry {corpus._quoted(path)}"
+                validate = corpus.validate_component_text
+            operations = (
+                ("local-fold", lambda: self.fold(name)),
+                ("binding-portable" if binding and plan.repertoire == "portable" else "component",
+                 lambda: (_names.assert_portable_name(name, label)
                     if plan.repertoire == "portable" else
-                    _names.validate_component_text(name, repertoire=plan.repertoire,
-                                                   label=f"tree entry {path!r}")
-                ), stage="names", position=(ordinal, 1), path=path, name=name,
+                    validate(name, repertoire=plan.repertoire, label=label))),
             )
+            if binding and plan.repertoire != "portable":
+                operations = operations[::-1]
+            for step, (operation, call) in enumerate(operations):
+                self.primitive(operation, call, stage="names", position=(ordinal, step),
+                               path=path, name=name)
 
     def siblings(self, names: Iterable[bytes | str], *, repertoire: str,
                  materializing: bool, label: str) -> None:
@@ -547,9 +576,8 @@ class _NameFacts:
             if not self.in_roots(path, roots, descendants_only=True):
                 continue
             name = path.rpartition("/")[2]
-            self.counts["suffix_checks"] += 1
             if not self.fold(name).endswith(plan.content_suffixes) and (
-                _names.short_name_carries_pinned_suffix(name, plan.content_suffixes)
+                self.short_suffix(name, plan.content_suffixes)
             ):
                 raise _Refusal(Finding(
                     "short-suffix", "suffixes", (ordinal,), path=path,
@@ -559,10 +587,24 @@ class _NameFacts:
                 ))
 
 
+def index_children(entries: Mapping[str, snapshot.GitEntry]) -> dict[str, dict[str, snapshot.GitEntry]]:
+    """Index each authenticated entry's immediate parent, retaining empty trees."""
+    children: dict[str, dict[str, snapshot.GitEntry]] = {}
+    for path, entry in entries.items():
+        parent, _, name = path.rpartition("/")
+        children.setdefault(parent, {})[name] = entry
+        if entry.mode == "040000":
+            children.setdefault(path, {})
+    return children
+
+
 class _NameRun:
     def __init__(self, entries: Mapping[str, snapshot.GitEntry], plan: ProtectionPlan,
-                 facts: _NameFacts):
+                 facts: _NameFacts, shapes: _ShapeFacts | None = None):
         self.entries = entries
+        self.children = index_children(entries)
+        self.shapes = shapes or _ShapeFacts()
+        self.selected_paths: tuple[str, ...] | None = None
         self.plan = plan
         self.attribute_outcomes: dict[bytes, AttributeOutcome] = {}
         self.facts = facts
@@ -591,13 +633,97 @@ class _NameRun:
                     if current == "names":
                         self.facts.names(self.paths, self.plan)
                     elif current == "siblings":
-                        self.facts.sibling_paths(self.paths, self.plan)
+                        sibling_paths = self.paths
+                        if self.plan.phase == "binding":
+                            sibling_paths = tuple(
+                                (directory + "/" if directory else "") + name
+                                for directory in sorted({"", *(p for p, e in self.entries.items()
+                                                              if e.mode == "040000")})
+                                for name in sorted(self.children.get(directory, {})))
+                        self.facts.sibling_paths(sibling_paths, self.plan)
                     else:
                         self.facts.suffixes(self.paths, self.plan)
             except _Refusal as exc:
                 self.findings.append(exc.finding)
                 return
             self.completed.add(current)
+
+
+    def binding(self, stage: str) -> None:
+        """Select root spelling or content facts in binding's per-root order."""
+        if stage in self.completed or self.findings:
+            return
+        found: list[str] = []
+        try:
+            for root_ordinal, root in enumerate(self.plan.content_roots):
+                if stage == "content-roots":
+                    parent = ""
+                    for depth, component in enumerate(root.split("/")):
+                        for name in sorted(self.children.get(parent, {})):
+                            if name != component and self.facts.full_fold(name) == self.facts.full_fold(component):
+                                raise _Refusal(Finding("content-root-alias", stage, (root_ordinal, depth),
+                                                      name=name, target=component))
+                        exact = (parent + "/" if parent else "") + component
+                        if not self.shapes.mode(exact, self.entries.get(exact)).directory:
+                            break
+                        parent = exact
+                    continue
+                root_fact = self.shapes.mode(root, self.entries.get(root))
+                self.mode_facts[root, "ancestor"] = root_fact
+                if not root_fact.directory:
+                    raise _Refusal(Finding("content-root-missing" if root_fact.shape == "missing"
+                        else "content-root-mode", stage, (root_ordinal, 0), path=root))
+                for ordinal, path in enumerate(sorted(self.entries)):
+                    if not path.startswith(root + "/"):
+                        continue
+                    entry = self.entries[path]
+                    fact = self.shapes.mode(path, entry)
+                    position = (root_ordinal, 1, ordinal)
+                    if fact.mode == "160000":
+                        raise _Refusal(Finding("content-gitlink", stage, (*position, 0), path=path))
+                    if not self.facts.carries_suffix(path, self.plan.content_suffixes):
+                        if self.plan.repertoire == "portable" and self.facts.short_suffix(
+                            path.rpartition("/")[2], self.plan.content_suffixes):
+                            raise _Refusal(Finding("content-short-suffix", stage, (*position, 1), path=path))
+                        continue
+                    self.mode_facts[path, "attested-leaf"] = fact
+                    if not fact.regular:
+                        raise _Refusal(Finding("content-symlink" if fact.mode == "120000"
+                            else "content-mode", stage, (*position, 2), path=path,
+                            mode=fact.mode, object_type=fact.object_type))
+                    found.append(path)
+        except _Refusal as exc:
+            self.findings.append(exc.finding)
+            return
+        except _names.NamePolicyError as exc:
+            self.findings.append(Finding("name", stage, (), detail=str(exc)))
+            return
+        if stage == "content":
+            self.selected_paths = tuple(dict.fromkeys(found))
+        self.completed.add(stage)
+
+
+def evaluate_binding_mapping(entries: Mapping[str, snapshot.GitEntry], plan: ProtectionPlan,
+                             *, stage: str, by_directory=None) -> _NameRun:
+    """Legacy mapping evidence shares decisions but cannot certify payload reads."""
+    run = _NameRun(entries, plan, _NameFacts())
+    if by_directory is not None:
+        run.children = {p: dict(children) for p, children in by_directory.items()}
+    if stage in NAME_STAGES:
+        run.evaluate(stage)
+    else:
+        run.binding(stage)
+    return run
+
+
+def folded_path_index(entries: Mapping[str, snapshot.GitEntry], *,
+                      facts: _NameFacts | None = None) -> dict[str, str]:
+    """Retain the first sorted exact witness for each lazily requested fold key."""
+    facts = facts or _NameFacts()
+    folded: dict[str, str] = {}
+    for path in sorted(entries):
+        folded.setdefault(facts.full_fold(path), path)
+    return folded
 
 
 def folded_parts(path: str) -> tuple[str, ...]:
@@ -644,7 +770,7 @@ def evaluate_declarations(obligations: DeclarationObligations, *, work,
     call. Keys hold one string per declaration, never one trie node per prefix.
     """
     facts = facts or _NameFacts()
-    fold = fold or (lambda path: "/".join(facts.folded_parts(path)))
+    fold = fold or facts.full_fold
     relatives = obligations.paths
     try:
         seen: dict[str, str] = {}
@@ -1252,7 +1378,7 @@ class TreePolicy:
         kind of directory observation creates a payload-capable GitEntry.
         """
         selected: dict[str, snapshot.GitEntry] = {}
-        run = _NameRun(MappingProxyType(selected), plan, self._facts)
+        run = _NameRun(MappingProxyType(selected), plan, self._facts, self._shapes)
 
         def remember(parts, records, oid):
             path = snapshot._tree_path_decode(b"/".join(parts))
@@ -1302,6 +1428,7 @@ class TreePolicy:
                 add(self.snapshot._public_entry(parts, raw))
         # Successful exact lookups discharge ancestors at the reader's existing
         # barrier, with its missing-prefix and wrong-shape behavior unchanged.
+        run.children = index_children(selected)
         run.completed.add("ancestors")
         return run
 
@@ -1386,8 +1513,8 @@ class TreePolicy:
                  previous: ProtectedTreeView | None = None) -> ProtectedTreeView:
         """Evaluate newly required obligations at the caller's existing barrier.
 
-        Stages: names and aliases, modes and ancestors, export names, and
-        attributes. Earlier completed facts are reused. Repeated explicit
+        Stages: names and aliases, modes and ancestors, export names,
+        binding content roots and suffix-selected leaves, and attributes. Earlier completed facts are reused. Repeated explicit
         listing reads retain reader admission charges; evaluating a completed
         name, shape or export fact adds none. Attributes are the exception: a
         repeated attribute plan replays its admission under the record's D12
@@ -1403,7 +1530,7 @@ class TreePolicy:
             self._validate_view(previous)
             if previous.plan != plan:
                 raise PolicyUseError("protected view has an incompatible plan")
-        if stage not in (*NAME_STAGES, *SHAPE_STAGES, "export-names", "attributes"):
+        if stage not in (*NAME_STAGES, *SHAPE_STAGES, *BINDING_STAGES, "export-names", "attributes"):
             raise NotImplementedError(f"protected-tree stage {stage!r} belongs to a later migration")
         exporting = "export-names" in plan.obligations
         if exporting and (
@@ -1433,7 +1560,7 @@ class TreePolicy:
             )} if plan.listing_scope else {}
             selected.update((path, self._entries[path]) for path in exact | ancestors
                             if path in self._entries)
-            run = _NameRun(MappingProxyType(selected), plan, self._facts)
+            run = _NameRun(MappingProxyType(selected), plan, self._facts, self._shapes)
             self._runs[plan] = run
         # The plan is the schedule: callers may stop after names, admit one
         # state lookup/payload, then request a separate shape obligation.
@@ -1453,18 +1580,15 @@ class TreePolicy:
                 self.evaluate_ancestors(plan, _run=run)
             elif current == "export-names":
                 self._export_names(run)
+            elif current in BINDING_STAGES:
+                run.binding(current)
             else:
                 raise NotImplementedError(f"protected-tree stage {current!r} belongs to a later migration")
         return self._view(plan, run)
 
     def _view(self, plan: ProtectionPlan, run: _NameRun) -> ProtectedTreeView:
         entries = MappingProxyType(dict(run.entries))
-        children: dict[str, dict[str, snapshot.GitEntry]] = {p: {} for p in plan.listing_scope}
-        for path, entry in entries.items():
-            parent, _, name = path.rpartition("/")
-            children.setdefault(parent, {})[name] = entry
-            if entry.mode == "040000":
-                children.setdefault(path, {})
+        children = {p: {} for p in plan.listing_scope} | run.children
         view = ProtectedTreeView(
             subject=self.subject, plan=plan, policy_version=self.policy_version,
             entries=entries,
@@ -1480,7 +1604,7 @@ class TreePolicy:
             refused=frozenset(f.stage for f in run.findings),
             unevaluated=frozenset(plan.obligations) - run.completed - {f.stage for f in run.findings},
             admission=tuple((f.name, getattr(self.work, f.name)) for f in fields(self.work)),
-            _evaluator=self,
+            _evaluator=self, selected_paths=run.selected_paths,
             raw_listings=MappingProxyType(dict(run.raw_listings)),
             raw_listing_tree_ids=MappingProxyType(dict(run.tree_ids)),
         )
@@ -1680,6 +1804,8 @@ class ProtectedTreeView:
     raw_listing_tree_ids: Mapping[str, str | None] = field(
         default_factory=lambda: MappingProxyType({}), kw_only=True)
 
+    selected_paths: tuple[str, ...] | None = field(default=None, kw_only=True)
+
     @property
     def plan_fingerprint(self) -> str:
         return self.plan.fingerprint
@@ -1709,8 +1835,10 @@ class ProtectedTreeView:
             raise refusal
         if self.unevaluated or not set(self.plan.obligations) <= self.completed:
             raise PolicyUseError("protected obligations are unevaluated")
+        entries = self.entries if self.selected_paths is None else MappingProxyType(
+            {path: self.entries[path] for path in self.selected_paths})
         selection = ProtectedSelection(self.subject, use, self.plan_fingerprint,
-                                       self.policy_version, self.entries, self.completed, self._evaluator)
+                                       self.policy_version, entries, self.completed, self._evaluator)
         self._evaluator._selections[id(selection)] = selection
         return selection
 
