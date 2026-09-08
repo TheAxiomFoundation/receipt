@@ -10,10 +10,16 @@ Reviewing PR #74 at `0f47e917854fb66a7aac19891d6ed659e1b52788` in one local pass
 - Ran `git diff 44baaedf7f27219a5c65a9f65728f1c8863c2014 --stat`: 13 new files under `tests`, 8,644 insertions.
 - Located the design record and M3 tests using `git ls-files`.
 - Initial ordinary `git add PROGRESS.md` refused because `.gitignore:26` ignores the file. Added a narrow root exception to honor the explicit committed-progress requirement without force-adding; this is an audit artifact, not part of the reviewed PR.
+- Scope checks pinned to the original PR SHA show only 13 additions under `tests`; `src`, `docs`, existing M1 fixtures, goldens, and compatibility/precedence assertions are unchanged.
+- Independently extracted and hashed all 239 function spans (102 protected-tree, 118 snapshot, 19 verify), checked all 15 source-module hashes against `git show 9dc1f85:...`, and printed 24 matching sample records.
+- Verified all 19 M1 golden files byte-for-byte against the supplied main base and PR head. The local `main` ref is stale (`d542d592...`) and lacks these files; the attempted local-main check failed, so all authoritative comparisons use the supplied full base SHA.
+- Instrumented authentication: all 15 `git show` calls finish before frozen module execution. Independent source/hash mutations are rejected. The actual pytest authentication test fails during fixture setup on a tampered oracle, as required.
+- Ran `.venv/bin/pytest -q tests/test_m3_legacy.py`: 5 passed in 1.02s, including distinct-body, early-refusal, isolated-global, and identical-live-leg negative controls.
+- Reviewed all D1–D18 probe implementations and counted 761 characterization cases plus 5 oracle cases. Every stored account observation contains all 15 `SnapshotWork` fields (3,369 account observations across the matrices).
+- Measured macOS 26.6.2 arm64, APFS with case-insensitive and normalization-insensitive lookup; Python 3.14.4, Git 2.53.0, OpenSSL 3.6.3. Independently constructed raw A/a and decomposed-Unicode names under both `core.ignoreCase` settings with `core.precomposeUnicode=false`.
 
 ## Next
 
-- Independently verify scope, legacy source identity and tamper controls.
-- Compare D1–D18, admission/substitution and accounting matrices, fixture construction, and decision wording against the design and implementation.
-- Run the required offline suite; read the build report only after forming an independent view.
+- Run the required offline suite and the alternate ignoreCase M3 matrix; finish evidence/voice checks.
+- Read the build report only after forming an independent view from those executions.
 - Write command evidence and verdict to `review-full.md`, update this file, and commit the completed audit.
