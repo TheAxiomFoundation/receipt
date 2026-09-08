@@ -127,7 +127,7 @@ def compare(probe, repo, monkeypatch, *args, expected=None):
             with reached(m) as counts:
                 result = probe(m, repo, patch, *args)
             results.append(plain({"trace": result, "bodies": dict(sorted(counts.items()))}))
-    assert codes[0] is not codes[1]
+    assert codes[0] is not codes[1], "legacy/live selector bodies must be distinct"
     assert results[0] == results[1], (results[0], results[1])
     if expected is not None:
         assert results[1] == expected
