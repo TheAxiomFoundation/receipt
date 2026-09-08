@@ -2,7 +2,7 @@
 
 ## State
 
-Reviewing PR #74 at `0f47e917854fb66a7aac19891d6ed659e1b52788` in one local pass, without subagents, background tasks, installations, or network access. Final output: committed `review-full.md`; the supplied state directory is outside the writable roots. Review artifacts are separate from the frozen PR revision.
+Completed the defensive correctness and completeness audit of PR #74 at `0f47e917854fb66a7aac19891d6ed659e1b52788` in one local pass, without subagents, background tasks, installations, or network access. Verdict: **approve, no findings**. Final output: committed `review-full.md`; the supplied state directory is outside the writable roots. Review artifacts are separate from the frozen PR revision.
 
 ## Done
 
@@ -19,9 +19,11 @@ Reviewing PR #74 at `0f47e917854fb66a7aac19891d6ed659e1b52788` in one local pass
 - Measured macOS 26.6.2 arm64, APFS with case-insensitive and normalization-insensitive lookup; Python 3.14.4, Git 2.53.0, OpenSSL 3.6.3. Independently constructed raw A/a and decomposed-Unicode names under both `core.ignoreCase` settings with `core.precomposeUnicode=false`.
 - Required offline suite completed: **3,955 passed in 1053.42s (0:17:33), zero skips, exit 0**. Command: `.venv/bin/pytest -q --ignore=tests/test_ledger_equivalence.py --ignore=tests/test_append_gate_equivalence.py --ignore=tests/test_brier_witness_equivalence.py --ignore=tests/test_attest_equivalence.py` (foreground output captured with `tee /private/tmp/receipt-m3-pr1-review-suite.log` and `pipefail`). This includes all D1–D18 cases and all unchanged M1 assertions.
 - Independent view after scope, source, matrix, and full-suite checks: no blocking finding. The build report has not yet been read.
+- Alternate configuration run: `RECEIPT_M1_IGNORECASE=true .venv/bin/pytest -q` followed by the six explicit M3 test files: **766 passed in 455.71s (0:07:35), zero skips, exit 0**. The full-suite run used the fixture default `false`; live imports resolve to this worktree.
+- After both runs, read the supplied build report. Its counts, scope, source hashes, filesystem observations and substitution qualifications agree with the independent review.
+- A final expected-exception scan exposed a pre-existing D18 `NameError` in `release_chain._base_shape_error`. Independently traced both authenticated historical and live source to `release_chain.py:2398`; the freeze accurately records the production defect. This is not a PR finding, and no production fix was made.
+- Wrote `review-full.md` with scope commands, 24 hash samples, authentication/tamper evidence, D1–D18 and public-entry-point mappings, all-field accounting, host facts, suite results, decision-voice review and the required final JSON verdict.
 
 ## Next
 
-- Run the alternate ignoreCase M3 matrix; finish evidence/voice checks.
-- Read the build report only after forming an independent view from those executions.
-- Write command evidence and verdict to `review-full.md`, update this file, and commit the completed audit.
+- No audit work remains. The maintainer runs the four explicitly excluded harnesses on a networked host. D1/A7 approval and later context implementation remain outside this freeze review.
