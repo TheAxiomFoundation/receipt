@@ -55,11 +55,10 @@ def test_frozen_dependencies_cannot_follow_live_globals(repo, monkeypatch):
 
 
 def test_comparison_rejects_two_accidentally_identical_legs(repo, monkeypatch):
-    from receipt import snapshot
-    original = snapshot.TreeSnapshot.select
-    def different(cls, *args, **kwargs):
-        raise snapshot.SnapshotError("negative control: live selector replaced")
-    monkeypatch.setattr(snapshot.TreeSnapshot, "select", classmethod(different))
-    with pytest.raises(AssertionError):
+    from contextlib import nullcontext
+    import m3_fixture
+    # Reproduce an uncalled legacy seam: both nominal legs execute live code
+    # and produce equal results/counts. Only the code-identity guard can refuse.
+    monkeypatch.setattr(m3_fixture, "source_tree", lambda **kwargs: nullcontext())
+    with pytest.raises(AssertionError, match="legacy/live selector bodies must be distinct"):
         compare(_exercise, repo, monkeypatch, True)
-    assert original.__func__.__code__ is not different.__code__
