@@ -39,5 +39,5 @@ that reproduces it.
 
 ## License
 
-By contributing you agree your contributions are licensed under Apache-2.0, the
+By contributing you agree your contributions are licensed under MIT, the
 license of this repository.
