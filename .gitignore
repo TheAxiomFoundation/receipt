@@ -24,3 +24,6 @@ paper/index.log
 
 # lane progress notes live in the worktree, never in the tree
 PROGRESS.md
+
+# This independent review requires committed progress notes.
+!/PROGRESS.md
