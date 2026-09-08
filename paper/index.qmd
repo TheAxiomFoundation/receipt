@@ -477,7 +477,7 @@ manifests, tokens and signatures.
 
 # Availability
 
-`receipt` is on PyPI (Apache-2.0), with source, port diffs, review
+`receipt` is on PyPI (MIT), with source, port diffs, review
 records and differential harnesses at
 [github.com/TheAxiomFoundation/receipt](https://github.com/TheAxiomFoundation/receipt),
 the package page at [axiom.org/receipt](https://axiom.org/receipt),
