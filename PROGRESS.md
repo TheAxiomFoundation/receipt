@@ -17,9 +17,11 @@ Reviewing PR #74 at `0f47e917854fb66a7aac19891d6ed659e1b52788` in one local pass
 - Ran `.venv/bin/pytest -q tests/test_m3_legacy.py`: 5 passed in 1.02s, including distinct-body, early-refusal, isolated-global, and identical-live-leg negative controls.
 - Reviewed all D1–D18 probe implementations and counted 761 characterization cases plus 5 oracle cases. Every stored account observation contains all 15 `SnapshotWork` fields (3,369 account observations across the matrices).
 - Measured macOS 26.6.2 arm64, APFS with case-insensitive and normalization-insensitive lookup; Python 3.14.4, Git 2.53.0, OpenSSL 3.6.3. Independently constructed raw A/a and decomposed-Unicode names under both `core.ignoreCase` settings with `core.precomposeUnicode=false`.
+- Required offline suite completed: **3,955 passed in 1053.42s (0:17:33), zero skips, exit 0**. Command: `.venv/bin/pytest -q --ignore=tests/test_ledger_equivalence.py --ignore=tests/test_append_gate_equivalence.py --ignore=tests/test_brier_witness_equivalence.py --ignore=tests/test_attest_equivalence.py` (foreground output captured with `tee /private/tmp/receipt-m3-pr1-review-suite.log` and `pipefail`). This includes all D1–D18 cases and all unchanged M1 assertions.
+- Independent view after scope, source, matrix, and full-suite checks: no blocking finding. The build report has not yet been read.
 
 ## Next
 
-- Run the required offline suite and the alternate ignoreCase M3 matrix; finish evidence/voice checks.
+- Run the alternate ignoreCase M3 matrix; finish evidence/voice checks.
 - Read the build report only after forming an independent view from those executions.
 - Write command evidence and verdict to `review-full.md`, update this file, and commit the completed audit.
