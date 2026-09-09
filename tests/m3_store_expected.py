@@ -370,15 +370,17 @@ CASE_TRACE = {
 
 #: Per-host overlays for the host-dependent packed-tamper cases (sys.platform).
 #: None means no observation has been recorded for that host yet; the test then
-#: fails and prints the observed trace so it can be recorded here.
+#: fails and prints the observed trace so it can be recorded here. The linux
+#: entries were recorded from the GitHub Actions ubuntu runner (run 34415583271,
+#: identical on Python 3.11, 3.12 and 3.13).
 HOST_CASE_TRACE = {
     "darwin": {},
     "linux": {
-        'D7-packed-tamper-1-payload-01': None,
-        'D7-packed-tamper-1-payload-10': None,
-        'D7-packed-tamper-2-payload-01': None,
-        'D7-packed-tamper-2-payload-10': None,
-        'D7-packed-tamper-3-payload-01': None,
-        'D7-packed-tamper-3-payload-10': None,
+        'D7-packed-tamper-1-payload-01': 26,
+        'D7-packed-tamper-1-payload-10': 27,
+        'D7-packed-tamper-2-payload-01': 30,
+        'D7-packed-tamper-2-payload-10': 31,
+        'D7-packed-tamper-3-payload-01': 32,
+        'D7-packed-tamper-3-payload-10': 33,
     },
 }
