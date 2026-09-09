@@ -154,6 +154,18 @@ CASES = {
 
 @pytest.mark.parametrize("case", CASES)
 def test_independent_store_availability(repo, monkeypatch, case):
-    from m3_store_expected import CASE_TRACE, TRACES
+    import json
+    import sys
+
+    from m3_store_expected import CASE_TRACE, HOST_CASE_TRACE, TRACES
     probe, *args = CASES[case]
-    compare(probe, repo, monkeypatch, *args, expected=TRACES[CASE_TRACE[case]])
+    overlay = HOST_CASE_TRACE.get(sys.platform, {})
+    index = overlay[case] if case in overlay else CASE_TRACE[case]
+    if index is None:
+        # Host-dependent case with no recorded observation for this platform:
+        # the legacy and live legs are still compared; the observed trace is
+        # printed so it can be recorded in m3_store_expected.HOST_CASE_TRACE.
+        observed = compare(probe, repo, monkeypatch, *args)
+        pytest.fail(f"unrecorded host observation for {case} on {sys.platform}: "
+                    + json.dumps(observed, sort_keys=True))
+    compare(probe, repo, monkeypatch, *args, expected=TRACES[index])

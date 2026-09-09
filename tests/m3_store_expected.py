@@ -2,6 +2,14 @@
 
 Equal complete observations are interned solely to avoid duplicating fixtures.
 Every case, including both read orders, remains explicitly mapped below.
+
+CASE_TRACE holds the observations recorded on the build host (macOS 26.6.2,
+case-insensitive APFS, Git 2.53.0). Git's handling of a tampered pack after a
+reader has warmed it differs by platform, so HOST_CASE_TRACE overlays per-host
+observations for those cases: an index into TRACES once recorded, None while
+unrecorded. The invariant every host asserts is that the legacy and live legs
+agree; the recorded trace pins what that agreed behaviour is on each host
+(M3 record, risk 9).
 """
 
 TRACES = [
@@ -358,4 +366,19 @@ CASE_TRACE = {
     'D7-duplicate-remove-all-3-payload-10': 45,
     'D7-duplicate-remove-all-3-selection-01': 46,
     'D7-duplicate-remove-all-3-selection-10': 47,
+}
+
+#: Per-host overlays for the host-dependent packed-tamper cases (sys.platform).
+#: None means no observation has been recorded for that host yet; the test then
+#: fails and prints the observed trace so it can be recorded here.
+HOST_CASE_TRACE = {
+    "darwin": {},
+    "linux": {
+        'D7-packed-tamper-1-payload-01': None,
+        'D7-packed-tamper-1-payload-10': None,
+        'D7-packed-tamper-2-payload-01': None,
+        'D7-packed-tamper-2-payload-10': None,
+        'D7-packed-tamper-3-payload-01': None,
+        'D7-packed-tamper-3-payload-10': None,
+    },
 }
