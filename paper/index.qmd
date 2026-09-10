@@ -9,9 +9,10 @@ date-format: iso
 kicker: working paper
 revision: "14"
 status: |
-  Working paper. It describes `receipt` 0.6.0 on PyPI; 0.6.1
-  (2026-09-06) adds two refusals the review below surfaced and changes
-  nothing else, as noted where they apply. Code:
+  Working paper. It describes `receipt` 0.6.1 on PyPI (2026-09-06).
+  Its source differs from 0.6.0 (2026-09-05) in the signing module and the
+  version string alone: two refusals the review below surfaced, noted
+  where they apply. Code:
   [github.com/TheAxiomFoundation/receipt](https://github.com/TheAxiomFoundation/receipt).
   API reference: [axiom.org/receipt/api](https://axiom.org/receipt/api/).
 abstract: |
@@ -263,7 +264,7 @@ requires an expected commit. Pinned, it names `--commit`,
 | regenerated | every manifest, signature and token rebuilt with the original key and authorities; content and journal unchanged | PASS | FAIL, history: `existing release file was deleted relative to` the base, naming the genesis token |
 | dropped gate | published from its own genesis without ever declaring `rulespec/compile` | FAIL, declaration: `the witnessed journal does not declare a gate the pinned spec requires: …` | FAIL, declaration |
 
-: The six scenarios and their verdicts under receipt 0.6.0, from the package's own fixture. The base-only runs, the ones this table omits, refuse as usage errors before any pass runs. {#tbl-scenarios}
+: The six scenarios and their verdicts under receipt 0.6.1, from the package's own fixture. The base-only runs, the ones this table omits, refuse as usage errors before any pass runs. {#tbl-scenarios}
 
 The hand edit and the re-encode
 leave the same rate in the same file, and only the journal tells them
@@ -288,7 +289,7 @@ verifier as an oracle on real fixtures. The
 package must reproduce the oracle's verdicts, accepted and refused
 alike, to the byte after two disclosed normalizations: surrounding
 whitespace, and the volatile identifiers OpenSSL prints on error
-lines. At v0.6.0 the four harnesses collect 108 cases: 43
+lines. At v0.6.1 the four harnesses collect 108 cases: 43
 release-chain, 28 append-gate, 17 witness and 20 attestation.
  Of those, 86 compare the package's verdict against the
 oracle's; the other 22 authenticate the oracle sources, exercise the
@@ -302,21 +303,21 @@ the directory oracle refuses while the package accepts the unchanged
 commit. The
 signing module's retired-key semantics match the release-key rotation
 procedure the statute corpus repository adopted [@axiom-corpus-431];
-they entered with direct tests and no oracle. The package's remaining 1,466 tests
+they entered with direct tests and no oracle. The package's remaining 1,471 tests
 pass at the tag.
 
 # Adoption {#sec-adoption}
 
-On 2026-09-05, two repositories pin `receipt==0.6.0` on their default
+On 2026-09-10, two repositories pin `receipt==0.6.1` on their default
 branch and call it from their verification paths, a third pins it on a branch that has not reached its default branch,
 and a fourth shows its output (@tbl-adoption).
 
 | Repository | Pin | Surface called |
 |---|---|---|
-| TheAxiomFoundation/axiom-encode | `receipt==0.6.0` | threshold keyring check on apply manifests, through `receipt.sign` |
-| ThesisInstitute/thesis | `receipt==0.6.0` (custody extra) | signature primitives in the snapshot signer and the chain verifier; producer signing armed |
-| PolicyEngine/chronicle, branch `codex/thesis-ledger-facts` | `receipt==0.6.0` | release-chain and append-gate shims over `receipt.release_chain` and `receipt.append_gate`, whose shim headers require a fresh byte-equivalence proof against pinned legacy oracles before each receipt upgrade |
-| TheAxiomFoundation/axiom.org | none in a dependency manifest; the capture recipe installs 0.6.0 | the receipt page shows eighteen fixture runs, byte-identical to the maintainer's regeneration at v0.6.0 after masking the run-minted object ids, digests, times and temporary paths |
+| TheAxiomFoundation/axiom-encode | `receipt==0.6.1` | threshold keyring check on apply manifests, through `receipt.sign` |
+| ThesisInstitute/thesis | `receipt==0.6.1` (custody extra) | signature primitives in the snapshot signer and the chain verifier; producer signing armed |
+| PolicyEngine/chronicle, branch `codex/thesis-ledger-facts` | `receipt==0.6.1` | release-chain and append-gate shims over `receipt.release_chain` and `receipt.append_gate`, whose shim headers require a fresh byte-equivalence proof against pinned legacy oracles before each receipt upgrade |
+| TheAxiomFoundation/axiom.org | none in a dependency manifest; the capture recipe installs 0.6.1 | the receipt page shows eighteen fixture runs, byte-identical to the maintainer's regeneration at v0.6.1 after masking the run-minted object ids, digests, times and temporary paths |
 
 : Adoption at one date. {#tbl-adoption}
 
