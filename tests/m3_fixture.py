@@ -4,6 +4,7 @@ from collections import Counter
 from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
 import hashlib
+import inspect
 from pathlib import Path
 import sys
 
@@ -89,6 +90,13 @@ def reached(m):
                 continue
             body = (descriptor.__func__ if isinstance(descriptor, (classmethod, staticmethod))
                     else descriptor.fget if isinstance(descriptor, property) else descriptor)
+            if inspect.isgeneratorfunction(body) or inspect.isasyncgenfunction(body):
+                # Generator frames report call events per resumption in a way
+                # that differs between interpreter versions (3.12 counted one
+                # fewer than 3.11, 3.13 and 3.14 on the D6 cases); their entry
+                # counts are interpreter facts, not receipt bodies. The listing
+                # walks are still observed through the reader's public counters.
+                continue
             if hasattr(body, "__code__"):
                 selected[body.__code__] = f"{name}.{method}"
     for module, names in (
