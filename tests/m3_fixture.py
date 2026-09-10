@@ -129,6 +129,32 @@ def compare(probe, repo, monkeypatch, *args, expected=None):
             results.append(plain({"trace": result, "bodies": dict(sorted(counts.items()))}))
     assert codes[0] is not codes[1], "legacy/live selector bodies must be distinct"
     assert results[0] == results[1], (results[0], results[1])
-    if expected is not None:
-        assert results[1] == expected
+    if expected is not None and results[1] != expected:
+        # Print the differing leaves, not the whole structures: CI logs truncate
+        # a raw dict diff, which hid the host-dependent D7 traces once already.
+        raise AssertionError("observed trace differs from the recorded one: "
+                             + json.dumps(_leaf_differences(results[1], expected), sort_keys=True))
     return results[1]
+
+
+def _leaf_differences(observed, expected, path="$"):
+    """Leaves where two plain structures differ, keyed by a JSON-ish path."""
+    if isinstance(observed, dict) and isinstance(expected, dict):
+        out = {}
+        for key in sorted(set(observed) | set(expected), key=str):
+            if key not in observed or key not in expected:
+                out[f"{path}.{key}"] = {"observed": observed.get(key, "<absent>"),
+                                        "expected": expected.get(key, "<absent>")}
+            else:
+                out.update(_leaf_differences(observed[key], expected[key], f"{path}.{key}"))
+        return out
+    if isinstance(observed, list) and isinstance(expected, list):
+        out = {}
+        for index in range(max(len(observed), len(expected))):
+            if index >= len(observed) or index >= len(expected):
+                out[f"{path}[{index}]"] = {"observed": observed[index] if index < len(observed) else "<absent>",
+                                           "expected": expected[index] if index < len(expected) else "<absent>"}
+            else:
+                out.update(_leaf_differences(observed[index], expected[index], f"{path}[{index}]"))
+        return out
+    return {} if observed == expected else {path: {"observed": observed, "expected": expected}}
