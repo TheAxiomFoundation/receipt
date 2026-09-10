@@ -1,4 +1,5 @@
 """Synchronous raw-index probes and exact reached-body observations for M3."""
+import json
 from collections import Counter
 from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
