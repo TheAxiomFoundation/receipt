@@ -82,6 +82,11 @@ def reached(m):
         if cls is None:
             continue
         for method, descriptor in vars(cls).items():
+            if method == "__replace__":
+                # Synthesized by dataclasses on Python 3.13 and later only; it is
+                # not a receipt body, and counting it made the freeze depend on
+                # the interpreter version (absent on 3.11 and 3.12).
+                continue
             body = (descriptor.__func__ if isinstance(descriptor, (classmethod, staticmethod))
                     else descriptor.fget if isinstance(descriptor, property) else descriptor)
             if hasattr(body, "__code__"):
