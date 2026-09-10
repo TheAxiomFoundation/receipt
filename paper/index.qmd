@@ -4,12 +4,14 @@ author:
   - name: Max Ghenis
     affiliations:
       - name: Axiom Foundation
-date: 2026-09-05
+date: 2026-09-10
 date-format: iso
 kicker: working paper
-revision: "13"
+revision: "14"
 status: |
-  Working paper. It describes `receipt` 0.6.0 on PyPI. Code:
+  Working paper. It describes `receipt` 0.6.0 on PyPI; 0.6.1
+  (2026-09-06) adds two refusals the review below surfaced and changes
+  nothing else, as noted where they apply. Code:
   [github.com/TheAxiomFoundation/receipt](https://github.com/TheAxiomFoundation/receipt).
   API reference: [axiom.org/receipt/api](https://axiom.org/receipt/api/).
 abstract: |
@@ -177,8 +179,10 @@ a fingerprint that is not a digest, an empty authority set, or a
 malformed release path refuses before any verification runs. The producer-key and append specifications carry no validator, and
 the key specification checks the scheme label alone. The keyring specification checks a nonempty key set,
 distinct identifiers and fingerprints, and a threshold between one and
-the key count, which a NaN threshold passes. Nothing downstream closes that gap: the threshold check compares
-the satisfied count against the threshold and returns. The defaults that exist are mechanics, not trust. The candidate is
+the key count, which a NaN threshold passed in 0.6.0, and nothing downstream
+closed that gap: the threshold check compared the satisfied count against
+the threshold and returned. 0.6.1 refuses any
+threshold that is not an integer at construction. The defaults that exist are mechanics, not trust. The candidate is
 `HEAD` unless named, names are held to the portable repertoire, and a
 receipt may precede its manifest's recorded creation time by at most
 300 seconds.
@@ -190,7 +194,8 @@ threshold call says whether retired keys may vouch: excluded, any
 retired key or signature presented refuses outright; allowed, they count
 toward the same threshold. The
 any-generation call, for a threshold of one, tries the current keys and
-then the retired ones. A malformed or mispinned public key is fatal in either call. In the threshold call, a missing signature or a missing
+then the retired ones; 0.6.1 lets the caller exclude the retired ones,
+as the threshold call already could. A malformed or mispinned public key is fatal in either call. In the threshold call, a missing signature or a missing
 public key is reported as absent, and a malformed signature whose key
 is present as failed; neither votes, so the check still passes when
 enough other keys satisfy the threshold. The
