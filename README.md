@@ -141,4 +141,4 @@ Releases through 0.1.2 shipped as `vidimus`; those remain on PyPI under the old 
 
 ## License
 
-Apache-2.0.
+MIT.

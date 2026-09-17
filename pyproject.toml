@@ -8,7 +8,7 @@ version = "0.6.1"
 description = "Verifiable custody of agent-produced records: chained manifests, RFC 3161 witnesses, pinned Ed25519 signatures, workflow attestation, closed-world corpus binding — one offline verification command"
 readme = "README.md"
 requires-python = ">=3.11"
-license = "Apache-2.0"
+license = "MIT"
 authors = [{ name = "The Axiom Foundation" }]
 classifiers = [
     "Development Status :: 1 - Planning",
