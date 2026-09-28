@@ -26,6 +26,7 @@ import hashlib
 import os
 import pathlib
 import re
+import stat
 import subprocess
 import tempfile
 from collections.abc import Mapping
@@ -252,14 +253,58 @@ def _verify_producer_signature_with_openssl(
 def read_producer_public_key(
     anchor_dir: pathlib.Path, spec: ProducerKeySpec
 ) -> bytes:
-    """Read the configured producer key after the upstream regular-file checks."""
+    """Read the configured producer key from inside ``anchor_dir``.
 
-    public_key_path = anchor_dir / spec.public_key_filename
-    if public_key_path.is_symlink() or not public_key_path.is_file():
-        raise SignError(
-            f"missing or non-regular producer public key: {public_key_path}"
-        )
-    return public_key_path.read_bytes()
+    The filename is a relative path of ordinary components, walked from
+    ``anchor_dir`` one directory descriptor at a time without following a
+    link, and the leaf is opened once with ``O_NOFOLLOW`` and must be a
+    regular file. The upstream checks this helper kept looked at the final
+    component only, so it followed a symlinked parent, ``..`` and an
+    absolute filename out of ``anchor_dir``, and let ``PermissionError``
+    escape (0.6.2 review, L7 finding 9). Every refusal is a SignError.
+    """
+
+    filename = spec.public_key_filename
+    public_key_path = anchor_dir / filename
+    missing = f"missing or non-regular producer public key: {public_key_path}"
+    if type(filename) is not str or "\0" in filename:
+        raise SignError(missing)
+    # Split the spelling itself: PurePosixPath drops "." and folds "//".
+    parts = tuple(filename.split("/"))
+    if any(part in {"", ".", ".."} for part in parts) or not getattr(
+        os, "O_NOFOLLOW", 0
+    ):
+        raise SignError(missing)
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        directory = os.open(anchor_dir, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for part in parts[:-1]:
+                child = os.open(part, directory_flags, dir_fd=directory)
+                os.close(directory)
+                directory = child
+            leaf = os.open(
+                parts[-1],
+                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=directory,
+            )
+        finally:
+            os.close(directory)
+    except PermissionError as exc:
+        raise SignError(f"cannot read producer public key: {public_key_path}") from exc
+    except OSError as exc:
+        raise SignError(missing) from exc
+    try:
+        if not stat.S_ISREG(os.fstat(leaf).st_mode):
+            raise SignError(missing)
+        chunks: list[bytes] = []
+        while chunk := os.read(leaf, 1 << 16):
+            chunks.append(chunk)
+    except OSError as exc:
+        raise SignError(f"cannot read producer public key: {public_key_path}") from exc
+    finally:
+        os.close(leaf)
+    return b"".join(chunks)
 
 
 def verify_signature_bytes(
