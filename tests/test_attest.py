@@ -640,3 +640,76 @@ def test_verify_commit_old_failure_and_unparseable_success_messages(
         f"{COMMIT}: no valid attestation for its records push subject (no detail)"
     )
     assert verify_commit(pathlib.Path("/repo"), COMMIT, spec=_spec()) == "<verified>"
+
+
+# --- 0.6.2 review, L6 finding 14: the logged identity is the enforced one
+
+
+def _accepting_gh(monkeypatch: pytest.MonkeyPatch, stdout: str) -> None:
+    monkeypatch.setattr(
+        attest_module, "commit_age_seconds", lambda _root, _commit: 10**9
+    )
+    monkeypatch.setattr(
+        attest_module.subprocess,
+        "run",
+        lambda args, **_kwargs: subprocess.CompletedProcess(
+            args, 0, stdout=stdout, stderr=""
+        ),
+    )
+
+
+def test_verify_commit_returns_the_identity_gh_enforced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In a reusable-workflow run the certificate names the called workflow
+    (the SAN gh matched) and the caller (``buildConfigURI``). The smallest
+    identity-shaped string won, so the log could name the caller, a workflow
+    the allowlist excludes."""
+
+    enforced = (
+        "https://github.com/MaxGhenis/brier/.github/workflows/"
+        "roll-docket.yml@refs/heads/main"
+    )
+    caller = (
+        "https://github.com/MaxGhenis/brier/.github/workflows/"
+        "a-unlisted-caller.yml@refs/heads/feature"
+    )
+    payload = [
+        {
+            "verificationResult": {
+                "signature": {
+                    "certificate": {
+                        "subjectAlternativeName": enforced,
+                        "buildConfigURI": caller,
+                    }
+                }
+            }
+        }
+    ]
+    _accepting_gh(monkeypatch, json.dumps(payload))
+    assert verify_commit(pathlib.Path("/repo"), COMMIT, spec=_spec()) == (
+        enforced.removeprefix("https://")
+    )
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        json.dumps([{"verificationResult": {"signature": None}}]),
+        json.dumps([{"verificationResult": {"signature": "text"}}]),
+        json.dumps([{"verificationResult": {"signature": ["list"]}}]),
+        "[" * 100_000 + "]" * 100_000,
+        "not json",
+        "",
+    ],
+    ids=["signature-null", "signature-string", "signature-list", "deep", "text", "empty"],
+)
+def test_verify_commit_reads_malformed_gh_output_as_no_identity(
+    monkeypatch: pytest.MonkeyPatch, stdout: str
+) -> None:
+    """Acceptance is gh's exit status alone; its stdout is only for the log.
+    A ``null`` or string ``signature`` raised AttributeError, and nesting past
+    the decoder's stack raised RecursionError, after gh had accepted."""
+
+    _accepting_gh(monkeypatch, stdout)
+    assert verify_commit(pathlib.Path("/repo"), COMMIT, spec=_spec()) == "<verified>"
