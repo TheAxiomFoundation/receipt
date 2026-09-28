@@ -35,8 +35,12 @@ receipt verify --spec path/to/spec.py --commit HEAD
 The command selects a commit and prints its full commit and tree OIDs. The
 binding pass compares the witnessed journal with that tree's raw blob bytes;
 changes to the working tree or index do not change the selected subject.
-`--root` names the repository's top level. A history comparison also needs the
-base commit in that repository: `--base-ref REF` requires `--expect-commit OID`.
+`--root` names the repository's top level. Without it, the top level is the
+nearest directory above the spec, as named, that holds `.git`; the command
+refuses when a symlink lies on that walk, the top level included, since a link
+committed in the checkout could point it at another repository, and asks for
+`--root`. A history comparison also needs the base commit in that repository:
+`--base-ref REF` requires `--expect-commit OID`.
 
 The auditor's out-of-band pins are `--expect-spec-sha256`, `--expect-commit`,
 `--expect-tree`, and `--expect-anchor-set`. The spec digest is checked before
