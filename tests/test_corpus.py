@@ -848,6 +848,90 @@ def test_refuses_a_content_symlink(tmp_path: pathlib.Path) -> None:
         )
 
 
+@pytest.mark.parametrize("name_repertoire", ["portable", "posix-bytes"])
+@pytest.mark.parametrize(
+    ("link", "target"),
+    [
+        # A directory link: a checkout presents staging/*.yaml under the root.
+        (b"rules/ext", b"../staging"),
+        # A link to a content file under a name without the pinned suffix.
+        (b"rules/tax/rate-link", b"rate.yaml"),
+        # A link to a file outside the repository.
+        (b"rules/outside", b"../../outside.yaml"),
+    ],
+)
+def test_refuses_a_symlink_without_a_pinned_suffix_under_a_content_root(
+    tmp_path: pathlib.Path,
+    name_repertoire: str,
+    link: bytes,
+    target: bytes,
+) -> None:
+    """The closed world counts files a checkout presents, not only rows."""
+
+    write_tree(tmp_path)
+    (tmp_path / "staging").mkdir()
+    (tmp_path / "staging/unbound.yaml").write_text("name: rate\nvalue: 0.99\n")
+    _commit_worktree(tmp_path)
+    oid = _commit_index_updates(
+        tmp_path, [("120000", _hash_blob(tmp_path, target), link)]
+    )
+
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(
+            tmp_path,
+            oid,
+            render_journal(journal_rows()),
+            spec=corpus_spec(name_repertoire=name_repertoire),
+        )
+    assert str(caught.value) == (
+        f"content root contains a symlink: '{link.decode('ascii')}'"
+    )
+
+
+def test_refuses_a_symlink_that_keeps_a_tombstoned_path_readable(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A removed row asserts the path no longer survives in any spelling."""
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+    legacy = "rules/legacy/rate.yaml"
+    for state in ("present", "removed"):
+        rows.append(
+            {
+                "schemaVersion": JOURNAL_SCHEMA,
+                "entryIndex": len(rows),
+                "kind": "content",
+                "path": legacy,
+                "sha256": sha256_text(CONTENT["rules/tax/rate.yaml"]),
+                "state": state,
+            }
+        )
+    _commit_worktree(tmp_path)
+    oid = _commit_index_updates(
+        tmp_path, [("120000", _hash_blob(tmp_path, b"tax"), b"rules/legacy")]
+    )
+
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(tmp_path, oid, render_journal(rows), spec=corpus_spec())
+    assert str(caught.value) == "content root contains a symlink: 'rules/legacy'"
+
+
+def test_a_symlink_outside_every_content_root_still_verifies(
+    tmp_path: pathlib.Path,
+) -> None:
+    write_tree(tmp_path)
+    _commit_worktree(tmp_path)
+    oid = _commit_index_updates(
+        tmp_path, [("120000", _hash_blob(tmp_path, b"../rules"), b"misc/rules-link")]
+    )
+
+    verification = _verify_commit(
+        tmp_path, oid, render_journal(journal_rows()), spec=corpus_spec()
+    )
+    assert {entry.path for entry in verification.content} == set(CONTENT)
+
+
 def test_refuses_control_characters_in_gate_evidence(tmp_path: pathlib.Path) -> None:
     """Regression: evidence strings are rendered to a terminal, so a producer
     could embed CR/ESC and redraw the verdict line into a false PASS."""
@@ -3231,7 +3315,7 @@ def test_short_name_suffix_screen_covers_every_tree_entry_kind_in_portable(
         name_repertoire=name_repertoire,
     )
 
-    if name_repertoire == "posix-bytes":
+    if name_repertoire == "posix-bytes" and shape == "directory":
         verification = _verify_commit(
             tmp_path,
             oid,
@@ -3247,10 +3331,14 @@ def test_short_name_suffix_screen_covers_every_tree_entry_kind_in_portable(
                 render_journal(journal_rows()),
                 spec=spec,
             )
-        assert str(caught.value) == (
-            "content root contains a file whose short-name alias would carry a "
-            f"pinned suffix: {path!r}"
-        )
+        if name_repertoire == "posix-bytes":
+            # No 8.3 screen here, but no symlink under a content root either.
+            assert str(caught.value) == f"content root contains a symlink: {path!r}"
+        else:
+            assert str(caught.value) == (
+                "content root contains a file whose short-name alias would carry a "
+                f"pinned suffix: {path!r}"
+            )
 
 
 def _refuses_short_name_alias(tmp_path: pathlib.Path, name: str) -> None:

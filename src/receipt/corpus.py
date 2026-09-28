@@ -1628,6 +1628,15 @@ def _content_entries_from_listing(
                         "would carry a pinned suffix: "
                         f"{_quoted(relative)}"
                     )
+                if entry.mode == "120000":
+                    # A link without a pinned suffix is no content row, but a
+                    # checkout resolves it: to a directory, it presents files
+                    # under the root that no row binds, and it keeps a
+                    # tombstoned path readable. The sweep cannot call the
+                    # root closed while one is present.
+                    raise CorpusError(
+                        f"content root contains a symlink: {_quoted(relative)}"
+                    )
                 continue
 
             if entry.mode == "120000":
