@@ -72,6 +72,15 @@ JSON nested more than 128 deep is refused, including JSON 0.6.1 accepted.
   now the existing `TSA trust configuration is not canonical JSON: <path>`.
   The bundle checks keep their order, so apart from depth a replaced bundle
   refused before gets the same refusal.
+- A commit whose `tree` or `parent` header has continuation lines is refused
+  at the first one. `receipt.snapshot` rejoined every continuation into the
+  header's value before refusing it, copying the value once per line, so a
+  commit of one-byte continuations near the 64 MiB object budget, about 65 KB
+  as a loose object, kept `select()` or `assert_ancestor()` busy for about
+  three hours of CPU before the refusal. No value holding a newline is an
+  object name, so the verdict and the text
+  (`commit <oid> is not a canonical commit object`) are what they always
+  were; a differential against the 0.6.1 parser checks this.
 
 ## 0.6.2
 
