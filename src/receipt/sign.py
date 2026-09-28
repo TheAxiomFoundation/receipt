@@ -7,13 +7,15 @@ material nor reads trust configuration from the environment.
 
 Keyrings follow loud rotation: the keyring is an object committed in consumer
 code, and rotation is a reviewed replacement of that object that moves the
-retired key into ``legacy_keys``. Legacy keys can vouch only where the caller
-explicitly verifies immutable pre-rotation history under ``allow_legacy=True``:
-``verify_threshold`` requires that word at every call site, and
+retired key into ``legacy_keys``. Legacy keys can vouch only under
+``allow_legacy=True``, the caller's statement that the material is immutable
+pre-rotation history; the package cannot tell history from new material.
+``verify_threshold`` requires that word at every call site, while
 ``verify_any_generation`` — for envelopes whose key identifier does not name
-the signing generation — takes it as the default. They are refused loudly for
-new material, a presented retired key_id refusing either call under
-``allow_legacy=False``; malformed key material is always fatal, and only a
+the signing generation — takes it as the default, so there a caller who says
+nothing gets legacy verification (0.6.2 review, L7 finding 12). Legacy keys
+are refused loudly under ``allow_legacy=False``, a presented retired key_id
+refusing either call; malformed key material is always fatal, and only a
 clean signature mismatch under a validated key falls through to an older
 generation. There are no time-based transition windows. Keys outside the
 committed keyring are refused, and unknown fingerprints are surfaced verbatim

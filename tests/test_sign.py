@@ -2062,3 +2062,20 @@ def test_an_unreadable_producer_public_key_is_a_sign_error(
             read_producer_public_key(anchors, ProducerKeySpec("unreadable.pub", "0" * 64))
     finally:
         key.chmod(0o600)
+
+
+def test_the_retired_key_claim_names_the_default_that_makes_it_conditional() -> None:
+    """0.6.2 review, L7 finding 12: "retired keys verify immutable history
+    only" was unconditional, but ``verify_any_generation`` tries retired keys
+    unless the caller says ``allow_legacy=False`` (the default is intended
+    and pinned elsewhere). The README and the module now say the condition."""
+
+    readme = (pathlib.Path(__file__).resolve().parents[1] / "README.md").read_text(
+        encoding="utf-8"
+    )
+    line = next(item for item in readme.splitlines() if item.startswith("- `receipt.sign`"))
+    assert "retired keys verify immutable history only" not in line
+    assert "`verify_any_generation` takes as its default" in line
+    module_doc = " ".join((sign_module.__doc__ or "").split())
+    assert "Legacy keys can vouch only where the caller explicitly" not in module_doc
+    assert "a caller who says nothing gets legacy verification" in module_doc
