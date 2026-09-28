@@ -260,6 +260,28 @@ def test_a_061_subclass_with_its_own_fields_still_constructs() -> None:
     assert noted.note == "rotated 2026" and noted.additional_signers == ()
 
 
+def test_a_061_subclass_with_its_own_signers_attribute_still_verifies() -> None:
+    """A subclass attribute named ``signers`` must not change the pins."""
+
+    @dataclasses.dataclass(frozen=True)
+    class WithSignersField(AnchorSpec):
+        signers: tuple[str, ...] = ()  # e.g. the people who reviewed the pin
+
+    @dataclasses.dataclass(frozen=True)
+    class WithSignersMethod(AnchorSpec):
+        def signers(self) -> tuple[str, ...]:  # type: ignore[override]
+            return ("ops@example.org",)
+
+    for anchor in (
+        WithSignersField(*BASE.values()),  # type: ignore[arg-type]
+        WithSignersField(*BASE.values(), ("ops@example.org",)),  # type: ignore[arg-type]
+        WithSignersMethod(*BASE.values()),  # type: ignore[arg-type]
+    ):
+        _check_signer_pins(anchor, "r.tsr", certificate_sha256="2" * 64, spki_sha256="3" * 64)
+        with pytest.raises(ReleaseChainError, match="signer certificate is not pinned"):
+            _check_signer_pins(anchor, "r.tsr", certificate_sha256="a" * 64, spki_sha256="3" * 64)
+
+
 def test_additional_signers_is_keyword_only() -> None:
     with pytest.raises(TypeError):
         AnchorSpec(*BASE.values(), (OTHER,))  # type: ignore[arg-type, misc]
