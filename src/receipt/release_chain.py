@@ -1299,7 +1299,10 @@ def verify_receipt(
                 f"RFC 3161 policy is not pinned for {tsa}: {policy_oid!r}"
             )
         current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-        if gen_time > current + timedelta(seconds=MAX_FUTURE_SECONDS):
+        # A difference of two instants is always a representable timedelta;
+        # current + 300 s is not, for a verification time in the last five
+        # minutes of year 9999, and raised OverflowError.
+        if gen_time - current > _allowance(MAX_FUTURE_SECONDS):
             raise ReleaseChainError(
                 f"RFC 3161 genTime {gen_time.isoformat()} for {receipt.name} "
                 f"postdates verifier time {current.isoformat()}"
@@ -1387,21 +1390,22 @@ def verify_release_receipts(
         for tsa, receipt_path in receipt_paths.items()
     }
     created_at = parse_created_at(manifest["createdAtUtc"])
-    earliest_allowed = created_at - timedelta(seconds=clock_skew_seconds)
+    # Both bounds below are differences of instants, as in
+    # receipt.tsa.validate_token_time: `created_at - skew` has no datetime
+    # for a manifest created in the first `skew` seconds of year 1, and a
+    # skew too large for a timedelta raised OverflowError on its own.
+    skew = _allowance(clock_skew_seconds)
     release_index = manifest["releaseIndex"]
     for tsa, gen_time in receipt_times.items():
-        if gen_time < earliest_allowed:
+        if created_at - gen_time > skew:
             raise ReleaseChainError(
                 f"release {release_index} {tsa} genTime "
                 f"{gen_time.isoformat()} impossibly precedes createdAtUtc "
                 f"{created_at.isoformat()}"
             )
     if previous_times is not None:
-        lower_bound = max(previous_times.values()) - timedelta(
-            seconds=clock_skew_seconds
-        )
         current_earliest = min(receipt_times.values())
-        if current_earliest < lower_bound:
+        if max(previous_times.values()) - current_earliest > skew:
             raise ReleaseChainError(
                 f"release {release_index} receipt chronology regresses: "
                 f"earliest current genTime {current_earliest.isoformat()} "
@@ -1410,6 +1414,20 @@ def verify_release_receipts(
                 f"{clock_skew_seconds}s skew"
             )
     return receipt_times
+
+
+def _allowance(seconds: int) -> timedelta:
+    """``timedelta(seconds=seconds)``, saturating where it cannot be held.
+
+    An allowance past ``timedelta.max`` already exceeds the distance between
+    any two datetimes, so saturating decides every comparison exactly as the
+    unbounded value would.
+    """
+
+    try:
+        return timedelta(seconds=seconds)
+    except OverflowError:
+        return timedelta.max if seconds > 0 else timedelta.min
 
 
 def jsonl_line_offsets(payload: bytes, label: str) -> list[int]:

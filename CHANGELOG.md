@@ -174,6 +174,16 @@ JSON nested more than 128 deep is refused, including JSON 0.6.1 accepted.
   value, so a list or object raised `TypeError` where a number or a stray
   string got `invalid witness status for <path>: ...`. Both now get that
   refusal. Found by the adversarial sweep over these fixes.
+- The release chain's time bounds decide the ends of the datetime range. A
+  producer-signed, witnessed manifest created in the first five minutes of year
+  1 made `created_at - timedelta(seconds=clock_skew_seconds)` raise
+  `OverflowError` out of `verify_release_chain`, and through it out of
+  `verify_append_gate`. So did a `clock_skew_seconds` too large for a
+  timedelta, which passes the argument check, and a verification time in the
+  last five minutes of year 9999. The bounds are now differences of instants,
+  which decide those cases and every other case exactly as before; the
+  refusal texts are unchanged. This is the release-chain counterpart of the
+  creation-claim fix above, found by the adversarial sweep over these fixes.
 
 ## 0.6.2
 

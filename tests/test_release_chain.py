@@ -35,6 +35,7 @@ import pathlib
 import shutil
 import subprocess
 from dataclasses import replace
+from datetime import datetime, timezone
 
 import pytest
 
@@ -2759,3 +2760,96 @@ def test_a_manifest_count_past_the_number_range_is_not_canonical(
     )
     with pytest.raises(ReleaseChainError):
         verify_release_chain(repo, spec=spec.chain)
+
+
+# ---------------------------------------------------------------------------
+# Time bounds at the ends of the datetime range: the release-chain
+# counterpart of the L2 F3 fix in receipt.tsa (found by the adversarial sweep
+# over this branch).
+
+
+def _resign_genesis_alone(
+    repo: pathlib.Path, workspace: pathlib.Path, *, created_at: str
+) -> None:
+    """Replace the chain with a genesis created at ``created_at``, signed by
+    the fixture producer and stamped by both fixture authorities."""
+
+    from corpus_fixture import ANCHOR_NAMES, LocalTsa
+    from receipt.canonical import canonical_bytes
+    from receipt.sign import sign_payload
+
+    spec = load_spec(repo / "verification/spec.py").verification
+    manifests = repo / spec.chain.manifest_relative
+    payload = json.loads(_genesis_manifest(repo).read_bytes())
+    payload["createdAtUtc"] = created_at
+    for entry in list(manifests.iterdir()):
+        entry.unlink()
+    raw = canonical_bytes(payload) + b"\n"
+    digest = hashlib.sha256(raw).hexdigest()
+    stem = f"0000-{digest[:16]}"
+    (manifests / f"{stem}.json").write_bytes(raw)
+    (manifests / f"{stem}.producer.sig").write_bytes(
+        sign_payload((workspace / "producer.key").read_bytes(), raw, domain=b"")
+    )
+    for name in ANCHOR_NAMES:
+        directory = workspace / name
+        LocalTsa(
+            name=name,
+            directory=directory,
+            root_pem=directory / f"{name}-root.pem",
+            policy_oid="",
+            signer_certificate_sha256="",
+            signer_spki_sha256="",
+        ).stamp(digest, manifests / f"{stem}.{name}.tsr")
+
+
+def test_a_genesis_created_in_year_one_is_measured_not_crashed_on(
+    repo: pathlib.Path, built: pathlib.Path
+) -> None:
+    """``created_at - timedelta(seconds=clock_skew_seconds)`` has no
+    datetime for a manifest created in the first five minutes of year 1, and
+    raised OverflowError after both receipts had verified -- out of
+    verify_release_chain and, through it, verify_append_gate. The bound is now
+    a difference of instants: the receipts postdate the claim, so the genesis
+    verifies, exactly as it does when created one second after the window."""
+
+    workspace = built.parent / "tsa-workspace"
+    spec = load_spec(repo / "verification/spec.py").verification
+    for created_at in ("0001-01-01T00:00:00Z", "0001-01-01T00:04:59Z", "0001-01-01T00:05:00Z"):
+        _resign_genesis_alone(repo, workspace, created_at=created_at)
+        verification = verify_release_chain(repo, spec=spec.chain)
+        assert [release.manifest["createdAtUtc"] for release in verification.releases] == [
+            created_at
+        ]
+
+
+def test_an_oversized_clock_skew_saturates_rather_than_overflowing(
+    repo: pathlib.Path,
+) -> None:
+    """A skew too large for a timedelta passed the argument check and then
+    raised OverflowError; an allowance that large exceeds every distance
+    between datetimes, so the chain verifies as it does under any large
+    skew."""
+
+    spec = load_spec(repo / "verification/spec.py").verification
+    reference = verify_release_chain(repo, spec=spec.chain, clock_skew_seconds=10**6)
+    saturated = verify_release_chain(repo, spec=spec.chain, clock_skew_seconds=10**15)
+    assert len(saturated.releases) == len(reference.releases)
+
+
+@pytest.mark.parametrize(
+    "now",
+    [
+        datetime.max.replace(tzinfo=timezone.utc),
+        datetime(9999, 12, 31, 23, 55, tzinfo=timezone.utc),
+    ],
+    ids=["datetime-max", "last-five-minutes"],
+)
+def test_a_verification_time_at_the_top_of_the_range_is_decided(
+    repo: pathlib.Path, now: datetime
+) -> None:
+    """``current + timedelta(seconds=300)`` overflowed for a verification
+    time in the last five minutes of year 9999."""
+
+    spec = load_spec(repo / "verification/spec.py").verification
+    assert verify_release_chain(repo, spec=spec.chain, now=now).releases
