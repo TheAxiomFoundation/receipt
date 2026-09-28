@@ -2688,3 +2688,74 @@ def test_a_manifest_path_this_verifier_cannot_stat_is_not_no_chain(
         )
     finally:
         releases.chmod(0o755)
+
+
+# ---------------------------------------------------------------------------
+# Manifest bytes that escaped as interpreter exceptions. A manifest is parsed
+# before its filename digest is compared, so these bytes need no key.
+
+
+def _genesis_manifest(repo: pathlib.Path) -> pathlib.Path:
+    spec = load_spec(repo / "verification/spec.py").verification
+    manifests = sorted((repo / spec.chain.manifest_relative).glob("0000-*.json"))
+    assert len(manifests) == 1
+    return manifests[0]
+
+
+@pytest.mark.parametrize(
+    ("data", "reason"),
+    [
+        (b"[" * 100_000 + b"]" * 100_000, "JSON nesting exceeds 128 levels at char 128"),
+        (
+            b'{"releaseIndex": ' + b"9" * 5000 + b"}",
+            "JSON integer literal has 5000 digits, more than 4300",
+        ),
+    ],
+    ids=["nested-100000-deep", "integer-5000-digits"],
+)
+def test_a_manifest_past_the_decoding_bounds_is_not_valid_json(
+    repo: pathlib.Path, data: bytes, reason: str
+) -> None:
+    """``json.loads`` let these out as ``RecursionError`` and ``ValueError``;
+    they are now the existing ``manifest is not valid JSON`` refusal."""
+
+    manifest = _genesis_manifest(repo)
+    manifest.write_bytes(data)
+    spec = load_spec(repo / "verification/spec.py").verification
+    with pytest.raises(ReleaseChainError) as caught:
+        verify_release_chain(repo, spec=spec.chain)
+    message = str(caught.value)
+    assert message.startswith("manifest is not valid JSON: ")
+    assert message.endswith(f": {reason}")
+
+
+@pytest.mark.parametrize("field", ["lineCount", "previousLineCount"])
+def test_a_manifest_count_past_the_number_range_is_not_canonical(
+    repo: pathlib.Path, field: str
+) -> None:
+    """The schema bounds counts below only, so a count of 10**400 passed it
+    and reached ``receipt.canonical``, which has no encoding for it and
+    raised ``ValueError``. Such bytes are not canonical JSON: the existing
+    refusal."""
+
+    manifest = _genesis_manifest(repo)
+    payload = json.loads(manifest.read_text())
+    if field == "lineCount":
+        payload["state"]["lineCount"] = 10**400
+    else:
+        payload["releaseIndex"] = 1
+        payload["previousManifestSha256"] = "0" * 64
+        payload["append"] = {
+            "previousLineCount": 10**400,
+            "appendedRowCount": 1,
+            "appendedBytesSha256": "0" * 64,
+        }
+    manifest.write_text(json.dumps(payload) + "\n")
+    spec = load_spec(repo / "verification/spec.py").verification
+    with pytest.raises(ReleaseChainError) as caught:
+        release_chain.load_manifest(manifest, spec.chain)
+    assert str(caught.value) == (
+        f"manifest bytes are not canonical JSON plus one newline: {manifest}"
+    )
+    with pytest.raises(ReleaseChainError):
+        verify_release_chain(repo, spec=spec.chain)

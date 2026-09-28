@@ -38,6 +38,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
+from receipt import _bounded_json as bounded_json
 from receipt import sign as _sign
 from receipt import tsa as _tsa
 from receipt._names import (
@@ -534,16 +535,27 @@ def load_manifest(
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ReleaseChainError(f"manifest is not UTF-8: {path}") from exc
+    # A manifest is read before its filename digest is compared, so these
+    # bytes are unauthenticated.  receipt._bounded_json bounds the nesting
+    # and integer width json.loads let out as RecursionError and ValueError.
     try:
-        parsed = json.loads(
+        parsed = bounded_json.loads(
             text,
             object_pairs_hook=_object_without_duplicates,
             parse_constant=_fail_json_constant,
         )
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, bounded_json.JsonBoundError) as exc:
         raise ReleaseChainError(f"manifest is not valid JSON: {path}: {exc}") from exc
     payload = validate_manifest_schema(parsed, spec)
-    expected = canonical_bytes(payload) + b"\n"
+    # The schema bounds counts below only, so a count past the Number range
+    # reaches the encoder, which has no canonical form for it and said so
+    # with ValueError.  No canonical bytes means these are not them.
+    try:
+        expected = canonical_bytes(payload) + b"\n"
+    except (ValueError, RecursionError) as exc:
+        raise ReleaseChainError(
+            f"manifest bytes are not canonical JSON plus one newline: {path}"
+        ) from exc
     if raw != expected:
         raise ReleaseChainError(
             f"manifest bytes are not canonical JSON plus one newline: {path}"
