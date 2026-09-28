@@ -1873,3 +1873,69 @@ def test_a_bytes_subclass_signature_is_refused_for_its_type() -> None:
             b"p", "abc", public_key, public_key_filename="p",  # type: ignore[arg-type]
             spki_sha256=None, label="x",
         )
+
+
+# --- 0.6.2 review, L7 finding 5: the OpenSSL fallback accepts what the
+# cryptography path accepts, and nothing else
+
+
+def _p224_key_with_a_64_byte_signature(payload: bytes) -> tuple[bytes, bytes]:
+    from cryptography.hazmat.primitives import hashes
+
+    key = ec.generate_private_key(ec.SECP224R1())
+    for _attempt in range(200):
+        signature = key.sign(payload, ec.ECDSA(hashes.SHA256()))
+        if len(signature) == 64:
+            public_pem = key.public_key().public_bytes(
+                serialization.Encoding.PEM,
+                serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+            return public_pem, signature
+    raise AssertionError("no 64-byte P-224 signature in 200 tries")
+
+
+def test_forced_openssl_path_refuses_what_the_cryptography_path_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl is not installed")
+
+    private_key_pem, public_key_pem = generate_signing_keypair()
+    payload = b"payload"
+    signature = sign_payload(private_key_pem, payload, domain=b"")
+    public_key = serialization.load_pem_public_key(public_key_pem)
+    der_spki = public_key.public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    p224_pem, p224_signature = _p224_key_with_a_64_byte_signature(payload)
+    cases = {
+        "der_spki": (signature, der_spki),
+        "private_key_pem": (signature, private_key_pem),
+        "p224_unpinned": (p224_signature, p224_pem),
+    }
+    for name, (candidate_signature, key_bytes) in cases.items():
+        crypto = _outcome(
+            lambda: _verify(payload, candidate_signature, key_bytes, pin=None)
+        )
+        with monkeypatch.context() as patch:
+            patch.setattr(sign_module, "CRYPTOGRAPHY_AVAILABLE", False)
+            fallback = _outcome(
+                lambda: _verify(payload, candidate_signature, key_bytes, pin=None)
+            )
+        assert crypto[0] == "refused", name
+        assert fallback[0] == "refused", (name, fallback)
+    with monkeypatch.context() as patch:
+        patch.setattr(sign_module, "CRYPTOGRAPHY_AVAILABLE", False)
+        assert _outcome(
+            lambda: _verify(payload, p224_signature, p224_pem, pin=None)
+        ) == ("refused", "producer public key is not Ed25519: producer-ed25519.pub")
+        assert _outcome(
+            lambda: _verify(payload, signature, private_key_pem, pin=None)
+        ) == (
+            "refused",
+            "cannot decode producer Ed25519 public key: producer-ed25519.pub",
+        )
+        # The Ed25519 control still verifies on the fallback.
+        assert _outcome(
+            lambda: _verify(payload, signature, public_key_pem, pin=None)
+        ) == ("accepted", "")

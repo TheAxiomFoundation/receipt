@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import os
 import pathlib
+import re
 import subprocess
 import tempfile
 from collections.abc import Mapping
@@ -51,6 +52,11 @@ else:
 
 
 PRODUCER_SIGNATURE_BYTES = 64
+
+#: DER prefix of an Ed25519 SubjectPublicKeyInfo (RFC 8410): SEQUENCE,
+#: AlgorithmIdentifier id-Ed25519, BIT STRING of 32 key bytes. 44 bytes whole.
+_ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
+_PEM_LABEL = re.compile(rb"-----BEGIN ([^\r\n-]+)-----")
 
 
 class SignError(ValueError):
@@ -143,6 +149,19 @@ def _verify_producer_signature_with_openssl(
     spki_sha256: str | None,
     label: str,
 ) -> None:
+    # The fallback held to what the cryptography path accepts (0.6.2 review,
+    # L7 finding 5). ``pkey -pubin`` decodes whatever OpenSSL can read -- a
+    # bare DER SPKI, a PKCS#8 *private* key, a non-Ed25519 key -- and
+    # ``pkeyutl -verify -rawin`` then verifies with whatever it decoded,
+    # ECDSA included, so a P-224 key with a 64-byte DER signature verified
+    # where ``load_pem_public_key`` and the Ed25519 type check refuse. The
+    # first PEM block must be a public key, the input must be PEM, and the
+    # decoded SPKI must be Ed25519's, before anything is verified.
+    first_label = _PEM_LABEL.search(public_key_pem)
+    if first_label is not None and first_label.group(1) != b"PUBLIC KEY":
+        raise SignError(
+            f"cannot decode producer Ed25519 public key: {public_key_filename}"
+        )
     with tempfile.TemporaryDirectory(prefix="thesis-release-producer-") as name:
         temporary = pathlib.Path(name)
         empty_ca_dir = temporary / "empty-ca"
@@ -166,6 +185,8 @@ def _verify_producer_signature_with_openssl(
             [
                 "pkey",
                 "-pubin",
+                "-inform",
+                "PEM",
                 "-in",
                 str(public_key_path),
                 "-outform",
@@ -174,6 +195,12 @@ def _verify_producer_signature_with_openssl(
             environment=environment,
             label=f"public-key decoding for {label}",
         )
+        if len(spki_der) != len(_ED25519_SPKI_PREFIX) + 32 or not spki_der.startswith(
+            _ED25519_SPKI_PREFIX
+        ):
+            raise SignError(
+                f"producer public key is not Ed25519: {public_key_filename}"
+            )
         if spki_sha256 is not None:
             computed_spki_sha256 = hashlib.sha256(spki_der).hexdigest()
             if computed_spki_sha256 != spki_sha256:
