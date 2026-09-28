@@ -713,3 +713,40 @@ def test_verify_commit_reads_malformed_gh_output_as_no_identity(
 
     _accepting_gh(monkeypatch, stdout)
     assert verify_commit(pathlib.Path("/repo"), COMMIT, spec=_spec()) == "<verified>"
+
+
+# --- 0.6.2 review, L6 finding 15: a frozen spec keeps exact strings
+
+
+class _Widening(str):
+    """A str whose escaping widens once ``widen`` is set."""
+
+    widen = False
+
+    def __iter__(self):  # type: ignore[override]
+        return iter(".*" if self.widen else str.__str__(self))
+
+
+@pytest.mark.parametrize(
+    "field", ["repository", "allowed_ref", "protected_prefix", "allowed_workflows"]
+)
+def test_attest_spec_refuses_str_subclasses(field: str) -> None:
+    values = {
+        "repository": _Widening("MaxGhenis/brier"),
+        "allowed_ref": _Widening("refs/heads/main"),
+        "protected_prefix": _Widening("records/"),
+        "allowed_workflows": frozenset({_Widening(WORKFLOW)}),
+    }
+    with pytest.raises(ValueError):
+        _spec(**{field: values[field]})
+
+
+def test_a_constructed_spec_pattern_cannot_change_afterwards() -> None:
+    spec = _spec()
+    before = cert_identity_pattern(spec)
+    assert all(
+        type(value) is str
+        for value in (spec.repository, spec.allowed_ref, spec.protected_prefix)
+    )
+    assert all(type(workflow) is str for workflow in spec.allowed_workflows)
+    assert cert_identity_pattern(spec) == before
