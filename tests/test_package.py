@@ -28,3 +28,26 @@ def test_canonical_module_is_byte_identical_to_pinned_source() -> None:
     module_path = pathlib.Path(receipt.__file__).parent / "canonical.py"
     digest = hashlib.sha256(module_path.read_bytes()).hexdigest()
     assert digest == CANONICAL_SOURCE_SHA256
+
+
+def test_readme_states_what_the_canonical_promise_covers() -> None:
+    """0.6.2 review, L5 findings 6-8: "one byte stream per value" overstated.
+
+    A subclass whose ``__str__``/``__iter__``/``__repr__`` chooses the bytes,
+    an explicit surrogate pair (two keys ``json.loads`` would merge), and
+    nesting past the recursion limit each break the unqualified promise.
+    ``canonical.py`` stays byte-identical to the pinned upstream serializer
+    (the test above), so the README states the promise's scope instead.
+    """
+
+    readme = (
+        pathlib.Path(__file__).resolve().parents[1] / "README.md"
+    ).read_text(encoding="utf-8")
+    line = next(
+        item for item in readme.splitlines() if item.startswith("- `receipt.canonical`")
+    )
+    assert "one byte stream per JSON value" in line
+    assert "values as `json.loads` returns them" in line
+    assert "no explicit surrogate pair" in line
+    assert "byte-identical copy of the pinned upstream serializer" in line
+    assert "`RecursionError`" in line
