@@ -104,16 +104,32 @@ def _producer_openssl_binary(
     return completed.stdout
 
 
+def _signature_found(signature: object) -> str:
+    """What a refused signature was, in the retained ``found=`` slot.
+
+    The length for exact ``bytes`` and ``non-bytes`` for anything that is not
+    bytes at all, as ported. A ``bytes`` subclass is refused for its type, so
+    its length alone -- "must be exactly 64 raw bytes; found=64" -- named the
+    wrong reason (0.6.2 review, L7 finding 8).
+    """
+
+    if type(signature) is bytes:
+        return str(len(signature))
+    if isinstance(signature, bytes):
+        return f"{type(signature).__name__} (a bytes subclass)"
+    return "non-bytes"
+
+
 def _validate_signature_inputs(payload: bytes, signature: bytes, label: str) -> None:
     """Retain the upstream verifier's exact input checks and branch order."""
 
     if type(payload) is not bytes:
         raise SignError("producer-signed manifest payload must be bytes")
     if type(signature) is not bytes or len(signature) != PRODUCER_SIGNATURE_BYTES:
-        actual = len(signature) if isinstance(signature, bytes) else "non-bytes"
         raise SignError(
             f"producer signature for {label} must be exactly "
-            f"{PRODUCER_SIGNATURE_BYTES} raw bytes; found={actual}"
+            f"{PRODUCER_SIGNATURE_BYTES} raw bytes; "
+            f"found={_signature_found(signature)}"
         )
 
 
@@ -620,10 +636,10 @@ def verify_any_generation(
     if type(allow_legacy) is not bool:
         raise SignError("allow_legacy must be a bool")
     if type(signature) is not bytes or len(signature) != PRODUCER_SIGNATURE_BYTES:
-        actual = len(signature) if isinstance(signature, bytes) else "non-bytes"
         raise SignError(
             f"signature for {label} must be exactly "
-            f"{PRODUCER_SIGNATURE_BYTES} raw bytes; found={actual}"
+            f"{PRODUCER_SIGNATURE_BYTES} raw bytes; "
+            f"found={_signature_found(signature)}"
         )
 
     _require_str_key_ids(public_keys, "public key")

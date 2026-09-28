@@ -1830,3 +1830,46 @@ def test_presented_key_ids_of_mixed_type_refuse_as_sign_errors() -> None:
             b"p", signature, {1: public_a},  # type: ignore[dict-item]
             ring, domain=b"", label="r",
         )
+
+
+def test_a_bytes_subclass_signature_is_refused_for_its_type() -> None:
+    """0.6.2 review, L7 finding 8: "must be exactly 64 raw bytes; found=64"."""
+
+    class Signature(bytes):
+        pass
+
+    private_key, public_key = generate_signing_keypair()
+    signature = Signature(sign_payload(private_key, b"p", domain=b""))
+    with pytest.raises(SignError) as caught:
+        verify_signature_bytes(
+            b"p",
+            signature,
+            public_key,
+            public_key_filename="producer.pub",
+            spki_sha256=None,
+            label="x",
+        )
+    assert str(caught.value) == (
+        "producer signature for x must be exactly 64 raw bytes; "
+        "found=Signature (a bytes subclass)"
+    )
+    ring = KeyringSpec((KeySpec("a", spki_sha256(public_key), "spki-sha256"),), 1)
+    with pytest.raises(SignError) as caught:
+        verify_any_generation(
+            b"p", signature, {"a": public_key}, ring, domain=b"", label="r"
+        )
+    assert str(caught.value) == (
+        "signature for r must be exactly 64 raw bytes; "
+        "found=Signature (a bytes subclass)"
+    )
+    # The ported texts are unchanged for exact bytes and for non-bytes.
+    with pytest.raises(SignError, match="found=3$"):
+        verify_signature_bytes(
+            b"p", b"abc", public_key, public_key_filename="p", spki_sha256=None,
+            label="x",
+        )
+    with pytest.raises(SignError, match="found=non-bytes$"):
+        verify_signature_bytes(
+            b"p", "abc", public_key, public_key_filename="p",  # type: ignore[arg-type]
+            spki_sha256=None, label="x",
+        )
