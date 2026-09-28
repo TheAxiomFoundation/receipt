@@ -35,8 +35,13 @@ receipt verify --spec path/to/spec.py --commit HEAD
 The command selects a commit and prints its full commit and tree OIDs. The
 binding pass compares the witnessed journal with that tree's raw blob bytes;
 changes to the working tree or index do not change the selected subject.
-`--root` names the repository's top level. A history comparison also needs the
-base commit in that repository: `--base-ref REF` requires `--expect-commit OID`.
+`--root` names the repository's top level. Without it, the top level is the
+nearest directory above the spec, as named, that holds `.git`; the command
+refuses when a symlink lies on that walk, the top level included, since a link
+committed in the checkout could point it at another repository, or when the
+spec path resolves to a file other than the one the walk names, and asks for
+`--root`. A history comparison also needs the base commit in that repository:
+`--base-ref REF` requires `--expect-commit OID`.
 
 The auditor's out-of-band pins are `--expect-spec-sha256`, `--expect-commit`,
 `--expect-tree`, and `--expect-anchor-set`. The spec digest is checked before
@@ -91,10 +96,11 @@ preflight refuses LibreSSL and OpenSSL below 3.0. Install OpenSSL (for example
 Use a repository containing the candidate and, when supplied, the base commit.
 Shallow clones cannot verify a base outside their boundary; this release
 refuses every shallow repository with `shallow repositories are unsupported`,
-including one whose requested commits are present. Use `fetch-depth: 0` in
-GitHub Actions. LFS-tracked content roots are unsupported: verification reads
-the pointer blob, whose digest will not match a journal digest of the expanded
-content. Protected paths with transforming `filter`, `ident`, or
+including one whose requested commits are present, and `receipt.attest`'s
+history sweep refuses shallow and grafted repositories the same way. Use
+`fetch-depth: 0` in GitHub Actions. LFS-tracked content roots are unsupported:
+verification reads the pointer blob, whose digest will not match a journal
+digest of the expanded content. Protected paths with transforming `filter`, `ident`, or
 `working-tree-encoding` attributes refuse; `text` and `eol` are accepted, and
 checkout fidelity is outside the verdict.
 
@@ -111,6 +117,9 @@ The public `receipt verify` and append-gate entries retain their refusal when
 `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, or
 `GIT_ALTERNATE_OBJECT_DIRECTORIES` is set. The object reader separately freezes
 its Git environment and explicitly selects the repository for its reads.
+`receipt.attest` drops every inherited `GIT_*` variable and runs git with
+`--no-replace-objects` and `core.commitGraph=false`, so its sweep reads the
+repository it is given, from its commit objects.
 
 ```bash
 uv pip install receipt

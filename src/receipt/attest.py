@@ -9,11 +9,19 @@ committed by the consumer.
 Git and ``gh attestation verify`` remain subprocess boundaries.  Every
 subprocess stream is captured, so these helpers are silent library calls; the
 caller decides how to render accepted and refused outcomes.
+
+Every git child answers about the repository ``root`` names, as its objects
+record it: it runs with ``--no-replace-objects`` and
+``core.commitGraph=false`` and with every inherited ``GIT_*`` variable
+dropped (:func:`_git_environment`), the history walks refuse shallow and
+grafted repositories, and revisions are passed after ``--end-of-options``.  Configuration files are read where git finds them by
+default.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -163,15 +171,84 @@ def subject_name(commit: str) -> str:
     return f"records-push-{commit}.json"
 
 
+def _git_environment() -> dict[str, str]:
+    """Return the environment for every git child of this module.
+
+    Every inherited name beginning ``GIT_`` is removed.  ``GIT_DIR``,
+    ``GIT_WORK_TREE``, ``GIT_OBJECT_DIRECTORY`` and
+    ``GIT_ALTERNATE_OBJECT_DIRECTORIES`` each answered a query from somewhere
+    other than ``root``, so a sweep could accept by reading another
+    repository's history; ``GIT_GRAFT_FILE``, ``GIT_REPLACE_REF_BASE`` and the
+    ``GIT_CONFIG_*`` channels could reshape the history walked.  Removing the
+    whole prefix also covers names a later git adds.  The release-chain
+    entries refuse the redirecting variables instead, because they also read
+    the tree directly and a drop would leave two subjects; this module reads
+    the repository only through git, so dropping them leaves one.
+    ``GIT_NO_REPLACE_OBJECTS=1`` is then installed, matching the
+    ``--no-replace-objects`` every command carries: a ``refs/replace/`` ref
+    fetched with the repository substituted another commit's tree for the one
+    a branch names, and the sweep walked the substitute.
+    """
+
+    environment = {
+        name: value for name, value in os.environ.items() if not name.startswith("GIT_")
+    }
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    return environment
+
+
+def _git_command(*args: str) -> list[str]:
+    """Return the argv for one git child of this module.
+
+    ``core.commitGraph=false`` makes git read parents and root trees from the
+    commit objects rather than from the commit-graph file, a cache git trusts
+    without checking it against them: a stale or altered graph entry gave a
+    records commit below the tip its parent's tree, and the path-limited walk
+    then passed over it.
+    """
+
+    return ["git", "--no-replace-objects", "-c", "core.commitGraph=false", *args]
+
+
 def git_output(root: pathlib.Path, *args: str) -> str:
-    """Run a captured git query in ``root`` and return stripped text."""
+    """Run a captured git query in ``root`` and return stripped text.
+
+    The query carries :func:`_git_command`'s options and runs under
+    :func:`_git_environment`.
+    """
 
     return subprocess.check_output(
-        ["git", *args], cwd=root, text=True, stderr=subprocess.PIPE
+        _git_command(*args),
+        cwd=root,
+        env=_git_environment(),
+        text=True,
+        stderr=subprocess.PIPE,
     ).strip()
 
 
+def _refuse_rewritten_history(root: pathlib.Path) -> None:
+    """Refuse a repository whose history git would walk only in part.
+
+    In a shallow clone git treats each boundary commit as a root, so the
+    boundary appeared to introduce the checker: :func:`enforcement_epoch`
+    named it, :func:`commit_in_scope` exempted it as its own ancestor, and the
+    default range after it was empty.  A depth-1 clone, the GitHub Actions
+    checkout default, therefore accepted an unattested protected-tree commit
+    at its tip without a refusal.  A graft file rewrites parents the same way,
+    and git honors it with replace objects off.  Both refuse, in the words
+    the tree-snapshot reader uses; the fix for a shallow checkout is the whole
+    history (``fetch-depth: 0``).
+    """
+
+    if git_output(root, "rev-parse", "--is-shallow-repository") != "false":
+        raise ProvenanceError("shallow repositories are unsupported")
+    grafts = git_output(root, "rev-parse", "--git-path", "info/grafts")
+    if os.path.lexists(pathlib.Path(root) / grafts):
+        raise ProvenanceError("repository grafts are unsupported")
+
+
 def enforcement_epoch(root: pathlib.Path, *, spec: AttestSpec) -> str:
+    _refuse_rewritten_history(root)
     commits = git_output(
         root,
         "log",
@@ -195,8 +272,13 @@ def records_commits(
     *,
     spec: AttestSpec,
 ) -> list[str]:
-    """Enumerate protected-tree commits without simplifying merge history."""
+    """Enumerate protected-tree commits without simplifying merge history.
 
+    ``rev_range`` is read as revisions only: a value git would otherwise take
+    as an option, which could empty the sweep, is refused by git instead.
+    """
+
+    _refuse_rewritten_history(root)
     # --full-history: path simplification may otherwise drop a protected-tree
     # commit that arrived on a side branch.
     output = git_output(
@@ -204,6 +286,7 @@ def records_commits(
         "log",
         "--full-history",
         "--format=%H",
+        "--end-of-options",
         rev_range,
         "--",
         spec.protected_prefix,
@@ -217,7 +300,9 @@ def commit_age_seconds(
     *,
     now: float | None = None,
 ) -> int:
-    committed = int(git_output(root, "show", "-s", "--format=%ct", commit))
+    committed = int(
+        git_output(root, "show", "-s", "--format=%ct", "--end-of-options", commit)
+    )
     current = time.time() if now is None else now
     return max(0, int(current) - committed)
 
@@ -233,7 +318,10 @@ def repository_slug(root: pathlib.Path) -> str:
     # Preserve the configured value's whitespace and control bytes for the
     # guard below; only the command's one framing newline may be removed.
     raw_url = subprocess.check_output(
-        ["git", "remote", "get-url", "origin"], cwd=root, stderr=subprocess.PIPE
+        _git_command("remote", "get-url", "origin"),
+        cwd=root,
+        env=_git_environment(),
+        stderr=subprocess.PIPE,
     )
     url = raw_url.removesuffix(b"\n").decode("utf-8", errors="surrogateescape")
     try:
@@ -368,9 +456,11 @@ def verify_commit(
 def commit_in_scope(root: pathlib.Path, commit: str, epoch: str) -> bool:
     """Exempt only commits proven ancestors of the enforcement epoch."""
 
+    _refuse_rewritten_history(root)
     probe = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", commit, epoch],
+        _git_command("merge-base", "--is-ancestor", "--end-of-options", commit, epoch),
         cwd=root,
+        env=_git_environment(),
         capture_output=True,
         check=False,
     )
