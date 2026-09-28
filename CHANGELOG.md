@@ -131,6 +131,32 @@ JSON nested more than 128 deep is refused, including JSON 0.6.1 accepted.
   object name, so the verdict and the text
   (`commit <oid> is not a canonical commit object`) are what they always
   were; a differential against the 0.6.1 parser checks this.
+- `verify_append_gate` refuses malformed candidate ledger and prefix bytes
+  with `AppendError`. The ledger and its frozen-prefix manifest are
+  candidate-controlled. A manifest that is not JSON, not an object, missing a
+  key, or holding a count of `null`, `"x"` or `1e400`, a prefix row that is
+  not an object, and an appended row whose `measure`, `source` or
+  `responseArchive` is not an object or whose value is NaN, an infinity, a
+  5,000-digit integer or nested 5,000 deep each raised `JSONDecodeError`,
+  `AttributeError`, `KeyError`, `TypeError`, `ValueError`, `OverflowError` or
+  `RecursionError` out of the gate. The new refusals: `prefix manifest is not
+  valid JSON: ...`, `prefix manifest is not a JSON object`, `prefix manifest
+  lacks <field>`, `prefix manifest prefixLineCount is not a line count: ...`,
+  `prefix manifest lineSha256s is not a list`,
+  `line <n> (<id>) <field> is not an object`,
+  `line <n> (<id>) assertion content is not canonical JSON: ...`, and, for a
+  row no UTF-8 can encode (which only a direct caller of `check_prefix` can
+  pass), `line <n> is not valid UTF-8`. The decoding bounds get the existing
+  `line <n> is not valid JSON: ...`. A rewritten row that is not an object is
+  named `(?)`. Each guard fires only where the old code raised, so every other
+  input gets the verdict and text it got before, with one exception: a row or
+  manifest nested more than 128 deep is now refused as not valid JSON. 0.6.1
+  accepted such a row whenever `json.loads` could parse it and the deep value
+  sat outside the content address, and took later appends on top of it; the
+  bound refuses the row and every later append to a ledger that holds it.
+  `expected_assertion_version_id` raises the same refusals for its own
+  callers, and a falsy `measure`, `source` or `responseArchive` still reads
+  as absent.
 
 ## 0.6.2
 
