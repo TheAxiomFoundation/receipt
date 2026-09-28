@@ -8,7 +8,7 @@ from receipt import corpus, protected_tree, snapshot
 from corpus_fixture import CONTENT, journal_rows, render_journal
 from m1_fixture import outcome, signed_repo
 from protected_tree_consumer_fixture import consumer_leg, work_observation
-from test_protected_tree_consumers_work import SCOPES
+from test_protected_tree_consumers_work import CONTENT_LINKS, SCOPES
 
 
 class AuditReader(snapshot.TreeSnapshot):
@@ -35,7 +35,7 @@ def authority_calls(monkeypatch):
 
 
 def compare_binding(repo, monkeypatch, authority_calls, reader, commit, *,
-                    spec=None, journal=None, reaches_policy=None):
+                    spec=None, journal=None, reaches_policy=None, content_link=None):
     results = []
     calls, policy_subjects = authority_calls
     for old in (True, False):
@@ -60,6 +60,13 @@ def compare_binding(repo, monkeypatch, authority_calls, reader, commit, *,
                         assert calls['TreePolicy'] == 1
                         assert calls['ProtectedTreeView'] > 0
                         assert calls['ProtectedSelection'] > 0
+    if content_link is not None:
+        # 0.6.3's one intended divergence from the PR5 bodies: a symlink under
+        # a content root is refused whatever its name.
+        assert 'value' in results[0][0]
+        assert results[1][0] == {'exception': 'receipt.corpus.CorpusError',
+                                 'message': f"content root contains a symlink: '{content_link}'"}
+        return results[1]
     # Includes exact exception class/text, the full result, all public work
     # fields, and ordered attempted reads (including failed admission).
     assert results[0] == results[1]
@@ -78,7 +85,7 @@ def test_subclass_d1_to_d11_binding(signed_repo, monkeypatch, authority_calls,
                    else signed_repo.corpus.content_suffixes)
     result, work, _ = compare_binding(
         signed_repo, monkeypatch, authority_calls, reader, commit,
-        spec=spec, reaches_policy=True)
+        spec=spec, reaches_policy=True, content_link=CONTENT_LINKS.get(case))
     if case == 'clean':
         assert 'value' in result
         assert work['content_bytes'] == 104

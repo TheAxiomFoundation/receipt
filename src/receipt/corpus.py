@@ -1393,6 +1393,8 @@ def _binding_error(finding) -> CorpusError:
     if finding.kind == "content-symlink":
         return CorpusError("content root contains a symlink where a regular file was "
                            f"recorded: {_quoted(finding.path)}")
+    if finding.kind == "content-link":
+        return CorpusError(f"content root contains a symlink: {_quoted(finding.path)}")
     if finding.kind == "content-mode":
         return CorpusError(f"content root contains a non-regular file: {_quoted(finding.path)}")
     if finding.role == "attested-leaf":
