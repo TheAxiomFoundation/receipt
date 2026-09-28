@@ -2303,27 +2303,42 @@ def verify_release_history_immutable(
     candidate: TreeSnapshot,
     base: TreeSnapshot,
 ) -> tuple[str, set[str], dict[str, GitEntry]]:
-    """Compare release entries in two entered, authenticated tree snapshots."""
+    """Compare release entries in two entered, authenticated tree snapshots.
+
+    The comparison covers the release root and, when the spec keeps them
+    elsewhere, the manifest directory too: the manifests, producer signatures
+    and receipts are the release objects a rewritten history would replace.
+    The returned new files and base entries stay those under the release
+    root.
+    """
 
     release_root = spec.release_root_relative.as_posix()
     base_entries = base.entries(release_root).as_dict()
     candidate_entries = candidate.entries(release_root).as_dict()
+    compared_base = dict(base_entries)
+    compared_candidate = dict(candidate_entries)
+    manifest_parts = spec.manifest_relative.parts
+    root_parts = spec.release_root_relative.parts
+    if manifest_parts[: len(root_parts)] != root_parts:
+        manifest_directory = spec.manifest_relative.as_posix()
+        compared_base.update(base.entries(manifest_directory).as_dict())
+        compared_candidate.update(candidate.entries(manifest_directory).as_dict())
 
     # The old working-directory enumeration refused every candidate link or
     # non-regular entry before comparing base bytes. Preserve that ordering
     # over the tree's modes, without opening any blob.
-    for relative, entry in sorted(candidate_entries.items()):
+    for relative, entry in sorted(compared_candidate.items()):
         if entry.mode == "120000":
             raise ReleaseChainError(f"release path is a symlink: {relative}")
         if entry.mode not in {"100644", "100755"}:
             raise ReleaseChainError(f"release path is not regular: {relative}")
 
-    for relative, prior in sorted(base_entries.items()):
+    for relative, prior in sorted(compared_base.items()):
         if prior.mode not in {"100644", "100755"}:
             raise ReleaseChainError(
                 f"base release entry has non-regular git mode {prior.mode}: {relative}"
             )
-        current = candidate_entries.get(relative)
+        current = compared_candidate.get(relative)
         if current is None:
             raise ReleaseChainError(
                 f"existing release file was deleted relative to "
