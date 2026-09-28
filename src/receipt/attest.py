@@ -278,13 +278,16 @@ def extract_certificate_identities(payload: object) -> set[str]:
     for result in results:
         if not isinstance(result, dict):
             continue
-        certificate = (
-            (result.get("verificationResult") or {})
-            .get("signature", {})
-            .get("certificate", {})
-            if isinstance(result.get("verificationResult"), dict)
-            else {}
-        )
+        # Every level is checked for shape before it is read: a ``null`` or
+        # string ``signature`` in gh's output raised AttributeError after gh
+        # had accepted (0.6.2 review, L6 finding 14).
+        verification = result.get("verificationResult")
+        if not isinstance(verification, dict):
+            continue
+        signature = verification.get("signature")
+        if not isinstance(signature, dict):
+            continue
+        certificate = signature.get("certificate")
         if not isinstance(certificate, dict):
             continue
         for value in certificate.values():
@@ -314,7 +317,16 @@ def verify_commit(
     now: float | None = None,
     sleep: Callable[[float], None] | None = None,
 ) -> str:
-    """Verify one commit's attestation; return the accepted signer identity."""
+    """Verify one commit's attestation; return the signer identity gh enforced.
+
+    Acceptance is gh's exit status alone. The identity returned is for the
+    log line: the certificate identity that matches the pattern gh enforced,
+    or ``"<verified>"`` when gh's output names none. It was the smallest of
+    every identity-shaped string in any certificate field, so in a
+    reusable-workflow run the caller's ``buildConfigURI`` -- a workflow the
+    allowlist may exclude -- could be the name the log printed (0.6.2
+    review, L6 finding 14).
+    """
 
     payload = attestation_subject(spec.repository, commit)
     with tempfile.TemporaryDirectory() as tmp:
@@ -347,13 +359,20 @@ def verify_commit(
             )
             if completed.returncode == 0:
                 # gh already enforced the certificate identity; parse it back
-                # out of the certificate fields for the log line only.
+                # out of the certificate fields for the log line only. Output
+                # too deep for the decoder is unreadable output, like any
+                # other, and not a crash.
                 try:
                     parsed = json.loads(completed.stdout)
-                except json.JSONDecodeError:
+                except (ValueError, RecursionError):
                     parsed = None
-                identities = extract_certificate_identities(parsed)
-                return sorted(identities)[0] if identities else "<verified>"
+                enforced = re.compile(cert_identity_pattern(spec))
+                identities = sorted(
+                    identity
+                    for identity in extract_certificate_identities(parsed)
+                    if enforced.fullmatch(f"https://{identity}")
+                )
+                return identities[0] if identities else "<verified>"
             last_error = (completed.stderr or completed.stdout).strip()
             if attempt < attempts:
                 (time.sleep if sleep is None else sleep)(
