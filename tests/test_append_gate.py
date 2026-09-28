@@ -2863,3 +2863,37 @@ def test_a_gate_only_proposal_cannot_rewrite_a_ledger_its_spec_left_unclassified
         "gate-only proposal changes unclassified ledger state path(s): "
         f"['{CHAIN_SPEC.state_relative.as_posix()}']"
     )
+
+
+def test_a_row_id_cannot_forge_a_line_in_a_refusal(tmp_path: pathlib.Path) -> None:
+    """0.6.2 review, L6 finding 12: refusal texts quoted row ids verbatim.
+
+    A ``source_record_id`` holding a newline put an attacker-authored
+    ``thesis-facts append check OK`` line into the refusal a reviewer reads.
+    Unprintable characters are escaped now; printable ids, every id the
+    differential harness binds among them, are quoted exactly as before.
+    """
+
+    forged = (
+        "x\nthesis-facts append check OK: 3 rows, immutable prefix 1, "
+        "+1 appended vs base\ny"
+    )
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate, source_record_id=forged, value="not a number")
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    message = str(refusal.value)
+    assert "\n" not in message
+    assert message == (
+        "line 3 (x\\nthesis-facts append check OK: 3 rows, immutable prefix 1, "
+        "+1 appended vs base\\ny) has no numeric value"
+    )
+
+
+def test_printable_row_ids_are_quoted_unchanged() -> None:
+    from receipt.append_gate import _shown
+
+    for value in ("fixture.series.observation_3", "café 東京", 7, None):
+        assert _shown(value) == str(value)
+    assert _shown("a‮b") == "a\\u202eb"
+    assert _shown("a\x1b[2Kb") == "a\\x1b[2Kb"
