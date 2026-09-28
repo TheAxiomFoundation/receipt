@@ -1835,3 +1835,63 @@ def test_a_configuration_change_refuses_before_fsck_runs_under_it(
                 assert "configuration changed" in str(caught)
                 raise
             pytest.fail("verify_object_store ran fsck under the changed configuration")
+
+
+# --- 0.6.2 review, L3 findings 9 and 4: ancestry authenticates, never parses
+
+
+def _commit_with_parents(root: pathlib.Path, tree: str, *parents: str) -> str:
+    payload = (
+        f"tree {tree}\n".encode("ascii")
+        + b"".join(f"parent {parent}\n".encode("ascii") for parent in parents)
+        + b"author Snapshot Test <snapshot@example.test> 0 +0000\n"
+        + b"committer Snapshot Test <snapshot@example.test> 0 +0000\n\nfixture\n"
+    )
+    return _hash_object(root, "commit", payload)
+
+
+def test_ancestry_through_a_legacy_mode_tree_is_proved(
+    git_repo: pathlib.Path,
+) -> None:
+    """A <- M <- C where M's root tree holds a ``100664`` entry, which Git
+    accepts (``fsck`` is clean and ``merge-base --is-ancestor`` agrees).
+    ``assert_ancestor`` parsed every walked root tree with the reader's
+    content grammar and refused the true ancestry over a tree mode."""
+
+    blob = _hash_object(git_repo, "blob", b"x\n")
+    good = _tree_object(git_repo, [(b"100644", b"x.txt", blob)])
+    legacy = _tree_object(git_repo, [(b"100664", b"x.txt", blob)])
+    base = _commit_with_parents(git_repo, good)
+    middle = _commit_with_parents(git_repo, legacy, base)
+    candidate = _commit_with_parents(git_repo, good, middle)
+    assert _git(git_repo, "merge-base", "--is-ancestor", base, candidate, check=False).returncode == 0
+
+    with TreeSnapshot.select(git_repo, base) as base_snapshot:
+        with TreeSnapshot.select(git_repo, candidate) as selected:
+            assert selected.assert_ancestor(base_snapshot) == base
+            # Authenticated, not retained: the walked root tree is not in the
+            # content cache, so its parse costs no memory for the snapshot's
+            # lifetime.
+            assert legacy in selected._state.authenticated_trees
+            assert legacy not in selected._state.tree_cache
+
+
+def test_ancestry_still_refuses_a_root_tree_that_does_not_hash_to_its_name(
+    git_repo: pathlib.Path,
+) -> None:
+    blob = _hash_object(git_repo, "blob", b"x\n")
+    good = _tree_object(git_repo, [(b"100644", b"x.txt", blob)])
+    other = _tree_object(git_repo, [(b"100644", b"y.txt", blob)])
+    base = _commit_with_parents(git_repo, good)
+    middle = _commit_with_parents(git_repo, other, base)
+    candidate = _commit_with_parents(git_repo, good, middle)
+    loose = git_repo / ".git" / "objects" / other[:2] / other[2:]
+    import zlib
+
+    forged = zlib.compress(b"tree 0\0")
+    loose.chmod(0o644)
+    loose.write_bytes(forged)
+    with TreeSnapshot.select(git_repo, base) as base_snapshot:
+        with TreeSnapshot.select(git_repo, candidate) as selected:
+            with pytest.raises(SnapshotError):
+                selected.assert_ancestor(base_snapshot)

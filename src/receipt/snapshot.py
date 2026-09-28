@@ -349,6 +349,7 @@ class _SnapshotState:
     commit_cache: dict[str, _CommitObject]
     entry_token: object = field(default_factory=object)
     ancestry_bases: set[str] = field(default_factory=set)
+    authenticated_trees: set[str] = field(default_factory=set)
     object_store_attempted: bool = False
     attribute_cache: dict[str, tuple["_AttributeRule", ...]] = field(
         default_factory=dict
@@ -2334,8 +2335,40 @@ class TreeSnapshot:
         self._state.tree_cache[oid] = parsed
         return parsed
 
+    def _authenticate_tree(self, oid: str) -> None:
+        """Rehash and type-bind a tree without parsing or retaining it.
+
+        The ancestry walk authenticates every root tree it reaches, but
+        parentage needs only commit payloads, so nothing it reads there is
+        consumed as content. Parsing those trees applied the reader's content
+        grammar -- a legacy ``100664`` mode Git accepts refused a true
+        ancestry with a message about a tree mode (0.6.2 review, L3 finding
+        9) -- and caching them retained about seven times their raw bytes for
+        the snapshot's lifetime, memory no budget counted (L3 finding 4).
+        Here the bytes are streamed through the object hash under the same
+        tree-byte budget and then dropped; a tree already parsed for content
+        is already authenticated.
+        """
+
+        if oid in self._state.tree_cache or oid in self._state.authenticated_trees:
+            return
+        batch = self._batch()
+        _kind, size = batch.info(oid, role="tree")
+        if self._state.work.tree_bytes + size > MAX_TREE_BYTES_TOTAL:
+            raise SnapshotError(
+                f"tree and commit bytes exceed the snapshot budget of "
+                f"{MAX_TREE_BYTES_TOTAL} bytes"
+            )
+        batch.consume(oid, role="tree", limit=MAX_TREE_OBJECT_BYTES)
+        self._charge_tree_object(size)
+        self._state.authenticated_trees.add(oid)
+
     def _commit_object(
-        self, oid: str, *, parent_budget: int | None = None
+        self,
+        oid: str,
+        *,
+        parent_budget: int | None = None,
+        parse_tree: bool = True,
     ) -> _CommitObject:
         batch = self._batch()
         cached = self._state.commit_cache.get(oid)
@@ -2367,8 +2400,12 @@ class TreeSnapshot:
                 f"{MAX_ANCESTRY_COMMITS} commits"
             )
         # Every tree line reached by the ancestry walk is authenticated even
-        # though parentage itself needs only the commit payload.
-        self._tree_object(parsed.tree)
+        # though parentage itself needs only the commit payload. The walk
+        # passes parse_tree=False: see _authenticate_tree.
+        if parse_tree:
+            self._tree_object(parsed.tree)
+        else:
+            self._authenticate_tree(parsed.tree)
         for parent in parsed.parents:
             batch.info(parent, role="commit")
         self._state.commit_cache[oid] = parsed
@@ -2675,6 +2712,7 @@ class TreeSnapshot:
             commit = self._commit_object(
                 current,
                 parent_budget=MAX_ANCESTRY_COMMITS - work.ancestry_edges,
+                parse_tree=False,
             )
             if current == base_oid:
                 self._link_verification_work(base)
