@@ -24,7 +24,12 @@ normalization or case-fold model.
 ``content`` rows participate in a closed-world set comparison. ``attested``
 rows are exact paths required by the consumer spec without a content sweep.
 ``removed`` rows retire an effective content or attested binding and assert
-that neither the exact path nor an ASCII-fold-equal spelling survives.
+that neither the exact path nor an ASCII-fold-equal spelling survives. A
+later row naming the exact spelling lifts a tombstone; nothing else does. So
+once a path is removed, no ASCII-fold-equal spelling of it can be present
+while the corpus verifies, and a case-only rename (``rate.yaml`` to
+``Rate.yaml``) cannot be journalled at all: rename to a name that does not
+fold to the old one (0.6.2 review, L4 finding 5).
 ``gate`` rows are declarations, not proof a gate ran; callers use
 :func:`verify_declarations` as the separate completeness pass.
 
