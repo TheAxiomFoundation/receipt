@@ -4944,3 +4944,84 @@ def test_an_unpinned_spec_that_forges_pass_still_carries_the_caveat(
 
     assert run(repo, "--expect-spec-sha256", pinned_digest) == EXIT_USAGE
     assert "is not the expected spec" in capsys.readouterr().err
+
+
+# --- 0.6.2 review, L5 finding 4: formatting a caught exception must not raise
+
+
+_NESTED_STR_EXIT = """
+class _Inner(SystemExit):
+    def __str__(self):
+        raise SystemExit(0)
+
+
+class _Outer(Exception):
+    def __str__(self):
+        raise _Inner(1)
+
+
+raise _Outer()
+"""
+
+
+@pytest.mark.parametrize("as_json", [True, False])
+def test_a_spec_whose_exception_cannot_be_printed_still_refuses(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str], as_json: bool
+) -> None:
+    """The boundary's own ``str(exc)`` was spec code.
+
+    A spec raising an exception whose ``__str__`` raised a ``SystemExit``
+    subclass, whose own ``__str__`` raised ``SystemExit(0)``, left ``main``
+    with status 0 and no output at all: the handler that formats the refusal
+    re-opened the exit the ``BaseException`` boundary exists to stop.
+    """
+
+    path = tmp_path / "spec.py"
+    path.write_text(
+        SPEC_TEMPLATE.format(name="unprintable", spki="a" * 64) + _NESTED_STR_EXIT
+    )
+    argv = ["verify", "--spec", str(path), "--root", str(tmp_path)]
+    assert main([*argv, "--json"] if as_json else argv) == EXIT_USAGE
+    captured = capsys.readouterr()
+    if as_json:
+        payload = json.loads(captured.out)
+        assert payload["verdict"] == "FAIL"
+        assert payload["stage"] == "spec"
+        assert "_Outer (its message could not be rendered)" in payload["failure"]
+    else:
+        assert captured.err.rstrip("\n").endswith("receipt verify: FAIL")
+        assert "_Outer (its message could not be rendered)" in captured.err
+
+
+def test_described_exception_never_raises() -> None:
+    """Every read the formatter makes is guarded, the class name included."""
+
+    from receipt.verify import _described_exception, _exception_detail
+
+    class _ExitingName(type):
+        @property
+        def __name__(cls) -> str:  # type: ignore[override]
+            raise SystemExit(0)
+
+    class _Nameless(Exception, metaclass=_ExitingName):
+        pass
+
+    class _StrSubclass(str):
+        def __format__(self, spec: str) -> str:
+            raise SystemExit(0)
+
+    class _ReturnsSubclass(Exception):
+        def __str__(self) -> str:
+            return _StrSubclass("forged")
+
+    assert _described_exception(_Nameless("x")) == "exception: x"
+    assert (
+        _described_exception(_ReturnsSubclass())
+        == "_ReturnsSubclass (its message could not be rendered)"
+    )
+    assert (
+        _exception_detail(_ReturnsSubclass())
+        == "_ReturnsSubclass (its message could not be rendered)"
+    )
+    assert _exception_detail(ValueError("plain")) == "plain"
+    assert _exception_detail(SystemExit(0)) == "SystemExit: 0"
