@@ -5368,3 +5368,57 @@ def test_a_gate_only_journal_is_a_closed_world_of_zero_content_files() -> None:
     )
     with pytest.raises(CorpusError, match="journal row 1 is blank"):
         parse_journal(b"\n", spec=corpus_spec())
+
+
+def test_a_case_only_rename_cannot_be_journalled(tmp_path: pathlib.Path) -> None:
+    """0.6.2 review, L4 finding 5: the tombstone rule's permanent consequence.
+
+    ``rules/tax/rate.yaml`` renamed to ``rules/tax/Rate.yaml`` with the same
+    bytes, journalled honestly: removing the old spelling refuses because the
+    new spelling aliases it, and keeping both refuses because two declared
+    paths would alias. The rule is intended -- a survivor under a fold-equal
+    spelling answers to the tombstoned name on a case-insensitive checkout --
+    and the module docstring now says what it costs.
+    """
+
+    import receipt.corpus as corpus_module
+
+    body = CONTENT["rules/tax/rate.yaml"]
+    renamed = {
+        ("rules/tax/Rate.yaml" if path == "rules/tax/rate.yaml" else path): text
+        for path, text in CONTENT.items()
+    }
+    write_tree(tmp_path, content=renamed)
+    rows = journal_rows()
+    base = len(rows)
+    rows.append(
+        {
+            "schemaVersion": JOURNAL_SCHEMA,
+            "kind": "content",
+            "path": "rules/tax/rate.yaml",
+            "sha256": sha256_text(body),
+            "state": "removed",
+        }
+    )
+    rows.append(
+        {
+            "schemaVersion": JOURNAL_SCHEMA,
+            "kind": "content",
+            "path": "rules/tax/Rate.yaml",
+            "sha256": sha256_text(body),
+            "state": "present",
+        }
+    )
+    reindex(rows)
+    with pytest.raises(CorpusError, match="still present in the tree"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+    kept = rows[:base] + rows[base + 1 :]
+    reindex(kept)
+    with pytest.raises(CorpusError, match="two declared paths would alias"):
+        verify_corpus_binding(tmp_path, render_journal(kept), spec=corpus_spec())
+
+    documented = " ".join((corpus_module.__doc__ or "").split())
+    assert "a case-only rename (``rate.yaml`` to ``Rate.yaml``) cannot be journalled" in (
+        documented
+    )
