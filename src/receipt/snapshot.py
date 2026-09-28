@@ -506,6 +506,13 @@ def _bounded_process(
         )
     except FileNotFoundError as exc:
         raise SnapshotError("git is required to read an immutable tree snapshot") from exc
+    except (OSError, ValueError) as exc:
+        # E2BIG for an argument over the kernel's limit, and an argument the
+        # filesystem encoding cannot carry, were interpreter exceptions where
+        # the contract is a SnapshotError (0.6.2 review, L3 finding 5).
+        raise SnapshotError(
+            f"cannot start git: {type(exc).__name__}: {exc}"
+        ) from exc
 
     assert process.stdout is not None
     assert process.stderr is not None
@@ -1235,6 +1242,10 @@ class _BatchReader:
             )
         except FileNotFoundError as exc:
             raise SnapshotError("git is required to read an immutable tree snapshot") from exc
+        except (OSError, ValueError) as exc:
+            raise SnapshotError(
+                f"cannot start git: {type(exc).__name__}: {exc}"
+            ) from exc
         try:
             if (
                 self._process.stdin is None
@@ -1861,11 +1872,22 @@ class TreeSnapshot:
 
         if type(revision) is not str or not revision or "\0" in revision:
             raise SnapshotError("snapshot revision must be a non-empty string without NUL")
+        try:
+            os.fsencode(revision)
+        except UnicodeEncodeError as exc:
+            # A lone high surrogate has no filesystem encoding; it reached
+            # Popen and raised UnicodeEncodeError (0.6.2 review, L3 finding 5).
+            raise SnapshotError(
+                "snapshot revision cannot be encoded as a command argument"
+            ) from exc
         if type(verify_objects) is not bool:
             raise SnapshotError("verify_objects must be a bool")
         try:
             selected_root = pathlib.Path(os.fspath(root)).resolve()
-        except (TypeError, ValueError, OSError) as exc:
+        except (TypeError, ValueError, OSError, RuntimeError) as exc:
+            # RuntimeError: Python 3.11 and 3.12 report a symlink loop from
+            # resolve() that way; 3.13 raises OSError (0.6.2 review, L3
+            # finding 5).
             raise SnapshotError(f"candidate repository path is invalid: {root!r}") from exc
         if "\n" in os.fspath(selected_root) or "\r" in os.fspath(selected_root):
             raise SnapshotError("repository top-level path contains a line break")
@@ -3334,7 +3356,9 @@ class Materialization:
         selected = self._selected_entries()
         try:
             destination_stat = self._destination.lstat()
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
+            # ValueError: an embedded NUL, or a surrogate the filesystem
+            # encoding cannot carry (0.6.2 review, L3 finding 5).
             raise SnapshotError("materialization destination does not exist") from exc
         if not stat.S_ISDIR(destination_stat.st_mode) or stat.S_ISLNK(
             destination_stat.st_mode

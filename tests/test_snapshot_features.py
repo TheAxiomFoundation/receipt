@@ -1684,3 +1684,53 @@ def test_eol_is_accepted_as_a_stated_residual_not_as_byte_neutral(
     )
     assert "Only ``filter``" not in documented
     assert "``eol=crlf`` checks a blob's ``LF`` out as ``CRLF``" in documented
+
+
+# --- 0.6.2 review, L3 finding 5: invalid public arguments raise SnapshotError
+
+
+def _one_file_commit(root: pathlib.Path) -> str:
+    _write(root, "x.txt", b"x\n")
+    return _commit(root)
+
+
+@pytest.mark.parametrize(
+    "revision, message",
+    [
+        ("\ud800", "snapshot revision cannot be encoded as a command argument"),
+        ("HEAD" + "x" * 2_000_000, "cannot start git: OSError"),
+    ],
+    ids=["lone-surrogate", "over-the-argument-limit"],
+)
+def test_select_refuses_an_unusable_revision_as_a_snapshot_error(
+    git_repo: pathlib.Path, revision: str, message: str
+) -> None:
+    _one_file_commit(git_repo)
+    with pytest.raises(SnapshotError, match=message):
+        TreeSnapshot.select(git_repo, revision)
+
+
+def test_select_refuses_a_root_that_is_a_symlink_loop(tmp_path: pathlib.Path) -> None:
+    """Python 3.11 and 3.12 raise RuntimeError from ``resolve()`` on a loop."""
+
+    loop = tmp_path / "loop"
+    os.symlink(loop, loop)
+    with pytest.raises(SnapshotError):
+        TreeSnapshot.select(loop)
+
+
+@pytest.mark.parametrize(
+    "destination",
+    ["/tmp/\0x", "/tmp/\ud800"],
+    ids=["embedded-nul", "lone-surrogate"],
+)
+def test_materialize_refuses_an_unusable_destination_as_a_snapshot_error(
+    git_repo: pathlib.Path, destination: str
+) -> None:
+    commit = _one_file_commit(git_repo)
+    with TreeSnapshot.select(git_repo, commit) as selected:
+        with pytest.raises(
+            SnapshotError, match="materialization destination does not exist"
+        ):
+            with selected.materialize([""], destination, repertoire="portable"):
+                pass
