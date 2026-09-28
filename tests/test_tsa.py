@@ -63,6 +63,7 @@ from corpus_fixture import (
     rotate_tsa_signer,
     sha256_bytes,
     stamp_anonymously,
+    stamp_with_clock_precision,
 )
 
 UTC = timezone.utc
@@ -8673,3 +8674,639 @@ def test_refuses_the_openssl_that_used_to_be_the_documented_minimum(
         "receipt requires OpenSSL 3.0 or newer as `openssl` on the path; "
         "found: OpenSSL 1.1.1w  11 Sep 2023"
     )
+
+
+# ---------------------------------------------------------------------------
+# A genTime with fractional seconds (full Opus 5.5 review of 0.6.2, L2 F1)
+
+
+def restamp_with_clock_precision(
+    tree: WitnessTree, anchor: LocalAnchor, *, digits: int
+) -> datetime:
+    """Replace ``anchor``'s token with a genuine one carrying a fraction."""
+
+    token = tree.tokens[anchor.anchor_id]
+    stamped = stamp_with_clock_precision(
+        anchor.tsa, sha256_bytes(tree.record.read_bytes()), token, digits=digits
+    )
+    digest = sha256_bytes(token.read_bytes())
+
+    def refresh(payload: dict[str, Any]) -> None:
+        for outcome in payload.get("anchorOutcomes", [payload]):
+            if outcome.get("tsaAnchorId") == anchor.anchor_id:
+                outcome["tokenSha256"] = digest
+
+    rewrite_witness(tree, refresh)
+    return stamped
+
+
+def rfc3339_utc(value: datetime) -> str:
+    """The expected rendering, written out independently of ``_format_utc``."""
+
+    text = value.strftime("%Y-%m-%dT%H:%M:%S")
+    if value.microsecond:
+        text += "." + f"{value.microsecond:06d}".rstrip("0")
+    return text + "Z"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (datetime(2026, 9, 27, 12, 0, 0, tzinfo=UTC), "2026-09-27T12:00:00Z"),
+        (datetime(2026, 9, 27, 12, 0, 0, 500000, tzinfo=UTC), "2026-09-27T12:00:00.5Z"),
+        (datetime(2026, 9, 27, 12, 0, 0, 250000, tzinfo=UTC), "2026-09-27T12:00:00.25Z"),
+        (datetime(2026, 9, 27, 12, 0, 0, 1, tzinfo=UTC), "2026-09-27T12:00:00.000001Z"),
+        (datetime(2026, 9, 27, 12, 0, 0, 100000, tzinfo=UTC), "2026-09-27T12:00:00.1Z"),
+        (datetime(2026, 9, 27, 12, 0, 0, 999999, tzinfo=UTC), "2026-09-27T12:00:00.999999Z"),
+        (datetime(1, 1, 1, tzinfo=UTC), "0001-01-01T00:00:00Z"),
+        (datetime(9999, 12, 31, 23, 59, 59, 10, tzinfo=UTC), "9999-12-31T23:59:59.00001Z"),
+    ],
+)
+def test_format_utc_writes_z_and_a_fraction_without_trailing_zeros(
+    value: datetime, expected: str
+) -> None:
+    """``rstrip("0")`` over the whole ISO string ate the zeros of ``+00:00``
+    and returned ``...12:00:00.500000+00:`` for every nonzero fraction; the
+    whole-second form was always right and must stay byte-identical."""
+
+    assert tsa_module._format_utc(value) == expected
+
+
+@pytest.mark.parametrize("digits", [3, 6])
+def test_a_token_with_a_fractional_gentime_verifies_and_reports_it_exactly(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...], digits: int
+) -> None:
+    """A genuine token whose authority signs sub-second genTimes verifies.
+
+    OpenSSL's own ``clock_precision_digits`` signs it, ``openssl ts -verify``
+    accepts it against the pinned root, and the verifier now does too: the
+    witness verifies, and ``gen_time`` is the signed instant, fraction
+    included, in the RFC 3339 form a sidecar declares. Before the fix the
+    witness was refused as ``invalid timestamp claim token genTime`` and the
+    public token verifier returned ``...+00:``, which is not RFC 3339.
+    """
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    stamped = restamp_with_clock_precision(tree, alpha, digits=digits)
+    expected = rfc3339_utc(stamped)
+    assert stamped.microsecond and "." in expected
+    assert openssl_ts_verifies(tree.record, tree.tokens[alpha.anchor_id], alpha.tsa.root_pem)
+
+    evidence = verify_tree(tree)
+    assert evidence.status == "available"
+    assert evidence.gen_time == expected
+    assert [token.gen_time for token in evidence.tokens] == [expected]
+    assert token_time(evidence.tokens[0]) == stamped
+
+    direct = verify_timestamp_token(
+        tree.record,
+        token_claim(tree, alpha),
+        tree.reference,
+        spec=tree.spec,
+        records=tree.records,
+    )
+    assert direct.gen_time == expected
+
+
+def test_a_declared_fractional_gentime_is_compared_in_the_reported_form(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """``tsaGenTime`` declared as the verifier reports it is accepted; any
+    other spelling of the same instant is the existing mismatch refusal."""
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    stamped = restamp_with_clock_precision(tree, alpha, digits=3)
+    expected = rfc3339_utc(stamped)
+
+    rewrite_witness(
+        tree,
+        lambda payload: payload["anchorOutcomes"][0].__setitem__("tsaGenTime", expected),
+    )
+    assert verify_tree(tree).gen_time == expected
+
+    padded = stamped.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    assert padded != expected
+    rewrite_witness(
+        tree,
+        lambda payload: payload["anchorOutcomes"][0].__setitem__("tsaGenTime", padded),
+    )
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == (
+        f"witness tsaGenTime mismatch for {tree.record}: expected {expected}, "
+        f"got {padded}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "microsecond"),
+    [
+        ("20260927120000.5Z", 500000),
+        ("20260927120000.123456Z", 123456),
+        ("20260927120000.1234560Z", 123456),
+        ("20260927120000.12345600000000000000Z", 123456),
+        ("20260927120000.000001Z", 1),
+    ],
+)
+def test_a_gentime_fraction_up_to_microseconds_is_kept_exactly(
+    text: str, microsecond: int
+) -> None:
+    assert tsa_module._parse_generalized_time(text) == datetime(
+        2026, 9, 27, 12, 0, 0, microsecond, tzinfo=UTC
+    )
+
+
+@pytest.mark.parametrize(
+    "text", ["20260927120000.1234567Z", "20260927120000.0000001Z", "20260927120000.00000000000001Z"]
+)
+def test_a_gentime_finer_than_a_microsecond_is_refused_not_rounded(text: str) -> None:
+    """Six digits and a dropped seventh would be an earlier instant than the
+    one signed; ``receipt.release_chain`` refuses the same precision."""
+
+    with pytest.raises(TsaError) as caught:
+        tsa_module._parse_generalized_time(text)
+    assert str(caught.value) == (
+        "RFC 3161 genTime is finer than a microsecond, which this verifier "
+        f"cannot represent exactly: {text!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Token bytes that used to crash the parser before any signature was checked
+# (full Opus 5.5 review of 0.6.2, L2 F2)
+
+
+def der_length(size: int) -> bytes:
+    if size < 0x80:
+        return bytes([size])
+    encoded = size.to_bytes((size.bit_length() + 7) // 8, "big")
+    return bytes([0x80 | len(encoded)]) + encoded
+
+
+def der(tag: int, body: bytes) -> bytes:
+    return bytes([tag]) + der_length(len(body)) + body
+
+
+def oid_body(arcs: Sequence[int]) -> bytes:
+    """DER content octets of an OBJECT IDENTIFIER, minimal base-128."""
+
+    encoded = b""
+    for value in [arcs[0] * 40 + arcs[1], *arcs[2:]]:
+        chunk = [value & 0x7F]
+        value >>= 7
+        while value:
+            chunk.append(0x80 | (value & 0x7F))
+            value >>= 7
+        encoded += bytes(reversed(chunk))
+    return encoded
+
+
+def tst_info_der(*, policy: bytes, digest: bytes, gen_time: bytes) -> bytes:
+    algorithm = der(0x30, der(0x06, oid_body([2, 16, 840, 1, 101, 3, 4, 2, 1])) + b"\x05\x00")
+    imprint = der(0x30, algorithm + der(0x04, digest))
+    return der(
+        0x30,
+        der(0x02, b"\x01")
+        + der(0x06, policy)
+        + imprint
+        + der(0x02, b"\x07")
+        + der(0x18, gen_time),
+    )
+
+
+def signed_response(tst_info: bytes, authority: LocalTsa, directory: pathlib.Path) -> bytes:
+    """A granted TimeStampResp whose token CMS-signs ``tst_info`` with the
+    authority's own key: the bytes OpenSSL's ``ts -reply`` extraction reads."""
+
+    content = directory / "tst-info.der"
+    content.write_bytes(tst_info)
+    token = directory / "token.der"
+    subprocess.run(
+        [
+            "openssl", "cms", "-sign", "-binary", "-nodetach",
+            "-in", str(content), "-econtent_type", "1.2.840.113549.1.9.16.1.4",
+            "-signer", str(authority.signer_pem),
+            "-inkey", str(authority.directory / "signer.key"),
+            "-outform", "DER", "-out", str(token), "-md", "sha256",
+        ],
+        check=True,
+        capture_output=True,
+        env={**os.environ, "OPENSSL_CONF": "/dev/null"},
+    )
+    return der(0x30, der(0x30, der(0x02, b"\x00")) + token.read_bytes())
+
+
+def replace_token(tree: WitnessTree, anchor: LocalAnchor, data: bytes) -> None:
+    """Write ``data`` as ``anchor``'s token and make the sidecar agree with it."""
+
+    tree.tokens[anchor.anchor_id].write_bytes(data)
+    digest = sha256_bytes(data)
+
+    def refresh(payload: dict[str, Any]) -> None:
+        for outcome in payload.get("anchorOutcomes", [payload]):
+            if outcome.get("tsaAnchorId") == anchor.anchor_id:
+                outcome["tokenSha256"] = digest
+
+    rewrite_witness(tree, refresh)
+
+
+@pytest.mark.parametrize(
+    "gen_time",
+    [
+        b"20261301000000Z",  # month 13
+        b"20260230000000Z",  # February 30th
+        b"20261231235960Z",  # a leap second
+        b"00000101000000Z",  # year 0
+        b"20260927240000Z",  # hour 24
+    ],
+)
+def test_a_token_whose_gentime_is_no_calendar_instant_is_refused_by_name(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...], gen_time: bytes
+) -> None:
+    """Fourteen digits and a Z match the genTime grammar and still name no
+    instant. The parse runs on the unauthenticated extraction, before either
+    OpenSSL verification, so these bytes need no key: patching them into a
+    genuine response (and the sidecar's digest to match) used to end the
+    verification with ``ValueError`` from ``strptime`` instead of a refusal.
+    """
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    token = tree.tokens[alpha.anchor_id].read_bytes()
+    found = re.search(rb"\x18\x0f(\d{14}Z)", token)
+    assert found is not None
+    replace_token(tree, alpha, token[: found.start(1)] + gen_time + token[found.end(1) :])
+
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == f"invalid RFC 3161 genTime: {gen_time.decode()!r}"
+
+
+def test_a_token_whose_policy_oid_has_an_oversized_arc_is_refused_by_name(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """A policy OID with one 2,100-octet subidentifier is DER OpenSSL's
+    ``ts -reply`` accepts. Its decimal form has more than 4,300 digits, which
+    the interpreter refuses to write, so it escaped as ``ValueError``. It is
+    now refused by name; a 1,000-octet arc, which decodes, still reaches the
+    existing policy refusal."""
+
+    alpha = local_anchors[0]
+
+    def run(octets: int, where: pathlib.Path) -> str:
+        tree = build_witness_tree(where, local_anchors[:1])
+        record_digest = bytes.fromhex(sha256_bytes(tree.record.read_bytes()))
+        policy = bytes([0x2B]) + b"\xff" * octets + b"\x7f"
+        response = signed_response(
+            tst_info_der(policy=policy, digest=record_digest, gen_time=b"20260927120000Z"),
+            alpha.tsa,
+            where,
+        )
+        replace_token(tree, alpha, response)
+        with pytest.raises(TsaError) as caught:
+            verify_tree(tree)
+        return str(caught.value)
+
+    assert run(2100, tmp_path / "huge") == "oversized OID subidentifier in RFC 3161 token"
+    decodable = run(1000, tmp_path / "large")
+    assert decodable.startswith("RFC 3161 policy '1.3.")
+    assert decodable.endswith(f"is not allowed for TSA anchor {alpha.anchor_id!r}")
+
+
+def test_an_oid_arc_decodes_up_to_the_interpreters_digit_limit() -> None:
+    """The bound is exactly where writing the arc out would fail by default:
+    an arc of 4,300 decimal digits decodes, the next integer is refused. That
+    holds for the second arc too, whose subidentifier is the first one read
+    and carries 80 more than the arc written under 2."""
+
+    largest = 10**4300 - 1
+    assert _decode_oid(oid_body([1, 3, largest])) == f"1.3.{largest}"
+    with pytest.raises(TsaError, match="^oversized OID subidentifier in RFC 3161 token$"):
+        _decode_oid(oid_body([1, 3, largest + 1]))
+    # 2.<arc>: the first subidentifier is 80 + arc, so arcs just under the
+    # bound read subidentifiers of 10**4300 to 10**4300 + 79.
+    for arc in (largest - 79, largest - 1, largest):
+        assert _decode_oid(oid_body([2, arc])) == f"2.{arc}"
+    with pytest.raises(TsaError, match="^oversized OID subidentifier in RFC 3161 token$"):
+        _decode_oid(oid_body([2, largest + 1]))
+
+
+def test_an_oversized_oid_arc_is_refused_under_a_lowered_int_string_limit() -> None:
+    """A process may lower ``sys.set_int_max_str_digits`` below the default;
+    the decode then refuses rather than letting ``str()`` raise."""
+
+    import sys
+
+    arc = 10**700
+    previous = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(640)
+    try:
+        with pytest.raises(TsaError, match="^oversized OID subidentifier in RFC 3161 token$"):
+            _decode_oid(oid_body([1, 3, arc]))
+    finally:
+        sys.set_int_max_str_digits(previous)
+
+
+# ---------------------------------------------------------------------------
+# Creation claims at the ends of the datetime range (full Opus 5.5 review of
+# 0.6.2, L2 F3)
+
+
+def restamp_record_claiming(
+    tree: WitnessTree, anchor: LocalAnchor, recorded_at: str
+) -> None:
+    """Rewrite the record's ``recordedAt`` and stamp a genuine token over it."""
+
+    payload = json.loads(tree.record.read_text())
+    payload["recordedAt"] = recorded_at
+    tree.record.write_bytes(canonical_bytes(payload) + b"\n")
+    digest = sha256_bytes(tree.record.read_bytes())
+    token = tree.tokens[anchor.anchor_id]
+    anchor.tsa.stamp(digest, token)
+    token_digest = sha256_bytes(token.read_bytes())
+
+    def refresh(witness: dict[str, Any]) -> None:
+        witness["digestSha256"] = digest
+        for outcome in witness.get("anchorOutcomes", [witness]):
+            outcome["tokenSha256"] = token_digest
+
+    rewrite_witness(tree, refresh)
+
+
+def test_a_record_claiming_year_one_is_measured_not_crashed_on(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """``claim - timedelta(seconds=lead)`` has no datetime for a claim in the
+    first ``lead`` seconds of year 1, and raised ``OverflowError`` -- which is
+    not a ``ValueError`` and escaped every handler. The comparison is now a
+    difference: the genuine token postdates the claim, so the lead check
+    passes and the witness verifies, as it would for any earlier claim."""
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    restamp_record_claiming(tree, alpha, "0001-01-01T00:00:00Z")
+    assert verify_tree(tree).status == "available"
+
+
+@pytest.mark.parametrize(
+    "claim", ["0001-01-01T00:00:00+14:00", "0001-01-01T00:04:59+00:05", "9999-12-31T23:59:59-14:00"]
+)
+def test_a_claim_with_no_utc_instant_is_an_invalid_claim(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...], claim: str
+) -> None:
+    """A valid RFC 3339 string whose UTC instant falls outside years 1-9999
+    cannot be converted; that is now the existing invalid-claim refusal."""
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    restamp_record_claiming(tree, alpha, claim)
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == f"invalid timestamp claim recordedAt: {claim!r}"
+
+
+def test_a_record_claiming_the_last_second_is_the_existing_lead_refusal(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """The top of the range was never an overflow for the lead check and
+    must keep its refusal, word for word."""
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    restamp_record_claiming(tree, alpha, "9999-12-31T23:59:59Z")
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    message = str(caught.value)
+    assert message.startswith("RFC 3161 genTime ")
+    assert message.endswith(" impossibly precedes recordedAt=9999-12-31T23:59:59Z")
+
+
+def test_validate_token_time_decides_at_the_ends_of_the_range() -> None:
+    """Every overflow the shifted-instant form could reach, decided."""
+
+    gen_time = datetime(2026, 9, 27, 12, tzinfo=UTC)
+    claim = {"recordedAt": "2026-09-27T11:59:00Z"}
+    # A verification time at the top of the range with a future allowance.
+    validate_token_time(
+        claim,
+        gen_time,
+        now=datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC),
+        max_future_seconds=86_400,
+        max_token_lead_seconds=300,
+    )
+    # Allowances too large for a timedelta saturate rather than overflow.
+    validate_token_time(
+        {"recordedAt": "9999-12-31T23:59:59Z"},
+        datetime(1, 1, 1, tzinfo=UTC),
+        now=datetime(2026, 9, 28, tzinfo=UTC),
+        max_future_seconds=10**30,
+        max_token_lead_seconds=10**30,
+    )
+    # A genTime at the very bottom still refuses a later claim by name.
+    with pytest.raises(TsaError, match=r"impossibly precedes recordedAt=0001-01-01T00:10:00Z$"):
+        validate_token_time(
+            {"recordedAt": "0001-01-01T00:10:00Z"},
+            datetime(1, 1, 1, tzinfo=UTC),
+            now=datetime(2026, 9, 28, tzinfo=UTC),
+            max_future_seconds=0,
+            max_token_lead_seconds=300,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Deep or oversized JSON in the producer's files (full Opus 5.5 review of
+# 0.6.2, L2 F4)
+
+DEEP_ARRAY = b"[" * 100_000 + b"]" * 100_000
+HUGE_INTEGER = b'{"x": ' + b"9" * 5000 + b"}"
+BUNDLE_HEAD = b'{"schemaVersion":"thesis_tsa_trust_bundle_v1","bundleId":"tsa-anchors-v1",'
+
+
+def replace_record(tree: WitnessTree, data: bytes) -> None:
+    tree.record.write_bytes(data)
+    digest = sha256_bytes(data)
+    rewrite_witness(tree, lambda payload: payload.__setitem__("digestSha256", digest))
+
+
+@pytest.mark.parametrize(
+    ("victim", "data", "reason"),
+    [
+        ("witness", DEEP_ARRAY, "JSON nesting exceeds 128 levels at char 128"),
+        ("witness", HUGE_INTEGER, "JSON integer literal has 5000 digits, more than 4300"),
+        ("record", DEEP_ARRAY, "JSON nesting exceeds 128 levels at char 128"),
+        ("record", HUGE_INTEGER, "JSON integer literal has 5000 digits, more than 4300"),
+        ("genesis", DEEP_ARRAY, "JSON nesting exceeds 128 levels at char 128"),
+        (
+            "bundle",
+            BUNDLE_HEAD + b'"x":' + b"[" * 600 + b"]" * 600 + b"}",
+            # The object is level 1, so level 129 is the 128th bracket.
+            f"JSON nesting exceeds 128 levels at char {len(BUNDLE_HEAD) + 4 + 127}",
+        ),
+        (
+            "bundle",
+            BUNDLE_HEAD + b'"x":' + b"9" * 5000 + b"}",
+            "JSON integer literal has 5000 digits, more than 4300",
+        ),
+    ],
+    ids=[
+        "witness-deep",
+        "witness-integer",
+        "record-deep",
+        "record-integer",
+        "genesis-deep",
+        "bundle-deep",
+        "bundle-integer",
+    ],
+)
+def test_deep_or_oversized_json_is_the_cannot_read_refusal(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    victim: str,
+    data: bytes,
+    reason: str,
+) -> None:
+    """Each of the four JSON files a verification parses is producer-written.
+    ``json.loads`` let 100,000 levels of nesting out as ``RecursionError``
+    and a 5,000-digit integer as a bare ``ValueError``; both are now the
+    ``cannot read JSON`` refusal, naming the file and the bound."""
+
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    target = {
+        "witness": tree.witness,
+        "record": tree.record,
+        "genesis": tree.records / "CHAIN_GENESIS.json",
+        "bundle": tree.bundle,
+    }[victim]
+    if victim == "record":
+        replace_record(tree, data)
+    else:
+        target.write_bytes(data)
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == f"cannot read JSON {target}: {reason}"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [b"NaN", b"Infinity", b"-Infinity", str(2**1100).encode()],
+    ids=["nan", "infinity", "minus-infinity", "beyond-number-range"],
+)
+def test_a_bundle_canonical_json_cannot_encode_is_not_canonical(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...], value: bytes
+) -> None:
+    """A replaced bundle is parsed before its commitment is compared, and
+    ``receipt.canonical`` raised ``ValueError`` for values it cannot encode.
+    Such a payload is by that fact not canonical JSON: the existing refusal."""
+
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    tree.bundle.write_bytes(BUNDLE_HEAD + b'"x":' + value + b"}")
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == (
+        f"TSA trust configuration is not canonical JSON: {tree.bundle}"
+    )
+
+
+def test_an_ordinary_replaced_bundle_keeps_its_refusal(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """The control from the lane's reproduction: the order of the bundle
+    checks did not change, so a bundle refused before is refused as before."""
+
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    tree.bundle.write_bytes(BUNDLE_HEAD + b'"x":1}')
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == (
+        f"TSA trust configuration is not canonical JSON: {tree.bundle}"
+    )
+
+
+def test_the_depth_bound_is_a_new_refusal_of_records_0_6_1_accepted(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """The verdict change the decoding bound makes, pinned on both sides with
+    genuinely stamped records. The record is level 1, so a member holding 127
+    nested lists makes it 128 deep and it verifies; one more level is
+    refused. 0.6.1 verified the deeper record too, whenever json.loads could
+    parse it; the bound refuses it on every interpreter alike."""
+
+    alpha = local_anchors[0]
+    for levels, verifies in ((127, True), (128, False)):
+        tree = build_witness_tree(tmp_path / str(levels), local_anchors[:1])
+        payload = json.loads(tree.record.read_text())
+        nested: Any = 0
+        for _ in range(levels):
+            nested = [nested]
+        payload["nested"] = nested
+        tree.record.write_bytes(canonical_bytes(payload) + b"\n")
+        restamp_record_claiming(tree, alpha, payload["recordedAt"])
+        if verifies:
+            assert verify_tree(tree).status == "available"
+        else:
+            with pytest.raises(TsaError) as caught:
+                verify_tree(tree)
+            assert str(caught.value).startswith(
+                f"cannot read JSON {tree.record}: JSON nesting exceeds 128 levels at char "
+            )
+
+
+def test_the_public_json_reader_refuses_what_the_one_read_refuses(
+    tmp_path: pathlib.Path,
+) -> None:
+    """``load_json`` is the reader ``_record_payload`` mirrors word for word,
+    and it refuses the same deep and oversized files the same way."""
+
+    for name, data, reason in [
+        ("deep.json", DEEP_ARRAY, "JSON nesting exceeds 128 levels at char 128"),
+        ("huge.json", HUGE_INTEGER, "JSON integer literal has 5000 digits, more than 4300"),
+    ]:
+        path = tmp_path / name
+        path.write_bytes(data)
+        with pytest.raises(TsaError) as caught:
+            tsa_module.load_json(path)
+        assert str(caught.value) == f"cannot read JSON {path}: {reason}"
+
+
+# ---------------------------------------------------------------------------
+# A witness status that is not hashable (found by the adversarial sweep over
+# this branch; the same class as L2 F4)
+
+
+@pytest.mark.parametrize(
+    "schema", ["thesis_rfc3161_witness_v2", "thesis_rfc3161_witness_v1"]
+)
+@pytest.mark.parametrize(
+    "status", [[], ["available"], {}, {"available": True}], ids=["[]", "[available]", "{}", "{available}"]
+)
+def test_a_witness_status_that_is_a_list_or_object_is_refused_by_name(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    schema: str,
+    status: Any,
+) -> None:
+    """The status was checked with ``status not in {"available",
+    "unavailable"}``, which hashes the producer's value: a list or an object
+    raised TypeError where a number or a stray string gets the named refusal.
+    Both now get it."""
+
+    tree = build_witness_tree(tmp_path, local_anchors[:1], schema=schema)
+    rewrite_witness(tree, lambda payload: payload.__setitem__("status", status))
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == f"invalid witness status for {tree.record}: {status!r}"
+    with pytest.raises(TsaError) as stepped:
+        verify_step(tree.record, spec=tree.spec, records=tree.records)
+    assert str(stepped.value) == str(caught.value)
+
+
+def test_an_unavailable_witness_with_an_object_status_is_refused_by_name(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    tree = build_witness_tree(tmp_path, local_anchors[:1], available=False)
+    rewrite_witness(tree, lambda payload: payload.__setitem__("status", {}))
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == f"invalid witness status for {tree.record}: {{}}"
