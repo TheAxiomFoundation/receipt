@@ -5121,3 +5121,58 @@ def test_loading_a_spec_restores_an_existing_module_of_the_same_name(
         with pytest.raises(VerifySpecError, match="boom"):
             load_spec(path)
         assert sys.modules["_receipt_consumer_spec"] is sentinel
+
+
+# --- 0.6.2 review, L4 finding 4: a close-time re-audit invalidates history too
+
+
+def test_a_close_time_repository_change_invalidates_the_history_pass(
+    built: pathlib.Path,
+    committed_repo: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The history pass read the snapshots the close-time re-audit refused.
+
+    A writer appending to ``.git/config`` after the declaration pass made the
+    snapshots' ``__exit__`` re-audit refuse. The FAIL verdict dropped custody,
+    binding and declaration but kept history, so ``passesCompleted`` and
+    ``scope.established`` still carried the history claim on a run whose
+    every tree-derived read had just been invalidated.
+    """
+
+    import receipt.verify as verify_module
+
+    base_oid = head_oid(committed_repo)
+    corrected = dict(CONTENT)
+    corrected["rules/tax/rate.yaml"] = "name: rate\nvalue: 0.20\n"
+    candidate_oid = append_release(
+        committed_repo, built.parent / "tsa-workspace", content=corrected
+    )
+    assert candidate_oid is not None
+    argv = ("--base-ref", base_oid, "--expect-commit", candidate_oid, "--json")
+    assert run(committed_repo, *argv) == EXIT_OK
+    assert "history" in json.loads(capsys.readouterr().out)["passesCompleted"]
+
+    real = verify_module.verify_declarations
+
+    def declarations_then_a_concurrent_config_write(
+        *args: object, **kwargs: object
+    ) -> object:
+        outcome = real(*args, **kwargs)
+        with open(committed_repo / ".git" / "config", "a") as handle:
+            handle.write("[receiptprobe]\n\tconcurrent = 1\n")
+        return outcome
+
+    monkeypatch.setattr(
+        verify_module, "verify_declarations", declarations_then_a_concurrent_config_write
+    )
+    assert run(committed_repo, *argv) == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
+    assert payload["passesCompleted"] == []
+    assert payload["scope"]["established"] == []
+    assert [item["name"] for item in payload["passes"]] == ["custody", "binding"]
+    failure = next(item for item in payload["passes"] if not item["ok"])
+    assert failure["name"] == "custody"
+    assert "configuration changed during verification" in failure["failure"]
