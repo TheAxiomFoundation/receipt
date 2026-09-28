@@ -5341,3 +5341,30 @@ def test_parse_journal_and_verify_declarations_refuse_wrong_argument_types() -> 
         CorpusError, match="verification must be a CorpusVerification, not NoneType"
     ):
         verify_declarations(None, spec=spec)  # type: ignore[arg-type]
+
+
+def test_a_gate_only_journal_is_a_closed_world_of_zero_content_files() -> None:
+    """0.6.2 review, L4 finding 7: "genesis must bind content" never ran.
+
+    The branch carrying that message sat after the trailing-LF check, where
+    splitting always yields at least one row, so a journal of gate rows alone
+    has always parsed as zero content files. The unreachable branch is gone
+    and the docstring states the behaviour that was always there.
+    """
+
+    import receipt.corpus as corpus_module
+    from receipt.corpus import parse_journal
+
+    rows = journal_rows(content={}, attested={})
+    assert {row["kind"] for row in rows} == {"gate"}
+    content, attested, gates, removed = parse_journal(
+        render_journal(rows), spec=corpus_spec(required_attested_paths=frozenset())
+    )
+    assert (content, attested, removed) == ({}, {}, ())
+    assert gates
+    documented = " ".join((corpus_module.parse_journal.__doc__ or "").split())
+    assert "A journal of gate rows alone is a closed world of zero content files" in (
+        documented
+    )
+    with pytest.raises(CorpusError, match="journal row 1 is blank"):
+        parse_journal(b"\n", spec=corpus_spec())
