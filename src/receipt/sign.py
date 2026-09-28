@@ -209,20 +209,37 @@ def _verify_producer_signature_with_openssl(
                     f"{computed_spki_sha256}"
                 )
 
+        if payload:
+            command = [
+                "pkeyutl",
+                "-verify",
+                "-pubin",
+                "-inkey",
+                str(public_key_path),
+                "-rawin",
+                "-in",
+                str(manifest_path),
+                "-sigfile",
+                str(signature_path),
+            ]
+        else:
+            # ``pkeyutl -rawin`` cannot allocate a zero-byte one-shot buffer,
+            # so a valid signature over the empty message was refused as
+            # "signature verification failed" (0.6.2 review, L7 finding 6).
+            # ``dgst -verify`` runs the same one-shot Ed25519 verification
+            # and accepts an empty input; the key is already known to be an
+            # Ed25519 SPKI above.
+            command = [
+                "dgst",
+                "-verify",
+                str(public_key_path),
+                "-signature",
+                str(signature_path),
+                str(manifest_path),
+            ]
         try:
             _producer_openssl_binary(
-                [
-                    "pkeyutl",
-                    "-verify",
-                    "-pubin",
-                    "-inkey",
-                    str(public_key_path),
-                    "-rawin",
-                    "-in",
-                    str(manifest_path),
-                    "-sigfile",
-                    str(signature_path),
-                ],
+                command,
                 environment=environment,
                 label=f"Ed25519 signature verification for {label}",
             )
