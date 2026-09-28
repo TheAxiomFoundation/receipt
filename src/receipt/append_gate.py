@@ -228,6 +228,20 @@ def check_gate_only_confinement(
     the sentence names.
     """
 
+    # The ledger and its frozen-prefix manifest are what every skipped check
+    # is about, whatever the spec's DATA_SURFACE says. With a data surface
+    # that missed them, a gate-only proposal rewrote an existing ledger row
+    # and was accepted, the row reported only as "unclassified" (0.6.2
+    # review, L6 finding 11). So they, and the directories above them, are
+    # refused as unclassified changes here too.
+    on_the_state_files = sorted(
+        path for path in unclassified if path in _state_paths(candidate)
+    )
+    if on_the_state_files:
+        raise AppendError(
+            "gate-only proposal changes unclassified ledger state path(s): "
+            f"{on_the_state_files}"
+        )
     on_the_release_surface = sorted(
         path for path in unclassified if _is_protected(path, candidate)
     )
@@ -237,6 +251,19 @@ def check_gate_only_confinement(
             f"{on_the_release_surface}"
         )
     return set(unclassified)
+
+
+def _state_paths(candidate: _CandidateTree) -> frozenset[str]:
+    """The ledger, its prefix manifest, and every proper ancestor of each."""
+
+    paths: set[str] = set()
+    for relative in (
+        candidate.spec.chain.state_relative,
+        candidate.spec.chain.prefix_relative,
+    ):
+        paths.add(relative.as_posix())
+        paths.update(parent.as_posix() for parent in relative.parents if parent.parts)
+    return frozenset(paths)
 
 
 def _as_text(payload: bytes, relative: str) -> str:
