@@ -121,7 +121,9 @@ New refusals, each of an input 0.6.1 accepted or crashed on:
   lowercase hex characters; presented key ids must be `str`; without
   `cryptography`, the OpenSSL fallback refuses a key that is not an Ed25519
   PEM public key (a DER SPKI, a private key, a P-224 key), as the primary path
-  does; `read_producer_public_key` reads only inside the anchor directory,
+  does, and refuses a signature over the empty message, which no OpenSSL
+  command it can rely on verifies, as that rather than as a failed signature;
+  `read_producer_public_key` reads only inside the anchor directory,
   without following links; a bytes-subclass signature's refusal names its
   type rather than its length.
 - `receipt._names`: a portable component is at most 255 bytes, and pinned
@@ -134,7 +136,6 @@ Inputs that now verify, each refused in 0.6.1 for a reason that was not true:
 - An ancestry through a commit whose root tree uses a legacy mode Git accepts:
   walked root trees are rehashed and type-bound without the content grammar,
   and no longer held in memory for the snapshot's lifetime.
-- A signature over the empty message on the OpenSSL fallback.
 - A spec that defines a dataclass or pickles its own objects: the spec is
   compiled without the loader's `__future__` flags and executed as a module
   registered in `sys.modules`. On Python 3.11 to 3.13 a spec's module-level
