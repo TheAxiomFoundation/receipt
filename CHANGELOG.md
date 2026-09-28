@@ -107,6 +107,18 @@ JSON nested more than 128 deep is refused, including JSON 0.6.1 accepted.
   `expected_assertion_version_id` raises the same refusals for its own
   callers, and a falsy `measure`, `source` or `responseArchive` still reads
   as absent.
+- A release manifest past the decoding bounds, or with a count past the
+  Number range, is refused. Found while fixing the append gate, which reaches
+  it: `load_manifest` parses a manifest before its filename digest is
+  compared, and `json.loads` let deep nesting and 5,000-digit integers out as
+  `RecursionError` and `ValueError`. A count such as `state.lineCount` of
+  `10**400` passed the schema, which bounds counts only from below, and
+  `receipt.canonical` then raised `ValueError`. These are now the existing
+  `manifest is not valid JSON: <path>: ...` and
+  `manifest bytes are not canonical JSON plus one newline: <path>`. A
+  manifest nested more than 128 deep, which the closed-world schema refused
+  before (`producer.repo must be a string and non-empty`, for one), now gets
+  the depth refusal instead.
 
 ## 0.6.2
 
