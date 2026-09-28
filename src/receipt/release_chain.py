@@ -223,19 +223,13 @@ class AnchorSpec:
                 )
             seen.add(signer.certificate_sha256)
 
-    @property
-    def signers(self) -> tuple[PinnedSigner, ...]:
-        """Every accepted responder, the primary pin first."""
-
-        return _pinned_signers(self)
 
 
 def _pinned_signers(anchor: "AnchorSpec") -> tuple[PinnedSigner, ...]:
     """Every accepted responder, the primary pin first.
 
-    Construction and verification read the pins through this function
-    rather than the ``signers`` property, so a 0.6.1 subclass with its own
-    attribute named ``signers`` keeps verifying as it did.
+    A module function rather than an attribute of ``AnchorSpec``, so no name
+    a 0.6.1 subclass may already use (``signers`` included) changes the pins.
     """
 
     primary = PinnedSigner(

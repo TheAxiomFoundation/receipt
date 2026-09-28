@@ -58,8 +58,8 @@ through its own words and exception classes.
 
 One widening, in the consumer's hands: an anchor can pin more than one
 responder certificate under its root. Nothing a 0.6.1 spec accepts or refuses
-changes, unless it subclasses `AnchorSpec` with a field of its own named
-`additional_signers`.
+changes, unless it subclasses `AnchorSpec` with a field or property of its
+own named `additional_signers`.
 
 - `AnchorSpec` takes `additional_signers: tuple[PinnedSigner, ...] = ()`, and
   `PinnedSigner(certificate_sha256, spki_sha256)` pins one responder as a pair.
@@ -82,10 +82,11 @@ changes, unless it subclasses `AnchorSpec` with a field of its own named
   that is not 64 lowercase hex characters (checked by `PinnedSigner` and again
   by `AnchorSpec`, so an entry cannot skip the check), and a certificate
   pinned twice, primary included.
-- `additional_signers` is keyword-only, and construction and verification read
-  the pins through a module function rather than the `signers` property, so a
-  0.6.1 subclass of `AnchorSpec` that adds its own fields, `signers` included,
-  constructs and verifies as before, positionally included.
+- `additional_signers` is keyword-only, and `AnchorSpec` gains no other
+  attribute: construction and verification read the pins through a module
+  function. So a 0.6.1 subclass of `AnchorSpec` that adds its own fields or
+  attributes, one named `signers` included, constructs and verifies as before,
+  positionally included.
 - With no additional signers every verdict is the 0.6.1 verdict, refusal texts
   included: `RFC 3161 signer certificate is not pinned for <receipt>: <sha256>`
   for an unknown certificate, `RFC 3161 signer SPKI is not pinned for
