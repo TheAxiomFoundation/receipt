@@ -70,7 +70,9 @@ class AttestSpec:
     """Consumer-committed workflow-provenance policy.
 
     Every field is required.  ``allowed_workflows`` is normalized to a
-    ``frozenset`` so the frozen spec does not retain a mutable policy object.
+    ``frozenset`` so the frozen spec does not retain a mutable policy object,
+    and every text field and workflow must be exactly ``str``: a subclass
+    carries methods the pattern would consult later.
     """
 
     repository: str
@@ -80,6 +82,16 @@ class AttestSpec:
     checker_path: pathlib.PurePosixPath
 
     def __post_init__(self) -> None:
+        # Exactly ``str``: a subclass passed every check below and kept its
+        # own methods, and ``re.escape`` consults them when the pattern is
+        # built, so a frozen spec's ``cert_identity_pattern`` could widen
+        # after validation (0.6.2 review, L6 finding 15).
+        for name in ("repository", "allowed_ref", "protected_prefix"):
+            value = getattr(self, name)
+            if isinstance(value, str) and type(value) is not str:
+                raise ValueError(
+                    f"{name} must be a str, not a {type(value).__name__} subclass"
+                )
         _repository_slug(self.repository)
 
         workflows_value: object = self.allowed_workflows
@@ -102,7 +114,7 @@ class AttestSpec:
         for workflow in sorted(workflows, key=repr):
             if (
                 _relative_posix_path(workflow) is None
-                or not isinstance(workflow, str)
+                or type(workflow) is not str
                 or not workflow.startswith(".github/workflows/")
                 or workflow == ".github/workflows/"
                 or "@" in workflow
