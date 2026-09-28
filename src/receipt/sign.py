@@ -352,8 +352,33 @@ class KeySpec:
     scheme: str
 
     def __post_init__(self) -> None:
-        if self.scheme not in ("spki-sha256", "raw-sha256"):
+        if type(self.scheme) is not str or self.scheme not in (
+            "spki-sha256",
+            "raw-sha256",
+        ):
             raise SignError(f"unsupported key fingerprint scheme: {self.scheme!r}")
+        # Both schemes are SHA-256 hex digests, the form spki_sha256 and
+        # raw_public_key_sha256 return. Only the scheme was checked, so an
+        # uppercase, prefixed, bytes or newline-terminated pin constructed and
+        # then refused every key as a "mismatch" printing the same digest; an
+        # unhashable key_id escaped as TypeError; and a str-subclass pin whose
+        # __ne__ always answered False accepted any key (0.6.2 review, L7
+        # finding 7).
+        if type(self.key_id) is not str:
+            raise SignError(
+                f"key_id must be a str; found={type(self.key_id).__name__}"
+            )
+        if (
+            type(self.fingerprint) is not str
+            or len(self.fingerprint) != 64
+            or any(
+                character not in "0123456789abcdef" for character in self.fingerprint
+            )
+        ):
+            raise SignError(
+                f"key fingerprint for {self.key_id!r} must be 64 lowercase hex "
+                f"characters: {self.fingerprint!r}"
+            )
 
 
 @dataclass(frozen=True)
@@ -456,6 +481,18 @@ def _normalize_pinned_public_keys(
     return normalized_public_keys
 
 
+def _require_str_key_ids(presented: Mapping[str, bytes], what: str) -> None:
+    """Refuse a presented key_id that is not a str before any set is sorted.
+
+    Ids of mixed types reached ``sorted`` and escaped as TypeError (0.6.2
+    review, L7 finding 7).
+    """
+
+    for key_id in presented:
+        if type(key_id) is not str:
+            raise SignError(f"presented {what} key_id must be a str: {key_id!r}")
+
+
 def verify_threshold(
     payload: bytes,
     signatures: Mapping[str, bytes],
@@ -481,6 +518,8 @@ def verify_threshold(
     if type(allow_legacy) is not bool:
         raise SignError("allow_legacy must be a bool")
 
+    _require_str_key_ids(signatures, "signature")
+    _require_str_key_ids(public_keys, "public key")
     legacy_ids = {key.key_id for key in keyring.legacy_keys}
     specs = {
         key.key_id: key for key in (*keyring.keys, *keyring.legacy_keys)
@@ -587,6 +626,7 @@ def verify_any_generation(
             f"{PRODUCER_SIGNATURE_BYTES} raw bytes; found={actual}"
         )
 
+    _require_str_key_ids(public_keys, "public key")
     known = {key.key_id: key for key in (*keyring.keys, *keyring.legacy_keys)}
     unknown_key_ids = sorted(set(public_keys) - set(known))
     if unknown_key_ids:

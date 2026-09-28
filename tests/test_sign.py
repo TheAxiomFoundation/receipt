@@ -486,7 +486,7 @@ def test_keyring_construction_refusals_and_frozen_specs() -> None:
     with pytest.raises(SignError, match="^keyring must contain at least one key$"):
         KeyringSpec((), 1)
 
-    key_a = KeySpec("key-a", "fingerprint-a", "spki-sha256")
+    key_a = KeySpec("key-a", "a" * 64, "spki-sha256")
     for threshold in (0, -1):
         with pytest.raises(SignError) as caught:
             KeyringSpec((key_a,), threshold)
@@ -498,20 +498,20 @@ def test_keyring_construction_refusals_and_frozen_specs() -> None:
         KeyringSpec((key_a,), 2)
     assert str(caught.value) == "keyring threshold 2 exceeds key count 1"
 
-    duplicate_id = KeySpec("key-a", "fingerprint-b", "raw-sha256")
+    duplicate_id = KeySpec("key-a", "b" * 64, "raw-sha256")
     with pytest.raises(SignError) as caught:
         KeyringSpec((key_a, duplicate_id), 1)
     assert str(caught.value) == "duplicate key_id in keyring: 'key-a'"
 
     duplicate_fingerprint = KeySpec(
         "key-b",
-        "fingerprint-a",
+        "a" * 64,
         "raw-sha256",
     )
     with pytest.raises(SignError) as caught:
         KeyringSpec((key_a, duplicate_fingerprint), 1)
     assert str(caught.value) == (
-        "duplicate fingerprint in keyring: 'fingerprint-a'"
+        f"duplicate fingerprint in keyring: {'a' * 64!r}"
     )
 
     keyring = KeyringSpec((key_a,), 1)
@@ -535,8 +535,8 @@ def test_keyring_threshold_must_be_an_exact_int() -> None:
     that survives ``<`` and ``>`` against an int constructed a keyring.
     """
 
-    key_a = KeySpec("key-a", "fingerprint-a", "spki-sha256")
-    key_b = KeySpec("key-b", "fingerprint-b", "raw-sha256")
+    key_a = KeySpec("key-a", "a" * 64, "spki-sha256")
+    key_b = KeySpec("key-b", "b" * 64, "raw-sha256")
 
     for threshold in (
         True,
@@ -1038,13 +1038,13 @@ def _rotated_keyring() -> tuple[
 
 
 def test_keyring_legacy_construction_refusals() -> None:
-    current = KeySpec("root", "fp-current", "spki-sha256")
+    current = KeySpec("root", "c" * 64, "spki-sha256")
 
     with pytest.raises(SignError) as caught:
         KeyringSpec(
             (current,),
             1,
-            legacy_keys=(KeySpec("root", "fp-old", "spki-sha256"),),
+            legacy_keys=(KeySpec("root", "d" * 64, "spki-sha256"),),
         )
     assert str(caught.value) == "duplicate key_id in keyring: 'root'"
 
@@ -1052,27 +1052,27 @@ def test_keyring_legacy_construction_refusals() -> None:
         KeyringSpec(
             (current,),
             1,
-            legacy_keys=(KeySpec("old", "fp-current", "raw-sha256"),),
+            legacy_keys=(KeySpec("old", "c" * 64, "raw-sha256"),),
         )
-    assert str(caught.value) == "duplicate fingerprint in keyring: 'fp-current'"
+    assert str(caught.value) == f"duplicate fingerprint in keyring: {'c' * 64!r}"
 
     with pytest.raises(SignError) as caught:
         KeyringSpec(
             (current,),
             1,
             legacy_keys=(
-                KeySpec("old-a", "fp-old", "spki-sha256"),
-                KeySpec("old-b", "fp-old", "spki-sha256"),
+                KeySpec("old-a", "d" * 64, "spki-sha256"),
+                KeySpec("old-b", "d" * 64, "spki-sha256"),
             ),
         )
-    assert str(caught.value) == "duplicate fingerprint in keyring: 'fp-old'"
+    assert str(caught.value) == f"duplicate fingerprint in keyring: {'d' * 64!r}"
 
     # Threshold is defined over current keys alone; legacy keys never raise it.
     with pytest.raises(SignError) as caught:
         KeyringSpec(
             (current,),
             2,
-            legacy_keys=(KeySpec("old", "fp-old", "spki-sha256"),),
+            legacy_keys=(KeySpec("old", "d" * 64, "spki-sha256"),),
         )
     assert str(caught.value) == "keyring threshold 2 exceeds key count 1"
 
@@ -1377,8 +1377,8 @@ def test_verify_any_generation_requires_material_and_threshold_one() -> None:
 
     wide = KeyringSpec(
         keys=(
-            KeySpec("a", "fp-a", "spki-sha256"),
-            KeySpec("b", "fp-b", "spki-sha256"),
+            KeySpec("a", "a" * 64, "spki-sha256"),
+            KeySpec("b", "b" * 64, "spki-sha256"),
         ),
         threshold=2,
     )
@@ -1765,3 +1765,68 @@ def test_verify_any_generation_attempt_order_is_declaration_order(
         == "zz-current"
     )
     assert calls == ["zz-current"]
+
+
+# --- 0.6.2 review, L7 finding 7: a KeySpec pin is a lowercase SHA-256 hex digest
+
+
+@pytest.mark.parametrize(
+    "fingerprint",
+    [
+        "A" * 64,
+        "a" * 64 + "\n",
+        b"a" * 64,
+        "sha256:" + "a" * 64,
+        "a" * 63,
+        None,
+    ],
+    ids=["uppercase", "newline", "bytes", "prefixed", "short", "none"],
+)
+def test_key_spec_refuses_a_fingerprint_that_can_never_match(
+    fingerprint: object,
+) -> None:
+    """Only ``scheme`` was checked, so each of these constructed and then
+    refused every key as a "mismatch" printing the same digest."""
+
+    with pytest.raises(SignError, match="must be 64 lowercase hex characters"):
+        KeySpec("k", fingerprint, "spki-sha256")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("key_id", [["k"], {"k": 1}, 1, None])
+def test_key_spec_refuses_a_key_id_that_is_not_a_str(key_id: object) -> None:
+    with pytest.raises(SignError, match="^key_id must be a str"):
+        KeySpec(key_id, "a" * 64, "spki-sha256")  # type: ignore[arg-type]
+
+
+def test_a_str_subclass_pin_cannot_accept_a_stranger_key() -> None:
+    """A pin whose ``__ne__`` always answered False compared equal to any
+    computed fingerprint, so a stranger's key and signature satisfied the
+    keyring."""
+
+    class Agreeable(str):
+        def __ne__(self, other: object) -> bool:
+            return False
+
+    with pytest.raises(SignError, match="must be 64 lowercase hex characters"):
+        KeySpec("k", Agreeable("a" * 64), "spki-sha256")
+
+
+def test_presented_key_ids_of_mixed_type_refuse_as_sign_errors() -> None:
+    private_a, public_a = generate_signing_keypair()
+    ring = KeyringSpec((KeySpec("a", spki_sha256(public_a), "spki-sha256"),), 1)
+    signature = sign_payload(private_a, b"p", domain=b"")
+    with pytest.raises(SignError, match="presented signature key_id must be a str"):
+        verify_threshold(
+            b"p", {7: bytes(64), "z": bytes(64)}, {}, ring,  # type: ignore[dict-item]
+            domain=b"", label="r", allow_legacy=False,
+        )
+    with pytest.raises(SignError, match="presented public key key_id must be a str"):
+        verify_threshold(
+            b"p", {"a": signature}, {"a": public_a, 1: public_a},  # type: ignore[dict-item]
+            ring, domain=b"", label="r", allow_legacy=False,
+        )
+    with pytest.raises(SignError, match="presented public key key_id must be a str"):
+        verify_any_generation(
+            b"p", signature, {1: public_a},  # type: ignore[dict-item]
+            ring, domain=b"", label="r",
+        )
