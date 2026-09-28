@@ -394,3 +394,37 @@ def test_raw_tree_parser_applies_component_refusals_before_indexing(name: bytes)
     payload = b"100644 " + name + b"\0" + (b"\x01" * 20)
     with pytest.raises(SnapshotError, match="invalid entry name"):
         _parse_raw_tree("02" * 20, payload, object_format="sha1")
+
+
+# --- 0.6.2 review, L7 finding 10: pinned suffixes are exact text or refused
+
+
+@pytest.mark.parametrize(
+    "suffixes",
+    [".sig", b".sig", (b".sig",), (".json", 1)],
+    ids=["bare-str", "bare-bytes", "bytes-pin", "int-pin"],
+)
+def test_short_name_suffix_screen_refuses_pins_that_are_not_text(
+    suffixes: object,
+) -> None:
+    """A bare ``str`` was a collection of one-character pins and a non-str
+    pin was dropped, so the screen answered "no alias carries a pinned
+    suffix" -- its passing direction -- where the module's rule is to refuse
+    values other than exact ``str``."""
+
+    from receipt._names import NamePolicyError, short_name_carries_pinned_suffix
+
+    with pytest.raises(NamePolicyError):
+        short_name_carries_pinned_suffix("ABCDEFGHI.sig", suffixes)  # type: ignore[arg-type]
+
+
+def test_short_name_suffix_screen_refuses_a_str_subclass_pin() -> None:
+    from receipt._names import NamePolicyError, short_name_carries_pinned_suffix
+
+    class Pin(str):
+        pass
+
+    with pytest.raises(NamePolicyError, match="pinned suffix must be text"):
+        short_name_carries_pinned_suffix("ABCDEFGHI.sig", (Pin(".sig"),))
+    # The control: exact text pins still answer.
+    assert short_name_carries_pinned_suffix("ABCDEFGHI.sig", (".sig",)) is True

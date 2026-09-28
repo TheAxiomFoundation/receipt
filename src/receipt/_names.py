@@ -151,15 +151,27 @@ def short_name_carries_pinned_suffix(
 
     if type(name) is not str:
         raise NamePolicyError(f"short-name source must be text: {name!r}")
-    try:
-        capable = tuple(
-            suffix
-            for suffix in suffixes
-            if type(suffix) is str
-            and ALIAS_CAPABLE_SUFFIX_RE.fullmatch(suffix) is not None
+    # A bare str is an iterable of one-character pins and bytes one of ints,
+    # and a pin that is not exactly str was dropped: each made the screen
+    # answer "no alias carries a pinned suffix", its passing direction,
+    # against the module's rule that values other than exact str are refused
+    # (0.6.2 review, L7 finding 10).
+    if isinstance(suffixes, (str, bytes)):
+        raise NamePolicyError(
+            f"pinned suffixes must be a collection of text, not {suffixes!r}"
         )
+    try:
+        pins = tuple(suffixes)
     except TypeError as exc:
         raise NamePolicyError("pinned suffixes must be iterable text") from exc
+    for suffix in pins:
+        if type(suffix) is not str:
+            raise NamePolicyError(f"pinned suffix must be text: {suffix!r}")
+    capable = tuple(
+        suffix
+        for suffix in pins
+        if ALIAS_CAPABLE_SUFFIX_RE.fullmatch(suffix) is not None
+    )
     if not capable:
         return False
     extension = short_name_extension(name)
