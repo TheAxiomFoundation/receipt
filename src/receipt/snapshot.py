@@ -1782,17 +1782,34 @@ class TreeSnapshot:
                     f"{selected_root}"
                 )
             try:
-                discovery_lines = discovery.stdout.decode(
-                    "utf-8", errors="strict"
-                ).splitlines()
+                discovery_text = discovery.stdout.decode("utf-8", errors="strict")
             except UnicodeDecodeError as exc:
                 raise SnapshotError("repository discovery output is not UTF-8") from exc
+            # Git ends every line with LF and nothing else. ``splitlines``
+            # also split on VT, FF, FS, GS, RS, NEL, LS and PS, so a root
+            # whose name held one was refused as "malformed" output (0.6.2
+            # review, L3 finding 6). CR and LF in the root are refused above.
+            if not discovery_text.endswith("\n"):
+                raise SnapshotError("repository discovery output is malformed")
+            discovery_lines = discovery_text[:-1].split("\n")
             if len(discovery_lines) != 4:
                 raise SnapshotError("repository discovery output is malformed")
             top_text, git_dir_text, common_text, object_format = discovery_lines
             top_level = pathlib.Path(top_text).resolve()
             if top_level != selected_root:
-                raise SnapshotError("root is not the top level of its repository")
+                # One directory can have two spellings on a case-insensitive
+                # volume, and ``resolve`` does not normalise case: ``~/Code``
+                # for ``~/code`` was refused as "not the top level" (same
+                # finding). The same directory is the same inode; a
+                # subdirectory never is. The caller's spelling stays the
+                # selected root: the private configuration's safe.directory
+                # was written with it, and Git matched it.
+                try:
+                    same_directory = os.path.samefile(top_level, selected_root)
+                except OSError:
+                    same_directory = False
+                if not same_directory:
+                    raise SnapshotError("root is not the top level of its repository")
             git_dir = pathlib.Path(git_dir_text)
             if not git_dir.is_absolute():
                 git_dir = selected_root / git_dir
