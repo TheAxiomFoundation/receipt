@@ -1476,6 +1476,26 @@ def _creation_claims(payload: dict[str, Any]) -> list[tuple[str, datetime]]:
     return claims
 
 
+def _require_aware_verification_time(now: datetime | None) -> None:
+    """Refuse a verification time that does not say which instant it is.
+
+    ``astimezone`` reads a naive ``datetime`` as the process's local time,
+    so ``datetime(2026, 9, 27, 12, 30)`` accepted a token under ``TZ=UTC``
+    and refused it under ``TZ=Asia/Tokyo`` -- a verdict that depended on an
+    input nobody named (0.6.2 review, L2 finding 7). The record's own time
+    claims already refuse a missing timezone; the caller's clock is held to
+    the same rule. ``None`` still means "now, in UTC".
+    """
+
+    if now is None:
+        return
+    if not isinstance(now, datetime) or now.utcoffset() is None:
+        raise TsaError(
+            "verification time must be a timezone-aware datetime: "
+            f"{now!r}"
+        )
+
+
 def validate_token_time(
     payload: dict[str, Any],
     gen_time: datetime,
@@ -1486,6 +1506,7 @@ def validate_token_time(
 ) -> None:
     """Validate signed time against wall time and internal creation claims."""
 
+    _require_aware_verification_time(now)
     current = now.astimezone(UTC)
     if gen_time > current + timedelta(seconds=max_future_seconds):
         raise TsaError(
@@ -2566,6 +2587,7 @@ def verify_timestamp_token(
     maintenance release (peer review, fifth gate round one).
     """
 
+    _require_aware_verification_time(now)
     named_records = records
     records = records.resolve()
     evidence, _identity = _verify_timestamp_token(
@@ -4323,6 +4345,7 @@ def _verify_witness_with_updates(
         raise TypeError(
             "supply transition_bundle_updates or prior_pending_updates, not both"
         )
+    _require_aware_verification_time(now)
     named_records = records or path.parents[1]
     records = named_records.resolve()
     # One read of the record, and every question about it is asked of these
