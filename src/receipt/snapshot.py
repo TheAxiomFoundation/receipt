@@ -2797,7 +2797,14 @@ class TreeSnapshot:
         with last-rule-wins precedence in each reading; a transform in either
         reading refuses, regardless of repository configuration. Git uses
         ``WM_CASEFOLD`` on case-insensitive clones, so the folded reading also
-        catches transforms an exact reading would miss. An unsupported
+        catches transforms an exact reading would miss. The folded reading
+        folds the attributes file's own name as well: a case-insensitive
+        checkout finds ``.GITATTRIBUTES`` when Git asks for
+        ``.gitattributes``, and applies its transforms (0.6.2 review, L3
+        finding 3). So in that reading each directory's attributes file is
+        the one entry whose name ASCII-folds to ``.gitattributes``, and two
+        such entries in one directory refuse, because which one a checkout
+        keeps is not something the tree decides. An unsupported
         ``core.ignoreCase`` boolean still refuses at selection. No non-tree
         attribute source is consulted.
         """

@@ -1600,3 +1600,65 @@ def test_an_explicitly_empty_ignorecase_value_is_false_like_git(
     with snapshot:
         with pytest.raises(SnapshotError, match="transforming attribute filter applies"):
             snapshot.refuse_transforming_attributes(["releases/manifests/x.json"])
+
+
+# --- 0.6.2 review, L3 finding 3: the folded reading folds the file's own name
+
+
+def _attributes_named(
+    root: pathlib.Path, files: Iterable[tuple[bytes, bytes]]
+) -> TreeSnapshot:
+    protected_blob = _hash_object(root, "blob", b"$Id$\n")
+    entries = [
+        (b"100644", name, _hash_object(root, "blob", payload))
+        for name, payload in files
+    ]
+    entries.append((b"100644", b"protected.txt", protected_blob))
+    tree = _tree_object(root, entries)
+    return TreeSnapshot.select(root, _commit_object(root, tree))
+
+
+@pytest.mark.parametrize(
+    "name", [b".gitattributes", b".GITATTRIBUTES", b".GitAttributes"]
+)
+def test_a_case_variant_attributes_file_is_read_in_the_folded_reading(
+    git_repo: pathlib.Path, name: bytes
+) -> None:
+    """A case-insensitive checkout finds ``.GITATTRIBUTES`` when Git opens
+    ``.gitattributes`` and applies its ``ident`` to the protected path; the
+    reader looked the file up by its exact spelling only, found none, and
+    accepted a transform the README says refuses."""
+
+    with _attributes_named(git_repo, [(name, b"protected.txt ident\n")]) as selected:
+        with pytest.raises(
+            SnapshotError,
+            match="transforming attribute ident applies to protected path",
+        ):
+            selected.refuse_transforming_attributes(("protected.txt",))
+
+
+def test_two_attribute_files_that_fold_together_refuse(
+    git_repo: pathlib.Path,
+) -> None:
+    """Which of two fold-equal attribute files a case-insensitive checkout
+    keeps depends on write order, not on the tree, so neither is read."""
+
+    files = [(b".GITATTRIBUTES", b"protected.txt ident\n"), (b".gitattributes", b"")]
+    with _attributes_named(git_repo, files) as selected:
+        with pytest.raises(
+            SnapshotError,
+            match=(
+                r"attribute files \.GITATTRIBUTES, \.gitattributes in the root "
+                r"are one file on a case-insensitive checkout"
+            ),
+        ):
+            selected.refuse_transforming_attributes(("protected.txt",))
+
+
+def test_a_harmless_case_variant_attributes_file_is_accepted(
+    git_repo: pathlib.Path,
+) -> None:
+    with _attributes_named(
+        git_repo, [(b".GitAttributes", b"protected.txt text eol=lf\n")]
+    ) as selected:
+        selected.refuse_transforming_attributes(("protected.txt",))
