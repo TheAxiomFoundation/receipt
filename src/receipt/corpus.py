@@ -1129,6 +1129,14 @@ def parse_journal(
     tombstoned path that remains in the selected tree. A file that stays in
     the repository stays bound; the only way to stop binding it is to remove it.
 
+    No row kind is required. A journal of gate rows alone is a closed world of
+    zero content files, and it verifies against a tree whose content roots
+    hold no content file. An earlier branch here refused an "empty" journal
+    with "genesis must bind content", but after the trailing-LF check the
+    split always yields a row, so it never ran and that rule was never
+    enforced (0.6.2 review, L4 finding 7); it is gone rather than left to
+    read as a guarantee.
+
     Row capacity is the consumer's committed resource pin, not a process-wide
     corpus limit. It defaults to :data:`MAX_JOURNAL_ROWS` and is validated
     against :data:`MAX_JOURNAL_ROWS_CEILING` when the spec is constructed.
@@ -1173,8 +1181,6 @@ def parse_journal(
     # on what an allocation the bound exists to stop has already produced
     # (peer review, Sol round 4).
     raw_rows = journal_bytes.split(b"\n")[:-1]
-    if not raw_rows:
-        raise CorpusError("corpus journal is empty; genesis must bind content")
 
     content: dict[str, FileBinding] = {}
     attested: dict[str, FileBinding] = {}
