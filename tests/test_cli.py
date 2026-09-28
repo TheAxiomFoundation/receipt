@@ -335,6 +335,33 @@ def test_default_root_refuses_a_top_level_named_through_a_symlink(
     assert json.loads(capsys.readouterr().out)["root"] == str(repo.resolve())
 
 
+def test_default_root_refuses_a_dotdot_that_resolves_past_a_link(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Normalizing ``link/..`` lexically and resolving it physically name two
+    different files; the walk refuses rather than pick the one it did not
+    load. Without a link before the ``..``, the path is accepted."""
+
+    from receipt.cli import _DefaultRootError, _default_root
+
+    clone = tmp_path / "clone"
+    for directory in (".git", "verification", "vendor/good/.git", "vendor/verification"):
+        (clone / directory).mkdir(parents=True)
+    (clone / "verification/spec.py").write_text("SPEC = None\n")
+    (clone / "vendor/verification/spec.py").write_text("SPEC = None\n")
+    (clone / "x").symlink_to("vendor/good", target_is_directory=True)
+    (clone / "plain").mkdir()
+
+    spec_path = clone / "x" / ".." / "verification" / "spec.py"
+    with pytest.raises(_DefaultRootError) as caught:
+        _default_root(spec_path)
+    assert str(caught.value) == (
+        "the spec's path resolves to a file other than the one it names below "
+        f"its repository top level; supply --root: {spec_path}"
+    )
+    assert _default_root(clone / "plain" / ".." / "verification" / "spec.py") == clone
+
+
 def _default_root_061(spec_path: pathlib.Path) -> pathlib.Path:
     """The 0.6.1 walk, transcribed: it resolved the spec path first."""
 
@@ -443,8 +470,12 @@ def test_default_root_names_the_spec_s_physical_repository_exhaustively(
             )
             assert pathlib.Path(os.path.realpath(root)) == old
     # The domain reaches the substitution the walk exists to refuse: the 0.6.1
-    # walk named another repository than the named spec's in 140 layouts.
-    assert substituted == 140
+    # walk named another repository than the named spec's in 140 layouts. A
+    # temporary directory inside a work tree adds layouts that find its
+    # ``.git``, so the count is pinned only where no ancestor holds one.
+    assert substituted > 0
+    if not any((ancestor / ".git").exists() for ancestor in tmp_path.parents):
+        assert substituted == 140
 
 
 def test_json_pass_writes_to_a_redirected_stringio(

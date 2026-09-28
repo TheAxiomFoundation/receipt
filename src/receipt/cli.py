@@ -379,8 +379,10 @@ def _default_root(spec_path: pathlib.Path) -> pathlib.Path:
     for a checkout reached through a link to its top level, not
     distinguishable from one here, and both refuse and ask for ``--root``.
     Links above the top level are the auditor's own filesystem and are not
-    examined. With no ``.git`` above the spec, the spec's own directory is
-    returned and repository discovery refuses it.
+    examined. The spec as loaded, resolved, must then be the file the walk
+    names below that top level, which a ``..`` after a link in the supplied
+    path can otherwise break. With no ``.git`` above the spec, the spec's own
+    directory is returned and repository discovery refuses it.
     """
 
     named = pathlib.Path(os.path.abspath(spec_path))
@@ -398,7 +400,17 @@ def _default_root(spec_path: pathlib.Path) -> pathlib.Path:
                 "top level, so the repository to verify is ambiguous; supply "
                 f"--root: {directory}"
             )
-    return walked[-1]
+    root = walked[-1]
+    # Normalizing removes a ``..`` lexically, but the spec was loaded through
+    # the operating system, which applies it after any link before it: from
+    # ``link/../spec.py`` the two name different files. The spec loaded must
+    # be the file the walk found below its top level.
+    if pathlib.Path(spec_path).resolve() != root.resolve() / named.relative_to(root):
+        raise _DefaultRootError(
+            "the spec's path resolves to a file other than the one it names "
+            f"below its repository top level; supply --root: {spec_path}"
+        )
+    return root
 
 
 #: Every code point that can move a cursor, clear a line, or split one line
