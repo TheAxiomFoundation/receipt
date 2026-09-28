@@ -39,7 +39,7 @@ from dataclasses import replace
 import pytest
 
 from receipt import release_chain
-from receipt.canonical import canonical_sha256
+from receipt.canonical import canonical_bytes, canonical_sha256
 from receipt.release_chain import (
     ReleaseChainError,
     TIME_STAMP_RE,
@@ -53,11 +53,13 @@ from receipt.release_chain import (
     verify_release_chain,
     verify_release_history_immutable,
 )
+from receipt.sign import sign_payload
 from receipt.snapshot import GitEntry as SnapshotGitEntry
 from receipt.snapshot import Materialization, SnapshotError, TreeSnapshot
 from receipt.cli import EXIT_FAIL, main
-from receipt.verify import load_spec, run_verification
+from receipt.verify import load_spec, result_to_dict, run_verification
 
+import corpus_fixture
 from corpus_fixture import CONTENT, append_release, build_corpus
 
 ANCHOR_DIR = "releases/anchors"
@@ -349,6 +351,182 @@ def test_release_history_base_follows_commit_parents_not_the_commit_graph(
     assert str(caught.value) == (
         "existing release file bytes changed relative to "
         f"{published}: releases/published-note.txt"
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("delete", "existing release file was deleted relative to {base}: "),
+        ("mode", "existing release file mode changed relative to {base}: "),
+        ("bytes", "existing release file bytes changed relative to {base}: "),
+        ("symlink", "release path is a symlink: "),
+    ],
+)
+def test_release_history_covers_a_manifest_directory_outside_the_release_root(
+    repo: pathlib.Path,
+    mutation: str,
+    message: str,
+) -> None:
+    """ChainSpec accepts manifests outside the release root; history must too."""
+
+    chain = replace(
+        load_spec(repo / "verification/spec.py").verification.chain,
+        manifest_relative=pathlib.PurePosixPath("manifests"),
+    )
+    published = repo / "manifests" / "0000-0000000000000000.json"
+    published.parent.mkdir()
+    published.write_text('{"releaseIndex": 0}\n', encoding="utf-8")
+    base_oid = commit_snapshot(repo, "publish a manifest outside releases/")
+    if mutation == "delete":
+        published.unlink()
+    elif mutation == "mode":
+        published.chmod(0o755)
+    elif mutation == "bytes":
+        published.write_text('{"releaseIndex": 0, "rewritten": true}\n')
+    else:
+        published.unlink()
+        published.symlink_to(repo / "receipt/corpus-journal.jsonl")
+    candidate_oid = commit_snapshot(repo, mutation)
+
+    with TreeSnapshot.select(repo, candidate_oid) as candidate:
+        with TreeSnapshot.select(repo, base_oid) as base:
+            candidate.assert_ancestor(base)
+            with pytest.raises(ReleaseChainError) as caught:
+                verify_release_history_immutable(chain, candidate=candidate, base=base)
+
+    detail = mutation == "mode" and " (100644 -> 100755)" or ""
+    assert str(caught.value) == (
+        message.format(base=base_oid) + "manifests/0000-0000000000000000.json" + detail
+    )
+
+
+def test_release_history_accepts_an_append_to_a_manifest_directory_outside_the_root(
+    repo: pathlib.Path,
+) -> None:
+    chain = replace(
+        load_spec(repo / "verification/spec.py").verification.chain,
+        manifest_relative=pathlib.PurePosixPath("manifests"),
+    )
+    manifests = repo / "manifests"
+    manifests.mkdir()
+    (manifests / "0000-0000000000000000.json").write_text("{}\n", encoding="utf-8")
+    base_oid = commit_snapshot(repo, "genesis outside releases/")
+    (manifests / "0001-0000000000000001.json").write_text("{}\n", encoding="utf-8")
+    candidate_oid = commit_snapshot(repo, "next release outside releases/")
+
+    with TreeSnapshot.select(repo, candidate_oid) as candidate:
+        with TreeSnapshot.select(repo, base_oid) as base:
+            candidate.assert_ancestor(base)
+            resolved, new_files, base_entries = verify_release_history_immutable(
+                chain, candidate=candidate, base=base
+            )
+
+    # The return value still speaks for the release root only.
+    assert resolved == base_oid
+    assert new_files == set()
+    assert not any(path.startswith("manifests/") for path in base_entries)
+
+
+def test_base_ref_refuses_a_rewitnessed_genesis_kept_outside_the_release_root(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: the producer re-signs and re-stamps a rewritten genesis.
+
+    With the manifests outside ``release_root_relative`` the history pass
+    compared nothing the rewrite touched and the verdict was PASS.
+    """
+
+    monkeypatch.setattr(corpus_fixture, "MANIFEST_RELATIVE", "manifests")
+    root, workspace = tmp_path / "repo", tmp_path / "keys"
+    root.mkdir()
+    base_oid = build_corpus(root, workspace)
+    spec_path = root / "verification" / "spec.py"
+    spec_digest = hashlib.sha256(spec_path.read_bytes()).hexdigest()
+    assert load_spec(spec_path).verification.chain.manifest_relative == (
+        pathlib.PurePosixPath("manifests")
+    )
+
+    manifests = root / "manifests"
+    old_stems = sorted({path.name.split(".")[0] for path in manifests.iterdir()})
+    assert len(old_stems) == 1
+
+    # The producer rewrites history: new content, journal, prefix and genesis,
+    # signed by the pinned key and stamped by both pinned authorities.
+    content = {**CONTENT, "rules/tax/rate.yaml": "name: rate\nvalue: 0.99\n"}
+    for relative, text in content.items():
+        (root / relative).write_text(text)
+    journal_bytes = corpus_fixture.render_journal(corpus_fixture.journal_rows(content))
+    (root / corpus_fixture.JOURNAL_RELATIVE).write_bytes(journal_bytes)
+    lines = journal_bytes.decode("utf-8").split("\n")[:-1]
+    prefix = {
+        "schemaVersion": "receipt/test-corpus-prefix/v1",
+        "prefixLineCount": len(lines),
+        "lineSha256s": [corpus_fixture.sha256_text(line) for line in lines],
+        "prefixSha256": corpus_fixture.sha256_text("\n".join(lines) + "\n"),
+    }
+    prefix_bytes = canonical_bytes(prefix) + b"\n"
+    (root / corpus_fixture.PREFIX_RELATIVE).write_bytes(prefix_bytes)
+    manifest = {
+        "schemaVersion": corpus_fixture.SCHEMA_VERSION,
+        "releaseIndex": 0,
+        "previousManifestSha256": None,
+        "state": {
+            "path": corpus_fixture.JOURNAL_RELATIVE,
+            "jsonlSha256": corpus_fixture.sha256_bytes(journal_bytes),
+            "lineCount": len(lines),
+            "immutablePrefixSha256": corpus_fixture.sha256_bytes(prefix_bytes),
+        },
+        "append": None,
+        "createdAtUtc": corpus_fixture.created_at(60),
+        "producer": {"repo": "TheAxiomFoundation/receipt", "branch": "test"},
+    }
+    manifest_bytes = canonical_bytes(manifest) + b"\n"
+    digest = corpus_fixture.sha256_bytes(manifest_bytes)
+    for old in manifests.iterdir():
+        old.unlink()
+    stem = f"0000-{digest[:16]}"
+    assert [stem] != old_stems
+    (manifests / f"{stem}.json").write_bytes(manifest_bytes)
+    (manifests / f"{stem}.producer.sig").write_bytes(
+        sign_payload((workspace / "producer.key").read_bytes(), manifest_bytes, domain=b"")
+    )
+    for name in corpus_fixture.ANCHOR_NAMES:
+        directory = workspace / name
+        corpus_fixture.LocalTsa(
+            name=name,
+            directory=directory,
+            root_pem=directory / f"{name}-root.pem",
+            policy_oid="",
+            signer_certificate_sha256="",
+            signer_spki_sha256="",
+        ).stamp(digest, manifests / f"{stem}.{name}.tsr")
+    candidate_oid = commit_snapshot(root, "rewritten, re-witnessed genesis")
+    assert hashlib.sha256(spec_path.read_bytes()).hexdigest() == spec_digest
+
+    loaded = load_spec(spec_path, expect_sha256=spec_digest)
+    unanchored = result_to_dict(
+        run_verification(
+            root, loaded, commit=candidate_oid, expect_commit=candidate_oid
+        )
+    )
+    # Without a base the rewrite is a valid chain: the key signed it.
+    assert unanchored["verdict"] == "PASS"
+    payload = result_to_dict(
+        run_verification(
+            root,
+            loaded,
+            base_ref=base_oid,
+            commit=candidate_oid,
+            expect_commit=candidate_oid,
+        )
+    )
+    assert payload["verdict"] == "FAIL"
+    history = next(item for item in payload["passes"] if item["name"] == "history")
+    assert history["ok"] is False
+    assert history["failure"] == (
+        "release history is not immutable: existing release file was deleted "
+        f"relative to {base_oid}: manifests/{old_stems[0]}.alpha.tsr"
     )
 
 
