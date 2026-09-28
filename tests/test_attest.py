@@ -9,6 +9,7 @@ library.
 from __future__ import annotations
 
 import inspect
+import itertools
 import json
 import os
 import pathlib
@@ -885,3 +886,84 @@ def test_option_shaped_arguments_are_read_as_revisions(tmp_path: pathlib.Path) -
         r"fatal: Not a valid (commit|object) name --octopus",
         str(scope.value),
     )
+
+
+def _reference_records(root: pathlib.Path, rev_range: str) -> list[str]:
+    """The records commits git lists with replace objects off and no
+    inherited environment: the reference the sweep must equal."""
+
+    return _fixture_git(
+        root,
+        "--no-replace-objects",
+        "log",
+        "--full-history",
+        "--format=%H",
+        "--end-of-options",
+        rev_range,
+        "--",
+        "records/",
+    ).splitlines()
+
+
+def test_the_sweep_is_invariant_under_ambient_git_state_exhaustively(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """For two histories (linear, and an unattested commit on a merged side
+    branch), every subset of four inherited variables that can each move a
+    git read (``GIT_DIR``, ``GIT_OBJECT_DIRECTORY``, ``GIT_GRAFT_FILE``,
+    ``GIT_REPLACE_REF_BASE``), and a ``refs/replace/`` ref present or absent:
+    2 × 16 × 2 = 64 sweeps. In every one the epoch is the commit that added
+    the checker, and the commits in scope are exactly the reference's
+    records commits after it, the unattested one included."""
+
+    histories: dict[str, tuple[pathlib.Path, dict[str, str]]] = {}
+    linear = tmp_path / "linear"
+    histories["linear"] = (linear, _fixture_history(linear))
+    merged = tmp_path / "merged"
+    ids = _fixture_history(merged)
+    _fixture_git(merged, "checkout", "--quiet", "-b", "side", ids["epoch"])
+    ids["side"] = _fixture_commit(merged, "records/side.json", "side", 1_900_000_400)
+    _fixture_git(merged, "checkout", "--quiet", "main")
+    _fixture_git(merged, "merge", "--quiet", "--no-ff", "-m", "merge side", "side", timestamp=1_900_000_500)
+    histories["merged"] = (merged, ids)
+
+    other = tmp_path / "other"
+    _fixture_history(other, origin="Someone/else")
+    _fixture_git(other, "reset", "--quiet", "--hard", "HEAD~2")
+    grafts = tmp_path / "grafts"
+    values = {
+        "GIT_DIR": str(other / ".git"),
+        "GIT_OBJECT_DIRECTORY": str(other / ".git" / "objects"),
+        "GIT_GRAFT_FILE": str(grafts),
+        "GIT_REPLACE_REF_BASE": "refs/elsewhere/",
+    }
+    sweeps = 0
+    for name, (root, history) in histories.items():
+        hidden = history["side"] if name == "merged" else history["unattested"]
+        grafts.write_text(f"{history['unattested']}\n")
+        expected = _reference_records(root, f"{history['epoch']}..HEAD")
+        assert hidden in expected
+        for replaced in (False, True):
+            if replaced:
+                for ref in (f"refs/replace/{hidden}", f"refs/elsewhere/{hidden}"):
+                    parent = _fixture_git(root, "rev-parse", f"{hidden}^")
+                    substitute = _fixture_git(
+                        root,
+                        "commit-tree",
+                        _fixture_git(root, "rev-parse", f"{parent}^{{tree}}"),
+                        "-p",
+                        parent,
+                        "-m",
+                        "substitute",
+                    )
+                    _fixture_git(root, "update-ref", ref, substitute)
+            for chosen in itertools.product((False, True), repeat=len(values)):
+                with monkeypatch.context() as patch:
+                    for (variable, value), on in zip(values.items(), chosen):
+                        if on:
+                            patch.setenv(variable, value)
+                    assert repository_slug(root) == "MaxGhenis/brier"
+                    assert enforcement_epoch(root, spec=_spec()) == history["epoch"]
+                    assert _in_scope(root) == expected, (name, replaced, chosen)
+                sweeps += 1
+    assert sweeps == 64

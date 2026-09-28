@@ -95,7 +95,11 @@ present in 0.6.1.
   repository only through git, so a drop leaves one subject. Configuration
   files are still read where git finds them. The pinned upstream verifier
   accepts the shallow clone; `tests/test_attest_equivalence.py` records that
-  divergence against the oracle, and `tests/test_attest.py` pins the rest.
+  divergence against the oracle, and `tests/test_attest.py` pins the rest and
+  checks the sweep exhaustively over 64 combinations (two histories, every
+  subset of four inherited variables that can move a git read, and a replace
+  ref present or absent): the epoch and the commits in scope are the
+  reference's in every one.
 
 ## 0.6.1
 
