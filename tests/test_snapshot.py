@@ -19,6 +19,7 @@ import time
 from collections.abc import Iterable
 
 import pytest
+from hypothesis import given, settings, strategies as st
 
 import receipt.snapshot as snapshot_module
 from receipt.snapshot import (
@@ -1668,3 +1669,253 @@ def test_assert_ancestor_refuses_non_snapshot_without_resolving_it(
             match="^assert_ancestor base must be a TreeSnapshot$",
         ):
             selected.assert_ancestor("does-not-exist")
+
+
+# ---------------------------------------------------------------------------
+# Commit headers with continuation lines (full Opus 5.5 review of 0.6.2,
+# L3 F2): refused at the first continuation of tree/parent, in linear time.
+
+
+class _CountingPayload(bytes):
+    """A commit payload that counts how many header lines the parser asks for."""
+
+    lines_scanned = 0
+
+    def find(self, sub, *args):  # type: ignore[override]
+        if sub == b"\n" and args:
+            type(self).lines_scanned += 1
+        return super().find(sub, *args)
+
+
+@pytest.mark.parametrize("continued_header", ("tree", "parent"))
+def test_a_continued_oid_header_is_refused_at_its_first_continuation(
+    continued_header: str,
+) -> None:
+    """The refusal needs only the first continuation line: no value holding a
+    newline is an object name. Rejoining every continuation first copied the
+    growing value once per line, so the parser read all 10,000 lines here and
+    a 64 MiB commit took hours to refuse."""
+
+    headers = f"tree {ONE_OID}\n".encode()
+    if continued_header == "parent":
+        headers += f"parent {ZERO_OID}\n".encode()
+    payload = _CountingPayload(
+        headers + b" \n" * 10_000 + b"author A\ncommitter C\n\nmessage\n"
+    )
+    _CountingPayload.lines_scanned = 0
+    oid = "f" * 40
+    with pytest.raises(
+        SnapshotError, match=rf"^commit {oid} is not a canonical commit object$"
+    ):
+        _canonical_commit(oid, payload, object_format="sha1")
+    assert _CountingPayload.lines_scanned <= 3
+
+
+def test_800_000_continuation_lines_refuse_in_linear_time() -> None:
+    """800,000 one-byte continuations under the tree header cost 5.8 s of CPU
+    before on CPython 3.14 (1.5 s at 400,000, 0.4 s at 200,000: four times
+    per doubling). The refusal is now reached at the first one."""
+
+    payload = (
+        f"tree {ONE_OID}\n".encode()
+        + b" \n" * 800_000
+        + b"author A\ncommitter C\n\nmessage\n"
+    )
+    started = time.process_time()
+    with pytest.raises(SnapshotError, match="is not a canonical commit object$"):
+        _canonical_commit("f" * 40, payload, object_format="sha1")
+    assert time.process_time() - started < 1.0
+
+
+def test_select_refuses_a_commit_of_continuation_lines_promptly(
+    tmp_path: pathlib.Path,
+) -> None:
+    """End to end through ``select``: a loose commit object of 800,000
+    continuation lines, which git stores in a few kilobytes and the old
+    parser took seconds of CPU to refuse."""
+
+    root = tmp_path / "repository"
+    root.mkdir()
+    _git(root, "init", "-q")
+    tree = _tree_object(root, [(b"100644", b"x", _hash_object(root, "blob", b"x\n"))])
+    commit = _hash_object(
+        root,
+        "commit",
+        f"tree {tree}\n".encode()
+        + b" \n" * 800_000
+        + b"author a <a> 0 +0000\ncommitter a <a> 0 +0000\n\nm\n",
+    )
+    _git(root, "update-ref", "HEAD", commit)
+    started = time.process_time()
+    with pytest.raises(
+        SnapshotError, match=rf"^commit {commit} is not a canonical commit object$"
+    ):
+        TreeSnapshot.select(root)
+    assert time.process_time() - started < 1.0
+
+
+# The 0.6.1 parser, verbatim but for its name: the oracle for the
+# differential below, which checks that refusing at the first continuation
+# changed no verdict and no refusal text, only the time taken to reach it.
+from receipt.snapshot import (  # noqa: E402
+    MAX_ANCESTRY_COMMITS,
+    _CommitObject,
+    _OID_RE,
+)
+
+
+def _canonical_commit_061(
+    oid: str,
+    payload: bytes,
+    *,
+    object_format: str,
+    parent_limit: int | None = None,
+) -> _CommitObject:
+    """Parse exactly the canonical commit-header shape fixed by the plan."""
+
+    separator = payload.find(b"\n\n")
+    if separator < 0:
+        raise SnapshotError(f"commit {oid} is not a canonical commit object")
+
+    if parent_limit is None:
+        parent_limit = MAX_ANCESTRY_COMMITS
+    hex_length = hashlib.new(object_format).digest_size * 2
+
+    def object_name(value: bytes) -> str:
+        if len(value) != hex_length or _OID_RE.fullmatch(value) is None:
+            raise SnapshotError(f"commit {oid} is not a canonical commit object")
+        return value.decode("ascii")
+
+    tree: str | None = None
+    parents: list[str] = []
+    parent_overflow = False
+    phase = "tree"
+
+    def accept_header(name: bytes, value: bytes) -> None:
+        nonlocal parent_overflow, phase, tree
+        if phase == "tree":
+            if name != b"tree":
+                raise SnapshotError(
+                    f"commit {oid} is not a canonical commit object"
+                )
+            tree = object_name(value)
+            phase = "parents"
+            return
+        if phase == "parents":
+            if name == b"parent":
+                parent = object_name(value)
+                if len(parents) >= parent_limit:
+                    parent_overflow = True
+                else:
+                    parents.append(parent)
+                return
+            if name != b"author":
+                raise SnapshotError(
+                    f"commit {oid} is not a canonical commit object"
+                )
+            phase = "committer"
+            return
+        if phase == "committer":
+            if name != b"committer":
+                raise SnapshotError(
+                    f"commit {oid} is not a canonical commit object"
+                )
+            phase = "later"
+            return
+        if name in {b"tree", b"parent", b"author", b"committer"}:
+            raise SnapshotError(f"commit {oid} is not a canonical commit object")
+
+    # Commit framing names LF exactly. Scan it directly so a hostile commit
+    # cannot allocate a second list containing every physical header line.
+    position = 0
+    current_name: bytes | None = None
+    current_value = b""
+    while position <= separator:
+        line_end = payload.find(b"\n", position, separator)
+        if line_end < 0:
+            line_end = separator
+        line = payload[position:line_end]
+        position = line_end + 1
+        if line.startswith(b" "):
+            if current_name is None:
+                raise SnapshotError(
+                    f"commit {oid} is not a canonical commit object"
+                )
+            if current_name in {b"tree", b"parent"}:
+                current_value += b"\n" + line[1:]
+            continue
+        if current_name is not None:
+            accept_header(current_name, current_value)
+        name, space, value = line.partition(b" ")
+        if (
+            not space
+            or not name
+            or any(byte <= 0x20 or byte >= 0x7F for byte in name)
+        ):
+            raise SnapshotError(f"commit {oid} is not a canonical commit object")
+        current_name = name
+        current_value = value if name in {b"tree", b"parent"} else b""
+    if current_name is not None:
+        accept_header(current_name, current_value)
+    if tree is None or phase != "later":
+        raise SnapshotError(f"commit {oid} is not a canonical commit object")
+    if parent_overflow:
+        raise SnapshotError(
+            f"ancestry walk exceeds the budget of "
+            f"{MAX_ANCESTRY_COMMITS} commits"
+        )
+    return _CommitObject(oid=oid, tree=tree, parents=tuple(parents))
+
+
+_OIDS = st.sampled_from([ZERO_OID, ONE_OID, TWO_OID, "a" * 40, "1" * 39, "A" * 40])
+_CONTINUATIONS = st.sampled_from([b" continued", b" ", b" " + b"1" * 39, b"  two spaces"])
+_STRAY_LINES = st.sampled_from(
+    [
+        f"tree {TWO_OID}".encode(),
+        f"parent {ZERO_OID}".encode(),
+        b"author A <a@example.test> 0 +0000",
+        b"committer C <c@example.test> 0 +0000",
+        b"malformed",
+        b"tree",
+        b"",
+        b" orphan",
+    ]
+)
+
+
+@st.composite
+def _commit_payloads(draw: st.DrawFn) -> bytes:
+    """A well-formed commit, then continuations and stray lines put in it.
+
+    Continuations land under every kind of header -- tree and parent, whose
+    refusal is what changed, and author, committer and extra headers, where
+    a continuation is legitimate and must keep parsing."""
+
+    lines = [f"tree {draw(_OIDS)}".encode()]
+    lines += [f"parent {oid}".encode() for oid in draw(st.lists(_OIDS, max_size=3))]
+    lines += [b"author A <a@example.test> 0 +0000", b"committer C <c@example.test> 0 +0000"]
+    lines += draw(
+        st.lists(st.sampled_from([b"gpgsig -----BEGIN PGP-----", b"future-header x"]), max_size=2)
+    )
+    for _ in range(draw(st.integers(min_value=0, max_value=3))):
+        lines.insert(draw(st.integers(min_value=1, max_value=len(lines))), draw(_CONTINUATIONS))
+    if draw(st.integers(min_value=0, max_value=3)) == 0:
+        lines[draw(st.integers(min_value=0, max_value=len(lines) - 1))] = draw(_STRAY_LINES)
+    return b"\n".join(lines) + b"\n\n" + draw(st.binary(max_size=8))
+
+
+@settings(max_examples=3000, deadline=None, derandomize=True)
+@given(_commit_payloads(), st.one_of(st.none(), st.integers(min_value=0, max_value=3)))
+def test_commit_parse_agrees_with_the_061_parser(
+    payload: bytes, parent_limit: int | None
+) -> None:
+    """Every payload gets the 0.6.1 parser's outcome: the same parsed commit,
+    or the same refusal text."""
+
+    def outcome(parse: object) -> object:
+        try:
+            return parse("f" * 40, payload, object_format="sha1", parent_limit=parent_limit)
+        except SnapshotError as exc:
+            return str(exc)
+
+    assert outcome(_canonical_commit) == outcome(_canonical_commit_061)
