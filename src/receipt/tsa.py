@@ -4346,7 +4346,18 @@ def _verify_witness_with_updates(
             "supply transition_bundle_updates or prior_pending_updates, not both"
         )
     _require_aware_verification_time(now)
-    named_records = records or path.parents[1]
+    if records is not None:
+        named_records = records
+    elif len(path.parents) >= 2:
+        named_records = path.parents[1]
+    else:
+        # ``path.parents[1]`` raised IndexError for a bare filename (0.6.2
+        # review, L2 finding 8): the records root defaults to the record's
+        # grandparent, and a one-component path has none to name.
+        raise TsaError(
+            "cannot infer the records root from a record path without a "
+            f"<records>/<date>/ prefix; pass records=: {path}"
+        )
     records = named_records.resolve()
     # One read of the record, and every question about it is asked of these
     # bytes: the digest the sidecar has to match, the trust-bundle updates it

@@ -8795,3 +8795,21 @@ def test_every_public_witness_entry_refuses_a_naive_verification_time(
     # An aware time is the control, and so is the default.
     assert verify_tree(tree, now=datetime.now(UTC)).status == "available"
     assert verify_tree(tree).status == "available"
+
+
+@pytest.mark.parametrize("entry", ["verify_witness", "verify_witness_step"])
+def test_a_bare_record_filename_without_records_is_refused(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    monkeypatch: pytest.MonkeyPatch,
+    entry: str,
+) -> None:
+    """0.6.2 review, L2 finding 8: ``records`` defaults to the record's
+    grandparent, and ``path.parents[1]`` raised ``IndexError`` for a path
+    with one component. A caller-supplied path is refused in the module's
+    own type instead."""
+
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    monkeypatch.chdir(tree.record.parent)
+    with pytest.raises(TsaError, match="cannot infer the records root"):
+        getattr(tsa_module, entry)(pathlib.Path(tree.record.name), spec=tree.spec)
