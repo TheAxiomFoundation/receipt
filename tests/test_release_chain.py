@@ -290,6 +290,68 @@ def test_release_history_compares_two_entered_trees_and_returns_new_files(
     assert "releases/new-note.txt" not in base_entries
 
 
+def _redirect_commit_graph_parent(root: pathlib.Path, child: str, parent: str) -> None:
+    """Point ``child``'s first parent at ``parent`` in Git's commit-graph only."""
+
+    subprocess.run(
+        ["git", "-C", str(root), "commit-graph", "write", "--reachable"],
+        check=True,
+        capture_output=True,
+    )
+    graph = root / ".git" / "objects" / "info" / "commit-graph"
+    data = bytearray(graph.read_bytes())
+    assert data[:4] == b"CGPH"
+    chunks = {
+        bytes(data[8 + 12 * index : 12 + 12 * index]): int.from_bytes(
+            data[12 + 12 * index : 20 + 12 * index], "big"
+        )
+        for index in range(data[6] + 1)
+    }
+    fanout, lookup, commits = chunks[b"OIDF"], chunks[b"OIDL"], chunks[b"CDAT"]
+    count = int.from_bytes(data[fanout + 255 * 4 : fanout + 256 * 4], "big")
+    oids = [data[lookup + 20 * index : lookup + 20 * index + 20].hex() for index in range(count)]
+    record = commits + oids.index(child) * 36
+    data[record + 20 : record + 24] = oids.index(parent).to_bytes(4, "big")
+    graph.chmod(0o644)
+    graph.write_bytes(bytes(data))
+
+
+def test_release_history_base_follows_commit_parents_not_the_commit_graph(
+    repo: pathlib.Path,
+) -> None:
+    spec = load_spec(repo / "verification/spec.py").verification
+    first = commit_snapshot(repo, "before the note")
+    note = repo / "releases" / "published-note.txt"
+    note.write_text("published\n", encoding="utf-8")
+    published = commit_snapshot(repo, "publish the note")
+    note.write_text("published, then rewritten\n", encoding="utf-8")
+    rewritten = commit_snapshot(repo, "rewrite the note")
+    _redirect_commit_graph_parent(repo, rewritten, first)
+    oracle = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", f"{rewritten}~1"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert oracle.stdout.strip() == first
+
+    with TreeSnapshot.select(repo, rewritten, expect_commit=rewritten) as candidate:
+        with TreeSnapshot.select(repo, f"{rewritten}~1") as base:
+            assert base.commit == published
+            candidate.assert_ancestor(base)
+            with pytest.raises(ReleaseChainError) as caught:
+                verify_release_history_immutable(
+                    spec.chain,
+                    candidate=candidate,
+                    base=base,
+                )
+
+    assert str(caught.value) == (
+        "existing release file bytes changed relative to "
+        f"{published}: releases/published-note.txt"
+    )
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
