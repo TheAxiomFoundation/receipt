@@ -4,6 +4,50 @@ Every entry says what changed and what an auditor can conclude from it that
 they could not before. Refusals are named as refusals: a check added here is an
 input the package used to accept, or accept for the wrong reason.
 
+## 0.6.2
+
+One widening, in the consumer's hands: an anchor can pin more than one
+responder certificate under its root. Nothing a 0.6.1 spec accepts or refuses
+changes, unless it subclasses `AnchorSpec` with a field or property of its
+own named `additional_signers`.
+
+- `AnchorSpec` takes `additional_signers: tuple[PinnedSigner, ...] = ()`, and
+  `PinnedSigner(certificate_sha256, spki_sha256)` pins one responder as a pair.
+  A timestamp authority replaces its responder certificate periodically while
+  the receipts it already issued stay signed by the old one. DigiCert did so
+  between 2026-09-03 and 2026-09-04 ("DigiCert SHA256 RSA4096 Timestamp
+  Responder 2026 1", certificate SHA-256 `2da09da7…`, SPKI SHA-256
+  `753596b6…`). A 0.6.1 spec could pin only one of the two, so a chain that
+  spans the change refused either its new releases (old pin kept) or its old
+  ones (pin replaced). With the old pin kept and the new one added, both eras
+  verify. An auditor can conclude that a receipt verified only if its
+  certificate and its key are the two halves of one entry the consumer
+  committed; the certificate of one entry with the key of another is refused.
+  Membership is the whole rule: `openssl cms -verify -attime` has already
+  required the certificate to chain to the pinned root and be valid at the
+  token's signed time, so no order across releases is imposed.
+- Refused at construction: `additional_signers` that is not a tuple (a list,
+  set or generator has no reviewable order, and a list would not hash), an
+  entry that is not exactly a `PinnedSigner` (a subclass included), a digest
+  that is not 64 lowercase hex characters (checked by `PinnedSigner` and again
+  by `AnchorSpec`, so an entry cannot skip the check), and a certificate
+  pinned twice, primary included.
+- `additional_signers` is keyword-only, and `AnchorSpec` gains no other
+  attribute: construction and verification read the pins through a module
+  function. So a 0.6.1 subclass of `AnchorSpec` that adds its own fields or
+  attributes, one named `signers` included, constructs and verifies as before,
+  positionally included.
+- With no additional signers every verdict is the 0.6.1 verdict, refusal texts
+  included: `RFC 3161 signer certificate is not pinned for <receipt>: <sha256>`
+  for an unknown certificate, `RFC 3161 signer SPKI is not pinned for
+  <receipt>: <sha256>` for a known certificate with another key. The decision
+  is now `_check_signer_pins`, a pure function of the anchor and the two
+  digests, and `tests/test_anchor_signer_set.py` checks its acceptance rule,
+  refusal texts and order independence exhaustively over 225 anchors by 12
+  presented pairs, and agreement with a transcription of the 0.6.1
+  comparison over the 9 anchors without additional signers, besides a
+  two-release chain whose responder rotates under one root.
+
 ## 0.6.1
 
 Two keyring corrections. Both are refusals: values 0.6.0 accepted, one of them

@@ -34,7 +34,7 @@ import stat
 import subprocess
 import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
@@ -117,12 +117,53 @@ def _spec_relative_path(value: Any, label: str) -> pathlib.PurePosixPath:
 
 
 @dataclass(frozen=True)
+class PinnedSigner:
+    """One RFC 3161 responder certificate an anchor accepts, pinned as a pair.
+
+    The certificate digest and the SPKI digest belong to one entry, and a
+    receipt must match both halves of the same entry: the certificate of one
+    entry with the key of another is a certificate nobody reviewed.
+    """
+
+    certificate_sha256: str
+    spki_sha256: str
+
+    def __post_init__(self) -> None:
+        _sha256(self.certificate_sha256, "PinnedSigner certificate_sha256")
+        _sha256(self.spki_sha256, "PinnedSigner spki_sha256")
+
+
+@dataclass(frozen=True)
 class AnchorSpec:
+    """One timestamp authority: its root, its policy, and the responders it may use.
+
+    ``signer_certificate_sha256`` and ``signer_spki_sha256`` pin the first
+    accepted responder, exactly as in 0.6.1. ``additional_signers`` pins any
+    further responder certificates the same authority has used under the same
+    root, oldest first. A timestamp authority replaces its responder
+    certificate periodically while the receipts it already issued stay signed
+    by the old one, so a chain that spans the change must accept both: the
+    old entry is kept and the new one is added, never substituted.
+
+    Membership is the whole rule. By the time the pins are compared,
+    ``openssl cms -verify -purpose timestampsign -attime <genTime>`` has
+    required the responder certificate to chain to the pinned root and to be
+    valid at the token's signed time, so no entry vouches for a token outside
+    its own certificate's validity. No order across releases is imposed, and
+    the verdict does not say which entry matched. Adding an entry is a trust
+    decision, made in the consumer's committed code like every other pin.
+    """
+
     filename: str
     pem_sha256: str
     policy_oid: str
     signer_certificate_sha256: str
     signer_spki_sha256: str
+    # Keyword-only, so a 0.6.1 subclass that adds its own fields keeps
+    # constructing, positionally included.
+    additional_signers: tuple[PinnedSigner, ...] = field(
+        default=(), kw_only=True
+    )
 
     def __post_init__(self) -> None:
         """Refuse an anchor whose pins cannot pin anything.
@@ -151,6 +192,51 @@ class AnchorSpec:
                 "AnchorSpec policy_oid must be a dotted-decimal OID: "
                 f"{self.policy_oid!r}"
             )
+        # A list would construct and then fail to hash; a set or a generator
+        # has no declared order to review. Only a tuple is a spec line.
+        if type(self.additional_signers) is not tuple:
+            raise ReleaseChainError(
+                "AnchorSpec additional_signers must be a tuple of PinnedSigner, "
+                f"not {type(self.additional_signers).__name__}"
+            )
+        seen: set[str] = set()
+        for signer in _pinned_signers(self):
+            # Exactly PinnedSigner, and its digests checked again here: a
+            # subclass or a look-alike could skip PinnedSigner's own checks,
+            # and an unhashable or string-subclass digest must be refused
+            # before it is hashed or compared.
+            if type(signer) is not PinnedSigner:
+                raise ReleaseChainError(
+                    "AnchorSpec additional_signers entries must be PinnedSigner, "
+                    f"not {type(signer).__name__}"
+                )
+            _sha256(
+                signer.certificate_sha256, "PinnedSigner certificate_sha256"
+            )
+            _sha256(signer.spki_sha256, "PinnedSigner spki_sha256")
+            # One certificate has one key, so a repeated certificate digest is
+            # either a duplicate line or a pair that cannot both be right.
+            if signer.certificate_sha256 in seen:
+                raise ReleaseChainError(
+                    "AnchorSpec pins signer certificate "
+                    f"{signer.certificate_sha256} more than once"
+                )
+            seen.add(signer.certificate_sha256)
+
+
+
+def _pinned_signers(anchor: "AnchorSpec") -> tuple[PinnedSigner, ...]:
+    """Every accepted responder, the primary pin first.
+
+    A module function rather than an attribute of ``AnchorSpec``, so no name
+    a 0.6.1 subclass may already use (``signers`` included) changes the pins.
+    """
+
+    primary = PinnedSigner(
+        certificate_sha256=anchor.signer_certificate_sha256,
+        spki_sha256=anchor.signer_spki_sha256,
+    )
+    return (primary, *anchor.additional_signers)
 
 
 @dataclass(frozen=True)
@@ -1044,16 +1130,45 @@ def _verify_production_signer(
         environment=environment,
         label=f"signer SPKI decoding for {receipt.name}",
     )
-    certificate_sha256 = sha256_bytes(certificate_der)
-    spki_sha256 = sha256_bytes(public_key_der)
-    if certificate_sha256 != anchor_spec.signer_certificate_sha256:
+    _check_signer_pins(
+        anchor_spec,
+        receipt.name,
+        certificate_sha256=sha256_bytes(certificate_der),
+        spki_sha256=sha256_bytes(public_key_der),
+    )
+
+
+def _check_signer_pins(
+    anchor_spec: AnchorSpec,
+    receipt_name: str,
+    *,
+    certificate_sha256: str,
+    spki_sha256: str,
+) -> None:
+    """Refuse a responder whose certificate and key are not one pinned entry.
+
+    The digests are SHA-256 over the certificate and SPKI DER that OpenSSL
+    extracted from the certificate that verified the token. Both halves must
+    match one entry of the anchor's pins, read through ``_pinned_signers``.
+    The two refusals keep their 0.6.1 texts and order: an unknown
+    certificate names the certificate, and a known certificate whose entry
+    pins a different key names the key. With no additional signers this is
+    the 0.6.1 comparison exactly.
+    """
+
+    matching = [
+        signer
+        for signer in _pinned_signers(anchor_spec)
+        if signer.certificate_sha256 == certificate_sha256
+    ]
+    if not matching:
         raise ReleaseChainError(
-            f"RFC 3161 signer certificate is not pinned for {receipt.name}: "
+            f"RFC 3161 signer certificate is not pinned for {receipt_name}: "
             f"{certificate_sha256}"
         )
-    if spki_sha256 != anchor_spec.signer_spki_sha256:
+    if not any(signer.spki_sha256 == spki_sha256 for signer in matching):
         raise ReleaseChainError(
-            f"RFC 3161 signer SPKI is not pinned for {receipt.name}: {spki_sha256}"
+            f"RFC 3161 signer SPKI is not pinned for {receipt_name}: {spki_sha256}"
         )
 
 
