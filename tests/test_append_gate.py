@@ -2739,3 +2739,36 @@ def test_a_prefix_row_keeps_the_rule_it_was_admitted_under(
     candidate = Candidate(root=root, base=git(root, "rev-parse", "HEAD"))
     write_ledger(root, [*rows, observation_row(3)])
     assert "3 rows" in run_gate(candidate)
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["top-level", "nested"])
+def test_an_appended_row_repeating_a_json_key_is_refused(
+    tmp_path: pathlib.Path, nested: bool
+) -> None:
+    """0.6.2 review, L6 finding 9: the last value won, and the address bound it.
+
+    ``json.loads`` keeps the last of two equal keys, so a row reading
+    ``"value": 3.0, ..., "value": 999.0`` was accepted and its
+    ``assertionVersion.id`` computed over 999.0, while a first-wins reader
+    of the same bytes sees 3.0 and a strict one refuses the row.
+    """
+
+    candidate = base_repository(tmp_path)
+    rows = [observation_row(number) for number in range(1, BASE_ROW_COUNT + 1)]
+    # The address is computed over the value json.loads keeps: the last one.
+    rows.append(observation_row(BASE_ROW_COUNT + 1, value=999.0))
+    lines = [jsonl_line(row) for row in rows]
+    if nested:
+        lines[-1] = lines[-1].replace(
+            '"measure":{', '"measure":{"unit":"shadowed",', 1
+        )
+        key = "unit"
+    else:
+        lines[-1] = '{"value":3.0,' + lines[-1][1:]
+        key = "value"
+    assert lines[-1].count(f'"{key}":') == 2
+    path = candidate.root / CHAIN_SPEC.state_relative
+    path.write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == f"appended line 3 repeats the JSON key '{key}'"
