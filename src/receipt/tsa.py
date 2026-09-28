@@ -903,16 +903,25 @@ def physical_path(records: Path, value: str) -> Path:
 def _path_fold(path: Path) -> tuple[str, ...]:
     """A key two spellings of one filesystem path share.
 
-    NFC folds the decomposed and precomposed spellings of one character
-    together; ``casefold`` folds case together.  A path is folded component
-    by component, so nothing a fold produces can be read as a separator.
+    Unicode's canonical caseless match, ``NFD(casefold(NFD(x)))``, is the
+    key, composed back with NFC: normalisation folds the decomposed and
+    precomposed spellings of one character together, and ``casefold`` folds
+    case together.  The inner NFD is load-bearing.  ``casefold(NFC(x))``,
+    the key until 0.6.2, left eleven BMP pairs APFS resolves to one entry
+    with different keys -- U+0390 against U+0399 U+0308 U+0301 among them --
+    because casefolding a precomposed character can yield a sequence that is
+    not itself normalised (0.6.2 review, L2 finding 6).  The new key joins
+    every pair the old one joined, and those eleven besides.  A path is
+    folded component by component, so nothing a fold produces can be read as
+    a separator.
 
     Two distinct spellings with one key are one directory entry on a case- or
     normalisation-insensitive filesystem -- APFS and NTFS both, and HFS+
     normalises besides -- which is why a rule about "the same path" has to be
-    asked over this and not over the spelling.  ``receipt.corpus`` computes
-    the same fold for the same reason, over its declared corpus paths; this
-    module carries its own rather than importing that one, because
+    asked over this and not over the spelling.  ``receipt.corpus`` asks the
+    same question over its declared corpus paths with its own, narrower
+    ASCII-only fold (its ``_path_fold``); this module carries its own rather
+    than importing that one, because
     :mod:`receipt.tsa` depends on nothing in the package but
     :mod:`receipt.canonical` and a witness verifier has no business needing a
     corpus.
@@ -925,7 +934,8 @@ def _path_fold(path: Path) -> tuple[str, ...]:
     """
 
     return tuple(
-        unicodedata.normalize("NFC", part).casefold() for part in path.parts
+        unicodedata.normalize("NFC", unicodedata.normalize("NFD", part).casefold())
+        for part in path.parts
     )
 
 
