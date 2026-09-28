@@ -54,6 +54,34 @@ through its own words and exception classes.
 - Design record: `docs/design/0.7-m1-protected-tree-policy.md`, with the two
   review rounds beside it.
 
+## 0.6.3 (unreleased)
+
+Findings of the full Opus 5.5 review of 0.6.2, all in code 0.6.1 already
+shipped, and three more of the same kinds found while fixing them. One is a
+wrongful refusal of genuine tokens. The rest are inputs that ended a
+verification with an interpreter exception (`ValueError`, `OverflowError`,
+`RecursionError`, `AttributeError`, `TypeError`, ...) where the module's own
+refusal belonged, or took hours to reach that refusal. No refusal is reworded.
+Two changes reach inputs that did not crash before, and both are named below:
+a refusal that quotes an instant with a fraction now renders it correctly, and
+JSON nested more than 128 deep is refused, including JSON 0.6.1 accepted.
+
+- A timestamp token whose genTime carries fractional seconds verifies. The
+  formatter trimmed trailing zeros from the whole ISO string, so it ate the
+  zeros of `+00:00` and wrote `...12:00:00.249000+00:`. `verify_witness` then
+  refused every such token as `invalid timestamp claim token genTime`, and
+  `verify_timestamp_token` accepted it but reported that string as its
+  `gen_time`. OpenSSL signs sub-second genTimes whenever an authority sets
+  `clock_precision_digits`. A genTime is now written `...12:00:00.249Z`, and
+  that is the form a witness's `tsaGenTime` is compared in. Refusals that
+  quote an instant with a fraction change with it: `postdates verification
+  time 2026-09-28T12:00:00.123456Z` where 0.6.1 wrote `...123456+00:`, which
+  is most of them, since the verification time is `datetime.now()`. Refused:
+  a genTime with nonzero digits past the sixth, which the verifier cannot
+  represent without moving it earlier than the signed instant
+  (`RFC 3161 genTime is finer than a microsecond, which this verifier cannot
+  represent exactly: ...`, the rule `receipt.release_chain` already applied).
+
 ## 0.6.2
 
 One widening, in the consumer's hands: an anchor can pin more than one

@@ -63,6 +63,7 @@ from corpus_fixture import (
     rotate_tsa_signer,
     sha256_bytes,
     stamp_anonymously,
+    stamp_with_clock_precision,
 )
 
 UTC = timezone.utc
@@ -8672,4 +8673,161 @@ def test_refuses_the_openssl_that_used_to_be_the_documented_minimum(
     assert str(caught.value) == (
         "receipt requires OpenSSL 3.0 or newer as `openssl` on the path; "
         "found: OpenSSL 1.1.1w  11 Sep 2023"
+    )
+
+
+# ---------------------------------------------------------------------------
+# A genTime with fractional seconds (full Opus 5.5 review of 0.6.2, L2 F1)
+
+
+def restamp_with_clock_precision(
+    tree: WitnessTree, anchor: LocalAnchor, *, digits: int
+) -> datetime:
+    """Replace ``anchor``'s token with a genuine one carrying a fraction."""
+
+    token = tree.tokens[anchor.anchor_id]
+    stamped = stamp_with_clock_precision(
+        anchor.tsa, sha256_bytes(tree.record.read_bytes()), token, digits=digits
+    )
+    digest = sha256_bytes(token.read_bytes())
+
+    def refresh(payload: dict[str, Any]) -> None:
+        for outcome in payload.get("anchorOutcomes", [payload]):
+            if outcome.get("tsaAnchorId") == anchor.anchor_id:
+                outcome["tokenSha256"] = digest
+
+    rewrite_witness(tree, refresh)
+    return stamped
+
+
+def rfc3339_utc(value: datetime) -> str:
+    """The expected rendering, written out independently of ``_format_utc``."""
+
+    text = value.strftime("%Y-%m-%dT%H:%M:%S")
+    if value.microsecond:
+        text += "." + f"{value.microsecond:06d}".rstrip("0")
+    return text + "Z"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (datetime(2026, 9, 27, 12, 0, 0, tzinfo=UTC), "2026-09-27T12:00:00Z"),
+        (datetime(2026, 9, 27, 12, 0, 0, 500000, tzinfo=UTC), "2026-09-27T12:00:00.5Z"),
+        (datetime(2026, 9, 27, 12, 0, 0, 250000, tzinfo=UTC), "2026-09-27T12:00:00.25Z"),
+        (datetime(2026, 9, 27, 12, 0, 0, 1, tzinfo=UTC), "2026-09-27T12:00:00.000001Z"),
+        (datetime(2026, 9, 27, 12, 0, 0, 100000, tzinfo=UTC), "2026-09-27T12:00:00.1Z"),
+        (datetime(2026, 9, 27, 12, 0, 0, 999999, tzinfo=UTC), "2026-09-27T12:00:00.999999Z"),
+        (datetime(1, 1, 1, tzinfo=UTC), "0001-01-01T00:00:00Z"),
+        (datetime(9999, 12, 31, 23, 59, 59, 10, tzinfo=UTC), "9999-12-31T23:59:59.00001Z"),
+    ],
+)
+def test_format_utc_writes_z_and_a_fraction_without_trailing_zeros(
+    value: datetime, expected: str
+) -> None:
+    """``rstrip("0")`` over the whole ISO string ate the zeros of ``+00:00``
+    and returned ``...12:00:00.500000+00:`` for every nonzero fraction; the
+    whole-second form was always right and must stay byte-identical."""
+
+    assert tsa_module._format_utc(value) == expected
+
+
+@pytest.mark.parametrize("digits", [3, 6])
+def test_a_token_with_a_fractional_gentime_verifies_and_reports_it_exactly(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...], digits: int
+) -> None:
+    """A genuine token whose authority signs sub-second genTimes verifies.
+
+    OpenSSL's own ``clock_precision_digits`` signs it, ``openssl ts -verify``
+    accepts it against the pinned root, and the verifier now does too: the
+    witness verifies, and ``gen_time`` is the signed instant, fraction
+    included, in the RFC 3339 form a sidecar declares. Before the fix the
+    witness was refused as ``invalid timestamp claim token genTime`` and the
+    public token verifier returned ``...+00:``, which is not RFC 3339.
+    """
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    stamped = restamp_with_clock_precision(tree, alpha, digits=digits)
+    expected = rfc3339_utc(stamped)
+    assert stamped.microsecond and "." in expected
+    assert openssl_ts_verifies(tree.record, tree.tokens[alpha.anchor_id], alpha.tsa.root_pem)
+
+    evidence = verify_tree(tree)
+    assert evidence.status == "available"
+    assert evidence.gen_time == expected
+    assert [token.gen_time for token in evidence.tokens] == [expected]
+    assert token_time(evidence.tokens[0]) == stamped
+
+    direct = verify_timestamp_token(
+        tree.record,
+        token_claim(tree, alpha),
+        tree.reference,
+        spec=tree.spec,
+        records=tree.records,
+    )
+    assert direct.gen_time == expected
+
+
+def test_a_declared_fractional_gentime_is_compared_in_the_reported_form(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """``tsaGenTime`` declared as the verifier reports it is accepted; any
+    other spelling of the same instant is the existing mismatch refusal."""
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    stamped = restamp_with_clock_precision(tree, alpha, digits=3)
+    expected = rfc3339_utc(stamped)
+
+    rewrite_witness(
+        tree,
+        lambda payload: payload["anchorOutcomes"][0].__setitem__("tsaGenTime", expected),
+    )
+    assert verify_tree(tree).gen_time == expected
+
+    padded = stamped.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    assert padded != expected
+    rewrite_witness(
+        tree,
+        lambda payload: payload["anchorOutcomes"][0].__setitem__("tsaGenTime", padded),
+    )
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == (
+        f"witness tsaGenTime mismatch for {tree.record}: expected {expected}, "
+        f"got {padded}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "microsecond"),
+    [
+        ("20260927120000.5Z", 500000),
+        ("20260927120000.123456Z", 123456),
+        ("20260927120000.1234560Z", 123456),
+        ("20260927120000.12345600000000000000Z", 123456),
+        ("20260927120000.000001Z", 1),
+    ],
+)
+def test_a_gentime_fraction_up_to_microseconds_is_kept_exactly(
+    text: str, microsecond: int
+) -> None:
+    assert tsa_module._parse_generalized_time(text) == datetime(
+        2026, 9, 27, 12, 0, 0, microsecond, tzinfo=UTC
+    )
+
+
+@pytest.mark.parametrize(
+    "text", ["20260927120000.1234567Z", "20260927120000.0000001Z", "20260927120000.00000000000001Z"]
+)
+def test_a_gentime_finer_than_a_microsecond_is_refused_not_rounded(text: str) -> None:
+    """Six digits and a dropped seventh would be an earlier instant than the
+    one signed; ``receipt.release_chain`` refuses the same precision."""
+
+    with pytest.raises(TsaError) as caught:
+        tsa_module._parse_generalized_time(text)
+    assert str(caught.value) == (
+        "RFC 3161 genTime is finer than a microsecond, which this verifier "
+        f"cannot represent exactly: {text!r}"
     )
