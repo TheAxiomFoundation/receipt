@@ -11,6 +11,7 @@ import hashlib
 import inspect
 import itertools
 import pathlib
+import os
 import shutil
 import subprocess
 from collections.abc import Callable, Iterator, Mapping
@@ -2006,3 +2007,58 @@ def test_forced_openssl_path_agrees_with_cryptography_over_short_payloads(
         outcome[0] == ("accepted" if tamper == "none" else "refused")
         for (_size, tamper), outcome in crypto.items()
     )
+
+
+# --- 0.6.2 review, L7 finding 9: the key is read from inside anchor_dir only
+
+
+def test_read_producer_public_key_stays_inside_the_anchor_directory(
+    tmp_path: pathlib.Path,
+) -> None:
+    anchors = tmp_path / "anchors"
+    anchors.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "producer.pub").write_bytes(b"outside bytes")
+    (anchors / "linked").symlink_to(outside, target_is_directory=True)
+    nested = anchors / "keys"
+    nested.mkdir()
+    (nested / "producer.pub").write_bytes(b"nested bytes")
+
+    for filename in (
+        "linked/producer.pub",
+        "../outside/producer.pub",
+        str(outside / "producer.pub"),
+        "keys/../../outside/producer.pub",
+        "",
+        "keys/./producer.pub",
+    ):
+        spec = ProducerKeySpec(filename, "0" * 64)
+        with pytest.raises(SignError) as caught:
+            read_producer_public_key(anchors, spec)
+        assert str(caught.value) == (
+            f"missing or non-regular producer public key: {anchors / filename}"
+        ), filename
+
+    assert (
+        read_producer_public_key(anchors, ProducerKeySpec("keys/producer.pub", "0" * 64))
+        == b"nested bytes"
+    )
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads files mode 000")
+def test_an_unreadable_producer_public_key_is_a_sign_error(
+    tmp_path: pathlib.Path,
+) -> None:
+    anchors = tmp_path / "anchors"
+    anchors.mkdir()
+    key = anchors / "unreadable.pub"
+    key.write_bytes(b"key")
+    key.chmod(0)
+    try:
+        with pytest.raises(
+            SignError, match="^cannot read producer public key: "
+        ):
+            read_producer_public_key(anchors, ProducerKeySpec("unreadable.pub", "0" * 64))
+    finally:
+        key.chmod(0o600)
