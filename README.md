@@ -105,8 +105,8 @@ content. Protected paths with transforming `filter`, `ident`, or
 checkout fidelity is outside the verdict.
 
 `ChainSpec.name_repertoire` and `CorpusSpec.name_repertoire` default to
-`portable`: ASCII letters, digits, `.`, `_`, and `-`, no trailing period or
-Win32 device basename. A spec may declare `posix-bytes` for exact-byte names
+`portable`: ASCII letters, digits, `.`, `_`, and `-`, at most 255 bytes per
+component, no trailing period or Win32 device basename. A spec may declare `posix-bytes` for exact-byte names
 outside the materialized paths; names quoted or folded must still be valid
 UTF-8, and ASCII-fold-equal siblings refuse under both repertoires. Both spec
 fields must agree. Private materialization always requires portable names,

@@ -53,10 +53,12 @@ from typing import Any, Literal
 
 from receipt._names import (
     ALIAS_CAPABLE_SUFFIX_RE,
+    PORTABLE_COMPONENT_MAX_BYTES,
     PORTABLE_NAME_RE as PORTABLE_NAME_RE,
     SHORT_NAME_PUNCTUATION as SHORT_NAME_PUNCTUATION,
     WIN32_RESERVED_DEVICE_NAMES as WIN32_RESERVED_DEVICE_NAMES,
     NamePolicyError,
+    PortableNameTooLong,
     ascii_fold_text,
     assert_no_merging_entries as assert_no_merging_tree_names,
     assert_portable_name,
@@ -774,6 +776,12 @@ def _assert_portable_name(value: str, label: str) -> str:
 
     try:
         return assert_portable_name(value, label)
+    except PortableNameTooLong as exc:
+        raise CorpusError(
+            f"{label} has a component longer than {PORTABLE_COMPONENT_MAX_BYTES} "
+            "bytes, more than a portable host filesystem stores in one name: "
+            f"{_quoted(value)}"
+        ) from exc
     except NamePolicyError as exc:
         raise CorpusError(
             f"{label} is not a portable name (ASCII letters, digits, "
