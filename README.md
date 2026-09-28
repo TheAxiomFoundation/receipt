@@ -95,10 +95,11 @@ preflight refuses LibreSSL and OpenSSL below 3.0. Install OpenSSL (for example
 Use a repository containing the candidate and, when supplied, the base commit.
 Shallow clones cannot verify a base outside their boundary; this release
 refuses every shallow repository with `shallow repositories are unsupported`,
-including one whose requested commits are present. Use `fetch-depth: 0` in
-GitHub Actions. LFS-tracked content roots are unsupported: verification reads
-the pointer blob, whose digest will not match a journal digest of the expanded
-content. Protected paths with transforming `filter`, `ident`, or
+including one whose requested commits are present, and `receipt.attest`'s
+history sweep refuses shallow and grafted repositories the same way. Use
+`fetch-depth: 0` in GitHub Actions. LFS-tracked content roots are unsupported:
+verification reads the pointer blob, whose digest will not match a journal
+digest of the expanded content. Protected paths with transforming `filter`, `ident`, or
 `working-tree-encoding` attributes refuse; `text` and `eol` are accepted, and
 checkout fidelity is outside the verdict.
 
@@ -115,6 +116,8 @@ The public `receipt verify` and append-gate entries retain their refusal when
 `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, or
 `GIT_ALTERNATE_OBJECT_DIRECTORIES` is set. The object reader separately freezes
 its Git environment and explicitly selects the repository for its reads.
+`receipt.attest` drops every inherited `GIT_*` variable and runs git with
+`--no-replace-objects`, so its sweep reads the repository it is given.
 
 ```bash
 uv pip install receipt
