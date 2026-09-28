@@ -123,7 +123,6 @@ def _verify_producer_signature_with_openssl(
     public_key_pem: bytes,
     *,
     public_key_filename: str,
-    temporary_public_key_filename: str | None = None,
     spki_sha256: str | None,
     label: str,
 ) -> None:
@@ -134,14 +133,11 @@ def _verify_producer_signature_with_openssl(
         environment = _openssl_environment(empty_ca_dir)
         manifest_path = temporary / "manifest.json"
         signature_path = temporary / "producer.sig"
-        # Release-chain diagnostics carry the full anchor path. The upstream
-        # temporary file nevertheless uses only the configured filename.
-        temporary_key_name = (
-            temporary_public_key_filename
-            if temporary_public_key_filename is not None
-            else pathlib.Path(public_key_filename).name
-        )
-        public_key_path = temporary / temporary_key_name
+        # Four fixed private names. The key's name used to come from the
+        # configured filename, so a key named ``manifest.json`` replaced the
+        # payload file and the signature was checked over the key, and an
+        # absolute or ``..`` name wrote outside this directory.
+        public_key_path = temporary / "producer-public-key.pem"
         manifest_path.write_bytes(payload)
         signature_path.write_bytes(signature)
         public_key_path.write_bytes(public_key_pem)
