@@ -86,7 +86,8 @@ Claims corrected, with no change in behavior:
 New refusals, each of an input 0.6.1 accepted or crashed on:
 
 - `receipt.tsa`: a verification time without a UTC offset (`astimezone` read
-  it as local time, so the verdict followed the process's time zone); a bare
+  it as local time, so the verdict followed the process's time zone), or one
+  whose UTC instant falls outside years 1 to 9999 (was `OverflowError`); a bare
   record filename with no `records=` (was `IndexError`). The duplicate
   token-path rule keys on Unicode's canonical caseless match, so eleven
   spellings APFS stores as one entry are one path to it, as every spelling
