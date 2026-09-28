@@ -1502,7 +1502,13 @@ def _parse_rfc3339(value: Any, label: str) -> datetime:
         raise TsaError(f"invalid timestamp claim {label}: {value!r}") from exc
     if parsed.tzinfo is None:
         raise TsaError(f"timestamp claim lacks a timezone {label}: {value!r}")
-    return parsed.astimezone(UTC)
+    try:
+        return parsed.astimezone(UTC)
+    except OverflowError as exc:
+        # 0001-01-01T00:00:00+14:00 is a valid RFC 3339 string whose UTC
+        # instant precedes year 1: no datetime can hold it, and the
+        # conversion's OverflowError is not even a ValueError.
+        raise TsaError(f"invalid timestamp claim {label}: {value!r}") from exc
 
 
 def _creation_claims(payload: dict[str, Any]) -> list[tuple[str, datetime]]:
@@ -1534,20 +1540,42 @@ def validate_token_time(
     max_future_seconds: int,
     max_token_lead_seconds: int,
 ) -> None:
-    """Validate signed time against wall time and internal creation claims."""
+    """Validate signed time against wall time and internal creation claims.
+
+    Each bound is compared as a difference of two instants, which is always a
+    representable ``timedelta``, rather than as an instant shifted by an
+    allowance.  ``claim - timedelta(seconds=300)`` for a record claiming
+    ``0001-01-01T00:00:00Z`` has no datetime to be, and raised
+    ``OverflowError`` out of the verification; the difference form decides
+    every such case, and decides every other case exactly as before.
+    """
 
     current = now.astimezone(UTC)
-    if gen_time > current + timedelta(seconds=max_future_seconds):
+    if gen_time - current > _allowance(max_future_seconds):
         raise TsaError(
             f"RFC 3161 genTime {_format_utc(gen_time)} postdates verification "
             f"time {_format_utc(current)}"
         )
     for label, claim in _creation_claims(payload):
-        if gen_time < claim - timedelta(seconds=max_token_lead_seconds):
+        if claim - gen_time > _allowance(max_token_lead_seconds):
             raise TsaError(
                 f"RFC 3161 genTime {_format_utc(gen_time)} impossibly precedes "
                 f"{label}={_format_utc(claim)}"
             )
+
+
+def _allowance(seconds: int) -> timedelta:
+    """``timedelta(seconds=seconds)``, saturating where it cannot be held.
+
+    An allowance past ``timedelta.max`` (some 2.7 million years) already
+    exceeds the distance between any two datetimes, so saturating decides the
+    comparison exactly as the unbounded value would.
+    """
+
+    try:
+        return timedelta(seconds=seconds)
+    except OverflowError:
+        return timedelta.max if seconds > 0 else timedelta.min
 
 
 def _trust_bundle_reference(

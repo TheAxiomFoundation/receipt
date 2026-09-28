@@ -9007,3 +9007,109 @@ def test_an_oversized_oid_arc_is_refused_under_a_lowered_int_string_limit() -> N
             _decode_oid(oid_body([1, 3, arc]))
     finally:
         sys.set_int_max_str_digits(previous)
+
+
+# ---------------------------------------------------------------------------
+# Creation claims at the ends of the datetime range (full Opus 5.5 review of
+# 0.6.2, L2 F3)
+
+
+def restamp_record_claiming(
+    tree: WitnessTree, anchor: LocalAnchor, recorded_at: str
+) -> None:
+    """Rewrite the record's ``recordedAt`` and stamp a genuine token over it."""
+
+    payload = json.loads(tree.record.read_text())
+    payload["recordedAt"] = recorded_at
+    tree.record.write_bytes(canonical_bytes(payload) + b"\n")
+    digest = sha256_bytes(tree.record.read_bytes())
+    token = tree.tokens[anchor.anchor_id]
+    anchor.tsa.stamp(digest, token)
+    token_digest = sha256_bytes(token.read_bytes())
+
+    def refresh(witness: dict[str, Any]) -> None:
+        witness["digestSha256"] = digest
+        for outcome in witness.get("anchorOutcomes", [witness]):
+            outcome["tokenSha256"] = token_digest
+
+    rewrite_witness(tree, refresh)
+
+
+def test_a_record_claiming_year_one_is_measured_not_crashed_on(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """``claim - timedelta(seconds=lead)`` has no datetime for a claim in the
+    first ``lead`` seconds of year 1, and raised ``OverflowError`` -- which is
+    not a ``ValueError`` and escaped every handler. The comparison is now a
+    difference: the genuine token postdates the claim, so the lead check
+    passes and the witness verifies, as it would for any earlier claim."""
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    restamp_record_claiming(tree, alpha, "0001-01-01T00:00:00Z")
+    assert verify_tree(tree).status == "available"
+
+
+@pytest.mark.parametrize(
+    "claim", ["0001-01-01T00:00:00+14:00", "0001-01-01T00:04:59+00:05", "9999-12-31T23:59:59-14:00"]
+)
+def test_a_claim_with_no_utc_instant_is_an_invalid_claim(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...], claim: str
+) -> None:
+    """A valid RFC 3339 string whose UTC instant falls outside years 1-9999
+    cannot be converted; that is now the existing invalid-claim refusal."""
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    restamp_record_claiming(tree, alpha, claim)
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == f"invalid timestamp claim recordedAt: {claim!r}"
+
+
+def test_a_record_claiming_the_last_second_is_the_existing_lead_refusal(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """The top of the range was never an overflow for the lead check and
+    must keep its refusal, word for word."""
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    restamp_record_claiming(tree, alpha, "9999-12-31T23:59:59Z")
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    message = str(caught.value)
+    assert message.startswith("RFC 3161 genTime ")
+    assert message.endswith(" impossibly precedes recordedAt=9999-12-31T23:59:59Z")
+
+
+def test_validate_token_time_decides_at_the_ends_of_the_range() -> None:
+    """Every overflow the shifted-instant form could reach, decided."""
+
+    gen_time = datetime(2026, 9, 27, 12, tzinfo=UTC)
+    claim = {"recordedAt": "2026-09-27T11:59:00Z"}
+    # A verification time at the top of the range with a future allowance.
+    validate_token_time(
+        claim,
+        gen_time,
+        now=datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC),
+        max_future_seconds=86_400,
+        max_token_lead_seconds=300,
+    )
+    # Allowances too large for a timedelta saturate rather than overflow.
+    validate_token_time(
+        {"recordedAt": "9999-12-31T23:59:59Z"},
+        datetime(1, 1, 1, tzinfo=UTC),
+        now=datetime(2026, 9, 28, tzinfo=UTC),
+        max_future_seconds=10**30,
+        max_token_lead_seconds=10**30,
+    )
+    # A genTime at the very bottom still refuses a later claim by name.
+    with pytest.raises(TsaError, match=r"impossibly precedes recordedAt=0001-01-01T00:10:00Z$"):
+        validate_token_time(
+            {"recordedAt": "0001-01-01T00:10:00Z"},
+            datetime(1, 1, 1, tzinfo=UTC),
+            now=datetime(2026, 9, 28, tzinfo=UTC),
+            max_future_seconds=0,
+            max_token_lead_seconds=300,
+        )

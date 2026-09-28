@@ -9,7 +9,7 @@ CI explores the same examples every time and a failure is reproducible.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from hypothesis import HealthCheck, given, settings, strategies as st
 
@@ -158,3 +158,143 @@ def test_decode_oid_is_total(data: bytes) -> None:
     except tsa.TsaError:
         return
     assert all(part.isdigit() for part in text.split("."))
+
+
+# ---------------------------------------------------------------------------
+# The time checks decide every in-range input (L2 F3).
+
+allowances = st.integers(min_value=0, max_value=10**6) | st.integers(min_value=0, max_value=10**40)
+rfc3339_claims = st.tuples(
+    aware_datetimes, st.integers(min_value=-23 * 60, max_value=23 * 60)
+).map(
+    lambda pair: pair[0].replace(tzinfo=None).isoformat()
+    + ("Z" if pair[1] == 0 else f"{'+' if pair[1] > 0 else '-'}{abs(pair[1]) // 60:02d}:{abs(pair[1]) % 60:02d}")
+)
+
+
+@PROPERTY
+@given(rfc3339_claims, aware_datetimes, aware_datetimes, allowances, allowances)
+def test_validate_token_time_is_total(
+    claim: str, gen_time: datetime, now: datetime, future: int, lead: int
+) -> None:
+    """Any claim spelled with any offset, any genTime and any verification
+    time in years 1-9999, and any allowance: accepted or TsaError (L2 I7, E3,
+    E4: 300 of 601 claims in year 1's first ten minutes and 46 of 94
+    range-end offsets raised OverflowError)."""
+
+    try:
+        tsa.validate_token_time(
+            {"recordedAt": claim},
+            gen_time,
+            now=now,
+            max_future_seconds=future,
+            max_token_lead_seconds=lead,
+        )
+    except tsa.TsaError:
+        pass
+
+
+mid_range = st.datetimes(min_value=datetime(2000, 1, 1), max_value=datetime(2100, 1, 1)).map(
+    lambda value: value.replace(tzinfo=UTC)
+)
+
+
+whole_seconds = st.booleans()
+
+
+@PROPERTY
+@given(
+    mid_range,
+    mid_range,
+    mid_range,
+    st.integers(0, 10**8),
+    st.integers(0, 10**8),
+    whole_seconds,
+)
+def test_validate_token_time_decides_as_the_shifted_form_did_wherever_it_could(
+    claim: datetime,
+    gen_time: datetime,
+    now: datetime,
+    future: int,
+    lead: int,
+    whole: bool,
+) -> None:
+    """Differential against 0.6.1's comparisons, over inputs where they could
+    not overflow: the same verdict, the same refusal, and -- for whole-second
+    instants, which 0.6.1 already rendered correctly -- the same text. (A
+    fractional instant now renders as ``...Z`` where 0.6.1 wrote ``...+00:``;
+    that change is the L2 F1 fix, pinned in tests/test_tsa.py.)"""
+
+    if whole:
+        claim, gen_time, now = (value.replace(microsecond=0) for value in (claim, gen_time, now))
+
+    def rendered(value: datetime) -> str:
+        return value.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    if gen_time > now + timedelta(seconds=future):
+        expected = f"RFC 3161 genTime {rendered(gen_time)} postdates verification time {rendered(now)}"
+    elif gen_time < claim - timedelta(seconds=lead):
+        expected = (
+            f"RFC 3161 genTime {rendered(gen_time)} impossibly precedes "
+            f"recordedAt={rendered(claim)}"
+        )
+    else:
+        expected = None
+    try:
+        tsa.validate_token_time(
+            {"recordedAt": claim.isoformat()},
+            gen_time,
+            now=now,
+            max_future_seconds=future,
+            max_token_lead_seconds=lead,
+        )
+        actual = None
+    except tsa.TsaError as exc:
+        actual = str(exc)
+    if expected is None or actual is None:
+        assert actual == expected
+    elif whole:
+        assert actual == expected
+    else:
+        assert actual.split(" ")[4] == expected.split(" ")[4]
+
+
+@PROPERTY
+@given(
+    mid_range,
+    mid_range,
+    mid_range,
+    st.integers(0, 10**6),
+    st.integers(0, 10**6),
+    st.integers(0, 10**8),
+    st.integers(0, 10**8),
+    st.integers(0, 10**8),
+)
+def test_validate_token_time_acceptance_is_monotone(
+    claim: datetime,
+    gen_time: datetime,
+    now: datetime,
+    future: int,
+    lead: int,
+    d_now: int,
+    d_future: int,
+    d_lead: int,
+) -> None:
+    """Acceptance survives a later ``now``, a larger future allowance and a
+    larger lead (L2 I8)."""
+
+    def accepted(at: datetime, future_seconds: int, lead_seconds: int) -> bool:
+        try:
+            tsa.validate_token_time(
+                {"recordedAt": claim.isoformat()},
+                gen_time,
+                now=at,
+                max_future_seconds=future_seconds,
+                max_token_lead_seconds=lead_seconds,
+            )
+        except tsa.TsaError:
+            return False
+        return True
+
+    if accepted(now, future, lead):
+        assert accepted(now + timedelta(seconds=d_now), future + d_future, lead + d_lead)
