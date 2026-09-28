@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import pathlib
+import re
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -280,6 +281,50 @@ def stamp_anonymously(
         ],
         cwd=tsa.directory,
     )
+
+
+_OPENSSL_GENTIME_RE = re.compile(
+    r"^Time stamp: ([A-Z][a-z]{2}) +(\d{1,2}) (\d{2}:\d{2}:\d{2})(\.\d+)? (\d{4}) GMT$",
+    re.M,
+)
+
+
+def stamp_with_clock_precision(
+    tsa: LocalTsa, digest: str, out: pathlib.Path, *, digits: int
+) -> datetime:
+    """Stamp ``digest`` with a genTime carrying ``digits`` fractional digits.
+
+    ``clock_precision_digits`` is OpenSSL's own TSA setting, so the response is
+    genuine: the authority's key signs it and ``openssl ts -verify`` accepts
+    it. Returns the genTime as OpenSSL itself reads it back out of the token.
+    A fraction of all zeros is encoded without one, so the stamp is retried
+    until the fraction has a nonzero digit.
+    """
+
+    config = tsa.directory / f"precision-{digits}.cnf"
+    config.write_text(
+        (tsa.directory / "tsa.cnf").read_text() + f"clock_precision_digits = {digits}\n"
+    )
+    query = tsa.directory / f"{out.stem}.tsq"
+    _openssl(["ts", "-query", "-digest", digest, "-sha256", "-cert", "-out", str(query)])
+    for _attempt in range(50):
+        _openssl(
+            [
+                "ts", "-reply", "-config", str(config), "-section", "tsa_config",
+                "-queryfile", str(query), "-out", str(out),
+            ],
+            cwd=tsa.directory,
+        )
+        text = _openssl(["ts", "-reply", "-in", str(out), "-text"]).decode("ascii")
+        match = _OPENSSL_GENTIME_RE.search(text)
+        assert match is not None, text
+        month, day, clock, fraction, year = match.groups()
+        if fraction and fraction.strip(".0"):
+            stamped = datetime.strptime(
+                f"{month} {day} {clock} {year}", "%b %d %H:%M:%S %Y"
+            ).replace(tzinfo=timezone.utc)
+            return stamped.replace(microsecond=int((fraction[1:] + "000000")[:6]))
+    raise AssertionError("no stamp with a nonzero fraction in 50 attempts")
 
 
 def _issue_signer(
@@ -700,6 +745,7 @@ def write_spec_module(
     module = f'''"""Committed trust anchors for the receipt test corpus."""
 
 import pathlib
+import re
 
 from receipt.corpus import CorpusSpec
 from receipt.release_chain import AnchorSpec, ChainSpec
