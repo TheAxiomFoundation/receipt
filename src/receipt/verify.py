@@ -855,8 +855,16 @@ def run_verification(
             return result(incomplete="custody")
         if phase in {"custody", "finalize"}:
             # A close-time repository re-audit invalidates every tree-derived
-            # pass even if its body happened to finish first.
-            passes[:] = [item for item in passes if item.name == "history"]
+            # pass even if its body happened to finish first. That includes
+            # history, which read the same snapshots: keeping it reported a
+            # FAIL whose "established" list still carried the history claim
+            # (0.6.2 review, L4 finding 4). A custody failure before close
+            # leaves a completed history pass standing, as before.
+            passes[:] = [
+                item
+                for item in passes
+                if item.name == "history" and phase == "custody"
+            ]
             chain = None
             corpus = None
             passes.append(
