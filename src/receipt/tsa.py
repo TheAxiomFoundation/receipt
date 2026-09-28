@@ -544,6 +544,7 @@ try:  # pragma: no cover - exercised by whichever platform runs the suite
 except ImportError:  # pragma: no cover - Windows has no fcntl, and no O_NONBLOCK
     fcntl = None  # type: ignore[assignment]
 
+from receipt import _bounded_json as bounded_json
 from receipt.canonical import canonical_bytes, canonical_sha256
 
 TRUST_BUNDLE_RE = re.compile(r"records/trust/tsa-anchors-v[1-9][0-9]*\.json")
@@ -1079,8 +1080,13 @@ def load_json(path: Path) -> dict[str, Any]:
     """
 
     try:
-        value = json.loads(path.read_text())
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        value = bounded_json.loads(path.read_text())
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        bounded_json.JsonBoundError,
+    ) as exc:
         raise TsaError(f"cannot read JSON {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise TsaError(f"record must be a JSON object: {path}")
@@ -1104,11 +1110,23 @@ def _record_payload(data: bytes, path: Path) -> dict[str, Any]:
     ``bytes.decode`` than ``load_json`` gives for the same file (peer review,
     fourth gate round four); imitating a decoder is how the two came apart,
     and using it is how they stay together.
+
+    The parse is ``receipt._bounded_json``'s: ``json.loads`` itself, with a
+    fixed nesting depth and integer width.  Every input this serves -- the
+    record under witness, its sidecar, the chain genesis and a trust bundle --
+    is producer-written, and ``json.loads`` alone let deep nesting out as
+    ``RecursionError`` and a 5,000-digit integer out as a bare ``ValueError``.
+    Both are now the ``cannot read JSON`` refusal, and a file ``json.loads``
+    refused keeps the message it had.
     """
 
     try:
-        value = json.loads(io.TextIOWrapper(io.BytesIO(data)).read())
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        value = bounded_json.loads(io.TextIOWrapper(io.BytesIO(data)).read())
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        bounded_json.JsonBoundError,
+    ) as exc:
         raise TsaError(f"cannot read JSON {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise TsaError(f"record must be a JSON object: {path}")
@@ -1627,7 +1645,21 @@ def _load_trust_bundle(
         raise TsaError(f"unsupported TSA trust schema: {payload.get('schemaVersion')!r}")
     if not isinstance(payload.get("bundleId"), str) or not payload["bundleId"]:
         raise TsaError(f"TSA trust bundle lacks bundleId: {path}")
-    if bundle_bytes not in {canonical_bytes(payload), canonical_bytes(payload) + b"\n"}:
+    # A payload canonical JSON cannot encode (NaN, an infinity, an integer
+    # beyond the Number range) is by that fact not canonical JSON, and gets
+    # this refusal rather than receipt.canonical's ValueError.  The bundle
+    # is producer-written and read before its commitment is compared, so
+    # this is also where a replaced bundle with such a payload stops; the
+    # parse above has already bounded its depth.  The order of the checks is
+    # kept, so apart from a bundle nested past that bound, which the parse
+    # now refuses first, every bundle refused before keeps its refusal.
+    try:
+        encoded = canonical_bytes(payload)
+    except (ValueError, RecursionError) as exc:
+        raise TsaError(
+            f"TSA trust configuration is not canonical JSON: {path}"
+        ) from exc
+    if bundle_bytes not in {encoded, encoded + b"\n"}:
         raise TsaError(f"TSA trust configuration is not canonical JSON: {path}")
     anchors = payload.get("anchors")
     if not isinstance(anchors, list) or not anchors:
