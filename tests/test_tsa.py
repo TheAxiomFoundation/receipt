@@ -8878,3 +8878,44 @@ def test_an_unavailable_supplemental_outcome_satisfies_a_new_authority(
     assert "declared unavailable with a reason, which the ported rule accepts" in (
         documented
     )
+
+
+@pytest.mark.parametrize(
+    "now",
+    [
+        datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=14))),
+        datetime(9999, 12, 31, 23, tzinfo=timezone(timedelta(hours=-14))),
+        datetime(1, 1, 1, tzinfo=timezone(timedelta(microseconds=1))),
+    ],
+    ids=["year-0", "year-10000", "one-microsecond-early"],
+)
+def test_an_aware_verification_time_outside_the_utc_range_is_refused(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...], now: datetime
+) -> None:
+    """An aware ``now`` whose UTC instant is before year 1 or after 9999
+    raised OverflowError from ``astimezone`` in ``validate_token_time``,
+    reached through every public witness entry."""
+
+    message = "verification time is outside the representable UTC range"
+    with pytest.raises(TsaError, match=message):
+        validate_token_time(
+            {"recordedAt": "2026-09-27T11:59:00Z"},
+            datetime(2026, 9, 27, 12, 0, tzinfo=UTC),
+            now=now,
+            max_future_seconds=0,
+            max_token_lead_seconds=300,
+        )
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    with pytest.raises(TsaError, match=message):
+        verify_tree(tree, now=now)
+
+
+def test_a_gen_time_outside_the_utc_range_is_refused() -> None:
+    with pytest.raises(TsaError, match="RFC 3161 genTime is outside the representable"):
+        validate_token_time(
+            {"recordedAt": "2026-09-27T11:59:00Z"},
+            datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=14))),
+            now=datetime(2026, 9, 27, 12, 30, tzinfo=UTC),
+            max_future_seconds=0,
+            max_token_lead_seconds=300,
+        )

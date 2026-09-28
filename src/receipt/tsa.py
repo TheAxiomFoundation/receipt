@@ -1492,11 +1492,26 @@ def _require_aware_verification_time(now: datetime | None) -> None:
 
     if now is None:
         return
-    if not isinstance(now, datetime) or now.utcoffset() is None:
+    _utc_instant(now, "verification time")
+
+
+def _utc_instant(value: datetime, label: str) -> datetime:
+    """``value`` in UTC, refusing a time that names no representable instant.
+
+    Naive refuses as above. An aware time whose UTC instant falls outside
+    years 1 to 9999 -- ``datetime(1, 1, 1, tzinfo=+14:00)`` -- raised
+    OverflowError from ``astimezone`` (0.6.2 review, found beside L2 finding
+    7 by the crash-to-refusal sweep).
+    """
+
+    if not isinstance(value, datetime) or value.utcoffset() is None:
+        raise TsaError(f"{label} must be a timezone-aware datetime: {value!r}")
+    try:
+        return value.astimezone(UTC)
+    except (OverflowError, ValueError) as exc:
         raise TsaError(
-            "verification time must be a timezone-aware datetime: "
-            f"{now!r}"
-        )
+            f"{label} is outside the representable UTC range: {value!r}"
+        ) from exc
 
 
 def validate_token_time(
@@ -1509,8 +1524,8 @@ def validate_token_time(
 ) -> None:
     """Validate signed time against wall time and internal creation claims."""
 
-    _require_aware_verification_time(now)
-    current = now.astimezone(UTC)
+    current = _utc_instant(now, "verification time")
+    _utc_instant(gen_time, "RFC 3161 genTime")
     if gen_time > current + timedelta(seconds=max_future_seconds):
         raise TsaError(
             f"RFC 3161 genTime {_format_utc(gen_time)} postdates verification "
