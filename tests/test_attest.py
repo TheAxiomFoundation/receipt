@@ -485,6 +485,8 @@ def test_commit_scope_branch_outcomes(
             [
                 "git",
                 "--no-replace-objects",
+                "-c",
+                "core.commitGraph=false",
                 "merge-base",
                 "--is-ancestor",
                 "--end-of-options",
@@ -839,6 +841,49 @@ def test_a_replace_ref_does_not_hide_a_commit(tmp_path: pathlib.Path) -> None:
     assert _in_scope(root) == [ids["unattested"], ids["attested"]]
 
 
+def test_a_commit_graph_entry_does_not_hide_a_commit(tmp_path: pathlib.Path) -> None:
+    """The commit-graph file is a cache git trusts: an entry giving a records
+    commit below the tip its parent's tree made the walk pass over it."""
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    _fixture_git(root, "init", "--quiet", "--initial-branch=main", "--object-format=sha1")
+    _fixture_git(root, "remote", "add", "origin", "https://github.com/MaxGhenis/brier.git")
+    _fixture_commit(root, "README.md", "base", 1_900_000_000)
+    epoch = _fixture_commit(
+        root, "scripts/verify_records_attestations.py", "checker", 1_900_000_100
+    )
+    unattested = _fixture_commit(root, "records/u.json", "unattested", 1_900_000_200)
+    attested = _fixture_commit(root, "records/a.json", "attested", 1_900_000_300)
+    _fixture_git(root, "commit-graph", "write", "--reachable")
+    graph = root / ".git" / "objects" / "info" / "commit-graph"
+    data = bytearray(graph.read_bytes())
+    assert data[:4] == b"CGPH"
+    chunks = {
+        bytes(data[8 + 12 * i : 12 + 12 * i]): int.from_bytes(
+            data[12 + 12 * i : 20 + 12 * i], "big"
+        )
+        for i in range(data[6] + 1)
+    }
+    lookup, records = chunks[b"OIDL"], chunks[b"CDAT"]
+    oids = [
+        data[lookup + 20 * i : lookup + 20 * (i + 1)].hex()
+        for i in range((records - lookup) // 20)
+    ]
+    entry = records + oids.index(unattested) * 36
+    data[entry : entry + 20] = bytes.fromhex(
+        _fixture_git(root, "rev-parse", f"{epoch}^{{tree}}")
+    )
+    graph.chmod(0o644)
+    graph.write_bytes(bytes(data))
+    # The graph now hides the commit from git's own walk.
+    assert _fixture_git(
+        root, "log", "--full-history", "--format=%H", f"{epoch}..HEAD", "--", "records/"
+    ).split() == [attested]
+
+    assert _in_scope(root) == [attested, unattested]
+
+
 @pytest.mark.parametrize("variable", ["GIT_DIR", "GIT_GRAFT_FILE", "GIT_REPLACE_REF_BASE"])
 def test_an_inherited_git_variable_does_not_move_the_sweep(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, variable: str
@@ -895,6 +940,8 @@ def _reference_records(root: pathlib.Path, rev_range: str) -> list[str]:
     return _fixture_git(
         root,
         "--no-replace-objects",
+        "-c",
+        "core.commitGraph=false",
         "log",
         "--full-history",
         "--format=%H",

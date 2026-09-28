@@ -134,13 +134,16 @@ present in 0.6.1.
   `enforcement_epoch`, `records_commits` and `commit_in_scope` refuse a
   shallow repository with `shallow repositories are unsupported` and one with
   a graft file with `repository grafts are unsupported`; every git command
-  runs with `--no-replace-objects` and with every inherited `GIT_*` variable
-  dropped; and revisions are passed after `--end-of-options`. In 0.6.1 a
+  runs with `--no-replace-objects` and `core.commitGraph=false` and with every
+  inherited `GIT_*` variable dropped; and revisions are passed after
+  `--end-of-options`. In 0.6.1 a
   shallow clone, the GitHub Actions checkout default, made its boundary the
   enforcement epoch, so an unattested protected-tree commit at a depth-1
   clone's tip was exempt and the sweep accepted it; a replace ref, an
-  inherited `GIT_DIR`, `GIT_GRAFT_FILE` or `GIT_REPLACE_REF_BASE`, or a range
-  git read as an option could likewise keep commits out of the sweep. An
+  inherited `GIT_DIR`, `GIT_GRAFT_FILE` or `GIT_REPLACE_REF_BASE`, an altered
+  commit-graph file (a cache git reads parents and trees from without checking
+  them against the commits), or a range git read as an option could likewise
+  keep commits out of the sweep. An
   auditor can now conclude that an accepted sweep saw every protected-tree
   commit after the epoch in the named repository's own history. The 0.5.2
   note that `receipt.attest` "runs its own git commands under the ambient

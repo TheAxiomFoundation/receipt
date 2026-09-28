@@ -11,10 +11,10 @@ subprocess stream is captured, so these helpers are silent library calls; the
 caller decides how to render accepted and refused outcomes.
 
 Every git child answers about the repository ``root`` names, as its objects
-record it: it runs with ``--no-replace-objects`` and with every inherited
-``GIT_*`` variable dropped (:func:`_git_environment`), the history walks
-refuse shallow and grafted repositories, and revisions are passed after
-``--end-of-options``.  Configuration files are read where git finds them by
+record it: it runs with ``--no-replace-objects`` and
+``core.commitGraph=false`` and with every inherited ``GIT_*`` variable
+dropped (:func:`_git_environment`), the history walks refuse shallow and
+grafted repositories, and revisions are passed after ``--end-of-options``.  Configuration files are read where git finds them by
 default.
 """
 
@@ -198,13 +198,22 @@ def _git_environment() -> dict[str, str]:
 
 
 def _git_command(*args: str) -> list[str]:
-    return ["git", "--no-replace-objects", *args]
+    """Return the argv for one git child of this module.
+
+    ``core.commitGraph=false`` makes git read parents and root trees from the
+    commit objects rather than from the commit-graph file, a cache git trusts
+    without checking it against them: a stale or altered graph entry gave a
+    records commit below the tip its parent's tree, and the path-limited walk
+    then passed over it.
+    """
+
+    return ["git", "--no-replace-objects", "-c", "core.commitGraph=false", *args]
 
 
 def git_output(root: pathlib.Path, *args: str) -> str:
     """Run a captured git query in ``root`` and return stripped text.
 
-    The query carries ``--no-replace-objects`` and runs under
+    The query carries :func:`_git_command`'s options and runs under
     :func:`_git_environment`.
     """
 
