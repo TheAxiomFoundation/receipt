@@ -3077,7 +3077,10 @@ def _v1_witness_evidence(
     now: datetime | None,
 ) -> WitnessEvidence:
     status = witness.get("status")
-    if status not in {"available", "unavailable"}:
+    # A tuple, not a set: membership by equality, so a producer's list or
+    # object is simply not a status, where a set hashed it and raised
+    # TypeError before this refusal could name it.
+    if status not in ("available", "unavailable"):
         raise TsaError(f"invalid witness status for {path}: {status!r}")
     if status == "unavailable":
         # The v2 per-anchor outcome has held these two rules since it shipped;
@@ -3937,7 +3940,8 @@ def _v2_witness_evidence(
     now: datetime | None,
 ) -> WitnessEvidence:
     status = witness.get("status")
-    if status not in {"available", "unavailable"}:
+    # A tuple for the reason _v1_witness_evidence gives.
+    if status not in ("available", "unavailable"):
         raise TsaError(f"invalid witness status for {path}: {status!r}")
     preferred = preferred_active_trust_bundle(trusted_bundles)
     if witness.get("trustBundlePath") != preferred["path"]:

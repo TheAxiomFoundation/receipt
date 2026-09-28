@@ -119,6 +119,11 @@ JSON nested more than 128 deep is refused, including JSON 0.6.1 accepted.
   manifest nested more than 128 deep, which the closed-world schema refused
   before (`producer.repo must be a string and non-empty`, for one), now gets
   the depth refusal instead.
+- A witness whose `status` is a JSON list or object is refused by name. The
+  status was checked for membership in a set, which hashes the producer's
+  value, so a list or object raised `TypeError` where a number or a stray
+  string got `invalid witness status for <path>: ...`. Both now get that
+  refusal. Found by the adversarial sweep over these fixes.
 
 ## 0.6.2
 
