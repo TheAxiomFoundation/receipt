@@ -33,6 +33,7 @@ from receipt.release_chain import (
     PinnedSigner,
     ReleaseChainError,
     _check_signer_pins,
+    _pinned_signers,
     verify_release_chain,
 )
 from receipt.verify import load_spec
@@ -168,7 +169,7 @@ BASE = dict(
 def test_the_061_spelling_constructs_unchanged() -> None:
     anchor = AnchorSpec(**BASE)  # type: ignore[arg-type]
     assert anchor.additional_signers == ()
-    assert anchor.signers == (PinnedSigner("2" * 64, "3" * 64),)
+    assert _pinned_signers(anchor) == (PinnedSigner("2" * 64, "3" * 64),)
 
 
 def test_the_061_positional_spelling_constructs_unchanged() -> None:
@@ -176,9 +177,9 @@ def test_the_061_positional_spelling_constructs_unchanged() -> None:
     assert anchor == AnchorSpec(**BASE)  # type: ignore[arg-type]
 
 
-def test_signers_lists_the_primary_first() -> None:
+def test_the_pins_list_the_primary_first() -> None:
     anchor = AnchorSpec(**BASE, additional_signers=(OTHER,))  # type: ignore[arg-type]
-    assert anchor.signers == (PinnedSigner("2" * 64, "3" * 64), OTHER)
+    assert _pinned_signers(anchor) == (PinnedSigner("2" * 64, "3" * 64), OTHER)
 
 
 @pytest.mark.parametrize("value", [[OTHER], {OTHER}, frozenset({OTHER}), None, OTHER])
@@ -269,13 +270,24 @@ def test_a_061_subclass_with_its_own_signers_attribute_still_verifies() -> None:
 
     @dataclasses.dataclass(frozen=True)
     class WithSignersMethod(AnchorSpec):
-        def signers(self) -> tuple[str, ...]:  # type: ignore[override]
+        def signers(self) -> tuple[str, ...]:
             return ("ops@example.org",)
+
+    @dataclasses.dataclass(frozen=True)
+    class WithRequiredSigners(AnchorSpec):
+        signers: tuple[str, ...]
+        label: str
+
+    @dataclasses.dataclass(frozen=True)
+    class WithFactorySigners(AnchorSpec):
+        signers: tuple[str, ...] = dataclasses.field(default_factory=tuple)
 
     for anchor in (
         WithSignersField(*BASE.values()),  # type: ignore[arg-type]
         WithSignersField(*BASE.values(), ("ops@example.org",)),  # type: ignore[arg-type]
         WithSignersMethod(*BASE.values()),  # type: ignore[arg-type]
+        WithRequiredSigners(*BASE.values(), ("ops@example.org",), "digicert"),  # type: ignore[arg-type]
+        WithFactorySigners(*BASE.values()),  # type: ignore[arg-type]
     ):
         _check_signer_pins(anchor, "r.tsr", certificate_sha256="2" * 64, spki_sha256="3" * 64)
         with pytest.raises(ReleaseChainError, match="signer certificate is not pinned"):
@@ -303,8 +315,8 @@ def test_an_anchor_with_additional_signers_is_hashable_and_replaceable() -> None
 # domain. That is 225 anchors by 12 pairs. The invariants:
 #
 #   I1  acceptance: a pair is accepted if and only if it is one entry of
-#       ``anchor.signers``; the certificate of one entry with the key of
-#       another is refused.
+#       ``_pinned_signers(anchor)``; the certificate of one entry with the
+#       key of another is refused.
 #   I2  refusal text: an unknown certificate is refused naming the
 #       certificate, and a known certificate with an unpinned key is refused
 #       naming the key.
@@ -370,12 +382,12 @@ ANCHORS = list(_all_anchors())
 def test_the_domain_is_the_one_described() -> None:
     assert len(ANCHORS) == 225
     assert len(_presented()) == 12
-    assert len({anchor.signers for anchor in ANCHORS}) == 225
+    assert len({_pinned_signers(anchor) for anchor in ANCHORS}) == 225
 
 
 def test_i1_accepted_exactly_when_the_pair_is_one_entry() -> None:
     for anchor in ANCHORS:
-        entries = {(p.certificate_sha256, p.spki_sha256) for p in anchor.signers}
+        entries = {(p.certificate_sha256, p.spki_sha256) for p in _pinned_signers(anchor)}
         for certificate, key in _presented():
             accepted = _verdict(anchor, certificate, key) is None
             assert accepted == ((certificate, key) in entries), (anchor, certificate, key)
@@ -383,7 +395,7 @@ def test_i1_accepted_exactly_when_the_pair_is_one_entry() -> None:
 
 def test_i2_each_refusal_names_what_was_not_pinned() -> None:
     for anchor in ANCHORS:
-        pinned = {p.certificate_sha256 for p in anchor.signers}
+        pinned = {p.certificate_sha256 for p in _pinned_signers(anchor)}
         for certificate, key in _presented():
             verdict = _verdict(anchor, certificate, key)
             if verdict is None:
