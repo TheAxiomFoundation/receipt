@@ -14,7 +14,8 @@ import pathlib
 import shutil
 import subprocess
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, dataclass, replace
+from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -575,9 +576,10 @@ def test_nan_threshold_can_no_longer_reach_verify_threshold() -> None:
 
     ``len(satisfied) < nan`` is false, so a NaN-threshold keyring passed
     verification with zero satisfied signatures: a keyring that vouched for
-    anything, including an empty signature map. The check lives at
-    construction because construction is the only door — the dataclass is
-    frozen, and ``dataclasses.replace`` re-runs the same validation.
+    anything, including an empty signature map. The check runs at
+    construction, which ``dataclasses.replace`` repeats, and again at
+    verification, because construction is not the only door:
+    ``object.__setattr__`` reaches past a frozen dataclass.
     """
 
     _, public_key_pem = generate_signing_keypair()
@@ -596,22 +598,202 @@ def test_nan_threshold_can_no_longer_reach_verify_threshold() -> None:
         replace(KeyringSpec((key,), 1), threshold=nan)
     assert str(caught.value) == refusal
 
-    # Forced into the rejected state with object.__setattr__ — unreachable
-    # through any public route now, and the reason the gate is at
-    # construction: the verifier itself still compares against whatever the
-    # keyring carries, and an empty signature map clears a NaN.
+    # Forced into the rejected state with object.__setattr__: the verifier
+    # re-checks the keyring, so an empty signature map no longer clears a NaN.
     forced = KeyringSpec((key,), 1)
     object.__setattr__(forced, "threshold", nan)
-    smuggled = verify_threshold(
-        b"payload",
-        {},
-        {},
-        forced,
-        domain=b"consumer/v1\0",
-        label="record",
-        allow_legacy=False,
+    with pytest.raises(SignError) as caught:
+        verify_threshold(
+            b"payload",
+            {},
+            {},
+            forced,
+            domain=b"consumer/v1\0",
+            label="record",
+            allow_legacy=False,
+        )
+    assert str(caught.value) == refusal
+
+
+def _two_keys() -> tuple[tuple[bytes, bytes], tuple[bytes, bytes], KeySpec, KeySpec]:
+    first = generate_signing_keypair()
+    second = generate_signing_keypair()
+    return (
+        first,
+        second,
+        KeySpec("a", spki_sha256(first[1]), "spki-sha256"),
+        KeySpec("b", spki_sha256(second[1]), "spki-sha256"),
     )
-    assert smuggled.satisfied == ()
+
+
+def _verify_one_signer(keyring: object, key_pair: tuple[bytes, bytes], *, legacy: bool):
+    private_pem, public_pem = key_pair
+    payload, domain = b"payload", b"consumer/v1\0"
+    return verify_threshold(
+        payload,
+        {"a": sign_payload(private_pem, payload, domain=domain)},
+        {"a": public_pem},
+        keyring,  # type: ignore[arg-type]
+        domain=domain,
+        label="record",
+        allow_legacy=legacy,
+    )
+
+
+@pytest.mark.parametrize("generation", ["keys", "legacy_keys"])
+def test_a_keyring_list_mutated_after_construction_changes_nothing(
+    generation: str,
+) -> None:
+    """One signer must not satisfy a 2-of-2 by a list the caller kept."""
+
+    first, _second, key_a, key_b = _two_keys()
+    if generation == "keys":
+        keys = [key_a, key_b]
+        keyring = KeyringSpec(keys, 2)  # type: ignore[arg-type]
+        keys[1] = key_a
+    else:
+        legacy: list[KeySpec] = []
+        keyring = KeyringSpec((key_a, key_b), 2, legacy_keys=legacy)  # type: ignore[arg-type]
+        legacy.append(key_a)
+
+    assert type(keyring.keys) is tuple and type(keyring.legacy_keys) is tuple
+    assert keyring == KeyringSpec((key_a, key_b), 2)
+    hash(keyring)
+    with pytest.raises(SignError) as caught:
+        _verify_one_signer(keyring, first, legacy=generation == "legacy_keys")
+    assert str(caught.value) == (
+        "signature threshold not satisfied for record: threshold=2; "
+        "satisfied=('a',); failed=(); absent=('b',)"
+    )
+
+
+def test_every_mutation_of_the_callers_lists_leaves_the_keyring_unchanged() -> None:
+    """Property, enumerated: for each generation list and each mutation a list
+    supports (item assignment, append, insert, remove, clear, reverse, extend),
+    the constructed keyring's generations and its equality and hash stay put."""
+
+    _first, _second, key_a, key_b = _two_keys()
+    key_c = KeySpec("c", "c" * 64, "spki-sha256")
+    mutations = (
+        lambda items: items.__setitem__(0, key_a),
+        lambda items: items.__setitem__(-1, key_a),
+        lambda items: items.append(key_a),
+        lambda items: items.insert(0, key_c),
+        lambda items: items.remove(items[0]) if items else None,
+        lambda items: items.clear(),
+        lambda items: items.reverse(),
+        lambda items: items.extend([key_a, key_b]),
+    )
+    for mutate in mutations:
+        keys, legacy = [key_a, key_b], [key_c]
+        keyring = KeyringSpec(keys, 2, legacy_keys=legacy)  # type: ignore[arg-type]
+        snapshot = (keyring.keys, keyring.legacy_keys, hash(keyring))
+        mutate(keys)
+        mutate(legacy)
+        assert (keyring.keys, keyring.legacy_keys, hash(keyring)) == snapshot
+        assert keyring == KeyringSpec((key_a, key_b), 2, legacy_keys=(key_c,))
+
+
+def test_a_keyring_subclass_or_stand_in_cannot_reach_a_verifier() -> None:
+    first, _second, key_a, _key_b = _two_keys()
+
+    @dataclass(frozen=True)
+    class LaxKeyring(KeyringSpec):
+        def __post_init__(self) -> None:  # a subclass "extending" the spec
+            pass
+
+    stand_ins: list[object] = [
+        LaxKeyring((key_a,), 0),
+        LaxKeyring((key_a,), float("nan")),  # type: ignore[arg-type]
+        SimpleNamespace(keys=(key_a,), legacy_keys=(), threshold=0),
+    ]
+    for keyring in stand_ins:
+        name = type(keyring).__name__
+        with pytest.raises(SignError) as caught:
+            verify_threshold(
+                b"anything",
+                {},
+                {},
+                keyring,  # type: ignore[arg-type]
+                domain=b"d",
+                label="r",
+                allow_legacy=False,
+            )
+        assert str(caught.value) == f"keyring must be a KeyringSpec, not {name}"
+        with pytest.raises(SignError) as caught:
+            verify_any_generation(
+                b"anything",
+                bytes(64),
+                {"a": first[1]},
+                keyring,  # type: ignore[arg-type]
+                domain=b"d",
+                label="r",
+            )
+        assert str(caught.value) == f"keyring must be a KeyringSpec, not {name}"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("threshold", 0, "keyring threshold must be at least 1; found=0"),
+        ("keys", (), "keyring must contain at least one key"),
+        ("keys", "dup", "duplicate key_id in keyring: 'a'"),
+        ("legacy_keys", "dup", "duplicate key_id in keyring: 'a'"),
+        ("keys", "list", "keyring keys must be a tuple of KeySpec; found=list"),
+    ],
+)
+def test_verifiers_recheck_a_keyring_mutated_past_its_frozen_fields(
+    field: str, value: object, message: str
+) -> None:
+    first, _second, key_a, key_b = _two_keys()
+    keyring = KeyringSpec((key_a, key_b), 2)
+    if value == "dup":
+        value = (key_a, key_a) if field == "keys" else (key_a,)
+    elif value == "list":
+        value = [key_a, key_b]
+    object.__setattr__(keyring, field, value)
+
+    for verify in (
+        lambda: _verify_one_signer(keyring, first, legacy=True),
+        lambda: verify_any_generation(
+            b"payload", bytes(64), {}, keyring, domain=b"d", label="r"
+        ),
+    ):
+        with pytest.raises(SignError) as caught:
+            verify()
+        assert str(caught.value) == message
+
+
+@pytest.mark.parametrize(
+    ("keys", "legacy", "message"),
+    [
+        ("subclass", (), "keyring entries must be KeySpec, not NamedKey"),
+        ("current", "subclass", "keyring entries must be KeySpec, not NamedKey"),
+        ("current", ("a",), "keyring entries must be KeySpec, not str"),
+        ("current", None, "keyring legacy_keys must be an iterable of KeySpec; found=NoneType"),
+        ("text", (), "keyring keys must be an iterable of KeySpec; found=str"),
+    ],
+)
+def test_keyring_construction_refuses_entries_it_cannot_freeze(
+    keys: str, legacy: object, message: str
+) -> None:
+    _first, _second, key_a, key_b = _two_keys()
+
+    @dataclass(frozen=True)
+    class NamedKey(KeySpec):
+        pass
+
+    named = NamedKey(key_b.key_id, key_b.fingerprint, key_b.scheme)
+    current: object = {
+        "subclass": (key_a, named),
+        "current": (key_a,),
+        "text": "ab",
+    }[keys]
+    if legacy == "subclass":
+        legacy = (named,)
+    with pytest.raises(SignError) as caught:
+        KeyringSpec(current, 1, legacy_keys=legacy)  # type: ignore[arg-type]
+    assert str(caught.value) == message
 
 
 THRESHOLD_KEY_IDS = ("key-a", "key-b", "key-c")
