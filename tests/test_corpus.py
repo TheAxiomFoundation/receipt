@@ -2714,7 +2714,14 @@ def test_refuses_removed_paths_over_the_verdict_budget(
     """removedPaths is the other producer list the verdict renders verbatim."""
 
     content = dict(CONTENT)
-    names = [f"rules/tax/{'r' * 900}{index:04d}.yaml" for index in range(300)]
+    # Four 225-byte components rather than one 900-byte one: a portable
+    # component is at most 255 bytes (0.6.2 review, L7 finding 11), and this
+    # test is about the removedPaths budget, not the name rule.
+    segment = "r" * 225
+    names = [
+        f"rules/tax/{segment}/{segment}/{segment}/{segment}{index:04d}.yaml"
+        for index in range(300)
+    ]
     for name in names:
         content[name] = "name: r\n"
     rows = journal_rows(content=content)
@@ -5422,3 +5429,22 @@ def test_a_case_only_rename_cannot_be_journalled(tmp_path: pathlib.Path) -> None
     assert "a case-only rename (``rate.yaml`` to ``Rate.yaml``) cannot be journalled" in (
         documented
     )
+
+
+
+def test_a_journal_path_with_an_over_long_component_names_the_length(
+    tmp_path: pathlib.Path,
+) -> None:
+    """0.6.2 review, L7 finding 11: the corpus relabelled every name-policy
+    refusal as "not a portable name (ASCII letters, ...)"; a 256-byte
+    component is refused for its length, and says so."""
+
+    from receipt.corpus import parse_journal
+
+    content = dict(CONTENT)
+    long_name = f"rules/tax/{'r' * 251}.yaml"
+    content[long_name] = "name: r\n"
+    with pytest.raises(CorpusError) as caught:
+        parse_journal(render_journal(journal_rows(content=content)), spec=corpus_spec())
+    assert "has a component longer than 255 bytes" in str(caught.value)
+    assert "is not a portable name" not in str(caught.value)

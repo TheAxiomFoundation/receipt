@@ -7,7 +7,8 @@ wherever a verdict quotes or folds a name.
 
 The ``portable`` repertoire is deliberately narrower.  A component contains
 only ASCII letters, digits, ``.``, ``_`` and ``-``; it does not end in a
-period; and its basename is not a Win32 device name.  Materialization applies
+period; it is at most 255 bytes long; and its basename is not a Win32 device
+name.  Materialization applies
 this portable screen regardless of the declared repertoire.  That extra
 screen is a property of writing into an unknown host filesystem, not a wider
 claim about ``posix-bytes`` trees.
@@ -36,6 +37,12 @@ NAME_REPERTOIRES = frozenset({PORTABLE_REPERTOIRE, POSIX_BYTES_REPERTOIRE})
 # A portable component may begin with a period because consumers conventionally
 # keep state below ``.axiom``.  Empty, ``.`` and ``..`` are rejected separately.
 PORTABLE_NAME_RE = re.compile(r"[A-Za-z0-9._-]+\Z")
+
+# APFS, ext4 and NTFS each cap one name at 255 (bytes, or UTF-16 units, which
+# for the portable ASCII repertoire are the same count). A longer component
+# passed every screen and then failed to materialize with a raw OSError
+# (0.6.2 review, L7 finding 11).
+PORTABLE_COMPONENT_MAX_BYTES = 255
 
 # Characters Win32 short-name generation preserves in an extension beside
 # ASCII letters and digits. Spaces are removed before extension derivation;
@@ -70,6 +77,10 @@ _ASCII_LOWER = bytes.maketrans(
 
 class NamePolicyError(ValueError):
     """A tree name cannot be interpreted under the selected name policy."""
+
+
+class PortableNameTooLong(NamePolicyError):
+    """A portable component is longer than one host filesystem name holds."""
 
 
 def validate_repertoire(repertoire: str) -> str:
@@ -193,6 +204,17 @@ def _portable_failure(value: object, label: str, repertoire: str | None) -> None
     )
 
 
+def _portable_length_failure(
+    value: object, label: str, repertoire: str | None
+) -> None:
+    context = "" if repertoire is None else f" under name repertoire {repertoire!r}"
+    raise PortableNameTooLong(
+        f"{label} has a component longer than {PORTABLE_COMPONENT_MAX_BYTES} "
+        f"bytes, more than a portable host filesystem stores in one name"
+        f"{context}: {value!r}"
+    )
+
+
 def assert_portable_name(value: str, label: str) -> str:
     """Screen every component of a relative POSIX path as portable.
 
@@ -211,6 +233,8 @@ def assert_portable_name(value: str, label: str) -> str:
             or _win32_device_basename(component) in WIN32_RESERVED_DEVICE_NAMES
         ):
             _portable_failure(value, label, None)
+        if len(component) > PORTABLE_COMPONENT_MAX_BYTES:
+            _portable_length_failure(value, label, None)
     return value
 
 
@@ -276,6 +300,8 @@ def decode_component(
             or _win32_device_basename(text) in WIN32_RESERVED_DEVICE_NAMES
         ):
             _portable_failure(text, label, selected)
+        if len(raw) > PORTABLE_COMPONENT_MAX_BYTES:
+            _portable_length_failure(text, label, selected)
         return text
     return raw.decode("utf-8", errors="surrogateescape")
 
@@ -423,8 +449,10 @@ _assert_no_merging_entries = assert_no_merging_entries
 __all__ = [
     "ALIAS_CAPABLE_SUFFIX_RE",
     "NAME_REPERTOIRES",
+    "PORTABLE_COMPONENT_MAX_BYTES",
     "PORTABLE_NAME_RE",
     "PORTABLE_REPERTOIRE",
+    "PortableNameTooLong",
     "POSIX_BYTES_REPERTOIRE",
     "SHORT_NAME_PUNCTUATION",
     "WIN32_RESERVED_DEVICE_NAMES",
