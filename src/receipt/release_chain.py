@@ -161,7 +161,9 @@ class AnchorSpec:
     signer_spki_sha256: str
     # Keyword-only, so a 0.6.1 subclass that adds its own fields keeps
     # constructing, positionally included.
-    additional_signers: tuple[PinnedSigner, ...] = field(default=(), kw_only=True)
+    additional_signers: tuple[PinnedSigner, ...] = field(
+        default=(), kw_only=True
+    )
 
     def __post_init__(self) -> None:
         """Refuse an anchor whose pins cannot pin anything.
@@ -198,7 +200,7 @@ class AnchorSpec:
                 f"not {type(self.additional_signers).__name__}"
             )
         seen: set[str] = set()
-        for signer in self.signers:
+        for signer in _pinned_signers(self):
             # Exactly PinnedSigner, and its digests checked again here: a
             # subclass or a look-alike could skip PinnedSigner's own checks,
             # and an unhashable or string-subclass digest must be refused
@@ -208,7 +210,9 @@ class AnchorSpec:
                     "AnchorSpec additional_signers entries must be PinnedSigner, "
                     f"not {type(signer).__name__}"
                 )
-            _sha256(signer.certificate_sha256, "PinnedSigner certificate_sha256")
+            _sha256(
+                signer.certificate_sha256, "PinnedSigner certificate_sha256"
+            )
             _sha256(signer.spki_sha256, "PinnedSigner spki_sha256")
             # One certificate has one key, so a repeated certificate digest is
             # either a duplicate line or a pair that cannot both be right.
@@ -223,11 +227,22 @@ class AnchorSpec:
     def signers(self) -> tuple[PinnedSigner, ...]:
         """Every accepted responder, the primary pin first."""
 
-        primary = PinnedSigner(
-            certificate_sha256=self.signer_certificate_sha256,
-            spki_sha256=self.signer_spki_sha256,
-        )
-        return (primary, *self.additional_signers)
+        return _pinned_signers(self)
+
+
+def _pinned_signers(anchor: "AnchorSpec") -> tuple[PinnedSigner, ...]:
+    """Every accepted responder, the primary pin first.
+
+    Construction and verification read the pins through this function
+    rather than the ``signers`` property, so a 0.6.1 subclass with its own
+    attribute named ``signers`` keeps verifying as it did.
+    """
+
+    primary = PinnedSigner(
+        certificate_sha256=anchor.signer_certificate_sha256,
+        spki_sha256=anchor.signer_spki_sha256,
+    )
+    return (primary, *anchor.additional_signers)
 
 
 @dataclass(frozen=True)
@@ -1139,16 +1154,17 @@ def _check_signer_pins(
     """Refuse a responder whose certificate and key are not one pinned entry.
 
     The digests are SHA-256 over the certificate and SPKI DER that OpenSSL
-    extracted from the certificate that verified the token. Both halves must match one entry of
-    ``anchor_spec.signers``. The two refusals keep their 0.6.1 texts and
-    order: an unknown certificate names the certificate, and a known
-    certificate whose entry pins a different key names the key. With no
-    additional signers this is the 0.6.1 comparison exactly.
+    extracted from the certificate that verified the token. Both halves must
+    match one entry of the anchor's pins, read through ``_pinned_signers``.
+    The two refusals keep their 0.6.1 texts and order: an unknown
+    certificate names the certificate, and a known certificate whose entry
+    pins a different key names the key. With no additional signers this is
+    the 0.6.1 comparison exactly.
     """
 
     matching = [
         signer
-        for signer in anchor_spec.signers
+        for signer in _pinned_signers(anchor_spec)
         if signer.certificate_sha256 == certificate_sha256
     ]
     if not matching:
