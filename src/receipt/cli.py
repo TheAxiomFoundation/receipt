@@ -4,8 +4,9 @@ A clone, commodity tools, one offline fail-closed verdict. No network, no
 credentials, no service to ask. The loaded spec selects every configured key
 and anchor, and its SHA-256 is printed so that configuration can be quoted.
 Those bytes become auditor-owned trust only when the auditor supplies
-``--expect-spec-sha256``; otherwise the verdict explicitly treats the spec and
-the anchor set it proposes as untrusted.
+``--expect-spec-sha256``. Otherwise the spec is the producer's code, running
+in this process: the verdict treats the anchor set it proposes as untrusted
+and says the verdict is only as good as the spec the producer committed.
 
 The output is deliberately two-part. What the command *established* is stated
 without hedging. What it *did not* establish — that any declared gate actually
@@ -241,6 +242,14 @@ The boundaries below catch ``BaseException``, because ``SystemExit`` is not an
 ``Exception``: a spec or a pass that raised one exited the interpreter with a
 status of its own choosing and printed no verdict at all. ``KeyboardInterrupt``
 is the single deliberate exception — the operator's interrupt is not a verdict.
+
+Every promise above — at most one JSON object, the module's own text as the
+last line, a status the spec cannot choose — is about this module's code. The
+boundaries stop a spec that *raises*. They cannot stop spec code, which runs
+in this process, from writing to the streams, patching this module, or leaving
+the interpreter by other means. Only ``--expect-spec-sha256`` over a spec the
+auditor has read rules that out; without it, the verdict is only as good as
+the spec the producer committed, and the verdict says so.
 """
 
 from __future__ import annotations
@@ -303,7 +312,11 @@ def _build_parser() -> argparse.ArgumentParser:
     verify.add_argument(
         "--expect-spec-sha256",
         default=None,
-        help="require the exact spec source digest before its code executes",
+        help=(
+            "require the exact spec source digest before its code executes; "
+            "without it the spec is producer code and the verdict is only as "
+            "good as the spec the producer committed"
+        ),
     )
     verify.add_argument(
         "--root",
@@ -839,9 +852,23 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
         )
         lines.append("  equal the verified tree.")
         if not result._spec_pinned:
+            # An unpinned spec is the producer's code, and it ran in this
+            # process: it could have changed this verdict and the exit status
+            # (L5 F2 of the 0.6.2 review). Say so in plain words rather than
+            # leave "was trusted" to read as a remark about which keys the
+            # spec chose.
             lines.append(
                 "  It does NOT establish that the spec's code was trusted."
             )
+            lines.append(
+                "  The spec is unpinned (no --expect-spec-sha256): its code ran "
+                "in this"
+            )
+            lines.append(
+                "  process and could have changed this verdict, so the verdict "
+                "is only as"
+            )
+            lines.append("  good as the spec the producer committed.")
         if not result._anchor_set_pinned:
             lines.append(
                 "  It does NOT establish that the anchor set is one the "

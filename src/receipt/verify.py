@@ -282,8 +282,9 @@ def load_spec(
 
     Trust direction, stated plainly: a spec committed in the *producer's*
     repository is the producer's proposal, not the auditor's trust root.
-    Verified against a producer-shipped spec as found, a verdict establishes
-    only internal consistency with a policy the producer chose. For independent
+    Verified against a producer-shipped spec as found, a verdict is only as
+    good as that spec: its code runs in this process, so it can change what
+    the verdict reports and the command's exit status. For independent
     custody the auditor reads the spec once, out of band, and pins it — at
     minimum the ``spec_sha256`` this function returns — in the auditor's own
     records, after which every later verdict is against anchors the producer
@@ -867,6 +868,11 @@ def result_to_dict(result: VerifyResult) -> dict[str, Any]:
         not_established.append("that the anchor set is one the auditor trusts")
     if not result._spec_pinned:
         not_established.append("that the spec's code was trusted")
+        not_established.append(
+            "that this verdict is independent of the spec: an unpinned spec is "
+            "producer code that ran in this process, so the verdict is only as "
+            "good as the spec the producer committed"
+        )
 
     payload: dict[str, Any] = {
         "verdict": "PASS" if result.ok else "FAIL",
