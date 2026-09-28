@@ -626,6 +626,21 @@ def _is_calendar_date(value: Any) -> bool:
     return True
 
 
+class _RepeatedKey(Exception):
+    def __init__(self, key: str) -> None:
+        super().__init__(key)
+        self.key = key
+
+
+def _object_without_repeated_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    seen: set[str] = set()
+    for key, _value in pairs:
+        if key in seen:
+            raise _RepeatedKey(key)
+        seen.add(key)
+    return dict(pairs)
+
+
 def check_appended_row_types(lines: list[str], prefix_count: int) -> None:
     """Hold appended rows to the types their refusal texts already name.
 
@@ -641,12 +656,23 @@ def check_appended_row_types(lines: list[str], prefix_count: int) -> None:
     cover; a prefix row is immutable and cannot be corrected, so it keeps the
     rule it was admitted under. Runs with the binding shapes, after every
     pre-existing check, so no earlier refusal is pre-empted.
+
+    A repeated key refuses too, at any depth (L6 finding 9). ``json.loads``
+    keeps the last value, so a row saying ``"value": 3.0`` and then
+    ``"value": 999.0`` was accepted, and its content address bound 999.0
+    while a first-wins or strict reader of the same bytes saw 3.0 or refused.
     """
 
     for number, line in enumerate(lines, start=1):
         if number <= prefix_count:
             continue
-        row = json.loads(line)
+        try:
+            row = json.loads(line, object_pairs_hook=_object_without_repeated_keys)
+        except _RepeatedKey as repeated:
+            raise AppendError(
+                f"appended line {number} repeats the JSON key "
+                f"{_shown(repeated.key)!r}"
+            ) from None
         record_id = row.get("source_record_id")
         if type(record_id) is not str:
             raise AppendError(
