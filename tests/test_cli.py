@@ -5025,3 +5025,99 @@ def test_described_exception_never_raises() -> None:
     )
     assert _exception_detail(ValueError("plain")) == "plain"
     assert _exception_detail(SystemExit(0)) == "SystemExit: 0"
+
+
+# --- 0.6.2 review, L5 finding 5: a spec runs the way its file runs as a module
+
+
+@pytest.mark.parametrize(
+    "prelude",
+    [
+        pytest.param(
+            "import dataclasses\n"
+            "@dataclasses.dataclass(frozen=True)\n"
+            "class Pins:\n"
+            "    name: str = 'x'\n",
+            id="plain-dataclass",
+        ),
+        pytest.param(
+            "from __future__ import annotations\n"
+            "import dataclasses\n"
+            "@dataclasses.dataclass(frozen=True)\n"
+            "class Pins:\n"
+            "    name: str = 'x'\n",
+            id="future-annotations-dataclass",
+        ),
+        pytest.param(
+            "import pickle\nclass P: pass\npickle.dumps(P())\n",
+            id="pickle-own-class",
+        ),
+    ],
+)
+def test_a_spec_that_is_valid_as_a_module_loads(
+    tmp_path: pathlib.Path, prelude: str
+) -> None:
+    """Valid Python was refused for the loader's own execution environment.
+
+    ``load_spec`` executed the spec outside ``sys.modules``, where
+    ``dataclasses`` and ``pickle`` look a class's module up, so a spec
+    defining a dataclass was refused as "spec module raised on load" with
+    ``'NoneType' object has no attribute '__dict__'``.
+    """
+
+    path = tmp_path / "spec.py"
+    template = SPEC_TEMPLATE.format(name="module-shaped", spki="a" * 64)
+    if prelude.startswith("from __future__"):
+        path.write_text(prelude + template)
+    else:
+        path.write_text(template + "\n" + prelude)
+    loaded = load_spec(path)
+    assert loaded.verification.name == "module-shaped"
+    assert "_receipt_consumer_spec" not in sys.modules
+
+
+def test_a_spec_does_not_inherit_the_loaders_future_flags(
+    tmp_path: pathlib.Path,
+) -> None:
+    """``compile()`` without ``dont_inherit`` applied verify.py's own
+    ``from __future__ import annotations`` to the spec, so annotations the
+    same file evaluates as a module arrived as strings."""
+
+    path = tmp_path / "spec.py"
+    path.write_text(
+        SPEC_TEMPLATE.format(name="annotated", spki="a" * 64)
+        + "\nclass Probe:\n    a: int\n"
+        + "ANNOTATION = Probe.__annotations__['a']\n"
+    )
+    import receipt.verify as verify_module
+
+    # Read what the executed module saw through the loader's own namespace.
+    seen: dict[str, object] = {}
+    real_exec = exec
+
+    def capturing_exec(code: object, namespace: dict[str, object]) -> None:
+        real_exec(code, namespace)  # noqa: S102 - the test's own spec
+        seen.update(namespace)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(verify_module, "exec", capturing_exec, raising=False)
+        load_spec(path)
+    assert seen["ANNOTATION"] is int
+
+
+def test_loading_a_spec_restores_an_existing_module_of_the_same_name(
+    tmp_path: pathlib.Path,
+) -> None:
+    import types
+
+    sentinel = types.ModuleType("_receipt_consumer_spec")
+    path = tmp_path / "spec.py"
+    path.write_text(SPEC_TEMPLATE.format(name="restoring", spki="a" * 64))
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setitem(sys.modules, "_receipt_consumer_spec", sentinel)
+        load_spec(path)
+        assert sys.modules["_receipt_consumer_spec"] is sentinel
+        path.write_text("raise RuntimeError('boom')\n")
+        with pytest.raises(VerifySpecError, match="boom"):
+            load_spec(path)
+        assert sys.modules["_receipt_consumer_spec"] is sentinel
