@@ -47,14 +47,20 @@ verification invokes OpenSSL. Without an effective anchor pin, the claim is
 "custody under the anchor set {digest} the verified tree carries"; without a
 spec pin, the verdict also does not establish that the spec's code was trusted.
 The command performs verification offline; its trust configuration is
-executable Python supplied by the caller.
+executable Python, and the command runs it in its own process. Without
+`--expect-spec-sha256`, that code is whatever the producer committed. It can
+change what the command prints and the exit status it returns, so the verdict
+is only as good as the spec the producer committed. Read the spec once, out of
+band, and pin its digest.
 
 ## What this verdict speaks for
 
-A PASS establishes custody under the reported anchor set and binding of the
-witnessed journal to the named tree. An optional history pass establishes that
-every release object at the supplied base remains byte- and mode-identical.
-The verdict does not establish:
+Under a spec pinned with `--expect-spec-sha256`, a PASS establishes custody
+under the reported anchor set and binding of the witnessed journal to the named
+tree. An optional history pass establishes that every release object at the
+supplied base remains byte- and mode-identical. Without that pin, the spec's
+code ran inside the verifier, so the verdict and its exit status are only as
+good as the spec the producer committed. The verdict does not establish:
 
 - that any declared gate actually passed;
 - that the encoded rules are a correct reading of the law;

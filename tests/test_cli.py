@@ -572,6 +572,9 @@ def test_the_verdict_states_what_it_did_not_establish(
         "checkout\n"
         "  equal the verified tree.\n"
         "  It does NOT establish that the spec's code was trusted.\n"
+        "  The spec is unpinned (no --expect-spec-sha256): its code ran in this\n"
+        "  process and could have changed this verdict, so the verdict is only as\n"
+        "  good as the spec the producer committed.\n"
         "  It does NOT establish that the anchor set is one the auditor "
         "trusts.\n"
         "  Check freshness and uniqueness by comparing head\n"
@@ -615,6 +618,9 @@ def test_json_output_marks_gates_as_not_re_run(
         "that the files in any checkout equal the verified tree",
         "that the anchor set is one the auditor trusts",
         "that the spec's code was trusted",
+        "that this verdict is independent of the spec: an unpinned spec is "
+        "producer code that ran in this process, so the verdict is only as "
+        "good as the spec the producer committed",
     ]
     assert payload["scope"]["established"] == [
         "custody under the anchor set "
@@ -737,6 +743,7 @@ def test_matching_spec_and_anchor_pins_publish_full_custody(
     assert "Custody is under the anchor set" not in text
     assert "anchor set is one the auditor trusts" not in text
     assert "spec's code was trusted" not in text
+    assert "The spec is unpinned" not in text
 
     assert run(repo, *pins, "--json") == EXIT_OK
     payload = json.loads(capsys.readouterr().out)
@@ -747,6 +754,9 @@ def test_matching_spec_and_anchor_pins_publish_full_custody(
     )
     assert "that the spec's code was trusted" not in (
         payload["scope"]["notEstablished"]
+    )
+    assert not any(
+        "unpinned spec" in item for item in payload["scope"]["notEstablished"]
     )
 
 
@@ -4843,3 +4853,94 @@ def test_a_refusal_still_lets_the_operator_interrupt_through(
         main(["verify", "--spec", spec, "--root", str(not_a_tree)])
     with pytest.raises(KeyboardInterrupt):
         main(["verify", "--spec", spec, "--root", str(not_a_tree), "--json"])
+
+
+def test_the_readme_says_an_unpinned_spec_bounds_the_verdict() -> None:
+    """L5 F2 (0.6.2 review): an unpinned spec is producer code in this process.
+
+    Probe G of that review had an unpinned spec wrap ``run_verification`` and
+    print PASS with exit 0 over a tampered clone. The README described a PASS
+    as establishing custody and binding without saying that the spec, unless
+    pinned, chooses the verdict. Both sections that describe the verdict now
+    say it is only as good as the spec the producer committed, and neither
+    promises more.
+    """
+
+    readme = (pathlib.Path(__file__).resolve().parents[1] / "README.md").read_text(
+        encoding="utf-8"
+    )
+    using = readme.split("## Using it", 1)[1].split("\n## ", 1)[0]
+    speaks = readme.split("## What this verdict speaks for", 1)[1].split(
+        "\n## ", 1
+    )[0]
+    flat_using = " ".join(using.split())
+    flat_speaks = " ".join(speaks.split())
+    assert "is only as good as the spec the producer committed" in flat_using
+    assert "It can change what the command prints and the exit status" in flat_using
+    assert "only as good as the spec the producer committed" in flat_speaks
+    assert flat_speaks.startswith(
+        "Under a spec pinned with `--expect-spec-sha256`, a PASS establishes custody"
+    )
+    assert "A PASS establishes custody" not in flat_speaks
+
+
+def test_the_help_text_says_what_an_unpinned_spec_means(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit):
+        main(["verify", "--help"])
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert (
+        "without it the spec is producer code and the verdict is only as good "
+        "as the spec the producer committed"
+    ) in help_text
+
+
+def test_an_unpinned_spec_that_forges_pass_still_carries_the_caveat(
+    repo: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The residual the unpinned-spec lines describe, run end to end.
+
+    L5 F2 (0.6.2 review, probe G): a committed spec that wraps
+    ``run_verification`` prints PASS and exits 0 over a clone whose rule file
+    was edited after witnessing. The command cannot stop code it executes, so
+    the PASS stands; what the verdict owes the reader is the plain statement
+    that it is only as good as the spec the producer committed. The spec pin
+    is the remedy, and under it the forged spec no longer loads.
+    """
+
+    import receipt.cli as cli_module
+
+    # The forging spec rebinds this module attribute; restore it afterwards.
+    monkeypatch.setattr(cli_module, "run_verification", cli_module.run_verification)
+    (repo / "rules/tax/rate.yaml").write_text("name: rate\nvalue: 0.99\n")
+    spec_path = repo / "verification/spec.py"
+    pinned_digest = hashlib.sha256(spec_path.read_bytes()).hexdigest()
+    spec_path.write_text(
+        spec_path.read_text()
+        + "\nimport dataclasses\n"
+        "import receipt.cli as _cli\n"
+        "import receipt.verify as _v\n"
+        "_real = _cli.run_verification\n"
+        "def _forged(root, spec, **kw):\n"
+        "    r = _real(root, spec, **kw)\n"
+        "    return dataclasses.replace(r, passes=tuple(\n"
+        "        _v.PassResult(n, True, 'ok')\n"
+        "        for n in ('custody', 'binding', 'declaration')))\n"
+        "_cli.run_verification = _forged\n"
+    )
+    commit_candidate(repo, "edit a rule and forge the verdict in the spec")
+
+    assert run(repo) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "VERDICT: PASS" in out
+    assert (
+        "  The spec is unpinned (no --expect-spec-sha256): its code ran in this\n"
+        "  process and could have changed this verdict, so the verdict is only as\n"
+        "  good as the spec the producer committed.\n"
+    ) in out
+
+    assert run(repo, "--expect-spec-sha256", pinned_digest) == EXIT_USAGE
+    assert "is not the expected spec" in capsys.readouterr().err
