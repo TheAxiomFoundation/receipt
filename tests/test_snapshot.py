@@ -684,6 +684,100 @@ def test_batch_read_join_interruption_abandons_stream_and_reaps_child(
     assert temporary is not None and not temporary.exists()
 
 
+def test_batch_response_budget_refuses_a_read_observed_after_its_deadline(
+    git_repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    selected = TreeSnapshot.select(git_repo)
+    original_join = threading.Thread.join
+
+    def join_after_the_read_finishes(
+        thread: threading.Thread, timeout: float | None = None
+    ) -> None:
+        # The response arrives before the budget is consulted, as it can
+        # under load; the zero budget below is spent by then all the same.
+        if thread.name == "receipt-git-batch-stdout":
+            original_join(thread)
+        original_join(thread, timeout)
+
+    with selected:
+        process = selected._state.batch.process
+        with monkeypatch.context() as patch:
+            patch.setattr(snapshot_module, "MAX_GIT_SECONDS", 0)
+            patch.setattr(threading.Thread, "join", join_after_the_read_finishes)
+            with pytest.raises(
+                SnapshotError,
+                match="^Git batch child exceeded the budget of 0 seconds$",
+            ):
+                selected.header(selected.tree)
+        with pytest.raises(SnapshotError, match="^snapshot stream was abandoned$"):
+            selected.header(selected.tree)
+
+    assert process.poll() is not None
+    assert process.stdout is not None and process.stdout.closed
+
+
+class _ScriptedClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+class _KillRecorder:
+    def __init__(self) -> None:
+        self.kills = 0
+
+    def kill(self) -> None:
+        self.kills += 1
+
+
+def test_batch_response_budget_accepts_only_reads_observed_before_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exhaustive over deadlines and completion times on a scripted clock.
+
+    A read is returned exactly when it completes strictly before its deadline;
+    otherwise the stream is abandoned with the budget text. Accepted cases
+    leave at least 15 real seconds of join timeout, so a loaded machine cannot
+    turn one into a refusal.
+    """
+
+    clock = _ScriptedClock()
+    monkeypatch.setattr(snapshot_module, "time", clock)
+    outcomes: dict[tuple[float, float], bool] = {}
+    for deadline in (0.0, 30.0, 60.0):
+        for completes_at in (0.0, 15.0, 30.0, 45.0, 60.0, 75.0):
+            clock.now = 0.0
+            batch = _fake_batch(b"")
+            killer = _KillRecorder()
+            batch._process = killer  # type: ignore[assignment]
+
+            def read(_completes_at: float = completes_at) -> bytes:
+                clock.now = max(clock.now, _completes_at)
+                return b"frame"
+
+            try:
+                result = batch._read_with_deadline(read, deadline=deadline)
+            except SnapshotError as exc:
+                assert str(exc) == (
+                    "Git batch child exceeded the budget of "
+                    f"{snapshot_module.MAX_GIT_SECONDS} seconds"
+                )
+                assert batch.abandoned and killer.kills >= 1
+                outcomes[deadline, completes_at] = False
+            else:
+                assert result == b"frame"
+                assert not batch.abandoned and killer.kills == 0
+                outcomes[deadline, completes_at] = True
+
+    assert outcomes == {
+        (deadline, completes_at): completes_at < deadline
+        for deadline, completes_at in outcomes
+    }
+    assert len(outcomes) == 18
+
+
 def test_batch_request_interruption_abandons_stream_and_reaps_child(
     git_repo: pathlib.Path,
 ) -> None:

@@ -54,6 +54,26 @@ through its own words and exception classes.
 - Design record: `docs/design/0.7-m1-protected-tree-policy.md`, with the two
   review rounds beside it.
 
+## 0.6.3 (unreleased)
+
+- A spent time budget refuses even when its Git child or batch response has
+  already finished by the time the budget is checked. `Popen.wait` reports a
+  child that has already exited before it compares the clock. Under load, a
+  child that ran past its deadline, or any child under a zero budget, could
+  therefore be accepted, and a batch read that completed after its deadline
+  passed the same way. A Git call's budget now runs from just before its
+  child starts; a batch response's still runs from its request. The result is
+  accepted only when its completion is observed strictly before the
+  deadline. Otherwise the call refuses with the existing text: `git command
+  exceeded its N second budget` or `Git batch child exceeded the budget of N
+  seconds`.
+  An auditor can now conclude that an accepted Git call, including
+  `verify_object_store`'s fsck, finished inside `MAX_GIT_SECONDS` or
+  `MAX_FSCK_SECONDS` by the verifier's own clock, and that a zero budget
+  always refuses. The graceful-close and kill-reap waits are unchanged; they
+  bound how long a close waits, and every response the child served was
+  already accepted within its own budget.
+
 ## 0.6.2
 
 One widening, in the consumer's hands: an anchor can pin more than one
