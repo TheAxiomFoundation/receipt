@@ -1782,3 +1782,56 @@ def test_a_subdirectory_is_still_not_the_top_level(tmp_path: pathlib.Path) -> No
     _commit(root)
     with pytest.raises(SnapshotError, match="root is not the top level"):
         TreeSnapshot.select(root / "sub")
+
+
+# --- 0.6.2 review, L3 finding 7: configuration is re-audited at child boundaries
+
+
+def test_a_configuration_change_after_selection_refuses_before_the_batch_child(
+    git_repo: pathlib.Path,
+) -> None:
+    """Configuration was audited at selection and at close only, so the
+    entered snapshot's batch child ran under a configuration changed after
+    selection, and a writer who restored it before close went unseen."""
+
+    commit = _one_file_commit(git_repo)
+    selected = TreeSnapshot.select(git_repo, commit)
+    with open(git_repo / ".git" / "config", "a") as handle:
+        handle.write("[receiptprobe]\n\tconcurrent = 1\n")
+    with pytest.raises(
+        SnapshotError, match="repository configuration changed during verification"
+    ):
+        selected.__enter__()
+
+
+def test_a_configuration_change_refuses_before_fsck_runs_under_it(
+    git_repo: pathlib.Path,
+) -> None:
+    """An unreachable commit with a malformed timezone fails ``fsck``; a
+    writer adding ``fsck.badTimezone = ignore`` after the snapshot was
+    entered had ``count-objects`` and ``fsck`` run under the weakened
+    configuration, and the store verified, before close refused."""
+
+    _require_store_verification_support()
+    commit = _one_file_commit(git_repo)
+    tree = _git(git_repo, "rev-parse", f"{commit}^{{tree}}").stdout.decode().strip()
+    _hash_object(
+        git_repo,
+        "commit",
+        (
+            f"tree {tree}\nauthor t <t@example.test> 0 +99999\n"
+            "committer t <t@example.test> 0 +0000\n\nbad\n"
+        ).encode(),
+    )
+    with pytest.raises(
+        SnapshotError, match="repository configuration changed during verification"
+    ):
+        with TreeSnapshot.select(git_repo, commit, verify_objects=True) as selected:
+            with open(git_repo / ".git" / "config", "a") as handle:
+                handle.write("[fsck]\n\tbadTimezone = ignore\n")
+            try:
+                selected.verify_object_store((selected.commit,))
+            except SnapshotError as caught:
+                assert "configuration changed" in str(caught)
+                raise
+            pytest.fail("verify_object_store ran fsck under the changed configuration")

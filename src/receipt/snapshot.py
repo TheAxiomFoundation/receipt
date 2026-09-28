@@ -16,10 +16,12 @@ top level; every object operation thereafter carries an absolute ``--git-dir``
 and ``--no-replace-objects``. All inherited ``GIT_*`` variables are discarded,
 the three variables in :func:`_git_environment` are installed, and ``HOME`` is
 deliberately preserved. Repository configuration is audited without includes
-at selection and again at close. A same-owner configuration writer is not
-excluded, but changed configuration or repository-control sentinel files are
-rechecked at child boundaries and refused. A writer racing between one check
-and the following system call remains a same-owner residual.
+at selection, before every repository-addressed child an entered snapshot
+starts (the batch child, ``count-objects`` and ``fsck``), and again at close.
+A same-owner configuration writer is not excluded, but changed configuration
+or repository-control sentinel files are rechecked at those child boundaries
+and refused. A writer racing between one check and the following system call
+remains a same-owner residual.
 
 The configuration audit is scoped to the frozen :data:`GIT_COMMANDS`: private
 ``safe.directory`` setup; version, repository discovery, and configuration
@@ -2017,6 +2019,42 @@ class TreeSnapshot:
         self._refuse_grafts_and_shallow(self.git_dir, self._state.common_dir)
         self._refuse_alternates(self.git_dir, self._state.common_dir)
 
+    def _reaudit_repository_configuration(self, global_config: pathlib.Path) -> None:
+        """Refuse repository configuration that changed since selection.
+
+        Run before every repository-addressed child an entered snapshot
+        starts -- the batch child, ``count-objects``, ``fsck`` -- and again at
+        close. It ran only at close, so a writer who changed configuration
+        after selection (``fsck.badTimezone = ignore``, say) had the batch
+        child and ``fsck`` run under it, and one who restored it before close
+        went unseen (0.6.2 review, L3 finding 7).
+        """
+
+        completed = _git_run(
+            [
+                "-C",
+                os.fspath(self._state.root),
+                "config",
+                "--list",
+                "--show-scope",
+                "--no-includes",
+                "-z",
+            ],
+            cwd=None,
+            environment=_git_environment(global_config),
+        )
+        if completed.returncode != 0:
+            raise SnapshotError(
+                f"cannot re-audit repository configuration: "
+                f"{_first_error(completed)}"
+            )
+        records = _parse_config(completed.stdout)
+        if records != self._state.config_records:
+            raise SnapshotError(
+                "repository configuration changed during verification"
+            )
+        _audit_config(records, self._state.root)
+
     def __enter__(self) -> "TreeSnapshot":
         if self._state.closed:
             raise SnapshotError("snapshot is closed")
@@ -2029,6 +2067,7 @@ class TreeSnapshot:
             global_path.write_bytes(self._state.global_config_bytes)
             global_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
             self._reaudit_repository_files()
+            self._reaudit_repository_configuration(global_path)
             batch = _BatchReader(
                 self.git_dir,
                 environment=_git_environment(global_path),
@@ -2071,30 +2110,9 @@ class TreeSnapshot:
                 closing_errors.append(caught)
             if self._state.global_config is not None:
                 try:
-                    completed = _git_run(
-                        [
-                            "-C",
-                            os.fspath(self._state.root),
-                            "config",
-                            "--list",
-                            "--show-scope",
-                            "--no-includes",
-                            "-z",
-                        ],
-                        cwd=None,
-                        environment=_git_environment(self._state.global_config),
+                    self._reaudit_repository_configuration(
+                        self._state.global_config
                     )
-                    if completed.returncode != 0:
-                        raise SnapshotError(
-                            f"cannot re-audit repository configuration: "
-                            f"{_first_error(completed)}"
-                        )
-                    records = _parse_config(completed.stdout)
-                    if records != self._state.config_records:
-                        raise SnapshotError(
-                            "repository configuration changed during verification"
-                        )
-                    _audit_config(records, self._state.root)
                 except BaseException as caught:
                     closing_errors.append(caught)
         finally:
@@ -2724,6 +2742,7 @@ class TreeSnapshot:
         self._state.object_store_attempted = True
         environment = _git_environment(self._state.global_config)
         self._reaudit_repository_files()
+        self._reaudit_repository_configuration(self._state.global_config)
         counted = _git_run(
             _object_arguments(self.git_dir, ["count-objects", "-v"]),
             cwd=None,
@@ -2763,6 +2782,7 @@ class TreeSnapshot:
             )
 
         self._reaudit_repository_files()
+        self._reaudit_repository_configuration(self._state.global_config)
         started = time.monotonic()
         checked = _git_run(
             _object_arguments(
