@@ -1362,20 +1362,40 @@ def _parse_generalized_time(value: str) -> datetime:
     parsed = datetime.strptime(match.group(1), "%Y%m%d%H%M%S").replace(tzinfo=UTC)
     fraction = match.group(2)
     if fraction:
+        if fraction[6:].strip("0"):
+            # Keeping six digits would move the time earlier than the one the
+            # authority signed, and this time is not only reported: it is
+            # compared with the record's creation claims and with the
+            # witness's declared tsaGenTime.  The release-chain verifier
+            # refuses the same precision for the same reason, so the package's
+            # two verifiers of one authority's tokens agree on which genTimes
+            # they can represent.  Digits beyond the sixth that are all zero
+            # carry no precision.
+            raise TsaError(
+                "RFC 3161 genTime is finer than a microsecond, which this "
+                f"verifier cannot represent exactly: {value!r}"
+            )
         parsed = parsed.replace(microsecond=int((fraction + "000000")[:6]))
     return parsed
 
 
 def _format_utc(value: datetime) -> str:
+    """RFC 3339 in UTC: whole seconds, then any fraction without trailing zeros.
+
+    ``12:00:00Z`` and ``12:00:00.25Z``: the form a witness declares as
+    ``tsaGenTime`` and ``TokenEvidence.gen_time`` reports, so a fractional
+    genTime is the same string wherever it is written or compared.  The
+    fraction used to be trimmed with ``rstrip("0")`` over the whole ISO string,
+    which ate the zeros of ``+00:00`` instead and left ``…25+00:``: every
+    token signed with sub-second precision was then refused by
+    ``verify_witness`` and reported unparseably by ``verify_timestamp_token``.
+    """
+
     value = value.astimezone(UTC)
+    text = value.replace(tzinfo=None).isoformat(timespec="seconds")
     if value.microsecond:
-        return (
-            value.isoformat(timespec="microseconds")
-            .rstrip("0")
-            .rstrip(".")
-            .replace("+00:00", "Z")
-        )
-    return value.isoformat(timespec="seconds").replace("+00:00", "Z")
+        text += "." + f"{value.microsecond:06d}".rstrip("0")
+    return text + "Z"
 
 
 def _parse_tst_info(data: bytes) -> tuple[str, str, bytes, datetime]:
