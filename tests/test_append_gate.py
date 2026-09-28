@@ -2735,6 +2735,92 @@ def test_enforce_production_pins_refuses_what_it_cannot_honor(
     assert str(caught.value) == message
 
 
+def test_a_lone_cr_cannot_make_two_gate_rows_of_one_witnessed_row(
+    tmp_path: pathlib.Path, witnesses: Witnesses
+) -> None:
+    """The gate and the release chain must frame the ledger the same way.
+
+    The appended bytes are ``row3 CR row4 LF``: two rows under universal
+    newlines, one LF-framed row under the chain, whose signed manifest counts
+    three lines and whose last line no JSON reader can parse.
+    """
+
+    candidate = base_repository(tmp_path)
+    ledger = candidate.root / CHAIN_SPEC.state_relative
+    appended = (
+        jsonl_line(observation_row(BASE_ROW_COUNT + 1))
+        + "\r"
+        + jsonl_line(observation_row(BASE_ROW_COUNT + 2))
+        + "\n"
+    )
+    ledger.write_bytes(ledger.read_bytes() + appended.encode("utf-8"))
+    ledger_bytes, prefix_bytes = state_bytes_of(candidate)
+    anchors = tmp_path / "anchors"
+    write_release_chain(
+        candidate.root / CHAIN_SPEC.manifest_relative,
+        anchors,
+        witnesses=witnesses,
+        ledger_bytes=ledger_bytes,
+        prefix_bytes=prefix_bytes,
+    )
+    stage(candidate)
+
+    with pytest.raises(AppendError) as caught:
+        run_gate_with_anchors(candidate, anchors)
+    assert str(caught.value) == (
+        f"ledger line {BASE_ROW_COUNT + 1} contains a carriage return; a JSONL "
+        "row ends with exactly one LF, the framing the release chain verifies"
+    )
+
+
+def test_the_carriage_return_screen_over_every_short_ledger() -> None:
+    """Property, exhaustive over {a, LF, CR} strings up to length 7: the screen
+    refuses iff a CR is present, and names the LF-framed line holding the first."""
+
+    import itertools
+
+    checked = 0
+    for length in range(8):
+        for letters in itertools.product(b"a\n\r", repeat=length):
+            ledger = bytes(letters)
+            first = ledger.find(b"\r")
+            if first == -1:
+                append_gate._reject_carriage_returns(ledger)
+            else:
+                with pytest.raises(AppendError) as caught:
+                    append_gate._reject_carriage_returns(ledger)
+                line = ledger[:first].count(b"\n") + 1
+                assert str(caught.value).startswith(f"ledger line {line} contains")
+            checked += 1
+    assert checked == sum(3**n for n in range(8))
+
+
+@pytest.mark.parametrize("terminator", ["\r\n", "\r"])
+@pytest.mark.parametrize("path", ["base", "push"])
+def test_an_appended_row_must_end_in_exactly_one_lf(
+    tmp_path: pathlib.Path, terminator: str, path: str
+) -> None:
+    """Before any chain exists too: bytes the chain would refuse cannot enter."""
+
+    candidate = base_repository(tmp_path)
+    ledger = candidate.root / CHAIN_SPEC.state_relative
+    row = jsonl_line(observation_row(BASE_ROW_COUNT + 1))
+    ledger.write_bytes(ledger.read_bytes() + (row + terminator).encode("utf-8"))
+    if terminator == "\r":
+        # A lone CR at the end still needs the LF the ledger ends with.
+        ledger.write_bytes(ledger.read_bytes() + b"\n")
+
+    with pytest.raises(AppendError) as caught:
+        if path == "base":
+            run_gate(candidate)
+        else:
+            run_push_gate(candidate)
+    assert str(caught.value) == (
+        f"ledger line {BASE_ROW_COUNT + 1} contains a carriage return; a JSONL "
+        "row ends with exactly one LF, the framing the release chain verifies"
+    )
+
+
 def test_a_valid_genesis_proposal_is_accepted(
     tmp_path: pathlib.Path, witnesses: Witnesses
 ) -> None:

@@ -265,6 +265,25 @@ def reject_non_append_bytes(text: str) -> None:
             )
 
 
+def _reject_carriage_returns(ledger_bytes: bytes) -> None:
+    """Refuse a carriage return anywhere in the ledger bytes.
+
+    ``_as_text`` translates ``\r\n`` and a lone ``\r`` into row breaks, but
+    the release chain frames rows by LF alone and refuses CRLF. With a CR in
+    the ledger the two would disagree about what the rows are: the gate could
+    validate two rows where the signed manifest counts one that no JSON
+    reader can parse. Refusing the byte leaves one framing for both.
+    """
+
+    position = ledger_bytes.find(b"\r")
+    if position != -1:
+        line = ledger_bytes.count(b"\n", 0, position) + 1
+        raise AppendError(
+            f"ledger line {line} contains a carriage return; a JSONL row ends "
+            "with exactly one LF, the framing the release chain verifies"
+        )
+
+
 def expected_assertion_version_id(row: dict[str, Any], spec: AppendGateSpec) -> str:
     """Recompute the content address the resolver must have written.
 
@@ -1145,6 +1164,7 @@ def _verify_selected_tree(
         )
         appended = check_append_only(base, lines, candidate)
     check_rows(lines, binding_boundary, spec)
+    _reject_carriage_returns(ledger_bytes)
 
     production_pins = enforce_production_pins
     anchor_dir = release_anchor_dir or (trusted_code_root / spec.chain.anchor_relative)
