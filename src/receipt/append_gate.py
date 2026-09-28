@@ -597,19 +597,58 @@ def check_prefix_anchored_to_base(
     binding boundary so a candidate-controlled count can never move it.
     """
     entry = base.tree.entry(candidate.prefix_relative)
-    base_prefix = json.loads(
-        _as_text(
-            base.tree.blob(entry, limit=MAX_JOURNAL_BYTES), candidate.prefix_relative
-        )
+    base_text = _as_text(
+        base.tree.blob(entry, limit=MAX_JOURNAL_BYTES), candidate.prefix_relative
     )
+    try:
+        base_prefix = json.loads(base_text)
+    except (ValueError, RecursionError) as exc:
+        raise AppendError(
+            f"base {base.ref} immutable prefix manifest is not valid JSON"
+        ) from exc
+    if type(base_prefix) is not dict:
+        raise AppendError(
+            f"base {base.ref} immutable prefix manifest is not a JSON object"
+        )
+    # "Exactly" means as JSON values, not as Python ones: ``!=`` let ``true``
+    # and ``1.0`` stand for a base ``1``, and the success line then printed
+    # "immutable prefix True" (0.6.2 review, L6 finding 10).
     for field in ("prefixLineCount", "prefixSha256", "lineSha256s"):
-        if candidate_prefix.get(field) != base_prefix.get(field):
+        if not _same_json(candidate_prefix.get(field), base_prefix.get(field)):
             raise AppendError(
                 f"immutable prefix manifest {field} changed vs base {base.ref}; "
                 "the frozen prefix cannot grow through the automated append path "
                 "— growing it is an explicit reviewed migration"
             )
-    return int(base_prefix["prefixLineCount"])
+    return _prefix_line_count(base_prefix, f"base {base.ref} ")
+
+
+def _same_json(left: Any, right: Any) -> bool:
+    """Equality of two parsed JSON values that also compares their types."""
+
+    if type(left) is not type(right):
+        return False
+    if type(left) is dict:
+        return left.keys() == right.keys() and all(
+            _same_json(left[key], right[key]) for key in left
+        )
+    if type(left) is list:
+        return len(left) == len(right) and all(
+            _same_json(item, other) for item, other in zip(left, right)
+        )
+    return bool(left == right)
+
+
+def _prefix_line_count(prefix: dict[str, Any], owner: str = "") -> int:
+    """``prefixLineCount`` as the JSON integer the manifest must carry."""
+
+    count = prefix.get("prefixLineCount")
+    if type(count) is not int:
+        raise AppendError(
+            f"{owner}immutable prefix manifest prefixLineCount is not a JSON "
+            "integer"
+        )
+    return count
 
 
 def _is_calendar_date(value: Any) -> bool:
@@ -1232,7 +1271,7 @@ def _verify_selected_tree(
     prefix = check_prefix(
         lines, _as_text(prefix_bytes, candidate.prefix_relative), candidate
     )
-    binding_boundary = int(prefix["prefixLineCount"])
+    binding_boundary = _prefix_line_count(prefix)
     appended = None
     if base is not None:
         binding_boundary = check_prefix_anchored_to_base(
