@@ -7,9 +7,10 @@ input the package used to accept, or accept for the wrong reason.
 ## 0.6.2
 
 One widening, in the consumer's hands: an anchor can pin more than one
-responder certificate under its root. Nothing a 0.6.1 spec accepts or refuses
-changes, unless it subclasses `AnchorSpec` with a field or property of its
-own named `additional_signers`.
+responder certificate under its root. And refusals of inputs 0.6.1 accepted
+into a verdict about something other than what it named (below).
+Nothing else a 0.6.1 spec accepts or refuses changes, unless it subclasses
+`AnchorSpec` with a field or property of its own named `additional_signers`.
 
 - `AnchorSpec` takes `additional_signers: tuple[PinnedSigner, ...] = ()`, and
   `PinnedSigner(certificate_sha256, spki_sha256)` pins one responder as a pair.
@@ -47,6 +48,33 @@ own named `additional_signers`.
   presented pairs, and agreement with a transcription of the 0.6.1
   comparison over the 9 anchors without additional signers, besides a
   two-release chain whose responder rotates under one root.
+
+### Refusals
+
+Found by the full review of this release, and already present in 0.6.1.
+
+- `receipt verify` without `--root` finds the repository from the spec's path
+  as the auditor named it, not from its resolution, and refuses when a symlink
+  lies between the spec and the nearest directory above it holding `.git`,
+  that directory included: `the spec's path crosses a symlink at or below its
+  repository top level, so the repository to verify is ambiguous; supply
+  --root: <path>`. 0.6.1 resolved the path first, so a directory committed as
+  a symlink beside the spec could move the walk into another repository, and
+  the command then verified that repository's commit and tree, exiting 0,
+  while the clone's own rule files went unchecked. Pinning the spec and the
+  anchor set did not catch it, because the other repository can carry the
+  same spec and anchors. An auditor can now conclude that a PASS without
+  `--root` is about the repository the named spec lies in. `--root` is
+  unchanged, and so is every run whose spec path crosses no symlink at or
+  below the top level; links above the top level are not examined, but a
+  checkout named through a link to its top level itself now refuses and needs
+  `--root`. `tests/test_cli.py` checks the walk exhaustively over 512 layouts
+  (three directories between a base and the spec, each real or a link and
+  each holding `.git` or not; the base holding `.git` or not and named
+  directly or through a link; the link targets inside a repository or not):
+  the refusal is exact, a returned top level contains the spec at the path
+  named, and where nothing refuses the result resolves to the 0.6.1 walk's.
+  The 0.6.1 walk named a repository other than the named spec's in 140 of them.
 
 ## 0.6.1
 
