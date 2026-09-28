@@ -81,6 +81,16 @@ JSON nested more than 128 deep is refused, including JSON 0.6.1 accepted.
   represent without moving it earlier than the signed instant
   (`RFC 3161 genTime is finer than a microsecond, which this verifier cannot
   represent exactly: ...`, the rule `receipt.release_chain` already applied).
+- Token bytes that name no instant or no decodable OID are refused by name.
+  The TSTInfo is parsed from the unauthenticated extraction before either
+  OpenSSL verification, so anyone who can write a token file and its sidecar
+  could end a verification with `ValueError`. A genTime of fourteen digits
+  that is no calendar instant (month 13, February 30th, a leap second, year 0)
+  is now `invalid RFC 3161 genTime: '20261301000000Z'`. An OID arc whose
+  decimal form would exceed 4,300 digits, which the interpreter refuses to
+  write, is `oversized OID subidentifier in RFC 3161 token`, and the decode
+  stops as soon as the bound is crossed. Every genTime and OID that parsed
+  before parses to the same value.
 
 ## 0.6.2
 
