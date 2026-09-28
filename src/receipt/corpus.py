@@ -966,8 +966,20 @@ def _sha256(value: Any, label: str) -> str:
 def _parse_row(line: str, number: int, spec: CorpusSpec) -> dict[str, Any]:
     try:
         parsed = json.loads(line, object_pairs_hook=_object_without_duplicates)
+    except CorpusError:
+        raise
     except json.JSONDecodeError as exc:
         raise CorpusError(f"journal row {number} is not valid JSON: {exc}") from exc
+    except (ValueError, RecursionError) as exc:
+        # json.loads's other refusals are not JSONDecodeError: an integer
+        # literal over the interpreter's digit limit raises ValueError, and
+        # nesting past the decoder's stack raises RecursionError. Both are
+        # journal bytes a producer chose, and both escaped as interpreter
+        # exceptions (0.6.2 review, L4 finding 3).
+        raise CorpusError(
+            f"journal row {number} cannot be decoded within the interpreter's "
+            f"limits: {type(exc).__name__}"
+        ) from exc
     if type(parsed) is not dict:
         raise CorpusError(f"journal row {number} is not a JSON object")
     kind = parsed.get("kind")

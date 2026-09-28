@@ -5248,3 +5248,42 @@ def test_alias_capability_is_bounded_at_both_ends() -> None:
     # And ASCII is what makes the written length the folded length.
     for pin in (".y", ".yml", ".YAML", ".t3st"):
         assert len(_path_fold(pin)) == len(pin)
+
+
+# --- 0.6.2 review, L4 finding 3: every journal decode failure is a CorpusError
+
+
+@pytest.mark.parametrize(
+    "row, reason",
+    [
+        pytest.param(
+            b'{"entryIndex":' + b"1" * 4301 + b"}\n", "ValueError", id="wide-integer"
+        ),
+        pytest.param(
+            b"[" * 200_000 + b"]" * 200_000 + b"\n", "RecursionError", id="deep-array"
+        ),
+        pytest.param(
+            b'{"a":' * 100_000 + b"1" + b"}" * 100_000 + b"\n",
+            "RecursionError",
+            id="deep-object",
+        ),
+    ],
+)
+def test_journal_rows_json_cannot_decode_refuse_as_corpus_errors(
+    row: bytes, reason: str
+) -> None:
+    """``json.loads`` refuses an integer literal over the interpreter's digit
+    limit with ``ValueError`` and nesting past its stack with
+    ``RecursionError``. Neither is a ``JSONDecodeError``, so both escaped
+    ``parse_journal`` and ``verify_corpus_binding`` as interpreter exceptions
+    where the module's contract is a ``CorpusError``."""
+
+    from receipt.corpus import parse_journal
+
+    assert len(row) < MAX_JOURNAL_ROW_BYTES
+    with pytest.raises(CorpusError) as caught:
+        parse_journal(row, spec=corpus_spec())
+    assert str(caught.value) == (
+        "journal row 1 cannot be decoded within the interpreter's limits: "
+        f"{reason}"
+    )
