@@ -2772,3 +2772,64 @@ def test_an_appended_row_repeating_a_json_key_is_refused(
     with pytest.raises(AppendError) as refusal:
         run_gate(candidate)
     assert str(refusal.value) == f"appended line 3 repeats the JSON key '{key}'"
+
+
+# --- 0.6.2 review, L6 finding 10: "exactly" means as JSON values
+
+
+def _rewrite_prefix_count(candidate: Candidate, count: object) -> None:
+    path = candidate.root / CHAIN_SPEC.prefix_relative
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["prefixLineCount"] = count
+    path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("count", [True, 1.0], ids=["true", "float"])
+def test_a_prefix_count_equal_only_in_python_is_refused(
+    tmp_path: pathlib.Path, count: object
+) -> None:
+    """``true`` and ``1.0`` are not the JSON value ``1``, but ``!=`` let
+    either stand for the base's frozen count, and the success line printed
+    "immutable prefix True"."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    _rewrite_prefix_count(candidate, count)
+    with pytest.raises(
+        AppendError,
+        match="immutable prefix manifest prefixLineCount is not a JSON integer",
+    ):
+        run_gate(candidate)
+    with pytest.raises(
+        AppendError,
+        match="immutable prefix manifest prefixLineCount is not a JSON integer",
+    ):
+        run_push_gate(candidate)
+
+
+def test_same_json_compares_types_as_well_as_values() -> None:
+    from receipt.append_gate import _same_json
+
+    assert _same_json({"a": [1, "x"]}, {"a": [1, "x"]})
+    assert not _same_json(True, 1)
+    assert not _same_json(1.0, 1)
+    assert not _same_json([1], [True])
+    assert not _same_json({"a": 1}, {"a": 1, "b": 2})
+
+
+def test_a_base_prefix_manifest_that_is_not_json_is_an_append_error(
+    tmp_path: pathlib.Path,
+) -> None:
+    candidate = base_repository(tmp_path)
+    (candidate.root / CHAIN_SPEC.prefix_relative).write_text("[" * 100_000, encoding="utf-8")
+    git(candidate.root, "add", "-A")
+    git(candidate.root, "commit", "--quiet", "-m", "unreadable base manifest")
+    base = git(candidate.root, "rev-parse", "HEAD")
+    write_prefix_manifest(
+        candidate.root, [observation_row(number) for number in range(1, 3)]
+    )
+    append_one_row(candidate)
+    with pytest.raises(
+        AppendError, match="immutable prefix manifest is not valid JSON"
+    ):
+        run_gate(candidate, base_ref=base)
