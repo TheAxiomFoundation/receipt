@@ -196,7 +196,8 @@ def test_append_consumes_one_evaluator_and_keeps_export_conditional(append_repo,
     monkeypatch.setattr(policy.TreePolicy,'evaluate',evaluate)
     with append_repo.snapshot() as snap:
         candidate=append_gate._CandidateTree(snap,GATE_SPEC,str(GATE_SPEC.chain.state_relative),str(GATE_SPEC.chain.prefix_relative))
-        result=append_gate._verify_selected_tree(candidate,base=None,trusted_code_root=append_repo.root,release_anchor_dir=None)
+        result=append_gate._verify_selected_tree(candidate,base=None,trusted_code_root=append_repo.root,release_anchor_dir=None,
+                                              enforce_production_pins=True)
         assert 'append check OK' in result
         assert {id(p) for p,_,_ in seen}=={id(candidate._policy)}
         stages=[stage for _,_,stage in seen]

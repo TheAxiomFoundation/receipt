@@ -1113,6 +1113,7 @@ def _verify_selected_tree(
     base: _BaseCommit | None,
     trusted_code_root: pathlib.Path,
     release_anchor_dir: pathlib.Path | None,
+    enforce_production_pins: bool,
 ) -> str:
     """Run reader preflights, then retained checks, over entered snapshots."""
 
@@ -1176,7 +1177,7 @@ def _verify_selected_tree(
         appended = check_append_only(base, lines, candidate)
     check_rows(lines, binding_boundary, spec)
 
-    production_pins = release_anchor_dir is None
+    production_pins = enforce_production_pins
     anchor_dir = release_anchor_dir or (trusted_code_root / spec.chain.anchor_relative)
     release_index = (
         check_release_proposal(
@@ -1229,8 +1230,19 @@ def verify_append_gate_verdict(
     commit: str = "HEAD",
     trusted_code_root: pathlib.Path = CODE_ROOT,
     release_anchor_dir: pathlib.Path | None = None,
+    enforce_production_pins: bool = True,
 ) -> AppendGateVerdict:
-    """Verify a selected commit and return its immutable object identities."""
+    """Verify a selected commit and return its immutable object identities.
+
+    Anchors are read from ``trusted_code_root / spec.chain.anchor_relative``,
+    or from ``release_anchor_dir`` when one is named. Either way the spec's
+    pins apply to what is read there: the producer SPKI, each anchor's PEM
+    digest and policy OID, and its responder certificate and SPKI pairs.
+    A caller whose anchor directory holds authorities of its own, such as a
+    test fixture, says so with ``enforce_production_pins=False``, which is
+    accepted only together with ``release_anchor_dir``; the verdict then
+    speaks for that caller's trust material, not the spec's pins.
+    """
 
     try:
         assert_no_redirecting_git_environment()
@@ -1241,6 +1253,14 @@ def verify_append_gate_verdict(
         type(commit) is not str or re.fullmatch(r"[0-9a-f]{40}", commit) is None
     ):
         raise AppendError("base_ref requires a full commit OID")
+    if type(enforce_production_pins) is not bool:
+        raise AppendError("enforce_production_pins must be a bool")
+    if not enforce_production_pins and release_anchor_dir is None:
+        raise AppendError(
+            "enforce_production_pins=False requires release_anchor_dir; the "
+            "anchors under the trusted code root are always checked against "
+            "the spec's pins"
+        )
 
     try:
         selected = TreeSnapshot.select(root, commit)
@@ -1257,6 +1277,7 @@ def verify_append_gate_verdict(
                     base=None,
                     trusted_code_root=trusted_code_root,
                     release_anchor_dir=release_anchor_dir,
+                    enforce_production_pins=enforce_production_pins,
                 )
                 return AppendGateVerdict(
                     summary=summary,
@@ -1289,6 +1310,7 @@ def verify_append_gate_verdict(
                     base=base,
                     trusted_code_root=trusted_code_root,
                     release_anchor_dir=release_anchor_dir,
+                    enforce_production_pins=enforce_production_pins,
                 )
                 return AppendGateVerdict(
                     summary=summary,
@@ -1313,8 +1335,12 @@ def verify_append_gate(
     commit: str = "HEAD",
     trusted_code_root: pathlib.Path = CODE_ROOT,
     release_anchor_dir: pathlib.Path | None = None,
+    enforce_production_pins: bool = True,
 ) -> str:
-    """Verify one selected commit and return the baseline success text."""
+    """Verify one selected commit and return the baseline success text.
+
+    The anchor and pin rules are :func:`verify_append_gate_verdict`'s.
+    """
 
     return verify_append_gate_verdict(
         root,
@@ -1323,4 +1349,5 @@ def verify_append_gate(
         commit=commit,
         trusted_code_root=trusted_code_root,
         release_anchor_dir=release_anchor_dir,
+        enforce_production_pins=enforce_production_pins,
     ).summary
