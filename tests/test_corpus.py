@@ -5287,3 +5287,57 @@ def test_journal_rows_json_cannot_decode_refuse_as_corpus_errors(
         "journal row 1 cannot be decoded within the interpreter's limits: "
         f"{reason}"
     )
+
+
+# --- 0.6.2 review, L4 finding 6: caller and spec arguments refuse, not crash
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        (
+            {"required_gates": frozenset({1})},
+            "CorpusSpec required_gates must contain only strings: found int",
+        ),
+        (
+            {"required_gates": frozenset({b"x"})},
+            "CorpusSpec required_gates must contain only strings: found bytes",
+        ),
+        (
+            {"required_gates": frozenset({1, "a"})},
+            "CorpusSpec required_gates must contain only strings: found int",
+        ),
+        (
+            {"required_attested_paths": frozenset({1, "a"})},
+            "CorpusSpec required_attested_paths must contain only strings: found int",
+        ),
+        (
+            {"accepted_gate_tiers": frozenset({1, "public"})},
+            "CorpusSpec accepted_gate_tiers must contain only strings: found int",
+        ),
+    ],
+)
+def test_corpus_spec_set_members_must_be_strings(
+    overrides: dict[str, object], message: str
+) -> None:
+    with pytest.raises(CorpusError) as caught:
+        corpus_spec(**overrides)
+    assert str(caught.value) == message
+
+
+def test_parse_journal_and_verify_declarations_refuse_wrong_argument_types() -> None:
+    from receipt.corpus import parse_journal
+
+    spec = corpus_spec()
+    with pytest.raises(CorpusError, match="corpus journal must be bytes, not str"):
+        parse_journal("x\n", spec=spec)  # type: ignore[arg-type]
+    with pytest.raises(
+        CorpusError, match="corpus journal must be bytes, not memoryview"
+    ):
+        parse_journal(memoryview(b"x\n"), spec=spec)  # type: ignore[arg-type]
+    with pytest.raises(CorpusError, match="spec must be a CorpusSpec, not NoneType"):
+        parse_journal(b"x\n", spec=None)  # type: ignore[arg-type]
+    with pytest.raises(
+        CorpusError, match="verification must be a CorpusVerification, not NoneType"
+    ):
+        verify_declarations(None, spec=spec)  # type: ignore[arg-type]

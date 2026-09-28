@@ -359,6 +359,17 @@ class CorpusError(ValueError):
     """The journal is malformed, or it does not describe the selected tree."""
 
 
+def _require_str_members(values: frozenset[Any], field_name: str) -> None:
+    """Refuse a spec set holding anything but exact ``str`` members."""
+
+    for value in values:
+        if type(value) is not str:
+            raise CorpusError(
+                f"CorpusSpec {field_name} must contain only strings: "
+                f"found {type(value).__name__}"
+            )
+
+
 @dataclass(frozen=True)
 class CorpusSpec:
     """Corpus-specific binding constants, pinned in the consumer's code.
@@ -438,6 +449,10 @@ class CorpusSpec:
                 )
         if type(self.required_attested_paths) is not frozenset:
             raise CorpusError("CorpusSpec required_attested_paths must be a frozenset")
+        # Element types before any sort or set arithmetic: a frozenset mixing
+        # str and int raised TypeError from ``sorted`` instead of refusing
+        # (0.6.2 review, L4 finding 6).
+        _require_str_members(self.required_attested_paths, "required_attested_paths")
         for path in sorted(self.required_attested_paths):
             _validate_relative_path(
                 path,
@@ -446,6 +461,7 @@ class CorpusSpec:
             )
         if type(self.accepted_gate_tiers) is not frozenset:
             raise CorpusError("CorpusSpec accepted_gate_tiers must be a frozenset")
+        _require_str_members(self.accepted_gate_tiers, "accepted_gate_tiers")
         unknown = sorted(self.accepted_gate_tiers - set(GATE_TIERS))
         if unknown:
             raise CorpusError(
@@ -455,6 +471,7 @@ class CorpusSpec:
             )
         if type(self.required_gates) is not frozenset:
             raise CorpusError("CorpusSpec required_gates must be a frozenset")
+        _require_str_members(self.required_gates, "required_gates")
         for gate_id in sorted(self.required_gates):
             if GATE_ID_RE.fullmatch(gate_id) is None:
                 raise CorpusError(
@@ -1117,6 +1134,16 @@ def parse_journal(
     against :data:`MAX_JOURNAL_ROWS_CEILING` when the spec is constructed.
     """
 
+    # The caller's arguments before anything is asked of them: a ``str`` or
+    # ``memoryview`` journal and a missing spec raised TypeError and
+    # AttributeError where the contract is a CorpusError (0.6.2 review, L4
+    # finding 6).
+    if type(journal_bytes) is not bytes:
+        raise CorpusError(
+            f"corpus journal must be bytes, not {type(journal_bytes).__name__}"
+        )
+    if not isinstance(spec, CorpusSpec):
+        raise CorpusError(f"spec must be a CorpusSpec, not {type(spec).__name__}")
     # Before the decode, because the decode is the allocation every later
     # bound is measured against: a journal of arbitrary size became a ``str``
     # of arbitrary size before anything looked at it (peer review, Sol
@@ -1743,6 +1770,13 @@ def verify_declarations(
     already enforced during parsing; this is the completeness half.
     """
 
+    if not isinstance(verification, CorpusVerification):
+        raise CorpusError(
+            "verification must be a CorpusVerification, not "
+            f"{type(verification).__name__}"
+        )
+    if not isinstance(spec, CorpusSpec):
+        raise CorpusError(f"spec must be a CorpusSpec, not {type(spec).__name__}")
     declared = {gate.gate_id for gate in verification.gates}
     missing = sorted(spec.required_gates - declared)
     if missing:
