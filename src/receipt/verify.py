@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import hashlib
 import pathlib
+import sys
 import tempfile
 from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
@@ -413,10 +414,23 @@ def load_spec(
             f"spec {digest} is not the expected spec {expect_sha256}"
         )
 
-    module = types.ModuleType("_receipt_consumer_spec")
+    # The spec runs the way Python runs the same file as a module (0.6.2
+    # review, L5 finding 5). ``dont_inherit=True``: compile() otherwise
+    # applies this module's own ``from __future__ import annotations`` to the
+    # spec, so its annotations became strings a plain module would not have.
+    # And the module is in ``sys.modules`` while it executes, because
+    # ``dataclasses`` and ``pickle`` look a class's module up there: a spec
+    # defining a dataclass was refused as "raised on load" for the loader's
+    # own execution environment. The entry is removed afterwards and any
+    # earlier holder of the name restored, so loading leaves no trace.
+    module_name = "_receipt_consumer_spec"
+    module = types.ModuleType(module_name)
     module.__file__ = str(spec_path)
+    absent = object()
+    previous = sys.modules.get(module_name, absent)
+    sys.modules[module_name] = module
     try:
-        code = compile(source, str(spec_path), "exec")
+        code = compile(source, str(spec_path), "exec", dont_inherit=True)
         exec(code, module.__dict__)  # noqa: S102 - the audited repo's own pins
     except KeyboardInterrupt:  # the operator's interrupt, never a verdict
         raise
@@ -431,6 +445,11 @@ def load_spec(
         raise VerifySpecError(
             f"spec module raised on load: {spec_path}: {_exception_detail(exc)}"
         ) from exc
+    finally:
+        if previous is absent:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous
 
     candidate = getattr(module, "SPEC", None)
     if candidate is None:
