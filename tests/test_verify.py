@@ -181,6 +181,170 @@ def test_expected_digest_refuses_before_compile_or_exec(
     assert not marker.exists()
 
 
+def _hidden_marker_spec(marker: pathlib.Path, *, cookie: bytes, framing: str) -> bytes:
+    """A spec whose only code a UTF-8 reader sees is SPEC_SOURCE.
+
+    Under the declared codec, what reads as a comment decodes to a second
+    statement that writes ``marker``.
+    """
+
+    statement = f"open({str(marker)!r}, 'w').close()".encode("ascii")
+    if framing == "escaped-newline":
+        hidden = b"# Reviewed: constants only, no logic.\\u000a" + statement + b"\n"
+    else:
+        # UTF-7: "+AAo-" is a newline; the statement follows it in the comment.
+        hidden = b"# sha: +AAo-" + statement + b"\n"
+    return cookie + hidden + SPEC_SOURCE
+
+
+@pytest.mark.parametrize(
+    ("header", "framing", "codec"),
+    [
+        (b"# coding: raw_unicode_escape\n", "escaped-newline", "raw-unicode-escape"),
+        (b"# -*- coding: unicode_escape -*-\n", "escaped-newline", "unicode-escape"),
+        (b"# vim: set fileencoding=utf-7 :\n", "utf-7", "utf-7"),
+        # A lone CR ends line 1 for the compiler, so the declaration on the
+        # next line is honoured although tokenize.detect_encoding misses it.
+        (b"#!/usr/bin/env python\r# coding: raw_unicode_escape\n", "escaped-newline", "raw-unicode-escape"),
+    ],
+)
+@pytest.mark.parametrize("pinned", [False, True])
+def test_load_spec_refuses_a_source_encoding_other_than_utf8(
+    tmp_path: pathlib.Path,
+    header: bytes,
+    framing: str,
+    codec: str,
+    pinned: bool,
+) -> None:
+    marker = tmp_path / "hidden-code-ran"
+    source = _hidden_marker_spec(marker, cookie=header, framing=framing)
+    path = tmp_path / "spec.py"
+    path.write_bytes(source)
+    digest = hashlib.sha256(source).hexdigest()
+
+    with pytest.raises(VerifySpecError) as caught:
+        load_spec(path, expect_sha256=digest if pinned else None)
+
+    assert str(caught.value) == (
+        f"spec declares source encoding {codec}; a spec must be UTF-8 so it "
+        f"executes as the text a reviewer reads: {path.resolve()}"
+    )
+    assert not marker.exists()
+
+
+def test_load_spec_refuses_bytes_that_compile_to_another_program_than_their_text(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The backstop: a declaration the pre-check misses still cannot run code."""
+
+    marker = tmp_path / "hidden-code-ran"
+    path = tmp_path / "spec.py"
+    path.write_bytes(
+        _hidden_marker_spec(
+            marker,
+            cookie=b"# coding: raw_unicode_escape\n",
+            framing="escaped-newline",
+        )
+    )
+    monkeypatch.setattr(
+        verify_module, "_declared_source_encoding", lambda source: "utf-8"
+    )
+
+    with pytest.raises(VerifySpecError) as caught:
+        load_spec(path)
+
+    assert str(caught.value) == (
+        "spec does not compile to the program its UTF-8 text reads as; a source "
+        f"encoding declaration changed it: {path.resolve()}"
+    )
+    assert not marker.exists()
+
+
+def test_no_declaration_placement_runs_a_hidden_statement(tmp_path: pathlib.Path) -> None:
+    """Property, enumerated: whatever the first two lines look like, a hidden
+    statement never runs. Either the spec refuses, or it executes exactly the
+    UTF-8 text, where the statement is inside a comment."""
+
+    marker = tmp_path / "hidden-code-ran"
+    declarations = (
+        b"coding: raw_unicode_escape",
+        b"coding=unicode_escape",
+        b"-*- coding: raw-unicode-escape -*-",
+        b"vim: set fileencoding=utf-7 :",
+        b"coding:utf-7",
+    )
+    leads = (b"", b" ", b"\t", b"\x0c", b"\r", b"\r\n", b"\xef\xbb\xbf")
+    first_lines = (b"", b"#", b"# note", b"#!/usr/bin/env python", b"x = 0")
+    breaks = (b"\n", b"\r\n", b"\r")
+    statement = f"open({str(marker)!r}, 'w').close()".encode("ascii")
+    hidden = {
+        b"utf-7": b"# sha: +AAo-" + statement + b"\n",
+        b"escape": b"# note\\u000a" + statement + b"\n",
+    }
+    path = tmp_path / "spec.py"
+    cases = 0
+    for declaration in declarations:
+        body = hidden[b"utf-7" if b"utf-7" in declaration else b"escape"]
+        for lead in leads:
+            for line_break in breaks:
+                for first in first_lines:
+                    for header in (
+                        lead + b"# " + declaration + line_break,
+                        first + line_break + lead + b"# " + declaration + line_break,
+                    ):
+                        path.write_bytes(header + body + SPEC_SOURCE)
+                        try:
+                            load_spec(path)
+                        except VerifySpecError:
+                            pass
+                        assert not marker.exists(), header
+                        cases += 1
+    assert cases == 1050
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        b"",
+        b"# -*- coding: utf-8 -*-\n",
+        b"# coding: utf8\n",
+        b"\xef\xbb\xbf",
+        b"\xef\xbb\xbf# coding: utf-8\n",
+    ],
+)
+def test_load_spec_accepts_utf8_declarations_and_a_bom(
+    tmp_path: pathlib.Path, prefix: bytes
+) -> None:
+    source = prefix + SPEC_SOURCE.replace(b"loaded-spec-test", "règles".encode())
+    path = tmp_path / "spec.py"
+    path.write_bytes(source)
+
+    loaded = load_spec(path, expect_sha256=hashlib.sha256(source).hexdigest())
+
+    assert loaded.verification.name == "règles"
+
+
+@pytest.mark.parametrize(
+    ("source", "detail"),
+    [
+        (b"# coding: bogus\n" + SPEC_SOURCE, "unknown encoding: bogus"),
+        (b"x = '\xff'\n" + SPEC_SOURCE, "\\xff"),
+    ],
+)
+def test_load_spec_keeps_the_compilers_own_refusals(
+    tmp_path: pathlib.Path, source: bytes, detail: str
+) -> None:
+    path = tmp_path / "spec.py"
+    path.write_bytes(source)
+
+    with pytest.raises(VerifySpecError) as caught:
+        load_spec(path)
+
+    message = str(caught.value)
+    assert message.startswith(f"spec module raised on load: {path.resolve()}: ")
+    assert detail in message
+
+
 JOURNAL_BYTES = b'{"one":"row"}\n'
 PREFIX_BYTES = b'{"prefix":true}\n'
 CANDIDATE_COMMIT = "c" * 40

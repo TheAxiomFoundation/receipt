@@ -40,10 +40,11 @@ from receipt.canonical import canonical_bytes
 from receipt.release_chain import (
     AnchorSpec,
     ChainSpec,
+    PinnedSigner,
     ReleaseChainError,
 )
 from receipt.snapshot import TreeSnapshot
-from receipt.sign import generate_signing_keypair, sign_payload
+from receipt.sign import generate_signing_keypair, sign_payload, spki_sha256
 
 from corpus_fixture import LocalTsa, build_local_tsa, created_at
 
@@ -2525,8 +2526,9 @@ def genesis_proposal(
     The anchors live outside the candidate deliberately: ``releases/anchors``
     is GATE_SURFACE here, so a proposal that wrote them into the tree would be
     a mixed data/gate proposal and never reach the release verification at all.
-    The gate takes them through ``release_anchor_dir``, which is also what
-    turns production pin enforcement off for these fixture identities.
+    The gate takes them through ``release_anchor_dir``, and the runners below
+    say ``enforce_production_pins=False`` because these fixture identities
+    are not the spec's pins.
     """
 
     candidate = base_repository(tmp_path)
@@ -2556,6 +2558,7 @@ def run_gate_with_anchors(
         base_ref=candidate.base if base_ref is None else base_ref,
         commit=commit or commit_candidate(candidate),
         release_anchor_dir=anchors,
+        enforce_production_pins=False,
     )
 
 
@@ -2568,11 +2571,11 @@ def run_push_gate_with_anchors(
 ) -> str:
     """The push path over a chain built by this module's own witnesses.
 
-    ``release_anchor_dir`` is what turns production pin enforcement off for
-    those generated identities, exactly as it does on the base-ref path; the
-    cases that need a chain the gate actually verifies take this rather than
-    ``run_push_gate``, which points the verifier at the production anchors the
-    fixture has none of.
+    ``enforce_production_pins=False`` beside ``release_anchor_dir`` is what
+    turns production pin enforcement off for those generated identities,
+    exactly as on the base-ref path; the cases that need a chain the gate
+    actually verifies take this rather than ``run_push_gate``, which points
+    the verifier at the production anchors the fixture has none of.
     """
 
     return verify_append_gate(
@@ -2580,6 +2583,241 @@ def run_push_gate_with_anchors(
         spec=spec,
         commit=commit or commit_candidate(candidate),
         release_anchor_dir=anchors,
+        enforce_production_pins=False,
+    )
+
+
+def _pinned_gate_spec(
+    witnesses: Witnesses, *, signer: bool, pem: bool, producer: bool
+) -> AppendGateSpec:
+    """GATE_SPEC with the fixture witnesses' real pins, or a wrong one per switch."""
+
+    anchors = {}
+    for tsa in (witnesses.alpha, witnesses.beta):
+        anchors[tsa.name] = AnchorSpec(
+            filename=tsa.root_pem.name,
+            pem_sha256=(
+                hashlib.sha256(tsa.root_pem.read_bytes()).hexdigest() if pem else "c" * 64
+            ),
+            policy_oid=tsa.policy_oid,
+            signer_certificate_sha256=(
+                tsa.signer_certificate_sha256 if signer else "d" * 64
+            ),
+            signer_spki_sha256=tsa.signer_spki_sha256 if signer else "e" * 64,
+            additional_signers=(
+                PinnedSigner(certificate_sha256="a" * 64, spki_sha256="b" * 64),
+            ),
+        )
+    chain = replace(
+        CHAIN_SPEC,
+        anchors=anchors,
+        producer_spki_sha256=(
+            spki_sha256(witnesses.public_pem) if producer else "f" * 64
+        ),
+    )
+    return replace(GATE_SPEC, chain=chain)
+
+
+def _gate_verdict(call) -> str:
+    try:
+        return "ACCEPT " + call()
+    except AppendError as exc:
+        return "REFUSE " + str(exc)
+
+
+@pytest.mark.parametrize("producer", [True, False])
+@pytest.mark.parametrize("pem", [True, False])
+@pytest.mark.parametrize("signer", [True, False])
+def test_release_anchor_dir_applies_the_same_pins_as_the_trusted_code_root(
+    tmp_path: pathlib.Path,
+    witnesses: Witnesses,
+    signer: bool,
+    pem: bool,
+    producer: bool,
+) -> None:
+    """Naming an anchor directory moves where anchors are read, nothing else.
+
+    The same tree and the same anchor bytes, read once from under a trusted
+    code root and once from ``release_anchor_dir``, must give the same
+    verdict, refusal text included, for every combination of right and wrong
+    pins. Before, the second spelling accepted every one of them.
+    """
+
+    candidate, anchors, _stem = genesis_proposal(tmp_path, witnesses)
+    stage(candidate)
+    oid = commit_candidate(candidate)
+    spec = _pinned_gate_spec(witnesses, signer=signer, pem=pem, producer=producer)
+    trusted = tmp_path / "trusted"
+    shutil.copytree(anchors, trusted / CHAIN_SPEC.anchor_relative)
+
+    through_code_root = _gate_verdict(
+        lambda: verify_append_gate(
+            candidate.root,
+            spec=spec,
+            base_ref=candidate.base,
+            commit=oid,
+            trusted_code_root=trusted,
+        )
+    )
+    through_anchor_dir = _gate_verdict(
+        lambda: verify_append_gate(
+            candidate.root,
+            spec=spec,
+            base_ref=candidate.base,
+            commit=oid,
+            release_anchor_dir=anchors,
+        )
+    )
+
+    assert through_anchor_dir == through_code_root
+    assert through_anchor_dir.startswith(
+        "ACCEPT" if signer and pem and producer else "REFUSE"
+    )
+
+
+def test_enforce_production_pins_false_is_the_explicit_fixture_opt_out(
+    tmp_path: pathlib.Path, witnesses: Witnesses
+) -> None:
+    candidate, anchors, _stem = genesis_proposal(tmp_path, witnesses)
+    stage(candidate)
+    oid = commit_candidate(candidate)
+
+    with pytest.raises(AppendError) as caught:
+        verify_append_gate(
+            candidate.root,
+            spec=GATE_SPEC,
+            base_ref=candidate.base,
+            commit=oid,
+            release_anchor_dir=anchors,
+        )
+    # GATE_SPEC pins placeholders; the producer key is the first pin checked.
+    assert str(caught.value) == (
+        "producer public-key SPKI is not code-pinned: "
+        f"{spki_sha256(witnesses.public_pem)}"
+    )
+    assert verify_append_gate(
+        candidate.root,
+        spec=GATE_SPEC,
+        base_ref=candidate.base,
+        commit=oid,
+        release_anchor_dir=anchors,
+        enforce_production_pins=False,
+    ) == (
+        "thesis-facts append check OK: 2 rows, immutable prefix 1, "
+        "+0 appended vs base, release 0"
+    )
+
+
+@pytest.mark.parametrize(
+    ("anchor_dir", "switch", "message"),
+    [
+        (
+            False,
+            False,
+            "enforce_production_pins=False requires release_anchor_dir; the "
+            "anchors under the trusted code root are always checked against "
+            "the spec's pins",
+        ),
+        (True, 0, "enforce_production_pins must be a bool"),
+        (True, None, "enforce_production_pins must be a bool"),
+    ],
+)
+def test_enforce_production_pins_refuses_what_it_cannot_honor(
+    tmp_path: pathlib.Path, anchor_dir: bool, switch: object, message: str
+) -> None:
+    with pytest.raises(AppendError) as caught:
+        verify_append_gate_verdict(
+            tmp_path,
+            spec=GATE_SPEC,
+            release_anchor_dir=tmp_path if anchor_dir else None,
+            enforce_production_pins=switch,  # type: ignore[arg-type]
+        )
+    assert str(caught.value) == message
+
+
+def test_a_lone_cr_cannot_make_two_gate_rows_of_one_witnessed_row(
+    tmp_path: pathlib.Path, witnesses: Witnesses
+) -> None:
+    """The gate and the release chain must frame the ledger the same way.
+
+    The appended bytes are ``row3 CR row4 LF``: two rows under universal
+    newlines, one LF-framed row under the chain, whose signed manifest counts
+    three lines and whose last line no JSON reader can parse.
+    """
+
+    candidate = base_repository(tmp_path)
+    ledger = candidate.root / CHAIN_SPEC.state_relative
+    appended = (
+        jsonl_line(observation_row(BASE_ROW_COUNT + 1))
+        + "\r"
+        + jsonl_line(observation_row(BASE_ROW_COUNT + 2))
+        + "\n"
+    )
+    ledger.write_bytes(ledger.read_bytes() + appended.encode("utf-8"))
+    ledger_bytes, prefix_bytes = state_bytes_of(candidate)
+    anchors = tmp_path / "anchors"
+    write_release_chain(
+        candidate.root / CHAIN_SPEC.manifest_relative,
+        anchors,
+        witnesses=witnesses,
+        ledger_bytes=ledger_bytes,
+        prefix_bytes=prefix_bytes,
+    )
+    stage(candidate)
+
+    with pytest.raises(AppendError) as caught:
+        run_gate_with_anchors(candidate, anchors)
+    assert str(caught.value) == (
+        f"ledger line {BASE_ROW_COUNT + 1} contains a carriage return; a JSONL "
+        "row ends with exactly one LF, the framing the release chain verifies"
+    )
+
+
+def test_the_carriage_return_screen_over_every_short_ledger() -> None:
+    """Property, exhaustive over {a, LF, CR} strings up to length 7: the screen
+    refuses iff a CR is present, and names the LF-framed line holding the first."""
+
+    import itertools
+
+    checked = 0
+    for length in range(8):
+        for letters in itertools.product(b"a\n\r", repeat=length):
+            ledger = bytes(letters)
+            first = ledger.find(b"\r")
+            if first == -1:
+                append_gate._reject_carriage_returns(ledger)
+            else:
+                with pytest.raises(AppendError) as caught:
+                    append_gate._reject_carriage_returns(ledger)
+                line = ledger[:first].count(b"\n") + 1
+                assert str(caught.value).startswith(f"ledger line {line} contains")
+            checked += 1
+    assert checked == sum(3**n for n in range(8))
+
+
+@pytest.mark.parametrize("terminator", ["\r\n", "\r"])
+@pytest.mark.parametrize("path", ["base", "push"])
+def test_an_appended_row_must_end_in_exactly_one_lf(
+    tmp_path: pathlib.Path, terminator: str, path: str
+) -> None:
+    """Before any chain exists too: bytes the chain would refuse cannot enter."""
+
+    candidate = base_repository(tmp_path)
+    ledger = candidate.root / CHAIN_SPEC.state_relative
+    row = jsonl_line(observation_row(BASE_ROW_COUNT + 1))
+    ledger.write_bytes(ledger.read_bytes() + (row + terminator).encode("utf-8"))
+    if terminator == "\r":
+        # A lone CR at the end still needs the LF the ledger ends with.
+        ledger.write_bytes(ledger.read_bytes() + b"\n")
+
+    with pytest.raises(AppendError) as caught:
+        if path == "base":
+            run_gate(candidate)
+        else:
+            run_push_gate(candidate)
+    assert str(caught.value) == (
+        f"ledger line {BASE_ROW_COUNT + 1} contains a carriage return; a JSONL "
+        "row ends with exactly one LF, the framing the release chain verifies"
     )
 
 

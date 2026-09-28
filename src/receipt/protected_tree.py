@@ -672,6 +672,11 @@ class _NameRun:
                         if self.plan.repertoire == "portable" and self.facts.short_suffix(
                             path.rpartition("/")[2], self.plan.content_suffixes):
                             raise _Refusal(Finding("content-short-suffix", stage, (*position, 1), path=path))
+                        if fact.mode == "120000":
+                            # No content row, but a checkout resolves it: to a
+                            # directory, it presents files under the root no row
+                            # binds, and it keeps a tombstoned path readable.
+                            raise _Refusal(Finding("content-link", stage, (*position, 2), path=path))
                         continue
                     self.mode_facts[path, "attested-leaf"] = fact
                     if not fact.regular:

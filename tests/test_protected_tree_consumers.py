@@ -126,7 +126,7 @@ def test_every_mapping_and_attested_facade_reaches_its_old_and_new_body(signed_r
 
 
 def test_binding_selection_is_partial_until_content_and_bound_to_subject(raw_repo):
-    commit=raw_repo.commit((('rules/file.yaml','100644'),('rules/suffixless','120000'),('unused/module','160000')),
+    commit=raw_repo.commit((('rules/file.yaml','100644'),('rules/suffixless','100644'),('unused/module','160000')),
                            empty=('rules/empty',))
     with raw_repo.snapshot(commit) as snap:
         evaluator=policy.TreePolicy(snap,policy_version=policy.POLICY_VERSION,work=snap.work)
@@ -152,6 +152,22 @@ def test_binding_selection_is_partial_until_content_and_bound_to_subject(raw_rep
         assert repeated.completed==content.completed
     with pytest.raises(snapshot.SnapshotError):
         selection.entries_for(snap,use=plan.use)
+
+
+def test_binding_content_stage_refuses_a_suffixless_link_under_a_content_root(raw_repo):
+    """0.6.3: a checkout resolves a link under a content root whatever its name."""
+    commit=raw_repo.commit((('rules/file.yaml','100644'),('rules/suffixless','120000')))
+    with raw_repo.snapshot(commit) as snap:
+        evaluator=policy.TreePolicy(snap,policy_version=policy.POLICY_VERSION,work=snap.work)
+        plan=policy.ProtectionPlan(phase='binding',use='binding',whole_tree_name_scope=True,
+            content_roots=('rules',),content_suffixes=('.yaml',),
+            obligations=('names','siblings','content-roots','content'))
+        names=evaluator.evaluate(plan,stage='siblings')
+        content=evaluator.evaluate(plan,stage='content',previous=names)
+        finding=content.finding_for(plan.use)
+        assert (finding.kind,finding.path)==('content-link','rules/suffixless')
+        with pytest.raises(corpus.CorpusError,match="^content root contains a symlink: 'rules/suffixless'$"):
+            content.require(plan.use,render=corpus._binding_error)
 
 
 def test_composition_reuses_custody_facts_without_reusing_its_verdict(signed_repo,monkeypatch):
@@ -180,7 +196,8 @@ def test_append_consumes_one_evaluator_and_keeps_export_conditional(append_repo,
     monkeypatch.setattr(policy.TreePolicy,'evaluate',evaluate)
     with append_repo.snapshot() as snap:
         candidate=append_gate._CandidateTree(snap,GATE_SPEC,str(GATE_SPEC.chain.state_relative),str(GATE_SPEC.chain.prefix_relative))
-        result=append_gate._verify_selected_tree(candidate,base=None,trusted_code_root=append_repo.root,release_anchor_dir=None)
+        result=append_gate._verify_selected_tree(candidate,base=None,trusted_code_root=append_repo.root,release_anchor_dir=None,
+                                              enforce_production_pins=True)
         assert 'append check OK' in result
         assert {id(p) for p,_,_ in seen}=={id(candidate._policy)}
         stages=[stage for _,_,stage in seen]

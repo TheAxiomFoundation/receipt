@@ -382,7 +382,8 @@ def test_consumers_reach_attribute_policy_after_their_existing_barriers(
             monkeypatch.setattr(append_gate, "_read_state_blob", stop)
             with pytest.raises(RuntimeError, match="after append attributes"):
                 append_gate._verify_selected_tree(candidate, base=None,
-                    trusted_code_root=append_repo.root, release_anchor_dir=None)
+                    trusted_code_root=append_repo.root, release_anchor_dir=None,
+                    enforce_production_pins=True)
         assert calls[0][0] == "append-attributes"
     assert len(calls) == 1 and calls[0][1]
     assert (calls[0][2] > 0) == (consumer != "append")

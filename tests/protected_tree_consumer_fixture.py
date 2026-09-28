@@ -33,6 +33,13 @@ def consumer_leg(monkeypatch, module, *, old):
                 assert body.__code__ is not getattr(group, name).__code__
             def counted(*args, _body=body, _name=name, **kwargs):
                 counts[_name] += 1
+                if old and _name == '_verify_selected_tree':
+                    # The PR5 body predates the explicit switch (0.6.3) and
+                    # enforced pins exactly when no anchor directory was named.
+                    # A call on which the two rules disagree is a divergence
+                    # these legs must not hide.
+                    switch = kwargs.pop('enforce_production_pins')
+                    assert switch is (kwargs['release_anchor_dir'] is None), switch
                 return _body(*args, **kwargs)
             functions[name] = counted
         if module is append_gate:

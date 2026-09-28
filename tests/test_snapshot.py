@@ -972,7 +972,11 @@ def test_every_git_child_receives_frozen_environment_and_allowed_command(
             assert command[0:2] == ["config", "-f"]
             command[2] = "<global>"
             command[-1] = "<root>"
-        elif phase == "object" and command[0] == "rev-parse":
+        elif phase == "object" and command[:3] == [
+            "-c",
+            "core.commitGraph=false",
+            "rev-parse",
+        ]:
             command[-1] = "<rev>^{commit}"
         normalized = (phase, *command)
         assert normalized in GIT_COMMANDS
@@ -989,7 +993,15 @@ def test_every_git_child_receives_frozen_environment_and_allowed_command(
             "--show-object-format",
         ),
         ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
-        ("object", "rev-parse", "--verify", "--end-of-options", "<rev>^{commit}"),
+        (
+            "object",
+            "-c",
+            "core.commitGraph=false",
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            "<rev>^{commit}",
+        ),
         ("object", "cat-file", "--batch-command"),
         ("object", "cat-file", "--batch-command"),
         ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
