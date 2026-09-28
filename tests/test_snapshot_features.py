@@ -1662,3 +1662,25 @@ def test_a_harmless_case_variant_attributes_file_is_accepted(
         git_repo, [(b".GitAttributes", b"protected.txt text eol=lf\n")]
     ) as selected:
         selected.refuse_transforming_attributes(("protected.txt",))
+
+
+def test_eol_is_accepted_as_a_stated_residual_not_as_byte_neutral(
+    git_repo: pathlib.Path,
+) -> None:
+    """0.6.2 review, L3 finding 8: ``eol=crlf`` rewrites checkout bytes.
+
+    The docstring justified accepting ``text`` and ``eol`` by saying only
+    ``filter``, ``ident`` and ``working-tree-encoding`` transform raw blob
+    bytes. ``eol=crlf`` transforms them too; the acceptance is a residual
+    the README states (checkout fidelity is outside the verdict), and the
+    docstring now says so instead of denying the transform.
+    """
+
+    selected = _raw_attribute_snapshot(git_repo, b"protected.txt text eol=crlf\n")
+    with selected:
+        selected.refuse_transforming_attributes(("protected.txt",))
+    documented = " ".join(
+        (TreeSnapshot.refuse_transforming_attributes.__doc__ or "").split()
+    )
+    assert "Only ``filter``" not in documented
+    assert "``eol=crlf`` checks a blob's ``LF`` out as ``CRLF``" in documented
