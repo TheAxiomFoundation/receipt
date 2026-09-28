@@ -1020,6 +1020,9 @@ def test_full_verify_objects_uses_exact_commands_heads_and_environment(
         ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
         ("object", "rev-parse", "--verify", "--end-of-options", "<rev>^{commit}"),
         ("object", "cat-file", "--batch-command"),
+        # Configuration is re-audited before every child an entered snapshot
+        # starts (0.6.2 review, L3 finding 7).
+        ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
         ("object", "cat-file", "--batch-command"),
         ("setup", "config", "-f", "<global>", "safe.directory", "<root>"),
         ("discovery", "version"),
@@ -1034,8 +1037,11 @@ def test_full_verify_objects_uses_exact_commands_heads_and_environment(
         ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
         ("object", "rev-parse", "--verify", "--end-of-options", "<rev>^{commit}"),
         ("object", "cat-file", "--batch-command"),
+        ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
         ("object", "cat-file", "--batch-command"),
+        ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
         ("object", "count-objects", "-v"),
+        ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
         (
             "object",
             "-c",

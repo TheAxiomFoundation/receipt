@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import hashlib
 import pathlib
+import sys
 import tempfile
 from contextlib import ExitStack
 from dataclasses import dataclass, field
@@ -83,18 +84,71 @@ class VerifySpecError(ValueError):
     """The loaded verification spec is missing, malformed, or not a spec."""
 
 
+def _exception_name(exc: BaseException) -> str:
+    """The exception's class name, or a fixed word if reading it raises.
+
+    A spec can define the exception it raises, and a metaclass can make even
+    ``type(exc).__name__`` run spec code. Nothing read here may raise past a
+    fail-closed boundary, so every failure to read it falls back.
+    """
+
+    try:
+        name = type(exc).__name__
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException:  # noqa: BLE001 - a name that cannot be read is unnamed
+        return "exception"
+    return name if type(name) is str else "exception"
+
+
+def _exception_message(exc: BaseException) -> str | None:
+    """``str(exc)`` as an exact ``str``, or ``None`` if producing it raises.
+
+    ``str()`` runs the exception's own ``__str__``. A spec defining
+    ``__str__`` to raise ``SystemExit(0)`` turned the handler that formats a
+    refusal into the exit the boundary exists to stop: the command left with
+    status 0 and printed nothing (0.6.2 review, L5 finding 4). A ``str``
+    subclass is refused as well, because formatting one runs its methods.
+    """
+
+    try:
+        text = str(exc)
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException:  # noqa: BLE001 - an unprintable message is withheld
+        return None
+    return text if type(text) is str else None
+
+
+def _described_exception(exc: BaseException) -> str:
+    """``"<Name>: <message>"`` for any exception, without running away.
+
+    Used wherever a fail-closed boundary quotes what it caught. It never
+    raises (bar the operator's interrupt), so a boundary's own formatting
+    cannot re-open it.
+    """
+
+    name = _exception_name(exc)
+    message = _exception_message(exc)
+    if message is None:
+        return f"{name} (its message could not be rendered)"
+    return f"{name}: {message}"
+
+
 def _exception_detail(exc: BaseException) -> str:
     """Quote a failure, naming anything that is not an ordinary exception.
 
     ``str(SystemExit(0))`` is the bare string ``"0"``, which inside a refusal
     reads as a stray token rather than as a spec that tried to exit the
     interpreter. Ordinary exceptions already carry their own message and are
-    quoted unchanged.
+    quoted unchanged. Both reads are guarded (see :func:`_exception_message`).
     """
 
-    if isinstance(exc, Exception):
-        return str(exc)
-    return f"{type(exc).__name__}: {exc}"
+    if issubclass(type(exc), Exception):
+        message = _exception_message(exc)
+        if message is not None:
+            return message
+    return _described_exception(exc)
 
 
 #: The passes a PASS verdict is made of. A verdict is a claim about custody,
@@ -282,8 +336,9 @@ def load_spec(
 
     Trust direction, stated plainly: a spec committed in the *producer's*
     repository is the producer's proposal, not the auditor's trust root.
-    Verified against a producer-shipped spec as found, a verdict establishes
-    only internal consistency with a policy the producer chose. For independent
+    Verified against a producer-shipped spec as found, a verdict is only as
+    good as that spec: its code runs in this process, so it can change what
+    the verdict reports and the command's exit status. For independent
     custody the auditor reads the spec once, out of band, and pins it — at
     minimum the ``spec_sha256`` this function returns — in the auditor's own
     records, after which every later verdict is against anchors the producer
@@ -347,10 +402,23 @@ def load_spec(
             f"spec {digest} is not the expected spec {expect_sha256}"
         )
 
-    module = types.ModuleType("_receipt_consumer_spec")
+    # The spec runs the way Python runs the same file as a module (0.6.2
+    # review, L5 finding 5). ``dont_inherit=True``: compile() otherwise
+    # applies this module's own ``from __future__ import annotations`` to the
+    # spec, so its annotations became strings a plain module would not have.
+    # And the module is in ``sys.modules`` while it executes, because
+    # ``dataclasses`` and ``pickle`` look a class's module up there: a spec
+    # defining a dataclass was refused as "raised on load" for the loader's
+    # own execution environment. The entry is removed afterwards and any
+    # earlier holder of the name restored, so loading leaves no trace.
+    module_name = "_receipt_consumer_spec"
+    module = types.ModuleType(module_name)
     module.__file__ = str(spec_path)
+    absent = object()
+    previous = sys.modules.get(module_name, absent)
+    sys.modules[module_name] = module
     try:
-        code = compile(source, str(spec_path), "exec")
+        code = compile(source, str(spec_path), "exec", dont_inherit=True)
         exec(code, module.__dict__)  # noqa: S102 - the audited repo's own pins
     except KeyboardInterrupt:  # the operator's interrupt, never a verdict
         raise
@@ -365,6 +433,11 @@ def load_spec(
         raise VerifySpecError(
             f"spec module raised on load: {spec_path}: {_exception_detail(exc)}"
         ) from exc
+    finally:
+        if previous is absent:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous
 
     candidate = getattr(module, "SPEC", None)
     if candidate is None:
@@ -564,9 +637,11 @@ def run_verification(
         expected: type[Exception] | tuple[type[Exception], ...],
     ) -> str:
         del name
-        if isinstance(exc, expected):
-            return str(exc)
-        return f"{type(exc).__name__}: {exc}"
+        if issubclass(type(exc), expected):
+            message = _exception_message(exc)
+            if message is not None:
+                return message
+        return _described_exception(exc)
 
     # Before any pass runs git: an environment that would redirect git's reads
     # is refused here rather than met by the custody pass after the optional
@@ -780,8 +855,16 @@ def run_verification(
             return result(incomplete="custody")
         if phase in {"custody", "finalize"}:
             # A close-time repository re-audit invalidates every tree-derived
-            # pass even if its body happened to finish first.
-            passes[:] = [item for item in passes if item.name == "history"]
+            # pass even if its body happened to finish first. That includes
+            # history, which read the same snapshots: keeping it reported a
+            # FAIL whose "established" list still carried the history claim
+            # (0.6.2 review, L4 finding 4). A custody failure before close
+            # leaves a completed history pass standing, as before.
+            passes[:] = [
+                item
+                for item in passes
+                if item.name == "history" and phase == "custody"
+            ]
             chain = None
             corpus = None
             passes.append(
@@ -867,6 +950,11 @@ def result_to_dict(result: VerifyResult) -> dict[str, Any]:
         not_established.append("that the anchor set is one the auditor trusts")
     if not result._spec_pinned:
         not_established.append("that the spec's code was trusted")
+        not_established.append(
+            "that this verdict is independent of the spec: an unpinned spec is "
+            "producer code that ran in this process, so the verdict is only as "
+            "good as the spec the producer committed"
+        )
 
     payload: dict[str, Any] = {
         "verdict": "PASS" if result.ok else "FAIL",

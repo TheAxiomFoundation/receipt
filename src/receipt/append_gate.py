@@ -18,7 +18,7 @@ import re
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from receipt.canonical import canonical_sha256
@@ -83,6 +83,26 @@ class AppendGateVerdict:
     base_tree: str | None
     object_format: str
     name_repertoire: str
+
+
+def _shown(value: Any) -> str:
+    """Row-derived text as a refusal may quote it: unprintable characters
+    escaped, printable text unchanged.
+
+    Refusal texts quoted row ids verbatim, so an id holding a newline could
+    put a forged ``thesis-facts append check OK: ...`` line into the log a
+    reviewer reads beside the real failure (0.6.2 review, L6 finding 12).
+    Printable ids -- every id the differential harness binds -- render
+    exactly as before.
+    """
+
+    text = value if type(value) is str else str(value)
+    if text.isprintable():
+        return text
+    return "".join(
+        character if character.isprintable() else repr(character)[1:-1]
+        for character in text
+    )
 
 
 class AppendError(ValueError):
@@ -215,6 +235,20 @@ def check_gate_only_confinement(
     the sentence names.
     """
 
+    # The ledger and its frozen-prefix manifest are what every skipped check
+    # is about, whatever the spec's DATA_SURFACE says. With a data surface
+    # that missed them, a gate-only proposal rewrote an existing ledger row
+    # and was accepted, the row reported only as "unclassified" (0.6.2
+    # review, L6 finding 11). So they, and the directories above them, are
+    # refused as unclassified changes here too.
+    on_the_state_files = sorted(
+        path for path in unclassified if path in _state_paths(candidate)
+    )
+    if on_the_state_files:
+        raise AppendError(
+            "gate-only proposal changes unclassified ledger state path(s): "
+            f"{on_the_state_files}"
+        )
     on_the_release_surface = sorted(
         path for path in unclassified if _is_protected(path, candidate)
     )
@@ -224,6 +258,19 @@ def check_gate_only_confinement(
             f"{on_the_release_surface}"
         )
     return set(unclassified)
+
+
+def _state_paths(candidate: _CandidateTree) -> frozenset[str]:
+    """The ledger, its prefix manifest, and every proper ancestor of each."""
+
+    paths: set[str] = set()
+    for relative in (
+        candidate.spec.chain.state_relative,
+        candidate.spec.chain.prefix_relative,
+    ):
+        paths.add(relative.as_posix())
+        paths.update(parent.as_posix() for parent in relative.parents if parent.parts)
+    return frozenset(paths)
 
 
 def _as_text(payload: bytes, relative: str) -> str:
@@ -364,7 +411,7 @@ def check_prefix(
         if digest != hashes[index]:
             row_id = json.loads(lines[index]).get("source_record_id", "?")
             raise AppendError(
-                f"immutable prefix line {index + 1} ({row_id}) was rewritten"
+                f"immutable prefix line {index + 1} ({_shown(row_id)}) was rewritten"
             )
     joined = hashlib.sha256(
         ("\n".join(lines[:count]) + "\n").encode("utf-8")
@@ -431,12 +478,18 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
         if not record_id:
             raise AppendError(f"line {number} lacks source_record_id")
         if not isinstance(row.get("value"), (int, float)):
-            raise AppendError(f"line {number} ({record_id}) has no numeric value")
+            raise AppendError(
+                f"line {number} ({_shown(record_id)}) has no numeric value"
+            )
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(row.get("observed_at", ""))):
-            raise AppendError(f"line {number} ({record_id}) has no observed_at date")
+            raise AppendError(
+                f"line {number} ({_shown(record_id)}) has no observed_at date"
+            )
         unit = (row.get("measure") or {}).get("unit")
         if not unit:
-            raise AppendError(f"line {number} ({record_id}) has no measure unit")
+            raise AppendError(
+                f"line {number} ({_shown(record_id)}) has no measure unit"
+            )
 
         recomputed = expected_assertion_version_id(row, spec)
         version = row.get("assertionVersion")
@@ -448,8 +501,8 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
             supersedes = version.get("supersedes")
             if version_id != recomputed:
                 raise AppendError(
-                    f"line {number} ({record_id}) assertionVersion.id does not "
-                    f"match its content ({version_id} != {recomputed})"
+                    f"line {number} ({_shown(record_id)}) assertionVersion.id does not "
+                    f"match its content ({_shown(version_id)} != {recomputed})"
                 )
             effective_id = version_id
         else:
@@ -463,7 +516,7 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
         # A->B->A chain trying to restore a superseded value.
         if effective_id in versions:
             raise AppendError(
-                f"line {number} restates assertion version {effective_id} "
+                f"line {number} restates assertion version {_shown(effective_id)} "
                 f"from line {versions[effective_id]}"
             )
         versions[effective_id] = number
@@ -478,7 +531,7 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
             ):
                 if not row.get(field):
                     raise AppendError(
-                        f"appended line {number} ({record_id}) lacks {field}"
+                        f"appended line {number} ({_shown(record_id)}) lacks {field}"
                     )
             archive = row["responseArchive"]
             if not isinstance(archive, dict) or not archive.get("sha256"):
@@ -493,7 +546,7 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
             has_projection = "sourceBindingProjection" in row
             if has_hash != has_projection:
                 raise AppendError(
-                    f"appended line {number} ({record_id}) must carry "
+                    f"appended line {number} ({_shown(record_id)}) must carry "
                     "targetContentHash and sourceBindingProjection together"
                 )
             if has_hash:
@@ -502,13 +555,13 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
                     r"[0-9a-f]{64}", content_hash
                 ):
                     raise AppendError(
-                        f"appended line {number} ({record_id}) "
+                        f"appended line {number} ({_shown(record_id)}) "
                         "targetContentHash is not a SHA-256 hex digest"
                     )
                 projection = row["sourceBindingProjection"]
                 if not isinstance(projection, dict) or not projection:
                     raise AppendError(
-                        f"appended line {number} ({record_id}) "
+                        f"appended line {number} ({_shown(record_id)}) "
                         "sourceBindingProjection must be a non-empty object"
                     )
                 if projection.get("responseSha256") != archive.get("sha256"):
@@ -528,19 +581,19 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
             previous_line, previous_version = previous
             if supersedes is None:
                 raise AppendError(
-                    f"line {number} duplicates {record_id} (line "
+                    f"line {number} duplicates {_shown(record_id)} (line "
                     f"{previous_line}) without superseding an assertion "
                     "version — corrections must be explicit"
                 )
             if supersedes != previous_version:
                 raise AppendError(
-                    f"line {number} supersedes {supersedes} but the active "
-                    f"version of {record_id} is {previous_version}"
+                    f"line {number} supersedes {_shown(supersedes)} but the active "
+                    f"version of {_shown(record_id)} is {_shown(previous_version)}"
                 )
         elif supersedes is not None:
             raise AppendError(
-                f"line {number} supersedes {supersedes} but {record_id} has "
-                "no earlier row"
+                f"line {number} supersedes {_shown(supersedes)} but "
+                f"{_shown(record_id)} has no earlier row"
             )
         active_by_record_id[str(record_id)] = (number, effective_id)
 
@@ -561,7 +614,7 @@ def check_append_only(
         if lines[index] != line:
             row_id = json.loads(line).get("source_record_id", "?")
             raise AppendError(
-                f"change rewrites existing line {index + 1} ({row_id}); "
+                f"change rewrites existing line {index + 1} ({_shown(row_id)}); "
                 "the ledger is append-only — supersede instead"
             )
     return len(lines) - len(base_lines)
@@ -584,19 +637,143 @@ def check_prefix_anchored_to_base(
     binding boundary so a candidate-controlled count can never move it.
     """
     entry = base.tree.entry(candidate.prefix_relative)
-    base_prefix = json.loads(
-        _as_text(
-            base.tree.blob(entry, limit=MAX_JOURNAL_BYTES), candidate.prefix_relative
-        )
+    base_text = _as_text(
+        base.tree.blob(entry, limit=MAX_JOURNAL_BYTES), candidate.prefix_relative
     )
+    try:
+        base_prefix = json.loads(base_text)
+    except (ValueError, RecursionError) as exc:
+        raise AppendError(
+            f"base {base.ref} immutable prefix manifest is not valid JSON"
+        ) from exc
+    if type(base_prefix) is not dict:
+        raise AppendError(
+            f"base {base.ref} immutable prefix manifest is not a JSON object"
+        )
+    # "Exactly" means as JSON values, not as Python ones: ``!=`` let ``true``
+    # and ``1.0`` stand for a base ``1``, and the success line then printed
+    # "immutable prefix True" (0.6.2 review, L6 finding 10).
     for field in ("prefixLineCount", "prefixSha256", "lineSha256s"):
-        if candidate_prefix.get(field) != base_prefix.get(field):
+        if not _same_json(candidate_prefix.get(field), base_prefix.get(field)):
             raise AppendError(
                 f"immutable prefix manifest {field} changed vs base {base.ref}; "
                 "the frozen prefix cannot grow through the automated append path "
                 "— growing it is an explicit reviewed migration"
             )
-    return int(base_prefix["prefixLineCount"])
+    return _prefix_line_count(base_prefix, f"base {base.ref} ")
+
+
+def _same_json(left: Any, right: Any) -> bool:
+    """Equality of two parsed JSON values that also compares their types."""
+
+    if type(left) is not type(right):
+        return False
+    if type(left) is dict:
+        return left.keys() == right.keys() and all(
+            _same_json(left[key], right[key]) for key in left
+        )
+    if type(left) is list:
+        return len(left) == len(right) and all(
+            _same_json(item, other) for item, other in zip(left, right)
+        )
+    return bool(left == right)
+
+
+def _prefix_line_count(prefix: dict[str, Any], owner: str = "") -> int:
+    """``prefixLineCount`` as the JSON integer the manifest must carry."""
+
+    count = prefix.get("prefixLineCount")
+    if type(count) is not int:
+        raise AppendError(
+            f"{owner}immutable prefix manifest prefixLineCount is not a JSON "
+            "integer"
+        )
+    return count
+
+
+def _is_calendar_date(value: Any) -> bool:
+    """An ASCII ``YYYY-MM-DD`` naming a day that exists."""
+
+    if type(value) is not str or not re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value
+    ):
+        return False
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+class _RepeatedKey(Exception):
+    def __init__(self, key: str) -> None:
+        super().__init__(key)
+        self.key = key
+
+
+def _object_without_repeated_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    seen: set[str] = set()
+    for key, _value in pairs:
+        if key in seen:
+            raise _RepeatedKey(key)
+        seen.add(key)
+    return dict(pairs)
+
+
+def check_appended_row_types(lines: list[str], prefix_count: int) -> None:
+    """Hold appended rows to the types their refusal texts already name.
+
+    The ported row validation reads these fields loosely, and each looseness
+    let a value through that its own refusal says is refused (0.6.2 review,
+    L6 findings 6-8): ``value: true`` passed "has no numeric value" because
+    ``bool`` subclasses ``int``; ``observed_at`` passed "has no observed_at
+    date" with fullwidth or Arabic-Indic digits (``\\d`` is Unicode) or a
+    day that does not exist; and ``source_record_id`` could be any truthy
+    JSON value, keyed through ``str()`` so that ``7`` and ``"7"`` were one
+    record -- one could supersede the other. The rows checked are the ones
+    after the frozen prefix, the post-cutover rows the binding shapes already
+    cover; a prefix row is immutable and cannot be corrected, so it keeps the
+    rule it was admitted under. Runs with the binding shapes, after every
+    pre-existing check, so no earlier refusal is pre-empted.
+
+    A repeated key refuses too, at any depth (L6 finding 9). ``json.loads``
+    keeps the last value, so a row saying ``"value": 3.0`` and then
+    ``"value": 999.0`` was accepted, and its content address bound 999.0
+    while a first-wins or strict reader of the same bytes saw 3.0 or refused.
+    """
+
+    for number, line in enumerate(lines, start=1):
+        if number <= prefix_count:
+            continue
+        try:
+            row = json.loads(line, object_pairs_hook=_object_without_repeated_keys)
+        except _RepeatedKey as repeated:
+            raise AppendError(
+                f"appended line {number} repeats the JSON key "
+                f"{_shown(repeated.key)!r}"
+            ) from None
+        record_id = row.get("source_record_id")
+        if type(record_id) is not str:
+            raise AppendError(
+                f"appended line {number} source_record_id is not a string"
+            )
+        label = _shown(record_id)
+        if type(row.get("value")) not in (int, float):
+            raise AppendError(
+                f"appended line {number} ({label}) value is not a JSON number"
+            )
+        if not _is_calendar_date(row.get("observed_at")):
+            raise AppendError(
+                f"appended line {number} ({label}) observed_at is not an "
+                "ASCII YYYY-MM-DD calendar date"
+            )
+        version = row.get("assertionVersion")
+        supersedes = version.get("supersedes") if isinstance(version, dict) else None
+        if supersedes is not None and type(supersedes) is not str:
+            raise AppendError(
+                f"appended line {number} ({label}) assertionVersion.supersedes "
+                "is not a string"
+            )
 
 
 def check_binding_shapes(lines: list[str], prefix_count: int) -> None:
@@ -624,18 +801,18 @@ def check_binding_shapes(lines: list[str], prefix_count: int) -> None:
         digest = row["responseArchive"]["sha256"]
         if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise AppendError(
-                f"appended line {number} ({record_id}) "
+                f"appended line {number} ({_shown(record_id)}) "
                 "responseArchive.sha256 is not a SHA-256 hex digest"
             )
         repo_sha = row["ledgerRepoSha"]
         if not isinstance(repo_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", repo_sha):
             raise AppendError(
-                f"appended line {number} ({record_id}) ledgerRepoSha is "
+                f"appended line {number} ({_shown(record_id)}) ledgerRepoSha is "
                 "not a full 40-character commit id"
             )
         if not _is_canonical_rfc3339(row["retrievedAt"]):
             raise AppendError(
-                f"appended line {number} ({record_id}) retrievedAt is not "
+                f"appended line {number} ({_shown(record_id)}) retrievedAt is not "
                 "a canonical RFC 3339 timestamp (uppercase T and Z or "
                 "±HH:MM, no leap second)"
             )
@@ -1134,7 +1311,7 @@ def _verify_selected_tree(
     prefix = check_prefix(
         lines, _as_text(prefix_bytes, candidate.prefix_relative), candidate
     )
-    binding_boundary = int(prefix["prefixLineCount"])
+    binding_boundary = _prefix_line_count(prefix)
     appended = None
     if base is not None:
         binding_boundary = check_prefix_anchored_to_base(
@@ -1167,6 +1344,7 @@ def _verify_selected_tree(
     )
 
     check_binding_shapes(lines, binding_boundary)
+    check_appended_row_types(lines, binding_boundary)
     if base is not None:
         check_state_modes(
             base,
