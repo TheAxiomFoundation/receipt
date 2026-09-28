@@ -34,7 +34,7 @@ import stat
 import subprocess
 import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
@@ -159,7 +159,9 @@ class AnchorSpec:
     policy_oid: str
     signer_certificate_sha256: str
     signer_spki_sha256: str
-    additional_signers: tuple[PinnedSigner, ...] = ()
+    # Keyword-only, so a 0.6.1 subclass that adds its own fields keeps
+    # constructing, positionally included.
+    additional_signers: tuple[PinnedSigner, ...] = field(default=(), kw_only=True)
 
     def __post_init__(self) -> None:
         """Refuse an anchor whose pins cannot pin anything.
@@ -197,11 +199,17 @@ class AnchorSpec:
             )
         seen: set[str] = set()
         for signer in self.signers:
-            if not isinstance(signer, PinnedSigner):
+            # Exactly PinnedSigner, and its digests checked again here: a
+            # subclass or a look-alike could skip PinnedSigner's own checks,
+            # and an unhashable or string-subclass digest must be refused
+            # before it is hashed or compared.
+            if type(signer) is not PinnedSigner:
                 raise ReleaseChainError(
                     "AnchorSpec additional_signers entries must be PinnedSigner, "
                     f"not {type(signer).__name__}"
                 )
+            _sha256(signer.certificate_sha256, "PinnedSigner certificate_sha256")
+            _sha256(signer.spki_sha256, "PinnedSigner spki_sha256")
             # One certificate has one key, so a repeated certificate digest is
             # either a duplicate line or a pair that cannot both be right.
             if signer.certificate_sha256 in seen:
@@ -1130,8 +1138,8 @@ def _check_signer_pins(
 ) -> None:
     """Refuse a responder whose certificate and key are not one pinned entry.
 
-    The digests are the ones OpenSSL just computed from the certificate that
-    verified the token. Both halves must match one entry of
+    The digests are SHA-256 over the certificate and SPKI DER that OpenSSL
+    extracted from the certificate that verified the token. Both halves must match one entry of
     ``anchor_spec.signers``. The two refusals keep their 0.6.1 texts and
     order: an unknown certificate names the certificate, and a known
     certificate whose entry pins a different key names the key. With no
