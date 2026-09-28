@@ -87,7 +87,14 @@ class AppendGateVerdict:
 
 def _shown(value: Any) -> str:
     """Row-derived text as a refusal may quote it: unprintable characters
-    escaped, printable text unchanged."""
+    escaped, printable text unchanged.
+
+    Refusal texts quoted row ids verbatim, so an id holding a newline could
+    put a forged ``thesis-facts append check OK: ...`` line into the log a
+    reviewer reads beside the real failure (0.6.2 review, L6 finding 12).
+    Printable ids -- every id the differential harness binds -- render
+    exactly as before.
+    """
 
     text = value if type(value) is str else str(value)
     if text.isprintable():
@@ -404,7 +411,7 @@ def check_prefix(
         if digest != hashes[index]:
             row_id = json.loads(lines[index]).get("source_record_id", "?")
             raise AppendError(
-                f"immutable prefix line {index + 1} ({row_id}) was rewritten"
+                f"immutable prefix line {index + 1} ({_shown(row_id)}) was rewritten"
             )
     joined = hashlib.sha256(
         ("\n".join(lines[:count]) + "\n").encode("utf-8")
@@ -471,12 +478,18 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
         if not record_id:
             raise AppendError(f"line {number} lacks source_record_id")
         if not isinstance(row.get("value"), (int, float)):
-            raise AppendError(f"line {number} ({record_id}) has no numeric value")
+            raise AppendError(
+                f"line {number} ({_shown(record_id)}) has no numeric value"
+            )
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(row.get("observed_at", ""))):
-            raise AppendError(f"line {number} ({record_id}) has no observed_at date")
+            raise AppendError(
+                f"line {number} ({_shown(record_id)}) has no observed_at date"
+            )
         unit = (row.get("measure") or {}).get("unit")
         if not unit:
-            raise AppendError(f"line {number} ({record_id}) has no measure unit")
+            raise AppendError(
+                f"line {number} ({_shown(record_id)}) has no measure unit"
+            )
 
         recomputed = expected_assertion_version_id(row, spec)
         version = row.get("assertionVersion")
@@ -488,8 +501,8 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
             supersedes = version.get("supersedes")
             if version_id != recomputed:
                 raise AppendError(
-                    f"line {number} ({record_id}) assertionVersion.id does not "
-                    f"match its content ({version_id} != {recomputed})"
+                    f"line {number} ({_shown(record_id)}) assertionVersion.id does not "
+                    f"match its content ({_shown(version_id)} != {recomputed})"
                 )
             effective_id = version_id
         else:
@@ -503,7 +516,7 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
         # A->B->A chain trying to restore a superseded value.
         if effective_id in versions:
             raise AppendError(
-                f"line {number} restates assertion version {effective_id} "
+                f"line {number} restates assertion version {_shown(effective_id)} "
                 f"from line {versions[effective_id]}"
             )
         versions[effective_id] = number
@@ -518,7 +531,7 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
             ):
                 if not row.get(field):
                     raise AppendError(
-                        f"appended line {number} ({record_id}) lacks {field}"
+                        f"appended line {number} ({_shown(record_id)}) lacks {field}"
                     )
             archive = row["responseArchive"]
             if not isinstance(archive, dict) or not archive.get("sha256"):
@@ -533,7 +546,7 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
             has_projection = "sourceBindingProjection" in row
             if has_hash != has_projection:
                 raise AppendError(
-                    f"appended line {number} ({record_id}) must carry "
+                    f"appended line {number} ({_shown(record_id)}) must carry "
                     "targetContentHash and sourceBindingProjection together"
                 )
             if has_hash:
@@ -542,13 +555,13 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
                     r"[0-9a-f]{64}", content_hash
                 ):
                     raise AppendError(
-                        f"appended line {number} ({record_id}) "
+                        f"appended line {number} ({_shown(record_id)}) "
                         "targetContentHash is not a SHA-256 hex digest"
                     )
                 projection = row["sourceBindingProjection"]
                 if not isinstance(projection, dict) or not projection:
                     raise AppendError(
-                        f"appended line {number} ({record_id}) "
+                        f"appended line {number} ({_shown(record_id)}) "
                         "sourceBindingProjection must be a non-empty object"
                     )
                 if projection.get("responseSha256") != archive.get("sha256"):
@@ -568,19 +581,19 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
             previous_line, previous_version = previous
             if supersedes is None:
                 raise AppendError(
-                    f"line {number} duplicates {record_id} (line "
+                    f"line {number} duplicates {_shown(record_id)} (line "
                     f"{previous_line}) without superseding an assertion "
                     "version — corrections must be explicit"
                 )
             if supersedes != previous_version:
                 raise AppendError(
-                    f"line {number} supersedes {supersedes} but the active "
-                    f"version of {record_id} is {previous_version}"
+                    f"line {number} supersedes {_shown(supersedes)} but the active "
+                    f"version of {_shown(record_id)} is {_shown(previous_version)}"
                 )
         elif supersedes is not None:
             raise AppendError(
-                f"line {number} supersedes {supersedes} but {record_id} has "
-                "no earlier row"
+                f"line {number} supersedes {_shown(supersedes)} but "
+                f"{_shown(record_id)} has no earlier row"
             )
         active_by_record_id[str(record_id)] = (number, effective_id)
 
@@ -601,7 +614,7 @@ def check_append_only(
         if lines[index] != line:
             row_id = json.loads(line).get("source_record_id", "?")
             raise AppendError(
-                f"change rewrites existing line {index + 1} ({row_id}); "
+                f"change rewrites existing line {index + 1} ({_shown(row_id)}); "
                 "the ledger is append-only — supersede instead"
             )
     return len(lines) - len(base_lines)
@@ -788,18 +801,18 @@ def check_binding_shapes(lines: list[str], prefix_count: int) -> None:
         digest = row["responseArchive"]["sha256"]
         if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise AppendError(
-                f"appended line {number} ({record_id}) "
+                f"appended line {number} ({_shown(record_id)}) "
                 "responseArchive.sha256 is not a SHA-256 hex digest"
             )
         repo_sha = row["ledgerRepoSha"]
         if not isinstance(repo_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", repo_sha):
             raise AppendError(
-                f"appended line {number} ({record_id}) ledgerRepoSha is "
+                f"appended line {number} ({_shown(record_id)}) ledgerRepoSha is "
                 "not a full 40-character commit id"
             )
         if not _is_canonical_rfc3339(row["retrievedAt"]):
             raise AppendError(
-                f"appended line {number} ({record_id}) retrievedAt is not "
+                f"appended line {number} ({_shown(record_id)}) retrievedAt is not "
                 "a canonical RFC 3339 timestamp (uppercase T and Z or "
                 "±HH:MM, no leap second)"
             )
