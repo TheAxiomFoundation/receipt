@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import io
+import itertools
 import os
 import pathlib
 import subprocess
+import sys
 
 import pytest
 
@@ -347,6 +349,151 @@ def test_git_seconds_budget_refuses_a_timed_out_child(
         )
 
 
+def _exits_before_the_budget_is_checked(
+    arguments: list[str] | None = None,
+) -> type[subprocess.Popen[bytes]]:
+    """Popen whose child has exited, and been reaped, before any timed wait.
+
+    ``Popen.wait(timeout=...)`` reports a child that has already exited before
+    it compares the clock. Under load the child can finish before the runner
+    first looks at it; this makes that ordering certain rather than likely.
+    """
+
+    class ExitsBeforeTheBudgetIsChecked(subprocess.Popen):
+        def __init__(self, argv: list[str], **kwargs: object) -> None:
+            super().__init__(argv if arguments is None else arguments, **kwargs)
+
+        def wait(self, timeout: float | None = None) -> int:
+            if timeout is not None:
+                super().wait()
+            return super().wait(timeout=timeout)
+
+    return ExitsBeforeTheBudgetIsChecked
+
+
+def test_git_seconds_budget_refuses_a_child_observed_after_its_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        snapshot_module.subprocess,
+        "Popen",
+        _exits_before_the_budget_is_checked(
+            [sys.executable, "-c", "import time; time.sleep(0.5)"]
+        ),
+    )
+
+    with pytest.raises(
+        SnapshotError, match="^git command exceeded its 0.1 second budget$"
+    ):
+        snapshot_module._git_run(
+            ["version"], cwd=None, environment=os.environ, seconds=0.1
+        )
+
+
+class _ScriptedClock:
+    """The one clock snapshot.py reads, advanced only by a scripted child."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+class _ScriptedProcess:
+    """Popen stand-in that exits at ``exits_at`` on a scripted clock.
+
+    A wait notices the exit, or its own timeout, ``observed_after`` seconds
+    late, as a loaded scheduler would. Like ``Popen.wait``, a wait that finds
+    the child exited returns its status even if the timeout has also passed.
+    """
+
+    def __init__(
+        self, clock: _ScriptedClock, *, exits_at: float, observed_after: float
+    ) -> None:
+        self.stdout = io.BytesIO()
+        self.stderr = io.BytesIO()
+        self.stdin = None
+        self.returncode: int | None = None
+        self._clock = clock
+        self._exits_at = exits_at
+        self._observed_after = observed_after
+        self._killed = False
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self._killed:
+            self.returncode = -9
+            return -9
+        due = self._exits_at
+        if timeout is not None:
+            due = min(due, self._clock.now + timeout)
+        self._clock.now = max(self._clock.now, due + self._observed_after)
+        if self._exits_at <= self._clock.now:
+            self.returncode = 0
+            return 0
+        raise subprocess.TimeoutExpired(["git", "version"], timeout)
+
+    def kill(self) -> None:
+        self._killed = True
+
+
+_HALF_SECONDS = tuple(step / 2 for step in range(9))
+
+
+@pytest.mark.parametrize("seconds", (0.0, 1.0, 2.0, 3.0))
+def test_git_seconds_budget_accepts_only_a_child_observed_before_its_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    seconds: float,
+) -> None:
+    """Exhaustive over spawn cost, exit time and observation lag.
+
+    A bounded call returns exactly when the child's exit is observed strictly
+    before ``seconds`` have passed since the call began, spawning included.
+    Every other schedule refuses with the budget text; none is accepted late.
+    """
+
+    clock = _ScriptedClock()
+    monkeypatch.setattr(snapshot_module, "time", clock)
+    outcomes: dict[tuple[float, float, float], bool] = {}
+    for spawned_at, exits_at, observed_after in itertools.product(
+        _HALF_SECONDS[:3], _HALF_SECONDS, _HALF_SECONDS[:5]
+    ):
+        if exits_at < spawned_at:
+            continue
+
+        def spawn(
+            *_args: object,
+            _spawned_at: float = spawned_at,
+            _exits_at: float = exits_at,
+            _observed_after: float = observed_after,
+            **_kwargs: object,
+        ) -> _ScriptedProcess:
+            clock.now = _spawned_at
+            return _ScriptedProcess(
+                clock, exits_at=_exits_at, observed_after=_observed_after
+            )
+
+        clock.now = 0.0
+        monkeypatch.setattr(snapshot_module.subprocess, "Popen", spawn)
+        try:
+            completed = snapshot_module._git_run(
+                ["version"], cwd=None, environment=os.environ, seconds=seconds
+            )
+        except SnapshotError as exc:
+            assert str(exc) == f"git command exceeded its {seconds:g} second budget"
+            outcomes[spawned_at, exits_at, observed_after] = False
+        else:
+            assert completed.returncode == 0
+            outcomes[spawned_at, exits_at, observed_after] = True
+
+    assert len(outcomes) == (9 + 8 + 7) * 5
+    assert outcomes == {
+        case: case[1] + case[2] < seconds for case in outcomes
+    }
+    if seconds == 0.0:
+        assert not any(outcomes.values())
+
+
 def _require_store_verification_support() -> None:
     completed = subprocess.run(
         ["git", "version", "--build-options"],
@@ -404,5 +551,23 @@ def test_fsck_seconds_budget_refuses_a_zero_deadline(
         monkeypatch.setattr(snapshot_module, "MAX_FSCK_SECONDS", 0)
         with pytest.raises(
             SnapshotError, match="git command exceeded its 0 second budget"
+        ):
+            selected.verify_object_store((selected.commit,))
+
+
+def test_fsck_seconds_budget_refuses_a_child_that_exits_before_the_check(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _require_store_verification_support()
+    root, commit = _small_snapshot_repository(tmp_path)
+
+    with TreeSnapshot.select(root, commit, verify_objects=True) as selected:
+        monkeypatch.setattr(snapshot_module, "MAX_FSCK_SECONDS", 0)
+        monkeypatch.setattr(
+            snapshot_module.subprocess, "Popen", _exits_before_the_budget_is_checked()
+        )
+        with pytest.raises(
+            SnapshotError, match="^git command exceeded its 0 second budget$"
         ):
             selected.verify_object_store((selected.commit,))

@@ -84,6 +84,11 @@ materialization totals are then enforced across both snapshots together.
   as 16,777,216 KiB, versus 79,890 measured rulespec-us objects.
   ``MAX_FSCK_OUTPUT_BYTES`` is 1 MiB and ``MAX_FSCK_SECONDS`` is 600 seconds.
 
+A Git call's time budget runs from just before its child is started, and a
+batch response's from just after it is requested. Either is spent at its
+deadline. A child or read that finishes but is first observed at or after the
+deadline is refused like one still running, so a zero budget always refuses.
+
 Git 2.36.0 is the reader floor because it introduced ``cat-file
 --batch-command``. The frozen ``fsck --no-references`` invocation was added
 to Git in 2.50.0; optional store verification therefore fails closed on 2.36
@@ -495,6 +500,7 @@ def _bounded_process(
 ) -> subprocess.CompletedProcess[bytes]:
     """Run one child while retaining at most ``output_limit`` output bytes."""
 
+    deadline = time.monotonic() + seconds
     try:
         process = subprocess.Popen(
             list(argv),
@@ -567,11 +573,20 @@ def _bounded_process(
                 except OSError:
                     pass
         try:
-            returncode = process.wait(timeout=seconds)
+            returncode = process.wait(
+                timeout=max(0.0, deadline - time.monotonic())
+            )
         except subprocess.TimeoutExpired as exc:
             raise SnapshotError(
                 f"git command exceeded its {seconds:g} second budget"
             ) from exc
+        # Popen.wait reports a child that has already exited before it
+        # compares the clock, so under load a child reaped at or after the
+        # deadline, including under a zero budget, would otherwise pass.
+        if time.monotonic() >= deadline:
+            raise SnapshotError(
+                f"git command exceeded its {seconds:g} second budget"
+            )
         for thread in threads:
             thread.join(MAX_GIT_SECONDS)
             if thread.is_alive():
@@ -1335,7 +1350,9 @@ class _BatchReader:
             raise
         try:
             reader.join(max(0.0, deadline - time.monotonic()))
-            if reader.is_alive():
+            # A read that finished at or after the deadline, but before
+            # join looked, has still spent the budget.
+            if reader.is_alive() or time.monotonic() >= deadline:
                 raise SnapshotError(
                     f"Git batch child exceeded the budget of "
                     f"{MAX_GIT_SECONDS} seconds"
