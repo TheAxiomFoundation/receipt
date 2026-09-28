@@ -9268,3 +9268,45 @@ def test_the_public_json_reader_refuses_what_the_one_read_refuses(
         with pytest.raises(TsaError) as caught:
             tsa_module.load_json(path)
         assert str(caught.value) == f"cannot read JSON {path}: {reason}"
+
+
+# ---------------------------------------------------------------------------
+# A witness status that is not hashable (found by the adversarial sweep over
+# this branch; the same class as L2 F4)
+
+
+@pytest.mark.parametrize(
+    "schema", ["thesis_rfc3161_witness_v2", "thesis_rfc3161_witness_v1"]
+)
+@pytest.mark.parametrize(
+    "status", [[], ["available"], {}, {"available": True}], ids=["[]", "[available]", "{}", "{available}"]
+)
+def test_a_witness_status_that_is_a_list_or_object_is_refused_by_name(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    schema: str,
+    status: Any,
+) -> None:
+    """The status was checked with ``status not in {"available",
+    "unavailable"}``, which hashes the producer's value: a list or an object
+    raised TypeError where a number or a stray string gets the named refusal.
+    Both now get it."""
+
+    tree = build_witness_tree(tmp_path, local_anchors[:1], schema=schema)
+    rewrite_witness(tree, lambda payload: payload.__setitem__("status", status))
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == f"invalid witness status for {tree.record}: {status!r}"
+    with pytest.raises(TsaError) as stepped:
+        verify_step(tree.record, spec=tree.spec, records=tree.records)
+    assert str(stepped.value) == str(caught.value)
+
+
+def test_an_unavailable_witness_with_an_object_status_is_refused_by_name(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    tree = build_witness_tree(tmp_path, local_anchors[:1], available=False)
+    rewrite_witness(tree, lambda payload: payload.__setitem__("status", {}))
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == f"invalid witness status for {tree.record}: {{}}"
