@@ -7,8 +7,8 @@ input the package used to accept, or accept for the wrong reason.
 ## 0.6.2
 
 One widening, in the consumer's hands: an anchor can pin more than one
-responder certificate under its root. And refusals of inputs 0.6.1 accepted
-into a verdict about something other than what it named (below).
+responder certificate under its root. And two refusals, both of inputs 0.6.1
+accepted into a verdict about something other than what it named (below).
 Nothing else a 0.6.1 spec accepts or refuses changes, unless it subclasses
 `AnchorSpec` with a field or property of its own named `additional_signers`.
 
@@ -49,9 +49,10 @@ Nothing else a 0.6.1 spec accepts or refuses changes, unless it subclasses
   comparison over the 9 anchors without additional signers, besides a
   two-release chain whose responder rotates under one root.
 
-### Refusals
+### Two refusals
 
-Found by the full review of this release, and already present in 0.6.1.
+Both were found by the full review of this release, and both were already
+present in 0.6.1.
 
 - `receipt verify` without `--root` finds the repository from the spec's path
   as the auditor named it, not from its resolution, and refuses when a symlink
@@ -75,6 +76,26 @@ Found by the full review of this release, and already present in 0.6.1.
   the refusal is exact, a returned top level contains the spec at the path
   named, and where nothing refuses the result resolves to the 0.6.1 walk's.
   The 0.6.1 walk named a repository other than the named spec's in 140 of them.
+- `receipt.attest` sweeps the whole history of the repository it is given.
+  `enforcement_epoch`, `records_commits` and `commit_in_scope` refuse a
+  shallow repository with `shallow repositories are unsupported` and one with
+  a graft file with `repository grafts are unsupported`; every git command
+  runs with `--no-replace-objects` and with every inherited `GIT_*` variable
+  dropped; and revisions are passed after `--end-of-options`. In 0.6.1 a
+  shallow clone, the GitHub Actions checkout default, made its boundary the
+  enforcement epoch, so an unattested protected-tree commit at a depth-1
+  clone's tip was exempt and the sweep accepted it; a replace ref, an
+  inherited `GIT_DIR`, `GIT_GRAFT_FILE` or `GIT_REPLACE_REF_BASE`, or a range
+  git read as an option could likewise keep commits out of the sweep. An
+  auditor can now conclude that an accepted sweep saw every protected-tree
+  commit after the epoch in the named repository's own history. The 0.5.2
+  note that `receipt.attest` "runs its own git commands under the ambient
+  environment and is neither guarded nor claimed to be" no longer holds; it
+  drops the variables rather than refusing them, because it reads the
+  repository only through git, so a drop leaves one subject. Configuration
+  files are still read where git finds them. The pinned upstream verifier
+  accepts the shallow clone; `tests/test_attest_equivalence.py` records that
+  divergence against the oracle, and `tests/test_attest.py` pins the rest.
 
 ## 0.6.1
 
