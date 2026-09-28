@@ -2833,3 +2833,33 @@ def test_a_base_prefix_manifest_that_is_not_json_is_an_append_error(
         AppendError, match="immutable prefix manifest is not valid JSON"
     ):
         run_gate(candidate, base_ref=base)
+
+
+def test_a_gate_only_proposal_cannot_rewrite_a_ledger_its_spec_left_unclassified(
+    tmp_path: pathlib.Path,
+) -> None:
+    """0.6.2 review, L6 finding 11: the ledger is the verdict's subject.
+
+    A consumer spec whose ``data_surface`` missed ``ledger/**`` let a
+    proposal that added a gate file and rewrote an existing ledger row
+    return the gate-only verdict, the rewrite reported only as an
+    "unclassified change". The ledger and its prefix manifest are refused
+    as unclassified gate-only changes whatever the spec's surfaces say.
+    """
+
+    import dataclasses
+
+    spec = dataclasses.replace(
+        GATE_SPEC, data_surface=frozenset({"releases/manifests/**"})
+    )
+    candidate = base_repository(tmp_path)
+    rows = [observation_row(number) for number in range(1, BASE_ROW_COUNT + 1)]
+    rows[1] = observation_row(2, value=12345.0)
+    write_ledger(candidate.root, rows)
+    add_gate_file(candidate)
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate, spec=spec)
+    assert str(refusal.value) == (
+        "gate-only proposal changes unclassified ledger state path(s): "
+        f"['{CHAIN_SPEC.state_relative.as_posix()}']"
+    )
