@@ -91,6 +91,17 @@ JSON nested more than 128 deep is refused, including JSON 0.6.1 accepted.
   write, is `oversized OID subidentifier in RFC 3161 token`, and the decode
   stops as soon as the bound is crossed. Every genTime and OID that parsed
   before parses to the same value.
+- A creation claim at either end of the datetime range is decided, not
+  crashed on. The lead check shifted the claim by the allowance
+  (`claim - timedelta(seconds=300)`), which has no datetime for a record
+  claiming the first minutes of year 1, and converting
+  `0001-01-01T00:00:00+14:00` to UTC has none either. Both raised
+  `OverflowError`, which is not even a `ValueError`. The checks now compare
+  differences of instants, which decide every such case and every other case
+  exactly as before (a differential property against the old comparisons
+  checks the verdict, and the text for whole-second instants), and a claim
+  with no UTC instant is the existing `invalid timestamp claim recordedAt:
+  '...'`.
 
 ## 0.6.2
 
