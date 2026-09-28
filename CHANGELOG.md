@@ -52,6 +52,26 @@ JSON nested more than 128 deep is refused, including JSON 0.6.1 accepted.
   checks the verdict, and the text for whole-second instants), and a claim
   with no UTC instant is the existing `invalid timestamp claim recordedAt:
   '...'`.
+- Deep or oversized JSON in a witnessed tree is refused. The record, its
+  sidecar, the chain genesis and a trust bundle are all producer-written, and
+  `json.loads` let 100,000 levels of nesting out as `RecursionError` and a
+  5,000-digit integer out as a bare `ValueError`. They are now decoded by
+  `receipt._bounded_json`: `json.loads` with two bounds the bytes alone
+  decide, at most 128 nested containers and at most 4,300 digits in an
+  integer literal, both independent of the call stack and of the process's
+  own int-string limit. Past either bound the file gets the existing
+  `cannot read JSON <path>: ...` refusal, and a file `json.loads` refused
+  keeps its message. New refusal: a JSON value nested more than 128 deep.
+  0.6.1 accepted such a record whenever `json.loads` could parse it, and
+  refused such a sidecar, genesis or bundle by its shape
+  (`record must be a JSON object: ...`) or its content; each now gets the
+  depth refusal. The deepest document in the thesis and chronicle
+  repositories is 9 levels. A trust bundle whose payload canonical JSON
+  cannot encode (NaN, an infinity, an integer beyond the Number range), which
+  crashed the canonical check that runs before the commitment is compared, is
+  now the existing `TSA trust configuration is not canonical JSON: <path>`.
+  The bundle checks keep their order, so apart from depth a replaced bundle
+  refused before gets the same refusal.
 
 ## 0.6.2
 

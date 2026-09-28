@@ -9113,3 +9113,158 @@ def test_validate_token_time_decides_at_the_ends_of_the_range() -> None:
             max_future_seconds=0,
             max_token_lead_seconds=300,
         )
+
+
+# ---------------------------------------------------------------------------
+# Deep or oversized JSON in the producer's files (full Opus 5.5 review of
+# 0.6.2, L2 F4)
+
+DEEP_ARRAY = b"[" * 100_000 + b"]" * 100_000
+HUGE_INTEGER = b'{"x": ' + b"9" * 5000 + b"}"
+BUNDLE_HEAD = b'{"schemaVersion":"thesis_tsa_trust_bundle_v1","bundleId":"tsa-anchors-v1",'
+
+
+def replace_record(tree: WitnessTree, data: bytes) -> None:
+    tree.record.write_bytes(data)
+    digest = sha256_bytes(data)
+    rewrite_witness(tree, lambda payload: payload.__setitem__("digestSha256", digest))
+
+
+@pytest.mark.parametrize(
+    ("victim", "data", "reason"),
+    [
+        ("witness", DEEP_ARRAY, "JSON nesting exceeds 128 levels at char 128"),
+        ("witness", HUGE_INTEGER, "JSON integer literal has 5000 digits, more than 4300"),
+        ("record", DEEP_ARRAY, "JSON nesting exceeds 128 levels at char 128"),
+        ("record", HUGE_INTEGER, "JSON integer literal has 5000 digits, more than 4300"),
+        ("genesis", DEEP_ARRAY, "JSON nesting exceeds 128 levels at char 128"),
+        (
+            "bundle",
+            BUNDLE_HEAD + b'"x":' + b"[" * 600 + b"]" * 600 + b"}",
+            # The object is level 1, so level 129 is the 128th bracket.
+            f"JSON nesting exceeds 128 levels at char {len(BUNDLE_HEAD) + 4 + 127}",
+        ),
+        (
+            "bundle",
+            BUNDLE_HEAD + b'"x":' + b"9" * 5000 + b"}",
+            "JSON integer literal has 5000 digits, more than 4300",
+        ),
+    ],
+    ids=[
+        "witness-deep",
+        "witness-integer",
+        "record-deep",
+        "record-integer",
+        "genesis-deep",
+        "bundle-deep",
+        "bundle-integer",
+    ],
+)
+def test_deep_or_oversized_json_is_the_cannot_read_refusal(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    victim: str,
+    data: bytes,
+    reason: str,
+) -> None:
+    """Each of the four JSON files a verification parses is producer-written.
+    ``json.loads`` let 100,000 levels of nesting out as ``RecursionError``
+    and a 5,000-digit integer as a bare ``ValueError``; both are now the
+    ``cannot read JSON`` refusal, naming the file and the bound."""
+
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    target = {
+        "witness": tree.witness,
+        "record": tree.record,
+        "genesis": tree.records / "CHAIN_GENESIS.json",
+        "bundle": tree.bundle,
+    }[victim]
+    if victim == "record":
+        replace_record(tree, data)
+    else:
+        target.write_bytes(data)
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == f"cannot read JSON {target}: {reason}"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [b"NaN", b"Infinity", b"-Infinity", str(2**1100).encode()],
+    ids=["nan", "infinity", "minus-infinity", "beyond-number-range"],
+)
+def test_a_bundle_canonical_json_cannot_encode_is_not_canonical(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...], value: bytes
+) -> None:
+    """A replaced bundle is parsed before its commitment is compared, and
+    ``receipt.canonical`` raised ``ValueError`` for values it cannot encode.
+    Such a payload is by that fact not canonical JSON: the existing refusal."""
+
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    tree.bundle.write_bytes(BUNDLE_HEAD + b'"x":' + value + b"}")
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == (
+        f"TSA trust configuration is not canonical JSON: {tree.bundle}"
+    )
+
+
+def test_an_ordinary_replaced_bundle_keeps_its_refusal(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """The control from the lane's reproduction: the order of the bundle
+    checks did not change, so a bundle refused before is refused as before."""
+
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    tree.bundle.write_bytes(BUNDLE_HEAD + b'"x":1}')
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == (
+        f"TSA trust configuration is not canonical JSON: {tree.bundle}"
+    )
+
+
+def test_the_depth_bound_is_a_new_refusal_of_records_0_6_1_accepted(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """The verdict change the decoding bound makes, pinned on both sides with
+    genuinely stamped records. The record is level 1, so a member holding 127
+    nested lists makes it 128 deep and it verifies; one more level is
+    refused. 0.6.1 verified the deeper record too, whenever json.loads could
+    parse it; the bound refuses it on every interpreter alike."""
+
+    alpha = local_anchors[0]
+    for levels, verifies in ((127, True), (128, False)):
+        tree = build_witness_tree(tmp_path / str(levels), local_anchors[:1])
+        payload = json.loads(tree.record.read_text())
+        nested: Any = 0
+        for _ in range(levels):
+            nested = [nested]
+        payload["nested"] = nested
+        tree.record.write_bytes(canonical_bytes(payload) + b"\n")
+        restamp_record_claiming(tree, alpha, payload["recordedAt"])
+        if verifies:
+            assert verify_tree(tree).status == "available"
+        else:
+            with pytest.raises(TsaError) as caught:
+                verify_tree(tree)
+            assert str(caught.value).startswith(
+                f"cannot read JSON {tree.record}: JSON nesting exceeds 128 levels at char "
+            )
+
+
+def test_the_public_json_reader_refuses_what_the_one_read_refuses(
+    tmp_path: pathlib.Path,
+) -> None:
+    """``load_json`` is the reader ``_record_payload`` mirrors word for word,
+    and it refuses the same deep and oversized files the same way."""
+
+    for name, data, reason in [
+        ("deep.json", DEEP_ARRAY, "JSON nesting exceeds 128 levels at char 128"),
+        ("huge.json", HUGE_INTEGER, "JSON integer literal has 5000 digits, more than 4300"),
+    ]:
+        path = tmp_path / name
+        path.write_bytes(data)
+        with pytest.raises(TsaError) as caught:
+            tsa_module.load_json(path)
+        assert str(caught.value) == f"cannot read JSON {path}: {reason}"
