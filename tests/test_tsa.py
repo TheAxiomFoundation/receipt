@@ -8735,3 +8735,63 @@ def test_path_fold_joins_everything_the_0_6_1_key_joined() -> None:
             ) != tsa_module._path_fold(pathlib.PurePosixPath(character)):
                 split.append((code_point, variant))
     assert split == []
+
+
+# --- 0.6.2 review, L2 finding 7: the caller's clock must name its instant
+
+
+_NAIVE_NOW = datetime(2026, 9, 27, 12, 30)
+
+
+@pytest.mark.parametrize("zone", ["UTC", "America/Los_Angeles", "Asia/Tokyo"])
+def test_a_naive_verification_time_is_refused_in_every_time_zone(
+    monkeypatch: pytest.MonkeyPatch, zone: str
+) -> None:
+    """``now.astimezone(UTC)`` read a naive ``now`` as local time, so one
+    token and one ``now`` were accepted under ``TZ=UTC`` and refused as
+    postdating the verification time under ``TZ=Asia/Tokyo``."""
+
+    import time
+
+    monkeypatch.setenv("TZ", zone)
+    time.tzset()
+    try:
+        with pytest.raises(TsaError) as caught:
+            validate_token_time(
+                {"recordedAt": "2026-09-27T11:59:00Z"},
+                datetime(2026, 9, 27, 12, 0, tzinfo=UTC),
+                now=_NAIVE_NOW,
+                max_future_seconds=0,
+                max_token_lead_seconds=300,
+            )
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+    assert str(caught.value) == (
+        "verification time must be a timezone-aware datetime: "
+        "datetime.datetime(2026, 9, 27, 12, 30)"
+    )
+
+
+def test_every_public_witness_entry_refuses_a_naive_verification_time(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    anchor = local_anchors[0]
+    message = "verification time must be a timezone-aware datetime"
+    with pytest.raises(TsaError, match=message):
+        verify_tree(tree, now=_NAIVE_NOW)
+    with pytest.raises(TsaError, match=message):
+        verify_step(tree.record, spec=tree.spec, records=tree.records, now=_NAIVE_NOW)
+    with pytest.raises(TsaError, match=message):
+        verify_timestamp_token(
+            tree.record,
+            claim_against(tree, tree.reference, anchor, tree.tokens[anchor.anchor_id]),
+            tree.reference,
+            spec=tree.spec,
+            records=tree.records,
+            now=_NAIVE_NOW,
+        )
+    # An aware time is the control, and so is the default.
+    assert verify_tree(tree, now=datetime.now(UTC)).status == "available"
+    assert verify_tree(tree).status == "available"
