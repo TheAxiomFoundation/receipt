@@ -77,16 +77,20 @@ changes.
   token's signed time, so no order across releases is imposed.
 - Refused at construction: `additional_signers` that is not a tuple (a list,
   set or generator has no reviewable order, and a list would not hash), an
-  entry that is not a `PinnedSigner`, a digest that is not 64 lowercase hex
-  characters, and a certificate pinned twice, primary included.
+  entry that is not exactly a `PinnedSigner` (a subclass included), a digest
+  that is not 64 lowercase hex characters (checked by `PinnedSigner` and again
+  by `AnchorSpec`, so an entry cannot skip the check), and a certificate
+  pinned twice, primary included.
+- `additional_signers` is keyword-only, so a 0.6.1 subclass of `AnchorSpec`
+  that adds its own fields constructs as before, positionally included.
 - With no additional signers every verdict is the 0.6.1 verdict, refusal texts
   included: `RFC 3161 signer certificate is not pinned for <receipt>: <sha256>`
   for an unknown certificate, `RFC 3161 signer SPKI is not pinned for
   <receipt>: <sha256>` for a known certificate with another key. The decision
   is now `_check_signer_pins`, a pure function of the anchor and the two
   digests, and `tests/test_anchor_signer_set.py` checks its acceptance rule,
-  refusal texts, 0.6.1 equivalence and order independence exhaustively over
-  225 anchors by 12 presented pairs, besides a two-release chain whose
+  refusal texts, agreement with a transcription of the 0.6.1 comparison and
+  order independence exhaustively over 225 anchors by 12 presented pairs, besides a two-release chain whose
   responder rotates under one root.
 
 ## 0.6.1

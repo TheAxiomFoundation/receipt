@@ -210,6 +210,61 @@ def test_a_repeated_certificate_refuses() -> None:
         AnchorSpec(**BASE, additional_signers=(OTHER, OTHER))  # type: ignore[arg-type]
 
 
+class _LaxSigner(PinnedSigner):
+    """A subclass that skips PinnedSigner's own digest checks."""
+
+    def __post_init__(self) -> None:
+        pass
+
+
+class _AlwaysEqual(str):
+    """A digest that would compare equal to any certificate digest."""
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    __hash__ = str.__hash__
+
+
+def test_an_entry_must_be_exactly_a_pinned_signer() -> None:
+    with pytest.raises(ReleaseChainError, match="entries must be PinnedSigner, not _LaxSigner"):
+        AnchorSpec(**BASE, additional_signers=(_LaxSigner("A" * 64, "b" * 64),))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("field", ["certificate_sha256", "spki_sha256"])
+@pytest.mark.parametrize(
+    "value", [_AlwaysEqual("a" * 64), ["a" * 64], "A" * 64], ids=["str-subclass", "unhashable", "uppercase"]
+)
+def test_anchor_spec_checks_each_entry_digest_again(field: str, value: object) -> None:
+    """An entry whose digest changed after PinnedSigner checked it is refused by name, not crashed on."""
+
+    signer = PinnedSigner("a" * 64, "b" * 64)
+    object.__setattr__(signer, field, value)
+    with pytest.raises(ReleaseChainError, match=f"PinnedSigner {field}"):
+        AnchorSpec(**BASE, additional_signers=(signer,))  # type: ignore[arg-type]
+
+
+def test_a_061_subclass_with_its_own_fields_still_constructs() -> None:
+    @dataclasses.dataclass(frozen=True)
+    class LabelledAnchor(AnchorSpec):
+        label: str
+
+    labelled = LabelledAnchor(*BASE.values(), "digicert")  # type: ignore[arg-type]
+    assert labelled.label == "digicert" and labelled.additional_signers == ()
+
+    @dataclasses.dataclass(frozen=True)
+    class NotedAnchor(AnchorSpec):
+        note: str = ""
+
+    noted = NotedAnchor(*BASE.values(), "rotated 2026")  # type: ignore[arg-type]
+    assert noted.note == "rotated 2026" and noted.additional_signers == ()
+
+
+def test_additional_signers_is_keyword_only() -> None:
+    with pytest.raises(TypeError):
+        AnchorSpec(*BASE.values(), (OTHER,))  # type: ignore[arg-type, misc]
+
+
 def test_an_anchor_with_additional_signers_is_hashable_and_replaceable() -> None:
     anchor = AnchorSpec(**BASE, additional_signers=(OTHER,))  # type: ignore[arg-type]
     assert hash(anchor) == hash(dataclasses.replace(anchor))
