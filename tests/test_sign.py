@@ -10,11 +10,13 @@ from __future__ import annotations
 import hashlib
 import inspect
 import itertools
+import os
 import pathlib
 import shutil
 import subprocess
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, dataclass, replace
+from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -354,6 +356,133 @@ def test_forced_openssl_path_matches_stable_crypto_outcomes(
     assert (captured.out, captured.err) == ("", "")
 
 
+def _fallback_verdict(
+    payload: bytes, signature: bytes, public_key_pem: bytes, filename: str, *, pin: str | None
+) -> str:
+    try:
+        verify_signature_bytes(
+            payload,
+            signature,
+            public_key_pem,
+            public_key_filename=filename,
+            spki_sha256=pin,
+            label="0001-x.producer.sig",
+        )
+    except SignError as exc:
+        return f"REFUSE {exc}"
+    return "ACCEPT"
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["manifest.json", "anchors/manifest.json", "/tmp/elsewhere/manifest.json"],
+)
+@pytest.mark.parametrize("pinned", [True, False])
+def test_openssl_fallback_verifies_the_payload_whatever_the_key_is_named(
+    monkeypatch: pytest.MonkeyPatch, filename: str, pinned: bool
+) -> None:
+    """A key file named like the payload must not become the signed bytes.
+
+    The only signature here is the pinned key's signature over its own PEM
+    bytes, not over the payload.
+    """
+
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl is not installed")
+    private_key_pem, public_key_pem = generate_signing_keypair()
+    signature_over_key = sign_payload(private_key_pem, public_key_pem, domain=b"")
+    pin = _spki_pin(public_key_pem) if pinned else None
+    payload = b'{"releaseIndex": 1, "forged": true}\n'
+
+    expected = _fallback_verdict(
+        payload, signature_over_key, public_key_pem, filename, pin=pin
+    )
+    monkeypatch.setattr(sign_module, "CRYPTOGRAPHY_AVAILABLE", False)
+    actual = _fallback_verdict(
+        payload, signature_over_key, public_key_pem, filename, pin=pin
+    )
+
+    assert expected == actual == (
+        "REFUSE producer Ed25519 signature verification failed for "
+        "0001-x.producer.sig"
+    )
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["producer.sig", "empty-ca", "", "..", "keys/producer.pub", "../escape-probe.pem"],
+)
+def test_openssl_fallback_accepts_a_valid_signature_whatever_the_key_is_named(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, filename: str
+) -> None:
+    """The configured name decides nothing: no collision, crash or escape."""
+
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl is not installed")
+    private_key_pem, public_key_pem = generate_signing_keypair()
+    payload = b"payload"
+    signature = sign_payload(private_key_pem, payload, domain=b"")
+    monkeypatch.setattr(sign_module, "CRYPTOGRAPHY_AVAILABLE", False)
+    monkeypatch.setattr(sign_module.tempfile, "tempdir", str(tmp_path / "tmp"))
+    (tmp_path / "tmp").mkdir()
+
+    assert _fallback_verdict(
+        payload, signature, public_key_pem, filename, pin=_spki_pin(public_key_pem)
+    ) == "ACCEPT"
+    # Nothing was written beside the private directory.
+    assert sorted(path.name for path in (tmp_path / "tmp").iterdir()) == []
+
+
+def test_openssl_fallback_verdict_is_independent_of_the_key_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Differential, enumerated: for every configured name and every input
+    shape, the fallback's verdict equals the ``cryptography`` path's."""
+
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl is not installed")
+    private_key_pem, public_key_pem = generate_signing_keypair()
+    payload = b"payload"
+    shapes = {
+        "valid": (payload, sign_payload(private_key_pem, payload, domain=b"")),
+        "over the key": (payload, sign_payload(private_key_pem, public_key_pem, domain=b"")),
+        "other payload": (b"other", sign_payload(private_key_pem, payload, domain=b"")),
+    }
+    names = (
+        "producer-ed25519.pub", "manifest.json", "producer.sig", "empty-ca",
+        "producer-public-key.pem", "", "..", "keys/manifest.json",
+    )
+    pin = _spki_pin(public_key_pem)
+    for name in names:
+        for shape, (message, signature) in shapes.items():
+            monkeypatch.setattr(sign_module, "CRYPTOGRAPHY_AVAILABLE", True)
+            expected = _fallback_verdict(message, signature, public_key_pem, name, pin=pin)
+            monkeypatch.setattr(sign_module, "CRYPTOGRAPHY_AVAILABLE", False)
+            actual = _fallback_verdict(message, signature, public_key_pem, name, pin=pin)
+            assert actual == expected, (name, shape)
+            assert actual.startswith("ACCEPT" if shape == "valid" else "REFUSE"), (name, shape)
+
+
+def test_openssl_fallback_never_writes_to_an_absolute_configured_key_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl is not installed")
+    private_key_pem, public_key_pem = generate_signing_keypair()
+    payload = b"payload"
+    signature = sign_payload(private_key_pem, payload, domain=b"")
+    anchor = tmp_path / "producer-ed25519.pub"
+    anchor.write_bytes(public_key_pem)
+    os.utime(anchor, (1_000_000_000, 1_000_000_000))
+    monkeypatch.setattr(sign_module, "CRYPTOGRAPHY_AVAILABLE", False)
+
+    assert _fallback_verdict(
+        payload, signature, public_key_pem, str(anchor), pin=_spki_pin(public_key_pem)
+    ) == "ACCEPT"
+    assert anchor.stat().st_mtime == 1_000_000_000
+    assert anchor.read_bytes() == public_key_pem
+
+
 def test_sign_payload_cross_checks_with_openssl_cli(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -575,9 +704,10 @@ def test_nan_threshold_can_no_longer_reach_verify_threshold() -> None:
 
     ``len(satisfied) < nan`` is false, so a NaN-threshold keyring passed
     verification with zero satisfied signatures: a keyring that vouched for
-    anything, including an empty signature map. The check lives at
-    construction because construction is the only door — the dataclass is
-    frozen, and ``dataclasses.replace`` re-runs the same validation.
+    anything, including an empty signature map. The check runs at
+    construction, which ``dataclasses.replace`` repeats, and again at
+    verification, because construction is not the only door:
+    ``object.__setattr__`` reaches past a frozen dataclass.
     """
 
     _, public_key_pem = generate_signing_keypair()
@@ -596,22 +726,202 @@ def test_nan_threshold_can_no_longer_reach_verify_threshold() -> None:
         replace(KeyringSpec((key,), 1), threshold=nan)
     assert str(caught.value) == refusal
 
-    # Forced into the rejected state with object.__setattr__ — unreachable
-    # through any public route now, and the reason the gate is at
-    # construction: the verifier itself still compares against whatever the
-    # keyring carries, and an empty signature map clears a NaN.
+    # Forced into the rejected state with object.__setattr__: the verifier
+    # re-checks the keyring, so an empty signature map no longer clears a NaN.
     forced = KeyringSpec((key,), 1)
     object.__setattr__(forced, "threshold", nan)
-    smuggled = verify_threshold(
-        b"payload",
-        {},
-        {},
-        forced,
-        domain=b"consumer/v1\0",
-        label="record",
-        allow_legacy=False,
+    with pytest.raises(SignError) as caught:
+        verify_threshold(
+            b"payload",
+            {},
+            {},
+            forced,
+            domain=b"consumer/v1\0",
+            label="record",
+            allow_legacy=False,
+        )
+    assert str(caught.value) == refusal
+
+
+def _two_keys() -> tuple[tuple[bytes, bytes], tuple[bytes, bytes], KeySpec, KeySpec]:
+    first = generate_signing_keypair()
+    second = generate_signing_keypair()
+    return (
+        first,
+        second,
+        KeySpec("a", spki_sha256(first[1]), "spki-sha256"),
+        KeySpec("b", spki_sha256(second[1]), "spki-sha256"),
     )
-    assert smuggled.satisfied == ()
+
+
+def _verify_one_signer(keyring: object, key_pair: tuple[bytes, bytes], *, legacy: bool):
+    private_pem, public_pem = key_pair
+    payload, domain = b"payload", b"consumer/v1\0"
+    return verify_threshold(
+        payload,
+        {"a": sign_payload(private_pem, payload, domain=domain)},
+        {"a": public_pem},
+        keyring,  # type: ignore[arg-type]
+        domain=domain,
+        label="record",
+        allow_legacy=legacy,
+    )
+
+
+@pytest.mark.parametrize("generation", ["keys", "legacy_keys"])
+def test_a_keyring_list_mutated_after_construction_changes_nothing(
+    generation: str,
+) -> None:
+    """One signer must not satisfy a 2-of-2 by a list the caller kept."""
+
+    first, _second, key_a, key_b = _two_keys()
+    if generation == "keys":
+        keys = [key_a, key_b]
+        keyring = KeyringSpec(keys, 2)  # type: ignore[arg-type]
+        keys[1] = key_a
+    else:
+        legacy: list[KeySpec] = []
+        keyring = KeyringSpec((key_a, key_b), 2, legacy_keys=legacy)  # type: ignore[arg-type]
+        legacy.append(key_a)
+
+    assert type(keyring.keys) is tuple and type(keyring.legacy_keys) is tuple
+    assert keyring == KeyringSpec((key_a, key_b), 2)
+    hash(keyring)
+    with pytest.raises(SignError) as caught:
+        _verify_one_signer(keyring, first, legacy=generation == "legacy_keys")
+    assert str(caught.value) == (
+        "signature threshold not satisfied for record: threshold=2; "
+        "satisfied=('a',); failed=(); absent=('b',)"
+    )
+
+
+def test_every_mutation_of_the_callers_lists_leaves_the_keyring_unchanged() -> None:
+    """Property, enumerated: for each generation list and each mutation a list
+    supports (item assignment, append, insert, remove, clear, reverse, extend),
+    the constructed keyring's generations and its equality and hash stay put."""
+
+    _first, _second, key_a, key_b = _two_keys()
+    key_c = KeySpec("c", "c" * 64, "spki-sha256")
+    mutations = (
+        lambda items: items.__setitem__(0, key_a),
+        lambda items: items.__setitem__(-1, key_a),
+        lambda items: items.append(key_a),
+        lambda items: items.insert(0, key_c),
+        lambda items: items.remove(items[0]) if items else None,
+        lambda items: items.clear(),
+        lambda items: items.reverse(),
+        lambda items: items.extend([key_a, key_b]),
+    )
+    for mutate in mutations:
+        keys, legacy = [key_a, key_b], [key_c]
+        keyring = KeyringSpec(keys, 2, legacy_keys=legacy)  # type: ignore[arg-type]
+        snapshot = (keyring.keys, keyring.legacy_keys, hash(keyring))
+        mutate(keys)
+        mutate(legacy)
+        assert (keyring.keys, keyring.legacy_keys, hash(keyring)) == snapshot
+        assert keyring == KeyringSpec((key_a, key_b), 2, legacy_keys=(key_c,))
+
+
+def test_a_keyring_subclass_or_stand_in_cannot_reach_a_verifier() -> None:
+    first, _second, key_a, _key_b = _two_keys()
+
+    @dataclass(frozen=True)
+    class LaxKeyring(KeyringSpec):
+        def __post_init__(self) -> None:  # a subclass "extending" the spec
+            pass
+
+    stand_ins: list[object] = [
+        LaxKeyring((key_a,), 0),
+        LaxKeyring((key_a,), float("nan")),  # type: ignore[arg-type]
+        SimpleNamespace(keys=(key_a,), legacy_keys=(), threshold=0),
+    ]
+    for keyring in stand_ins:
+        name = type(keyring).__name__
+        with pytest.raises(SignError) as caught:
+            verify_threshold(
+                b"anything",
+                {},
+                {},
+                keyring,  # type: ignore[arg-type]
+                domain=b"d",
+                label="r",
+                allow_legacy=False,
+            )
+        assert str(caught.value) == f"keyring must be a KeyringSpec, not {name}"
+        with pytest.raises(SignError) as caught:
+            verify_any_generation(
+                b"anything",
+                bytes(64),
+                {"a": first[1]},
+                keyring,  # type: ignore[arg-type]
+                domain=b"d",
+                label="r",
+            )
+        assert str(caught.value) == f"keyring must be a KeyringSpec, not {name}"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("threshold", 0, "keyring threshold must be at least 1; found=0"),
+        ("keys", (), "keyring must contain at least one key"),
+        ("keys", "dup", "duplicate key_id in keyring: 'a'"),
+        ("legacy_keys", "dup", "duplicate key_id in keyring: 'a'"),
+        ("keys", "list", "keyring keys must be a tuple of KeySpec; found=list"),
+    ],
+)
+def test_verifiers_recheck_a_keyring_mutated_past_its_frozen_fields(
+    field: str, value: object, message: str
+) -> None:
+    first, _second, key_a, key_b = _two_keys()
+    keyring = KeyringSpec((key_a, key_b), 2)
+    if value == "dup":
+        value = (key_a, key_a) if field == "keys" else (key_a,)
+    elif value == "list":
+        value = [key_a, key_b]
+    object.__setattr__(keyring, field, value)
+
+    for verify in (
+        lambda: _verify_one_signer(keyring, first, legacy=True),
+        lambda: verify_any_generation(
+            b"payload", bytes(64), {}, keyring, domain=b"d", label="r"
+        ),
+    ):
+        with pytest.raises(SignError) as caught:
+            verify()
+        assert str(caught.value) == message
+
+
+@pytest.mark.parametrize(
+    ("keys", "legacy", "message"),
+    [
+        ("subclass", (), "keyring entries must be KeySpec, not NamedKey"),
+        ("current", "subclass", "keyring entries must be KeySpec, not NamedKey"),
+        ("current", ("a",), "keyring entries must be KeySpec, not str"),
+        ("current", None, "keyring legacy_keys must be an iterable of KeySpec; found=NoneType"),
+        ("text", (), "keyring keys must be an iterable of KeySpec; found=str"),
+    ],
+)
+def test_keyring_construction_refuses_entries_it_cannot_freeze(
+    keys: str, legacy: object, message: str
+) -> None:
+    _first, _second, key_a, key_b = _two_keys()
+
+    @dataclass(frozen=True)
+    class NamedKey(KeySpec):
+        pass
+
+    named = NamedKey(key_b.key_id, key_b.fingerprint, key_b.scheme)
+    current: object = {
+        "subclass": (key_a, named),
+        "current": (key_a,),
+        "text": "ab",
+    }[keys]
+    if legacy == "subclass":
+        legacy = (named,)
+    with pytest.raises(SignError) as caught:
+        KeyringSpec(current, 1, legacy_keys=legacy)  # type: ignore[arg-type]
+    assert str(caught.value) == message
 
 
 THRESHOLD_KEY_IDS = ("key-a", "key-b", "key-c")

@@ -423,7 +423,15 @@ GIT_COMMANDS = (
         "--show-object-format",
     ),
     ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
-    ("object", "rev-parse", "--verify", "--end-of-options", "<rev>^{commit}"),
+    (
+        "object",
+        "-c",
+        "core.commitGraph=false",
+        "rev-parse",
+        "--verify",
+        "--end-of-options",
+        "<rev>^{commit}",
+    ),
     ("object", "cat-file", "--batch-command"),
     ("object", "count-objects", "-v"),
     (
@@ -1983,10 +1991,16 @@ class TreeSnapshot:
             cls._refuse_grafts_and_shallow(git_dir, common_dir)
             cls._refuse_alternates(git_dir, common_dir)
 
+            # Parent-relative navigation (``<oid>~1``) must follow the parents
+            # the commit objects name. A commit-graph file is a local cache
+            # that no object hash covers: left enabled, it would decide which
+            # commit ``~`` and ``^`` select, as grafts would.
             resolved = _git_run(
                 _object_arguments(
                     git_dir,
                     [
+                        "-c",
+                        "core.commitGraph=false",
                         "rev-parse",
                         "--verify",
                         "--end-of-options",

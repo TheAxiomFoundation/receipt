@@ -901,7 +901,6 @@ def _verify_producer_signature_with_openssl(
             signature,
             public_key_pem,
             public_key_filename=spec.producer_public_key_filename,
-            temporary_public_key_filename=spec.producer_public_key_filename,
             spki_sha256=(
                 spec.producer_spki_sha256 if enforce_production_pin else None
             ),
@@ -926,7 +925,7 @@ def verify_producer_signature_bytes(
     key_spec = _sign.ProducerKeySpec(
         # When observing, normalized once here: the join below,
         # read_producer_public_key's own join, the observer key, and the
-        # fallback's temporary filename all flow from this one value, so no
+        # fallback's diagnostic name all flow from this one value, so no
         # later __fspath__ call exists for a stateful PathLike to answer
         # differently. When not observing, the raw configured value flows
         # exactly as it always has.
@@ -966,22 +965,14 @@ def verify_producer_signature_bytes(
             anchor_observer, key_spec.public_key_filename, public_key_pem
         )
         if not CRYPTOGRAPHY_AVAILABLE:
-            # When observing, the temporary key file must be a private leaf:
-            # a configured filename that is absolute would survive the
-            # temporary-directory join and hand OpenSSL (and the write
-            # before it) the original path, breaking the snapshot guarantee
-            # the observed digest depends on.
-            temporary_key_name = (
-                "producer-key-snapshot.pem"
-                if anchor_observer is not None
-                else key_spec.public_key_filename
-            )
+            # The fallback writes these exact bytes to a fixed private leaf of
+            # its own, never to a name derived from the configuration, so the
+            # observed digest is the digest of the key OpenSSL reads.
             _sign._verify_producer_signature_with_openssl(
                 manifest,
                 signature,
                 public_key_pem,
                 public_key_filename=str(public_key_path),
-                temporary_public_key_filename=temporary_key_name,
                 spki_sha256=(
                     key_spec.spki_sha256 if enforce_production_pin else None
                 ),
@@ -2303,27 +2294,42 @@ def verify_release_history_immutable(
     candidate: TreeSnapshot,
     base: TreeSnapshot,
 ) -> tuple[str, set[str], dict[str, GitEntry]]:
-    """Compare release entries in two entered, authenticated tree snapshots."""
+    """Compare release entries in two entered, authenticated tree snapshots.
+
+    The comparison covers the release root and, when the spec keeps them
+    elsewhere, the manifest directory too: the manifests, producer signatures
+    and receipts are the release objects a rewritten history would replace.
+    The returned new files and base entries stay those under the release
+    root.
+    """
 
     release_root = spec.release_root_relative.as_posix()
     base_entries = base.entries(release_root).as_dict()
     candidate_entries = candidate.entries(release_root).as_dict()
+    compared_base = dict(base_entries)
+    compared_candidate = dict(candidate_entries)
+    manifest_parts = spec.manifest_relative.parts
+    root_parts = spec.release_root_relative.parts
+    if manifest_parts[: len(root_parts)] != root_parts:
+        manifest_directory = spec.manifest_relative.as_posix()
+        compared_base.update(base.entries(manifest_directory).as_dict())
+        compared_candidate.update(candidate.entries(manifest_directory).as_dict())
 
     # The old working-directory enumeration refused every candidate link or
     # non-regular entry before comparing base bytes. Preserve that ordering
     # over the tree's modes, without opening any blob.
-    for relative, entry in sorted(candidate_entries.items()):
+    for relative, entry in sorted(compared_candidate.items()):
         if entry.mode == "120000":
             raise ReleaseChainError(f"release path is a symlink: {relative}")
         if entry.mode not in {"100644", "100755"}:
             raise ReleaseChainError(f"release path is not regular: {relative}")
 
-    for relative, prior in sorted(base_entries.items()):
+    for relative, prior in sorted(compared_base.items()):
         if prior.mode not in {"100644", "100755"}:
             raise ReleaseChainError(
                 f"base release entry has non-regular git mode {prior.mode}: {relative}"
             )
-        current = candidate_entries.get(relative)
+        current = compared_candidate.get(relative)
         if current is None:
             raise ReleaseChainError(
                 f"existing release file was deleted relative to "

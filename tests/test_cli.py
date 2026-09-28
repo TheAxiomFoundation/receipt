@@ -1147,6 +1147,23 @@ def test_refuses_a_symlinked_directory_under_a_content_root(
     assert run(repo) == EXIT_FAIL
 
 
+def test_refuses_a_suffixless_symlinked_directory_under_a_content_root(
+    repo: pathlib.Path, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The link's own name carries no pinned suffix, so it is no content row,
+    yet a checkout lists ``rules/injected/evil.yaml`` under the root."""
+
+    outside = tmp_path / "smuggled"
+    outside.mkdir()
+    (outside / "evil.yaml").write_text("name: evil\n")
+    (repo / "rules/injected").symlink_to(outside)
+    commit_candidate(repo, "add suffix-less symlinked content directory")
+    assert run(repo) == EXIT_FAIL
+    assert "content root contains a symlink: 'rules/injected'" in (
+        capsys.readouterr().err
+    )
+
+
 def test_scope_established_on_failure_json(
     repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

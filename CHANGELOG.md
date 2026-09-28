@@ -4,6 +4,75 @@ Every entry says what changed and what an auditor can conclude from it that
 they could not before. Refusals are named as refusals: a check added here is an
 input the package used to accept, or accept for the wrong reason.
 
+## 0.6.3 (unreleased)
+
+Eight corrections to inputs 0.6.2 and 0.6.1 accepted into a verdict that
+said more than was checked. Seven only add refusals; the OpenSSL-fallback
+fix also stops refusing a valid signature, and stops crashing, when the
+configured key name collides with the fallback's own files or has a
+directory component. One changes an API default, so a caller that points
+the append gate at fixture authorities has one keyword to add.
+
+- Revisions are resolved with Git's commit-graph disabled. The commit-graph
+  is a local cache no object hash covers; when it disagreed with the commit
+  objects it decided which commit a parent-relative revision such as
+  `<oid>~1` named, so a history pass could compare against a base the
+  commits never named. An auditor can now conclude that `~` and `^` follow
+  the parents written in the commit objects, as grafts are refused for.
+- The corpus binding refuses a symlink under a content root whatever its
+  name, with `content root contains a symlink: '<path>'`. A link without a
+  pinned suffix was skipped as not content, although a checkout resolves it
+  to files no journal row binds, or keeps a tombstoned path readable. An
+  auditor can now conclude that "closed-world" covers what a checkout of the
+  content roots presents. A gitlink, a suffix-bearing link and an 8.3-alias
+  name keep their refusals.
+- The history pass also compares the manifest directory when the spec keeps
+  it outside `release_root_relative`, a layout `ChainSpec` accepts. Before,
+  `--base-ref` compared no manifest, signature or receipt in that layout, and
+  a rewritten, re-signed, re-witnessed history passed it. For manifests under
+  the release root nothing changes; the returned new files still speak for
+  the release root, so the append gate only gains refusals.
+- `load_spec` refuses a PEP 263 declaration of any source encoding other than
+  UTF-8, with `spec declares source encoding <codec>; a spec must be UTF-8 so
+  it executes as the text a reviewer reads: <path>`, and executes the program
+  the UTF-8 text compiles to, refusing when the bytes compile to anything
+  else. A pinned spec's bytes could otherwise run code its reviewer never
+  read. The compiler's own refusals keep their texts.
+- `verify_append_gate` and `verify_append_gate_verdict` apply the spec's pins
+  to anchors read from `release_anchor_dir`. Naming that directory used to
+  turn off every pin (producer SPKI, anchor PEM digest, policy OID, and the
+  responder certificate and SPKI pairs, `additional_signers` included), so
+  the 0.6.2 claim about certificate-and-key pairs did not hold in that mode.
+  A caller whose anchor directory holds authorities of its own, such as a
+  test fixture, now says `enforce_production_pins=False`, which is refused
+  without `release_anchor_dir` and for anything but a bool. **Compatibility:**
+  such a caller refuses with the first pin its fixture fails until it adds
+  the keyword. Chronicle's shim forwards a test-only `--release-anchor-dir`;
+  its next pin bump passes `enforce_production_pins=args.release_anchor_dir
+  is None`.
+- The append gate refuses a carriage return anywhere in the ledger, with
+  `ledger line <n> contains a carriage return; a JSONL row ends with exactly
+  one LF, the framing the release chain verifies`. The gate split rows on CR
+  as well as LF while the release chain frames by LF alone, so one accepted
+  verdict could count rows differently from the manifest it witnessed.
+- `KeyringSpec` freezes `keys` and `legacy_keys` into tuples and requires
+  exact `KeySpec` entries, and `verify_threshold` and `verify_any_generation`
+  accept exactly a `KeyringSpec` and re-run its checks. A list mutated after
+  construction, a subclass with its own `__post_init__`, a stand-in object,
+  or `object.__setattr__` could otherwise put a count of zero, NaN or
+  duplicated signers into a threshold. An auditor can now conclude, as 0.6.1
+  said, that a keyring which reaches a verifier names a real signature
+  count. A keyring built from lists still constructs, now hashable.
+- The OpenSSL fallback (no `cryptography`) writes the public key to a fixed
+  private file name. The name used to come from the configured key
+  filename, so a configured name could replace the payload or signature
+  file, or, from the release chain, write to the consumer's anchor or crash
+  with a raw `OSError`. The configured name now decides nothing but
+  diagnostics.
+
+Each change has a regression test that fails on the commit before it, and
+the refusal texts of inputs that already refused are unchanged.
+
 ## 0.6.2
 
 One widening, in the consumer's hands: an anchor can pin more than one

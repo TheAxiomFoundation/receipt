@@ -36,9 +36,12 @@ interrupted the run, and that is not a verdict about the corpus.
 
 from __future__ import annotations
 
+import codecs
 import hashlib
+import io
 import pathlib
 import tempfile
+import tokenize
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -81,6 +84,24 @@ TIER_MEANING = {
 
 class VerifySpecError(ValueError):
     """The loaded verification spec is missing, malformed, or not a spec."""
+
+
+def _declared_source_encoding(source: bytes) -> str | None:
+    """Return the codec a PEP 263 declaration in ``source`` names, if any.
+
+    CPython's compiler translates ``\r\n`` and a lone ``\r`` to ``\n``
+    before it looks for the declaration on the first two lines, and
+    :func:`tokenize.detect_encoding` does not, so the same translation is
+    applied first. ``None`` means the declaration is one the compiler itself
+    refuses; compiling the bytes then reports that refusal in its own words.
+    """
+
+    translated = source.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    try:
+        encoding, _lines = tokenize.detect_encoding(io.BytesIO(translated).readline)
+    except SyntaxError:
+        return None
+    return codecs.lookup(encoding).name
 
 
 def _exception_detail(exc: BaseException) -> str:
@@ -311,6 +332,11 @@ def load_spec(
     by construction. When ``expect_sha256`` is supplied, its comparison happens
     immediately after hashing and before either compiling or executing those
     bytes; a mismatched spec therefore has no opportunity to run.
+
+    The bytes must also be the UTF-8 text a reviewer reads: a PEP 263
+    declaration of any other source encoding is refused, and the program
+    executed is the one that text compiles to, so no declaration can turn
+    what reads as a comment into code.
     """
 
     import types
@@ -347,11 +373,35 @@ def load_spec(
             f"spec {digest} is not the expected spec {expect_sha256}"
         )
 
+    # The pin binds bytes, and a reviewer reads those bytes as UTF-8 text. A
+    # PEP 263 declaration naming another codec (``raw_unicode_escape``,
+    # ``utf-7``) makes the compiler execute a different program than the one
+    # read: an escaped newline in what reads as a comment becomes code. Such
+    # a declaration is refused, and the program executed must be the one the
+    # UTF-8 text compiles to, which also covers a declaration the check above
+    # does not find where the compiler does.
+    declared = _declared_source_encoding(source)
+    if declared is not None and declared not in ("utf-8", "utf-8-sig"):
+        raise VerifySpecError(
+            f"spec declares source encoding {declared}; a spec must be UTF-8 so "
+            f"it executes as the text a reviewer reads: {spec_path}"
+        )
+
     module = types.ModuleType("_receipt_consumer_spec")
     module.__file__ = str(spec_path)
+    code = None
     try:
         code = compile(source, str(spec_path), "exec")
-        exec(code, module.__dict__)  # noqa: S102 - the audited repo's own pins
+        # Compiling the decoded text ignores any declaration. Where the bytes
+        # compiled, their UTF-8 reading must compile to the same program.
+        try:
+            text_code = compile(source.decode("utf-8-sig"), str(spec_path), "exec")
+        except (UnicodeDecodeError, SyntaxError, ValueError):
+            text_code = None
+        if text_code != code:
+            code = None
+        else:
+            exec(text_code, module.__dict__)  # noqa: S102 - the audited repo's own pins
     except KeyboardInterrupt:  # the operator's interrupt, never a verdict
         raise
     except BaseException as exc:  # noqa: BLE001 - any failure here is fail-closed
@@ -365,6 +415,11 @@ def load_spec(
         raise VerifySpecError(
             f"spec module raised on load: {spec_path}: {_exception_detail(exc)}"
         ) from exc
+    if code is None:
+        raise VerifySpecError(
+            "spec does not compile to the program its UTF-8 text reads as; "
+            f"a source encoding declaration changed it: {spec_path}"
+        )
 
     candidate = getattr(module, "SPEC", None)
     if candidate is None:
