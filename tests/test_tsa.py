@@ -8813,3 +8813,68 @@ def test_a_bare_record_filename_without_records_is_refused(
     monkeypatch.chdir(tree.record.parent)
     with pytest.raises(TsaError, match="cannot infer the records root"):
         getattr(tsa_module, entry)(pathlib.Path(tree.record.name), spec=tree.spec)
+
+
+def test_an_unavailable_supplemental_outcome_satisfies_a_new_authority(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """0.6.2 review, L2 finding 5: the rule requires the outcome, not an answer.
+
+    A pending bundle that adds a new authority needs a supplemental outcome
+    for it before the transition activates. An outcome declaring the new
+    authority unavailable, with a reason, meets that requirement -- the
+    ported baseline's behaviour (brier ``verify_record_chain.py``), kept for
+    equivalence -- so the transition activates on the active authority's
+    token alone. The docstrings said the outcome had to show that whoever
+    holds the new key answered; they now say what the rule requires.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    (tree.records / "trust" / beta.tsa.root_pem.name).write_bytes(
+        beta.tsa.root_pem.read_bytes()
+    )
+    reference, spec = add_bundle_version(tree, [alpha, beta], version=2)
+    tree = dataclasses.replace(tree, spec=spec)
+    second = add_record(
+        tree, [alpha], name="record-0002.json", observation="carries v2",
+        updates=[reference],
+    )
+    sidecar = second.with_suffix(".witness.json")
+    payload = json.loads(sidecar.read_text())
+    payload["supplementalOutcomes"] = [
+        {
+            "role": "pending_trust_bundle",
+            "status": "unavailable",
+            "reason": "beta did not answer",
+            "trustBundleId": reference["bundleId"],
+            "trustBundlePath": reference["path"],
+            "trustBundleSha256": reference["sha256"],
+            "tsaAnchorId": beta.anchor_id,
+            "tsa": beta.endpoint,
+        }
+    ]
+    sidecar.write_bytes(canonical_bytes(payload) + b"\n")
+
+    active = {BUNDLE_LOGICAL: tree.reference}
+    pending: list[dict[str, Any]] = []
+    for path in (tree.record, second):
+        step = tsa_module.verify_witness_step(
+            path,
+            spec=spec,
+            records=tree.records,
+            trusted_bundles=dict(active),
+            prior_pending_updates=list(pending),
+        )
+        pending.extend(step.trust_bundle_updates)
+        assert step.evidence.status == "available"
+        assert step.evidence.supplemental_tokens == ()
+        tsa_module.activate_trust_bundles(active, pending)
+        pending.clear()
+    assert tsa_module.preferred_active_trust_bundle(active)["bundleId"] == (
+        reference["bundleId"]
+    )
+    documented = " ".join((tsa_module.__doc__ or "").split())
+    assert "declared unavailable with a reason, which the ported rule accepts" in (
+        documented
+    )

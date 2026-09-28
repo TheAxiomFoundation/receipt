@@ -62,8 +62,11 @@ with disjoint signers does not and stays allowed (one check on the anchors
 covers the identities the spec scopes to the bundle as well, whose signer
 sets each anchor's has just been required to equal); a pending bundle anchor
 reusing an active anchor ID under a different code-pinned root, which is a
-new authority and so must carry a supplemental outcome before the transition
-can activate it -- the ported supplemental-outcome refusal, reaching a case
+new authority and so must carry a supplemental outcome -- available, or
+declared unavailable with a reason, which the ported rule accepts exactly as
+the baseline does -- before the transition can activate it (the outcome must
+be present; that the new key answered is shown only when it is available) --
+the ported supplemental-outcome refusal, reaching a case
 the baseline let through because it took the ID alone for the identity,
 while a pending anchor carrying every signer one active authority's
 equivalence class allows today and no signer that class has never held is
@@ -3725,9 +3728,12 @@ def _supplemental_candidates(
     therefore a key that rotation superseded.
 
     Nor may an anchor that is partly one thing and partly another simply be
-    treated as new: the supplemental outcome is supposed to show that whoever
-    holds the new key answered, and an anchor that also allows an active key
-    can satisfy it with a stamp by the authority the chain already trusts.
+    treated as new: an available supplemental outcome is supposed to show that
+    whoever holds the new key answered, and an anchor that also allows an
+    active key can satisfy it with a stamp by the authority the chain already
+    trusts.  (An outcome declared unavailable, with a reason, also satisfies
+    the requirement, as it does in the ported baseline: the rule requires the
+    outcome to be present, not the new key to have answered.)
     Neither reading is true of it, so it is refused and the producer is told
     what to do about it: a rotation belongs under the active ID and root, and
     a new authority belongs in an anchor whose signers are its own.  A pending
