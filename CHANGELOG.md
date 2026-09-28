@@ -64,8 +64,12 @@ present in 0.6.1.
   the command then verified that repository's commit and tree, exiting 0,
   while the clone's own rule files went unchecked. Pinning the spec and the
   anchor set did not catch it, because the other repository can carry the
-  same spec and anchors. An auditor can now conclude that a PASS without
-  `--root` is about the repository the named spec lies in. `--root` is
+  same spec and anchors. It also refuses when the spec path, resolved, is not
+  the file the walk names below that top level, which a `..` after a link in
+  the supplied path can cause: `the spec's path resolves to a file other than
+  the one it names below its repository top level; supply --root: <path>`. An
+  auditor can now conclude that a PASS without `--root` is about the
+  repository the named spec lies in, with that spec loaded. `--root` is
   unchanged, and so is every run whose spec path crosses no symlink at or
   below the top level; links above the top level are not examined, but a
   checkout named through a link to its top level itself now refuses and needs
