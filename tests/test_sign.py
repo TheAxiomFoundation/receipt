@@ -1942,14 +1942,17 @@ def test_forced_openssl_path_refuses_what_the_cryptography_path_refuses(
         ) == ("accepted", "")
 
 
-def test_forced_openssl_path_verifies_a_signature_over_the_empty_message(
+def test_forced_openssl_path_names_why_it_cannot_verify_the_empty_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """0.6.2 review, L7 finding 6: ``pkeyutl -rawin`` cannot take zero bytes.
 
     The fallback refused a valid signature over ``b""`` as "signature
     verification failed", blaming the signature for a tool limit, while the
-    cryptography path accepted it.
+    cryptography path accepted it. No OpenSSL command the fallback can rely
+    on verifies the empty message (``dgst -verify`` did with OpenSSL 3.6 and
+    refused a valid signature on the CI runners), so it still refuses, on
+    every version, and says why.
     """
 
     if shutil.which("openssl") is None:
@@ -1957,34 +1960,39 @@ def test_forced_openssl_path_verifies_a_signature_over_the_empty_message(
     private_key_pem, public_key_pem = generate_signing_keypair()
     _, other_public_key_pem = generate_signing_keypair()
     signature = sign_payload(private_key_pem, b"", domain=b"")
-    cases = {
-        "valid": lambda: _verify(b"", signature, public_key_pem, pin=None),
-        "wrong_key": lambda: _verify(b"", signature, other_public_key_pem, pin=None),
-        "zero_signature": lambda: _verify(b"", bytes(64), public_key_pem, pin=None),
-    }
-    crypto = {name: _outcome(call) for name, call in cases.items()}
-    monkeypatch.setattr(sign_module, "CRYPTOGRAPHY_AVAILABLE", False)
-    fallback = {name: _outcome(call) for name, call in cases.items()}
-    assert fallback == crypto
-    assert crypto["valid"] == ("accepted", "")
-    assert crypto["wrong_key"] == (
-        "refused",
-        "producer Ed25519 signature verification failed for artifact.sig",
+    assert _outcome(lambda: _verify(b"", signature, public_key_pem, pin=None)) == (
+        "accepted",
+        "",
     )
+    monkeypatch.setattr(sign_module, "CRYPTOGRAPHY_AVAILABLE", False)
+    reason = (
+        "producer Ed25519 signature over an empty message for artifact.sig "
+        "cannot be verified without the cryptography package"
+    )
+    for key in (public_key_pem, other_public_key_pem):
+        for candidate in (signature, bytes(64)):
+            assert _outcome(lambda: _verify(b"", candidate, key, pin=None)) == (
+                "refused",
+                reason,
+            )
+    # A pin mismatch is still reported first, as on the cryptography path.
+    assert _outcome(
+        lambda: _verify(b"", signature, other_public_key_pem, pin=_spki_pin(public_key_pem))
+    )[1].startswith("producer public-key SPKI is not code-pinned")
 
 
 def test_forced_openssl_path_agrees_with_cryptography_over_short_payloads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Differential over the payload sizes the empty-message case sat at the
-    edge of: every size, signature and tamper answers the same on both
-    paths (the lane's counterexample was ``payload=b"", tamper="none"``)."""
+    """Differential over the payload sizes beside the empty-message edge:
+    every size from one byte up, signature and tamper answers the same on
+    both paths. The empty message is the test above."""
 
     if shutil.which("openssl") is None:
         pytest.skip("openssl is not installed")
     private_key_pem, public_key_pem = generate_signing_keypair()
     calls: dict[tuple[int, str], Callable[[], None]] = {}
-    for size in (0, 1, 2, 3, 31, 32, 33, 64):
+    for size in (1, 2, 3, 31, 32, 33, 64):
         payload = bytes((index * 37 + 11) % 256 for index in range(size))
         signature = sign_payload(private_key_pem, payload, domain=b"")
         flipped = bytes([signature[0] ^ 1]) + signature[1:]

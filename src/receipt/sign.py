@@ -212,34 +212,31 @@ def _verify_producer_signature_with_openssl(
                     f"{computed_spki_sha256}"
                 )
 
-        if payload:
-            command = [
-                "pkeyutl",
-                "-verify",
-                "-pubin",
-                "-inkey",
-                str(public_key_path),
-                "-rawin",
-                "-in",
-                str(manifest_path),
-                "-sigfile",
-                str(signature_path),
-            ]
-        else:
+        if not payload:
             # ``pkeyutl -rawin`` cannot allocate a zero-byte one-shot buffer,
-            # so a valid signature over the empty message was refused as
-            # "signature verification failed" (0.6.2 review, L7 finding 6).
-            # ``dgst -verify`` runs the same one-shot Ed25519 verification
-            # and accepts an empty input; the key is already known to be an
-            # Ed25519 SPKI above.
-            command = [
-                "dgst",
-                "-verify",
-                str(public_key_path),
-                "-signature",
-                str(signature_path),
-                str(manifest_path),
-            ]
+            # and ``dgst -verify`` verified an empty message with OpenSSL 3.6
+            # but refused a valid one on the CI runners' OpenSSL, so no command
+            # this fallback can rely on verifies the empty message. It
+            # was refused as "signature verification failed", blaming the
+            # signature for the tool (0.6.2 review, L7 finding 6). It is still
+            # refused, on every OpenSSL, with the reason that is true; the
+            # cryptography path verifies it.
+            raise SignError(
+                f"producer Ed25519 signature over an empty message for {label} "
+                "cannot be verified without the cryptography package"
+            )
+        command = [
+            "pkeyutl",
+            "-verify",
+            "-pubin",
+            "-inkey",
+            str(public_key_path),
+            "-rawin",
+            "-in",
+            str(manifest_path),
+            "-sigfile",
+            str(signature_path),
+        ]
         try:
             _producer_openssl_binary(
                 command,
