@@ -3000,6 +3000,47 @@ class TreeSnapshot:
         self._state.attribute_cache[path] = rules
         return rules
 
+    def _folded_attribute_names(
+        self,
+        directory: tuple[bytes, ...],
+        cache: dict[bytes, tuple[bytes, ...]],
+    ) -> tuple[bytes, ...]:
+        """The entry in ``directory`` a case-insensitive checkout reads as
+        ``.gitattributes``: at most one name, whose ASCII fold is that name.
+
+        Two such entries refuse. A checkout onto a case-insensitive
+        filesystem writes both to one directory entry, and which bytes it
+        keeps is the order Git happens to write them in, not the tree.
+        """
+
+        key = b"/".join(directory)
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+        if directory:
+            raw = self._raw_entry_at(directory)
+            if raw is None or raw.mode != b"40000":
+                cache[key] = ()
+                return ()
+            tree_oid = raw.oid
+        else:
+            tree_oid = self.tree
+        records = self._tree_object(tree_oid)
+        names = tuple(
+            record.name
+            for record in records
+            if record.name.lower() == b".gitattributes"
+        )
+        if len(names) > 1:
+            where = _tree_path_decode(key) if key else "the root"
+            spelled = ", ".join(_tree_path_decode(name) for name in names)
+            raise SnapshotError(
+                f"attribute files {spelled} in {where} are one file on a "
+                "case-insensitive checkout"
+            )
+        cache[key] = names
+        return names
+
     def _attribute_step(self) -> None:
         self._charge_verification(
             "attribute_match_work",
@@ -3025,7 +3066,14 @@ class TreeSnapshot:
         with last-rule-wins precedence in each reading; a transform in either
         reading refuses, regardless of repository configuration. Git uses
         ``WM_CASEFOLD`` on case-insensitive clones, so the folded reading also
-        catches transforms an exact reading would miss. An unsupported
+        catches transforms an exact reading would miss. The folded reading
+        folds the attributes file's own name as well: a case-insensitive
+        checkout finds ``.GITATTRIBUTES`` when Git asks for
+        ``.gitattributes``, and applies its transforms (0.6.2 review, L3
+        finding 3). So in that reading each directory's attributes file is
+        the one entry whose name ASCII-folds to ``.gitattributes``, and two
+        such entries in one directory refuse, because which one a checkout
+        keeps is not something the tree decides. An unsupported
         ``core.ignoreCase`` boolean still refuses at selection. No non-tree
         attribute source is consulted.
         """
@@ -3058,13 +3106,24 @@ class TreeSnapshot:
         # Keep the readings separate so a fold-only reset cannot cancel an
         # exact transforming rule before the refusal is decided.
         folded_rules: dict[int, _AttributeRule] = {}
+        folded_names: dict[bytes, tuple[bytes, ...]] = {}
         for path_bytes, parts in unique.items():
             readings: list[dict[str, str]] = []
             for fold in (False, True):
                 final: dict[str, str] = {}
                 for depth in range(len(parts)):
-                    attribute_parts = (*parts[:depth], b".gitattributes")
-                    rules = self._attribute_rules(attribute_parts)
+                    if fold:
+                        names = self._folded_attribute_names(
+                            parts[:depth], folded_names
+                        )
+                        rules = (
+                            self._attribute_rules((*parts[:depth], names[0]))
+                            if names
+                            else ()
+                        )
+                    else:
+                        attribute_parts = (*parts[:depth], b".gitattributes")
+                        rules = self._attribute_rules(attribute_parts)
                     relative = parts[depth:]
                     if fold:
                         relative = tuple(segment.lower() for segment in relative)
