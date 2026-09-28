@@ -8831,3 +8831,179 @@ def test_a_gentime_finer_than_a_microsecond_is_refused_not_rounded(text: str) ->
         "RFC 3161 genTime is finer than a microsecond, which this verifier "
         f"cannot represent exactly: {text!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Token bytes that used to crash the parser before any signature was checked
+# (full Opus 5.5 review of 0.6.2, L2 F2)
+
+
+def der_length(size: int) -> bytes:
+    if size < 0x80:
+        return bytes([size])
+    encoded = size.to_bytes((size.bit_length() + 7) // 8, "big")
+    return bytes([0x80 | len(encoded)]) + encoded
+
+
+def der(tag: int, body: bytes) -> bytes:
+    return bytes([tag]) + der_length(len(body)) + body
+
+
+def oid_body(arcs: Sequence[int]) -> bytes:
+    """DER content octets of an OBJECT IDENTIFIER, minimal base-128."""
+
+    encoded = b""
+    for value in [arcs[0] * 40 + arcs[1], *arcs[2:]]:
+        chunk = [value & 0x7F]
+        value >>= 7
+        while value:
+            chunk.append(0x80 | (value & 0x7F))
+            value >>= 7
+        encoded += bytes(reversed(chunk))
+    return encoded
+
+
+def tst_info_der(*, policy: bytes, digest: bytes, gen_time: bytes) -> bytes:
+    algorithm = der(0x30, der(0x06, oid_body([2, 16, 840, 1, 101, 3, 4, 2, 1])) + b"\x05\x00")
+    imprint = der(0x30, algorithm + der(0x04, digest))
+    return der(
+        0x30,
+        der(0x02, b"\x01")
+        + der(0x06, policy)
+        + imprint
+        + der(0x02, b"\x07")
+        + der(0x18, gen_time),
+    )
+
+
+def signed_response(tst_info: bytes, authority: LocalTsa, directory: pathlib.Path) -> bytes:
+    """A granted TimeStampResp whose token CMS-signs ``tst_info`` with the
+    authority's own key: the bytes OpenSSL's ``ts -reply`` extraction reads."""
+
+    content = directory / "tst-info.der"
+    content.write_bytes(tst_info)
+    token = directory / "token.der"
+    subprocess.run(
+        [
+            "openssl", "cms", "-sign", "-binary", "-nodetach",
+            "-in", str(content), "-econtent_type", "1.2.840.113549.1.9.16.1.4",
+            "-signer", str(authority.signer_pem),
+            "-inkey", str(authority.directory / "signer.key"),
+            "-outform", "DER", "-out", str(token), "-md", "sha256",
+        ],
+        check=True,
+        capture_output=True,
+        env={**os.environ, "OPENSSL_CONF": "/dev/null"},
+    )
+    return der(0x30, der(0x30, der(0x02, b"\x00")) + token.read_bytes())
+
+
+def replace_token(tree: WitnessTree, anchor: LocalAnchor, data: bytes) -> None:
+    """Write ``data`` as ``anchor``'s token and make the sidecar agree with it."""
+
+    tree.tokens[anchor.anchor_id].write_bytes(data)
+    digest = sha256_bytes(data)
+
+    def refresh(payload: dict[str, Any]) -> None:
+        for outcome in payload.get("anchorOutcomes", [payload]):
+            if outcome.get("tsaAnchorId") == anchor.anchor_id:
+                outcome["tokenSha256"] = digest
+
+    rewrite_witness(tree, refresh)
+
+
+@pytest.mark.parametrize(
+    "gen_time",
+    [
+        b"20261301000000Z",  # month 13
+        b"20260230000000Z",  # February 30th
+        b"20261231235960Z",  # a leap second
+        b"00000101000000Z",  # year 0
+        b"20260927240000Z",  # hour 24
+    ],
+)
+def test_a_token_whose_gentime_is_no_calendar_instant_is_refused_by_name(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...], gen_time: bytes
+) -> None:
+    """Fourteen digits and a Z match the genTime grammar and still name no
+    instant. The parse runs on the unauthenticated extraction, before either
+    OpenSSL verification, so these bytes need no key: patching them into a
+    genuine response (and the sidecar's digest to match) used to end the
+    verification with ``ValueError`` from ``strptime`` instead of a refusal.
+    """
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    token = tree.tokens[alpha.anchor_id].read_bytes()
+    found = re.search(rb"\x18\x0f(\d{14}Z)", token)
+    assert found is not None
+    replace_token(tree, alpha, token[: found.start(1)] + gen_time + token[found.end(1) :])
+
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree)
+    assert str(caught.value) == f"invalid RFC 3161 genTime: {gen_time.decode()!r}"
+
+
+def test_a_token_whose_policy_oid_has_an_oversized_arc_is_refused_by_name(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """A policy OID with one 2,100-octet subidentifier is DER OpenSSL's
+    ``ts -reply`` accepts. Its decimal form has more than 4,300 digits, which
+    the interpreter refuses to write, so it escaped as ``ValueError``. It is
+    now refused by name; a 1,000-octet arc, which decodes, still reaches the
+    existing policy refusal."""
+
+    alpha = local_anchors[0]
+
+    def run(octets: int, where: pathlib.Path) -> str:
+        tree = build_witness_tree(where, local_anchors[:1])
+        record_digest = bytes.fromhex(sha256_bytes(tree.record.read_bytes()))
+        policy = bytes([0x2B]) + b"\xff" * octets + b"\x7f"
+        response = signed_response(
+            tst_info_der(policy=policy, digest=record_digest, gen_time=b"20260927120000Z"),
+            alpha.tsa,
+            where,
+        )
+        replace_token(tree, alpha, response)
+        with pytest.raises(TsaError) as caught:
+            verify_tree(tree)
+        return str(caught.value)
+
+    assert run(2100, tmp_path / "huge") == "oversized OID subidentifier in RFC 3161 token"
+    decodable = run(1000, tmp_path / "large")
+    assert decodable.startswith("RFC 3161 policy '1.3.")
+    assert decodable.endswith(f"is not allowed for TSA anchor {alpha.anchor_id!r}")
+
+
+def test_an_oid_arc_decodes_up_to_the_interpreters_digit_limit() -> None:
+    """The bound is exactly where writing the arc out would fail by default:
+    an arc of 4,300 decimal digits decodes, the next integer is refused. That
+    holds for the second arc too, whose subidentifier is the first one read
+    and carries 80 more than the arc written under 2."""
+
+    largest = 10**4300 - 1
+    assert _decode_oid(oid_body([1, 3, largest])) == f"1.3.{largest}"
+    with pytest.raises(TsaError, match="^oversized OID subidentifier in RFC 3161 token$"):
+        _decode_oid(oid_body([1, 3, largest + 1]))
+    # 2.<arc>: the first subidentifier is 80 + arc, so arcs just under the
+    # bound read subidentifiers of 10**4300 to 10**4300 + 79.
+    for arc in (largest - 79, largest - 1, largest):
+        assert _decode_oid(oid_body([2, arc])) == f"2.{arc}"
+    with pytest.raises(TsaError, match="^oversized OID subidentifier in RFC 3161 token$"):
+        _decode_oid(oid_body([2, largest + 1]))
+
+
+def test_an_oversized_oid_arc_is_refused_under_a_lowered_int_string_limit() -> None:
+    """A process may lower ``sys.set_int_max_str_digits`` below the default;
+    the decode then refuses rather than letting ``str()`` raise."""
+
+    import sys
+
+    arc = 10**700
+    previous = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(640)
+    try:
+        with pytest.raises(TsaError, match="^oversized OID subidentifier in RFC 3161 token$"):
+            _decode_oid(oid_body([1, 3, arc]))
+    finally:
+        sys.set_int_max_str_digits(previous)

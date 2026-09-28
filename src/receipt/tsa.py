@@ -1323,6 +1323,12 @@ def _read_der_tlv(data: bytes, offset: int) -> tuple[int, bytes, int]:
     return tag, data[offset:end], end
 
 
+#: The first arc value the decoder refuses: the smallest integer of 4,301
+#: decimal digits, one past what CPython's default
+#: ``sys.get_int_max_str_digits()`` will write out.
+_OID_ARC_CEILING = 10**4300
+
+
 def _decode_oid(data: bytes) -> str:
     if not data:
         raise TsaError("empty policy OID in RFC 3161 token")
@@ -1338,6 +1344,18 @@ def _decode_oid(data: bytes) -> str:
     continuation = False
     for byte in data:
         current = (current << 7) | (byte & 0x7F)
+        # Every arc is written out in decimal below, and the interpreter
+        # refuses to write an integer of more than 4,300 digits: a policy OID
+        # with one 2,100-octet subidentifier escaped as that ValueError,
+        # before any signature was checked.  Refused here, as soon as the
+        # value crosses the bound, so the decode stops early.  The bound is
+        # on the arc written, not the subidentifier read: the first
+        # subidentifier is written as ``first - 80`` once it reaches 80, so it
+        # may itself reach the ceiling plus 79.  Every arc that decoded
+        # before therefore decodes the same.
+        ceiling = _OID_ARC_CEILING + (80 if not subidentifiers else 0)
+        if current >= ceiling:
+            raise TsaError("oversized OID subidentifier in RFC 3161 token")
         continuation = bool(byte & 0x80)
         if not continuation:
             subidentifiers.append(current)
@@ -1352,14 +1370,36 @@ def _decode_oid(data: bytes) -> str:
     else:
         values = [2, first - 80]
     values.extend(subidentifiers[1:])
-    return ".".join(str(value) for value in values)
+    try:
+        return ".".join(str(value) for value in values)
+    except ValueError as exc:
+        # Only a process that lowered its own int-string limit below the
+        # interpreter's default reaches this; the bytes are refused all the same.
+        raise TsaError("oversized OID subidentifier in RFC 3161 token") from exc
 
 
 def _parse_generalized_time(value: str) -> datetime:
     match = re.fullmatch(r"(\d{14})(?:\.(\d+))?Z", value)
     if not match:
         raise TsaError(f"unsupported RFC 3161 genTime: {value!r}")
-    parsed = datetime.strptime(match.group(1), "%Y%m%d%H%M%S").replace(tzinfo=UTC)
+    # These bytes come from the unauthenticated `-nosigs` extraction, so the
+    # calendar is checked here and refused by name: month 13, February 30th,
+    # a leap second or year 0 used to escape as strptime's ValueError before
+    # any signature was checked.  Fixed-width fields, which is also the only
+    # split strptime accepted for fourteen digits.
+    digits = match.group(1)
+    try:
+        parsed = datetime(
+            int(digits[0:4]),
+            int(digits[4:6]),
+            int(digits[6:8]),
+            int(digits[8:10]),
+            int(digits[10:12]),
+            int(digits[12:14]),
+            tzinfo=UTC,
+        )
+    except ValueError as exc:
+        raise TsaError(f"invalid RFC 3161 genTime: {value!r}") from exc
     fraction = match.group(2)
     if fraction:
         if fraction[6:].strip("0"):
