@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import itertools
+import os
 import pathlib
 import shutil
 import subprocess
@@ -353,6 +354,133 @@ def test_forced_openssl_path_matches_stable_crypto_outcomes(
     )
     captured = capfd.readouterr()
     assert (captured.out, captured.err) == ("", "")
+
+
+def _fallback_verdict(
+    payload: bytes, signature: bytes, public_key_pem: bytes, filename: str, *, pin: str | None
+) -> str:
+    try:
+        verify_signature_bytes(
+            payload,
+            signature,
+            public_key_pem,
+            public_key_filename=filename,
+            spki_sha256=pin,
+            label="0001-x.producer.sig",
+        )
+    except SignError as exc:
+        return f"REFUSE {exc}"
+    return "ACCEPT"
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["manifest.json", "anchors/manifest.json", "/tmp/elsewhere/manifest.json"],
+)
+@pytest.mark.parametrize("pinned", [True, False])
+def test_openssl_fallback_verifies_the_payload_whatever_the_key_is_named(
+    monkeypatch: pytest.MonkeyPatch, filename: str, pinned: bool
+) -> None:
+    """A key file named like the payload must not become the signed bytes.
+
+    The only signature here is the pinned key's signature over its own PEM
+    bytes, not over the payload.
+    """
+
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl is not installed")
+    private_key_pem, public_key_pem = generate_signing_keypair()
+    signature_over_key = sign_payload(private_key_pem, public_key_pem, domain=b"")
+    pin = _spki_pin(public_key_pem) if pinned else None
+    payload = b'{"releaseIndex": 1, "forged": true}\n'
+
+    expected = _fallback_verdict(
+        payload, signature_over_key, public_key_pem, filename, pin=pin
+    )
+    monkeypatch.setattr(sign_module, "CRYPTOGRAPHY_AVAILABLE", False)
+    actual = _fallback_verdict(
+        payload, signature_over_key, public_key_pem, filename, pin=pin
+    )
+
+    assert expected == actual == (
+        "REFUSE producer Ed25519 signature verification failed for "
+        "0001-x.producer.sig"
+    )
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["producer.sig", "empty-ca", "", "..", "keys/producer.pub", "../escape-probe.pem"],
+)
+def test_openssl_fallback_accepts_a_valid_signature_whatever_the_key_is_named(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, filename: str
+) -> None:
+    """The configured name decides nothing: no collision, crash or escape."""
+
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl is not installed")
+    private_key_pem, public_key_pem = generate_signing_keypair()
+    payload = b"payload"
+    signature = sign_payload(private_key_pem, payload, domain=b"")
+    monkeypatch.setattr(sign_module, "CRYPTOGRAPHY_AVAILABLE", False)
+    monkeypatch.setattr(sign_module.tempfile, "tempdir", str(tmp_path / "tmp"))
+    (tmp_path / "tmp").mkdir()
+
+    assert _fallback_verdict(
+        payload, signature, public_key_pem, filename, pin=_spki_pin(public_key_pem)
+    ) == "ACCEPT"
+    # Nothing was written beside the private directory.
+    assert sorted(path.name for path in (tmp_path / "tmp").iterdir()) == []
+
+
+def test_openssl_fallback_verdict_is_independent_of_the_key_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Differential, enumerated: for every configured name and every input
+    shape, the fallback's verdict equals the ``cryptography`` path's."""
+
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl is not installed")
+    private_key_pem, public_key_pem = generate_signing_keypair()
+    payload = b"payload"
+    shapes = {
+        "valid": (payload, sign_payload(private_key_pem, payload, domain=b"")),
+        "over the key": (payload, sign_payload(private_key_pem, public_key_pem, domain=b"")),
+        "other payload": (b"other", sign_payload(private_key_pem, payload, domain=b"")),
+    }
+    names = (
+        "producer-ed25519.pub", "manifest.json", "producer.sig", "empty-ca",
+        "producer-public-key.pem", "", "..", "keys/manifest.json",
+    )
+    pin = _spki_pin(public_key_pem)
+    for name in names:
+        for shape, (message, signature) in shapes.items():
+            monkeypatch.setattr(sign_module, "CRYPTOGRAPHY_AVAILABLE", True)
+            expected = _fallback_verdict(message, signature, public_key_pem, name, pin=pin)
+            monkeypatch.setattr(sign_module, "CRYPTOGRAPHY_AVAILABLE", False)
+            actual = _fallback_verdict(message, signature, public_key_pem, name, pin=pin)
+            assert actual == expected, (name, shape)
+            assert actual.startswith("ACCEPT" if shape == "valid" else "REFUSE"), (name, shape)
+
+
+def test_openssl_fallback_never_writes_to_an_absolute_configured_key_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl is not installed")
+    private_key_pem, public_key_pem = generate_signing_keypair()
+    payload = b"payload"
+    signature = sign_payload(private_key_pem, payload, domain=b"")
+    anchor = tmp_path / "producer-ed25519.pub"
+    anchor.write_bytes(public_key_pem)
+    os.utime(anchor, (1_000_000_000, 1_000_000_000))
+    monkeypatch.setattr(sign_module, "CRYPTOGRAPHY_AVAILABLE", False)
+
+    assert _fallback_verdict(
+        payload, signature, public_key_pem, str(anchor), pin=_spki_pin(public_key_pem)
+    ) == "ACCEPT"
+    assert anchor.stat().st_mtime == 1_000_000_000
+    assert anchor.read_bytes() == public_key_pem
 
 
 def test_sign_payload_cross_checks_with_openssl_cli(
