@@ -118,7 +118,8 @@ The public `receipt verify` and append-gate entries retain their refusal when
 `GIT_ALTERNATE_OBJECT_DIRECTORIES` is set. The object reader separately freezes
 its Git environment and explicitly selects the repository for its reads.
 `receipt.attest` drops every inherited `GIT_*` variable and runs git with
-`--no-replace-objects`, so its sweep reads the repository it is given.
+`--no-replace-objects` and `core.commitGraph=false`, so its sweep reads the
+repository it is given, from its commit objects.
 
 ```bash
 uv pip install receipt
