@@ -1734,3 +1734,51 @@ def test_materialize_refuses_an_unusable_destination_as_a_snapshot_error(
         ):
             with selected.materialize([""], destination, repertoire="portable"):
                 pass
+
+
+# --- 0.6.2 review, L3 finding 6: discovery refused valid roots, wrongly named
+
+
+@pytest.mark.parametrize(
+    "separator", ["\x1c", "\x0b", "\x0c", "\x85", " "],
+    ids=["FS", "VT", "FF", "NEL", "LS"],
+)
+def test_a_root_whose_name_holds_a_unicode_line_separator_is_selected(
+    tmp_path: pathlib.Path, separator: str
+) -> None:
+    """``str.splitlines`` split Git's discovery output on these too, so a
+    valid top level was refused as "repository discovery output is
+    malformed"; Git ends its lines with LF only."""
+
+    root = tmp_path / f"r{separator}x"
+    _init(root)
+    commit = _one_file_commit(root)
+    with TreeSnapshot.select(root, commit) as selected:
+        assert selected.commit == commit
+
+
+def test_a_top_level_spelled_in_another_case_is_selected(
+    tmp_path: pathlib.Path,
+) -> None:
+    """On a case-insensitive volume one directory has two spellings, and
+    ``resolve()`` keeps the caller's: ``--root ~/Code/Repo`` for
+    ``~/code/repo`` was refused as "not the top level of its repository"."""
+
+    root = tmp_path / "repo"
+    _init(root)
+    commit = _one_file_commit(root)
+    respelled = tmp_path / "REPO"
+    if not respelled.exists():
+        pytest.skip("this volume is case-sensitive")
+    with TreeSnapshot.select(respelled, commit) as selected:
+        assert selected.commit == commit
+        assert selected.blob(selected.entry("x.txt"), limit=16) == b"x\n"
+
+
+def test_a_subdirectory_is_still_not_the_top_level(tmp_path: pathlib.Path) -> None:
+    root = tmp_path / "repo"
+    _init(root)
+    _write(root, "sub/x.txt", b"x\n")
+    _commit(root)
+    with pytest.raises(SnapshotError, match="root is not the top level"):
+        TreeSnapshot.select(root / "sub")
