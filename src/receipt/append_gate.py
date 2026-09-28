@@ -18,7 +18,7 @@ import re
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from receipt.canonical import canonical_sha256
@@ -83,6 +83,19 @@ class AppendGateVerdict:
     base_tree: str | None
     object_format: str
     name_repertoire: str
+
+
+def _shown(value: Any) -> str:
+    """Row-derived text as a refusal may quote it: unprintable characters
+    escaped, printable text unchanged."""
+
+    text = value if type(value) is str else str(value)
+    if text.isprintable():
+        return text
+    return "".join(
+        character if character.isprintable() else repr(character)[1:-1]
+        for character in text
+    )
 
 
 class AppendError(ValueError):
@@ -597,6 +610,65 @@ def check_prefix_anchored_to_base(
                 "— growing it is an explicit reviewed migration"
             )
     return int(base_prefix["prefixLineCount"])
+
+
+def _is_calendar_date(value: Any) -> bool:
+    """An ASCII ``YYYY-MM-DD`` naming a day that exists."""
+
+    if type(value) is not str or not re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value
+    ):
+        return False
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def check_appended_row_types(lines: list[str], prefix_count: int) -> None:
+    """Hold appended rows to the types their refusal texts already name.
+
+    The ported row validation reads these fields loosely, and each looseness
+    let a value through that its own refusal says is refused (0.6.2 review,
+    L6 findings 6-8): ``value: true`` passed "has no numeric value" because
+    ``bool`` subclasses ``int``; ``observed_at`` passed "has no observed_at
+    date" with fullwidth or Arabic-Indic digits (``\\d`` is Unicode) or a
+    day that does not exist; and ``source_record_id`` could be any truthy
+    JSON value, keyed through ``str()`` so that ``7`` and ``"7"`` were one
+    record -- one could supersede the other. The rows checked are the ones
+    after the frozen prefix, the post-cutover rows the binding shapes already
+    cover; a prefix row is immutable and cannot be corrected, so it keeps the
+    rule it was admitted under. Runs with the binding shapes, after every
+    pre-existing check, so no earlier refusal is pre-empted.
+    """
+
+    for number, line in enumerate(lines, start=1):
+        if number <= prefix_count:
+            continue
+        row = json.loads(line)
+        record_id = row.get("source_record_id")
+        if type(record_id) is not str:
+            raise AppendError(
+                f"appended line {number} source_record_id is not a string"
+            )
+        label = _shown(record_id)
+        if type(row.get("value")) not in (int, float):
+            raise AppendError(
+                f"appended line {number} ({label}) value is not a JSON number"
+            )
+        if not _is_calendar_date(row.get("observed_at")):
+            raise AppendError(
+                f"appended line {number} ({label}) observed_at is not an "
+                "ASCII YYYY-MM-DD calendar date"
+            )
+        version = row.get("assertionVersion")
+        supersedes = version.get("supersedes") if isinstance(version, dict) else None
+        if supersedes is not None and type(supersedes) is not str:
+            raise AppendError(
+                f"appended line {number} ({label}) assertionVersion.supersedes "
+                "is not a string"
+            )
 
 
 def check_binding_shapes(lines: list[str], prefix_count: int) -> None:
@@ -1167,6 +1239,7 @@ def _verify_selected_tree(
     )
 
     check_binding_shapes(lines, binding_boundary)
+    check_appended_row_types(lines, binding_boundary)
     if base is not None:
         check_state_modes(
             base,

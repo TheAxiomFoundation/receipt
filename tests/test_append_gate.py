@@ -2651,3 +2651,91 @@ def test_disjoint_unused_tree_anchors_agree_on_push_and_base_paths(
         "thesis-facts append check OK: 2 rows, immutable prefix 1, "
         "+0 appended vs base, release 0"
     )
+
+
+# --- 0.6.2 review, L6 findings 6-8: appended rows carry the types they name
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        pytest.param(
+            {"value": True},
+            "appended line 3 (fixture.series.observation_3) value is not a JSON number",
+            id="value-true",
+        ),
+        pytest.param(
+            {"observed_at": "２０２６-０７-０１"},
+            "appended line 3 (fixture.series.observation_3) observed_at is not an "
+            "ASCII YYYY-MM-DD calendar date",
+            id="fullwidth-digits",
+        ),
+        pytest.param(
+            {"observed_at": "٢٠٢٦-٠٧-٠١"},
+            "appended line 3 (fixture.series.observation_3) observed_at is not an "
+            "ASCII YYYY-MM-DD calendar date",
+            id="arabic-indic-digits",
+        ),
+        pytest.param(
+            {"observed_at": "2026-99-99"},
+            "appended line 3 (fixture.series.observation_3) observed_at is not an "
+            "ASCII YYYY-MM-DD calendar date",
+            id="no-such-day",
+        ),
+        pytest.param(
+            {"source_record_id": True},
+            "appended line 3 source_record_id is not a string",
+            id="id-true",
+        ),
+        pytest.param(
+            {"source_record_id": {"a": 1}},
+            "appended line 3 source_record_id is not a string",
+            id="id-object",
+        ),
+        pytest.param(
+            {"source_record_id": 7},
+            "appended line 3 source_record_id is not a string",
+            id="id-integer",
+        ),
+    ],
+)
+def test_an_appended_row_is_refused_for_a_type_its_refusals_already_name(
+    tmp_path: pathlib.Path, overrides: dict[str, Any], message: str
+) -> None:
+    """``bool`` subclasses ``int``, ``\\d`` matches every Unicode digit, the
+    date pattern had no calendar, and a record id could be any truthy value
+    keyed through ``str()`` -- so ``7`` and ``"7"`` were one record, one able
+    to supersede the other. Each passed a check whose refusal text says it
+    is refused."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate, **overrides)
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == message
+
+
+def test_a_prefix_row_keeps_the_rule_it_was_admitted_under(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The new checks apply after the frozen prefix only: an immutable row
+    cannot be corrected, so a loose prefix row keeps verifying and a clean
+    append over it passes."""
+
+    assert PREFIX_LINE_COUNT == 1
+    rows = [observation_row(1, value=True), observation_row(2)]
+    root = tmp_path / "loose-base"
+    root.mkdir()
+    write_ledger(root, rows)
+    write_prefix_manifest(root, rows)
+    releases = root / "releases"
+    releases.mkdir()
+    (releases / "README.md").write_text("fixture\n", encoding="utf-8")
+    git(root, "init", "--quiet")
+    git(root, "config", "user.email", "fixture@example.invalid")
+    git(root, "config", "user.name", "Append Gate Fixture")
+    git(root, "add", "-A")
+    git(root, "commit", "--quiet", "-m", "base ledger")
+    candidate = Candidate(root=root, base=git(root, "rev-parse", "HEAD"))
+    write_ledger(root, [*rows, observation_row(3)])
+    assert "3 rows" in run_gate(candidate)
