@@ -272,6 +272,8 @@ from receipt.verify import (
     TIER_MEANING,
     VerifyResult,
     VerifySpecError,
+    _described_exception,
+    _exception_message,
     load_spec,
     result_to_dict,
     run_verification,
@@ -1758,14 +1760,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             expect_sha256=args.expect_spec_sha256,
         )
     except VerifySpecError as exc:
-        return _refuse(as_json, "spec", str(exc), EXIT_USAGE)
+        message = _exception_message(exc)
+        return _refuse(
+            as_json,
+            "spec",
+            message if message is not None else _described_exception(exc),
+            EXIT_USAGE,
+        )
     except KeyboardInterrupt:  # the operator's interrupt, never a verdict
         raise
     except BaseException as exc:  # noqa: BLE001 - reading the spec is fail-closed
         return _refuse(
             as_json,
             "spec",
-            f"unable to read the spec: {type(exc).__name__}: {exc}",
+            f"unable to read the spec: {_described_exception(exc)}",
             EXIT_USAGE,
         )
 
@@ -1778,7 +1786,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _refuse(
             as_json,
             "root",
-            f"unable to resolve the root: {type(exc).__name__}: {exc}",
+            f"unable to resolve the root: {_described_exception(exc)}",
             EXIT_USAGE,
         )
     if not root_ok:
@@ -1802,7 +1810,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             as_json,
             "verification",
             "verification aborted, refusing to return a verdict: "
-            f"{type(exc).__name__}: {exc}",
+            f"{_described_exception(exc)}",
             EXIT_FAIL,
         )
 
@@ -1838,7 +1846,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 as_json,
                 "render",
                 "verdict could not be rendered; treat the run as unverified: "
-                f"{type(exc).__name__}: {exc}",
+                f"{_described_exception(exc)}",
                 EXIT_FAIL,
             )
     else:
@@ -1867,7 +1875,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 False,
                 "render",
                 "verdict could not be rendered; treat the run as unverified: "
-                f"{type(exc).__name__}: {exc}",
+                f"{_described_exception(exc)}",
                 EXIT_FAIL,
             )
     return EXIT_OK if result.ok else EXIT_FAIL
