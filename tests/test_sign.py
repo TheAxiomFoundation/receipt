@@ -1939,3 +1939,70 @@ def test_forced_openssl_path_refuses_what_the_cryptography_path_refuses(
         assert _outcome(
             lambda: _verify(payload, signature, public_key_pem, pin=None)
         ) == ("accepted", "")
+
+
+def test_forced_openssl_path_verifies_a_signature_over_the_empty_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """0.6.2 review, L7 finding 6: ``pkeyutl -rawin`` cannot take zero bytes.
+
+    The fallback refused a valid signature over ``b""`` as "signature
+    verification failed", blaming the signature for a tool limit, while the
+    cryptography path accepted it.
+    """
+
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl is not installed")
+    private_key_pem, public_key_pem = generate_signing_keypair()
+    _, other_public_key_pem = generate_signing_keypair()
+    signature = sign_payload(private_key_pem, b"", domain=b"")
+    cases = {
+        "valid": lambda: _verify(b"", signature, public_key_pem, pin=None),
+        "wrong_key": lambda: _verify(b"", signature, other_public_key_pem, pin=None),
+        "zero_signature": lambda: _verify(b"", bytes(64), public_key_pem, pin=None),
+    }
+    crypto = {name: _outcome(call) for name, call in cases.items()}
+    monkeypatch.setattr(sign_module, "CRYPTOGRAPHY_AVAILABLE", False)
+    fallback = {name: _outcome(call) for name, call in cases.items()}
+    assert fallback == crypto
+    assert crypto["valid"] == ("accepted", "")
+    assert crypto["wrong_key"] == (
+        "refused",
+        "producer Ed25519 signature verification failed for artifact.sig",
+    )
+
+
+def test_forced_openssl_path_agrees_with_cryptography_over_short_payloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Differential over the payload sizes the empty-message case sat at the
+    edge of: every size, signature and tamper answers the same on both
+    paths (the lane's counterexample was ``payload=b"", tamper="none"``)."""
+
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl is not installed")
+    private_key_pem, public_key_pem = generate_signing_keypair()
+    calls: dict[tuple[int, str], Callable[[], None]] = {}
+    for size in (0, 1, 2, 3, 31, 32, 33, 64):
+        payload = bytes((index * 37 + 11) % 256 for index in range(size))
+        signature = sign_payload(private_key_pem, payload, domain=b"")
+        flipped = bytes([signature[0] ^ 1]) + signature[1:]
+        tampered_payload = payload + b"\x00"
+        for tamper, arguments in {
+            "none": (payload, signature),
+            "signature": (payload, flipped),
+            "payload": (tampered_payload, signature),
+        }.items():
+            calls[(size, tamper)] = (
+                lambda arguments=arguments: _verify(
+                    *arguments, public_key_pem, pin=None
+                )
+            )
+    crypto = {key: _outcome(call) for key, call in calls.items()}
+    monkeypatch.setattr(sign_module, "CRYPTOGRAPHY_AVAILABLE", False)
+    fallback = {key: _outcome(call) for key, call in calls.items()}
+    assert fallback == crypto
+    assert all(
+        outcome[0] == ("accepted" if tamper == "none" else "refused")
+        for (_size, tamper), outcome in crypto.items()
+    )
