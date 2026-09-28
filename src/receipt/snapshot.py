@@ -3057,11 +3057,14 @@ class TreeSnapshot:
     ) -> None:
         """Evaluate the fail-closed committed-attribute subset over paths.
 
-        Only ``filter``, ``ident`` and ``working-tree-encoding`` transform raw
-        blob bytes: their set and valued states refuse, while unset, absent
-        and an explicit unspecified state are harmless. ``text`` and ``eol``
-        are accepted in every state, and the built-in ``binary`` macro expands
-        to ``-diff -merge -text``. Each path's final attribute states are
+        The refused set is ``filter``, ``ident`` and ``working-tree-encoding``:
+        their set and valued states refuse, while unset, absent and an
+        explicit unspecified state are harmless. ``text`` and ``eol`` are
+        accepted in every state, and the built-in ``binary`` macro expands to
+        ``-diff -merge -text``. That acceptance is a stated residual, not a
+        claim that they leave bytes alone: ``eol=crlf`` checks a blob's
+        ``LF`` out as ``CRLF`` (0.6.2 review, L3 finding 8), and checkout
+        fidelity is outside the verdict. Each path's final attribute states are
         computed independently under exact matching and ASCII-folded matching,
         with last-rule-wins precedence in each reading; a transform in either
         reading refuses, regardless of repository configuration. Git uses
