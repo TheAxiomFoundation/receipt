@@ -54,6 +54,66 @@ through its own words and exception classes.
 - Design record: `docs/design/0.7-m1-protected-tree-policy.md`, with the two
   review rounds beside it.
 
+## 0.6.3 (unreleased)
+
+Two refusals, each an input 0.6.2 and 0.6.1 accepted into a verdict about
+something other than what it named. Both are the high findings of the full
+review of 0.6.2, and both were already present in 0.6.1.
+
+- `receipt verify` without `--root` finds the repository from the spec's path
+  as the auditor named it, not from its resolution, and refuses when a symlink
+  lies between the spec and the nearest directory above it holding `.git`,
+  that directory included: `the spec's path crosses a symlink at or below its
+  repository top level, so the repository to verify is ambiguous; supply
+  --root: <path>`. 0.6.2 and 0.6.1 resolved the path first, so a directory
+  committed as a symlink beside the spec could move the walk into another
+  repository, and the command then verified that repository's commit and
+  tree, exiting 0, while the clone's own rule files went unchecked. Pinning
+  the spec and the anchor set did not catch it, because the other repository
+  can carry the same spec and anchors. It also refuses when the spec path,
+  resolved, is not the file the walk names below that top level, which a `..`
+  after a link in the supplied path can cause: `the spec's path resolves to a
+  file other than the one it names below its repository top level; supply
+  --root: <path>`. An auditor can now conclude that a PASS without `--root` is
+  about the repository the named spec lies in, with that spec loaded. `--root`
+  is unchanged, and so is every run whose spec path crosses no symlink at or
+  below the top level; links above the top level are not examined, but a
+  checkout named through a link to its top level itself now refuses and needs
+  `--root`. `tests/test_cli.py` checks the walk exhaustively over 512 layouts
+  (three directories between a base and the spec, each real or a link and
+  each holding `.git` or not; the base holding `.git` or not and named
+  directly or through a link; the link targets inside a repository or not):
+  the refusal is exact, a returned top level contains the spec at the path
+  named, and where nothing refuses the result resolves to the earlier walk's.
+  The earlier walk, the same in 0.6.2 and 0.6.1, named a repository other than
+  the named spec's in 140 of them.
+- `receipt.attest` sweeps the whole history of the repository it is given.
+  `enforcement_epoch`, `records_commits` and `commit_in_scope` refuse a
+  shallow repository with `shallow repositories are unsupported` and one with
+  a graft file with `repository grafts are unsupported`; every git command
+  runs with `--no-replace-objects` and `core.commitGraph=false` and with every
+  inherited `GIT_*` variable dropped; and revisions are passed after
+  `--end-of-options`. In 0.6.2 and 0.6.1 a shallow clone, the GitHub Actions
+  checkout default, made its boundary the enforcement epoch, so an unattested
+  protected-tree commit at a depth-1 clone's tip was exempt and the sweep
+  accepted it. A replace ref, an inherited `GIT_DIR`, `GIT_GRAFT_FILE` or
+  `GIT_REPLACE_REF_BASE`, an altered commit-graph file (a cache git reads
+  parents and trees from without checking them against the commits), or a
+  range git read as an option could likewise keep commits out of the sweep.
+  An auditor can now conclude that an accepted sweep saw every protected-tree
+  commit after the epoch in the named repository's own history. The 0.5.2
+  note that `receipt.attest` "runs its own git commands under the ambient
+  environment and is neither guarded nor claimed to be" no longer holds; it
+  drops the variables rather than refusing them, because it reads the
+  repository only through git, so a drop leaves one subject. Configuration
+  files are still read where git finds them. The pinned upstream verifier
+  accepts the shallow clone; `tests/test_attest_equivalence.py` records that
+  divergence against the oracle, and `tests/test_attest.py` pins the rest and
+  checks the sweep exhaustively over 64 combinations (two histories, every
+  subset of four inherited variables that can move a git read, and a replace
+  ref present or absent): the epoch and the commits in scope are the
+  reference's in every one.
+
 ## 0.6.2
 
 One widening, in the consumer's hands: an anchor can pin more than one
