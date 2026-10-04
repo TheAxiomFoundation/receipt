@@ -16,10 +16,12 @@ top level; every object operation thereafter carries an absolute ``--git-dir``
 and ``--no-replace-objects``. All inherited ``GIT_*`` variables are discarded,
 the three variables in :func:`_git_environment` are installed, and ``HOME`` is
 deliberately preserved. Repository configuration is audited without includes
-at selection and again at close. A same-owner configuration writer is not
-excluded, but changed configuration or repository-control sentinel files are
-rechecked at child boundaries and refused. A writer racing between one check
-and the following system call remains a same-owner residual.
+at selection, before every repository-addressed child an entered snapshot
+starts (the batch child, ``count-objects`` and ``fsck``), and again at close.
+A same-owner configuration writer is not excluded, but changed configuration
+or repository-control sentinel files are rechecked at those child boundaries
+and refused. A writer racing between one check and the following system call
+remains a same-owner residual.
 
 The configuration audit is scoped to the frozen :data:`GIT_COMMANDS`: private
 ``safe.directory`` setup; version, repository discovery, and configuration
@@ -306,12 +308,14 @@ class _SnapshotState:
     commit_cache: dict[str, _CommitObject]
     entry_token: object = field(default_factory=object)
     ancestry_bases: set[str] = field(default_factory=set)
+    authenticated_trees: set[str] = field(default_factory=set)
     object_store_attempted: bool = False
     attribute_cache: dict[str, tuple["_AttributeRule", ...]] = field(
         default_factory=dict
     )
     entered: bool = False
     closed: bool = False
+    close_errors: tuple[BaseException, ...] = ()
     abandoned: bool = False
     active_digest_token: object | None = None
     batch: "_BatchReader | None" = None
@@ -506,6 +510,13 @@ def _bounded_process(
         )
     except FileNotFoundError as exc:
         raise SnapshotError("git is required to read an immutable tree snapshot") from exc
+    except (OSError, ValueError) as exc:
+        # E2BIG for an argument over the kernel's limit, and an argument the
+        # filesystem encoding cannot carry, were interpreter exceptions where
+        # the contract is a SnapshotError (0.6.2 review, L3 finding 5).
+        raise SnapshotError(
+            f"cannot start git: {type(exc).__name__}: {exc}"
+        ) from exc
 
     assert process.stdout is not None
     assert process.stderr is not None
@@ -1245,6 +1256,10 @@ class _BatchReader:
             )
         except FileNotFoundError as exc:
             raise SnapshotError("git is required to read an immutable tree snapshot") from exc
+        except (OSError, ValueError) as exc:
+            raise SnapshotError(
+                f"cannot start git: {type(exc).__name__}: {exc}"
+            ) from exc
         try:
             if (
                 self._process.stdin is None
@@ -1871,11 +1886,22 @@ class TreeSnapshot:
 
         if type(revision) is not str or not revision or "\0" in revision:
             raise SnapshotError("snapshot revision must be a non-empty string without NUL")
+        try:
+            os.fsencode(revision)
+        except UnicodeEncodeError as exc:
+            # A lone high surrogate has no filesystem encoding; it reached
+            # Popen and raised UnicodeEncodeError (0.6.2 review, L3 finding 5).
+            raise SnapshotError(
+                "snapshot revision cannot be encoded as a command argument"
+            ) from exc
         if type(verify_objects) is not bool:
             raise SnapshotError("verify_objects must be a bool")
         try:
             selected_root = pathlib.Path(os.fspath(root)).resolve()
-        except (TypeError, ValueError, OSError) as exc:
+        except (TypeError, ValueError, OSError, RuntimeError) as exc:
+            # RuntimeError: Python 3.11 and 3.12 report a symlink loop from
+            # resolve() that way; 3.13 raises OSError (0.6.2 review, L3
+            # finding 5).
             raise SnapshotError(f"candidate repository path is invalid: {root!r}") from exc
         if "\n" in os.fspath(selected_root) or "\r" in os.fspath(selected_root):
             raise SnapshotError("repository top-level path contains a line break")
@@ -1942,17 +1968,34 @@ class TreeSnapshot:
                     f"{selected_root}"
                 )
             try:
-                discovery_lines = discovery.stdout.decode(
-                    "utf-8", errors="strict"
-                ).splitlines()
+                discovery_text = discovery.stdout.decode("utf-8", errors="strict")
             except UnicodeDecodeError as exc:
                 raise SnapshotError("repository discovery output is not UTF-8") from exc
+            # Git ends every line with LF and nothing else. ``splitlines``
+            # also split on VT, FF, FS, GS, RS, NEL, LS and PS, so a root
+            # whose name held one was refused as "malformed" output (0.6.2
+            # review, L3 finding 6). CR and LF in the root are refused above.
+            if not discovery_text.endswith("\n"):
+                raise SnapshotError("repository discovery output is malformed")
+            discovery_lines = discovery_text[:-1].split("\n")
             if len(discovery_lines) != 4:
                 raise SnapshotError("repository discovery output is malformed")
             top_text, git_dir_text, common_text, object_format = discovery_lines
             top_level = pathlib.Path(top_text).resolve()
             if top_level != selected_root:
-                raise SnapshotError("root is not the top level of its repository")
+                # One directory can have two spellings on a case-insensitive
+                # volume, and ``resolve`` does not normalise case: ``~/Code``
+                # for ``~/code`` was refused as "not the top level" (same
+                # finding). The same directory is the same inode; a
+                # subdirectory never is. The caller's spelling stays the
+                # selected root: the private configuration's safe.directory
+                # was written with it, and Git matched it.
+                try:
+                    same_directory = os.path.samefile(top_level, selected_root)
+                except OSError:
+                    same_directory = False
+                if not same_directory:
+                    raise SnapshotError("root is not the top level of its repository")
             git_dir = pathlib.Path(git_dir_text)
             if not git_dir.is_absolute():
                 git_dir = selected_root / git_dir
@@ -2160,6 +2203,42 @@ class TreeSnapshot:
         self._refuse_grafts_and_shallow(self.git_dir, self._state.common_dir)
         self._refuse_alternates(self.git_dir, self._state.common_dir)
 
+    def _reaudit_repository_configuration(self, global_config: pathlib.Path) -> None:
+        """Refuse repository configuration that changed since selection.
+
+        Run before every repository-addressed child an entered snapshot
+        starts -- the batch child, ``count-objects``, ``fsck`` -- and again at
+        close. It ran only at close, so a writer who changed configuration
+        after selection (``fsck.badTimezone = ignore``, say) had the batch
+        child and ``fsck`` run under it, and one who restored it before close
+        went unseen (0.6.2 review, L3 finding 7).
+        """
+
+        completed = _git_run(
+            [
+                "-C",
+                os.fspath(self._state.root),
+                "config",
+                "--list",
+                "--show-scope",
+                "--no-includes",
+                "-z",
+            ],
+            cwd=None,
+            environment=_git_environment(global_config),
+        )
+        if completed.returncode != 0:
+            raise SnapshotError(
+                f"cannot re-audit repository configuration: "
+                f"{_first_error(completed)}"
+            )
+        records = _parse_config(completed.stdout)
+        if records != self._state.config_records:
+            raise SnapshotError(
+                "repository configuration changed during verification"
+            )
+        _audit_config(records, self._state.root)
+
     def __enter__(self) -> "TreeSnapshot":
         if self._state.closed:
             raise SnapshotError("snapshot is closed")
@@ -2172,6 +2251,7 @@ class TreeSnapshot:
             global_path.write_bytes(self._state.global_config_bytes)
             global_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
             self._reaudit_repository_files()
+            self._reaudit_repository_configuration(global_path)
             batch = _BatchReader(
                 self.git_dir,
                 environment=_git_environment(global_path),
@@ -2214,30 +2294,9 @@ class TreeSnapshot:
                 closing_errors.append(caught)
             if self._state.global_config is not None:
                 try:
-                    completed = _git_run(
-                        [
-                            "-C",
-                            os.fspath(self._state.root),
-                            "config",
-                            "--list",
-                            "--show-scope",
-                            "--no-includes",
-                            "-z",
-                        ],
-                        cwd=None,
-                        environment=_git_environment(self._state.global_config),
+                    self._reaudit_repository_configuration(
+                        self._state.global_config
                     )
-                    if completed.returncode != 0:
-                        raise SnapshotError(
-                            f"cannot re-audit repository configuration: "
-                            f"{_first_error(completed)}"
-                        )
-                    records = _parse_config(completed.stdout)
-                    if records != self._state.config_records:
-                        raise SnapshotError(
-                            "repository configuration changed during verification"
-                        )
-                    _audit_config(records, self._state.root)
                 except BaseException as caught:
                     closing_errors.append(caught)
         finally:
@@ -2252,6 +2311,10 @@ class TreeSnapshot:
                 self._state.global_config = None
                 self._state.entered = False
                 self._state.closed = True
+        # Keep closure failures observable when an active body exception must
+        # retain precedence. Its notes alone do not tell the composition that
+        # every pass which read this snapshot has been invalidated.
+        self._state.close_errors = tuple(closing_errors)
         if closing_errors:
             if exc is not None:
                 for closing_error in closing_errors:
@@ -2261,6 +2324,12 @@ class TreeSnapshot:
                 for closing_error in additional:
                     primary.add_note(f"Snapshot close also failed: {closing_error}")
                 raise primary
+
+    @property
+    def close_errors(self) -> tuple[BaseException, ...]:
+        """Failures from closure, including those noted on a body exception."""
+
+        return self._state.close_errors
 
     @property
     def root(self) -> pathlib.Path:
@@ -2454,8 +2523,40 @@ class TreeSnapshot:
         self._state.tree_cache[oid] = parsed
         return parsed
 
+    def _authenticate_tree(self, oid: str) -> None:
+        """Rehash and type-bind a tree without parsing or retaining it.
+
+        The ancestry walk authenticates every root tree it reaches, but
+        parentage needs only commit payloads, so nothing it reads there is
+        consumed as content. Parsing those trees applied the reader's content
+        grammar -- a legacy ``100664`` mode Git accepts refused a true
+        ancestry with a message about a tree mode (0.6.2 review, L3 finding
+        9) -- and caching them retained about seven times their raw bytes for
+        the snapshot's lifetime, memory no budget counted (L3 finding 4).
+        Here the bytes are streamed through the object hash under the same
+        tree-byte budget and then dropped; a tree already parsed for content
+        is already authenticated.
+        """
+
+        if oid in self._state.tree_cache or oid in self._state.authenticated_trees:
+            return
+        batch = self._batch()
+        _kind, size = batch.info(oid, role="tree")
+        if self._state.work.tree_bytes + size > MAX_TREE_BYTES_TOTAL:
+            raise SnapshotError(
+                f"tree and commit bytes exceed the snapshot budget of "
+                f"{MAX_TREE_BYTES_TOTAL} bytes"
+            )
+        batch.consume(oid, role="tree", limit=MAX_TREE_OBJECT_BYTES)
+        self._charge_tree_object(size)
+        self._state.authenticated_trees.add(oid)
+
     def _commit_object(
-        self, oid: str, *, parent_budget: int | None = None
+        self,
+        oid: str,
+        *,
+        parent_budget: int | None = None,
+        parse_tree: bool = True,
     ) -> _CommitObject:
         batch = self._batch()
         cached = self._state.commit_cache.get(oid)
@@ -2487,8 +2588,12 @@ class TreeSnapshot:
                 f"{MAX_ANCESTRY_COMMITS} commits"
             )
         # Every tree line reached by the ancestry walk is authenticated even
-        # though parentage itself needs only the commit payload.
-        self._tree_object(parsed.tree)
+        # though parentage itself needs only the commit payload. The walk
+        # passes parse_tree=False: see _authenticate_tree.
+        if parse_tree:
+            self._tree_object(parsed.tree)
+        else:
+            self._authenticate_tree(parsed.tree)
         for parent in parsed.parents:
             batch.info(parent, role="commit")
         self._state.commit_cache[oid] = parsed
@@ -2803,6 +2908,7 @@ class TreeSnapshot:
             commit = self._commit_object(
                 current,
                 parent_budget=MAX_ANCESTRY_COMMITS - work.ancestry_edges,
+                parse_tree=False,
             )
             if current == base_oid:
                 self._link_verification_work(base)
@@ -2870,6 +2976,7 @@ class TreeSnapshot:
         self._state.object_store_attempted = True
         environment = _git_environment(self._state.global_config)
         self._reaudit_repository_files()
+        self._reaudit_repository_configuration(self._state.global_config)
         counted = _git_run(
             _object_arguments(self.git_dir, ["count-objects", "-v"]),
             cwd=None,
@@ -2909,6 +3016,7 @@ class TreeSnapshot:
             )
 
         self._reaudit_repository_files()
+        self._reaudit_repository_configuration(self._state.global_config)
         started = time.monotonic()
         checked = _git_run(
             _object_arguments(
@@ -3010,6 +3118,47 @@ class TreeSnapshot:
         self._state.attribute_cache[path] = rules
         return rules
 
+    def _folded_attribute_names(
+        self,
+        directory: tuple[bytes, ...],
+        cache: dict[bytes, tuple[bytes, ...]],
+    ) -> tuple[bytes, ...]:
+        """The entry in ``directory`` a case-insensitive checkout reads as
+        ``.gitattributes``: at most one name, whose ASCII fold is that name.
+
+        Two such entries refuse. A checkout onto a case-insensitive
+        filesystem writes both to one directory entry, and which bytes it
+        keeps is the order Git happens to write them in, not the tree.
+        """
+
+        key = b"/".join(directory)
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+        if directory:
+            raw = self._raw_entry_at(directory)
+            if raw is None or raw.mode != b"40000":
+                cache[key] = ()
+                return ()
+            tree_oid = raw.oid
+        else:
+            tree_oid = self.tree
+        records = self._tree_object(tree_oid)
+        names = tuple(
+            record.name
+            for record in records
+            if record.name.lower() == b".gitattributes"
+        )
+        if len(names) > 1:
+            where = _tree_path_decode(key) if key else "the root"
+            spelled = ", ".join(_tree_path_decode(name) for name in names)
+            raise SnapshotError(
+                f"attribute files {spelled} in {where} are one file on a "
+                "case-insensitive checkout"
+            )
+        cache[key] = names
+        return names
+
     def _attribute_step(self) -> None:
         self._charge_verification(
             "attribute_match_work",
@@ -3026,16 +3175,26 @@ class TreeSnapshot:
     ) -> None:
         """Evaluate the fail-closed committed-attribute subset over paths.
 
-        Only ``filter``, ``ident`` and ``working-tree-encoding`` transform raw
-        blob bytes: their set and valued states refuse, while unset, absent
-        and an explicit unspecified state are harmless. ``text`` and ``eol``
-        are accepted in every state, and the built-in ``binary`` macro expands
-        to ``-diff -merge -text``. Each path's final attribute states are
+        The refused set is ``filter``, ``ident`` and ``working-tree-encoding``:
+        their set and valued states refuse, while unset, absent and an
+        explicit unspecified state are harmless. ``text`` and ``eol`` are
+        accepted in every state, and the built-in ``binary`` macro expands to
+        ``-diff -merge -text``. That acceptance is a stated residual, not a
+        claim that they leave bytes alone: ``eol=crlf`` checks a blob's
+        ``LF`` out as ``CRLF`` (0.6.2 review, L3 finding 8), and checkout
+        fidelity is outside the verdict. Each path's final attribute states are
         computed independently under exact matching and ASCII-folded matching,
         with last-rule-wins precedence in each reading; a transform in either
         reading refuses, regardless of repository configuration. Git uses
         ``WM_CASEFOLD`` on case-insensitive clones, so the folded reading also
-        catches transforms an exact reading would miss. An unsupported
+        catches transforms an exact reading would miss. The folded reading
+        folds the attributes file's own name as well: a case-insensitive
+        checkout finds ``.GITATTRIBUTES`` when Git asks for
+        ``.gitattributes``, and applies its transforms (0.6.2 review, L3
+        finding 3). So in that reading each directory's attributes file is
+        the one entry whose name ASCII-folds to ``.gitattributes``, and two
+        such entries in one directory refuse, because which one a checkout
+        keeps is not something the tree decides. An unsupported
         ``core.ignoreCase`` boolean still refuses at selection. No non-tree
         attribute source is consulted.
         """
@@ -3068,13 +3227,24 @@ class TreeSnapshot:
         # Keep the readings separate so a fold-only reset cannot cancel an
         # exact transforming rule before the refusal is decided.
         folded_rules: dict[int, _AttributeRule] = {}
+        folded_names: dict[bytes, tuple[bytes, ...]] = {}
         for path_bytes, parts in unique.items():
             readings: list[dict[str, str]] = []
             for fold in (False, True):
                 final: dict[str, str] = {}
                 for depth in range(len(parts)):
-                    attribute_parts = (*parts[:depth], b".gitattributes")
-                    rules = self._attribute_rules(attribute_parts)
+                    if fold:
+                        names = self._folded_attribute_names(
+                            parts[:depth], folded_names
+                        )
+                        rules = (
+                            self._attribute_rules((*parts[:depth], names[0]))
+                            if names
+                            else ()
+                        )
+                    else:
+                        attribute_parts = (*parts[:depth], b".gitattributes")
+                        rules = self._attribute_rules(attribute_parts)
                     relative = parts[depth:]
                     if fold:
                         relative = tuple(segment.lower() for segment in relative)
@@ -3282,7 +3452,9 @@ class Materialization:
         selected = self._selected_entries()
         try:
             destination_stat = self._destination.lstat()
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
+            # ValueError: an embedded NUL, or a surrogate the filesystem
+            # encoding cannot carry (0.6.2 review, L3 finding 5).
             raise SnapshotError("materialization destination does not exist") from exc
         if not stat.S_ISDIR(destination_stat.st_mode) or stat.S_ISLNK(
             destination_stat.st_mode

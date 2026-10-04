@@ -135,6 +135,159 @@ JSON nested more than 128 deep is refused, including JSON 0.6.1 accepted.
   refusal texts are unchanged. This is the release-chain counterpart of the
   creation-claim fix above, found by the adversarial sweep over these fixes.
 
+Corrections from a full review of the 0.6.1 code, present in 0.6.1 and 0.6.2
+alike. Several are refusals of inputs those releases accepted; a few are inputs
+they refused for a reason that was not true.
+
+Claims corrected, with no change in behavior:
+
+- Without `--expect-spec-sha256`, the spec is the producer's code running in
+  the verifier's own process, and it can change what `receipt verify` prints
+  and the exit status. The README ("Using it", "What this verdict speaks
+  for"), the option's help text, the unpinned text verdict, and the JSON
+  `scope.notEstablished` list now say the verdict is only as good as the spec
+  the producer committed. The existing "spec's code was trusted" line and
+  entry are kept; the JSON list gains one entry.
+- `receipt.canonical`'s "one byte stream per value" covers values as
+  `json.loads` returns them, with finite floats and integers that convert to
+  finite ECMAScript Numbers; decoding `1e400` alone does not meet that range.
+  `canonical.py` stays byte-identical to its pinned
+  upstream source, so subclasses, explicit surrogate pairs and nesting past
+  the recursion limit behave as they do upstream; the README says so.
+- Retired keys verify when the caller says the material is history
+  (`allow_legacy=True`), which `verify_any_generation` takes as its default;
+  the README had said they verify "immutable history only".
+- Docstrings: a new authority's supplemental outcome may be declared
+  unavailable (the ported rule, unchanged); `eol=crlf` does transform checkout
+  bytes (accepted as a stated residual); a journal of gate rows alone is a
+  closed world of zero content files (the "genesis must bind content" branch
+  never ran and is removed); a case-only rename cannot be journalled, because
+  only an exact-spelling row lifts a tombstone.
+
+New refusals, each of an input 0.6.1 accepted or crashed on:
+
+- `receipt.tsa`: a verification time without a UTC offset (`astimezone` read
+  it as local time, so the verdict followed the process's time zone), or one
+  whose UTC instant falls outside years 1 to 9999 (was `OverflowError`); a bare
+  record filename with no `records=` (was `IndexError`). The duplicate
+  token-path rule keys on Unicode's canonical caseless match, so eleven
+  spellings APFS stores as one entry are one path to it, as every spelling
+  the old key joined still is.
+- `receipt.snapshot`: in the ASCII-folded attribute reading, the attributes
+  file is the entry whose name folds to `.gitattributes` (a case-insensitive
+  checkout applies `.GITATTRIBUTES`), and two such entries in one directory
+  refuse; repository configuration is re-audited before every Git child an
+  entered snapshot starts, not only at close; an unencodable revision, an
+  argument over the kernel's limit, a symlink-loop root and an unusable
+  materialization destination refuse as `SnapshotError`.
+- `receipt.corpus`: a journal row `json.loads` cannot decode (an integer over
+  the digit limit, nesting past the decoder's stack) and malformed
+  `CorpusSpec` set members or API arguments refuse as `CorpusError`.
+- `receipt.verify` and `receipt verify`: a close-time repository re-audit
+  failure invalidates every tree-derived pass, including when binding or
+  declaration has already raised, so a FAIL leaves no affected claim
+  established and reports the close failure; formatting a caught exception
+  can no longer raise, so a spec
+  whose exception's `__str__` exits cannot end the command with status 0.
+- `receipt.append_gate`: rows after the frozen prefix must carry a string
+  `source_record_id` and `supersedes`, a numeric (not boolean) `value`, an
+  ASCII `YYYY-MM-DD` `observed_at` naming a real day, and no repeated JSON
+  key; the frozen prefix manifest is compared as JSON values (`true` and `1.0`
+  are not `1`) and `prefixLineCount` must be a JSON integer; a gate-only
+  proposal that changes the ledger or its prefix manifest refuses whatever
+  the spec's surfaces classify; row text quoted in a refusal has unprintable
+  characters escaped (printable text, and every refusal the differential
+  harness binds, is unchanged).
+- `receipt.attest`: `AttestSpec` text fields and workflows must be exactly
+  `str`.
+- `receipt.sign`: `KeySpec` requires a `str` key_id and a fingerprint of 64
+  lowercase hex characters; presented key ids must be `str`; without
+  `cryptography`, the OpenSSL fallback refuses a key that is not an Ed25519
+  PEM public key (a DER SPKI, a private key, a P-224 key), as the primary path
+  does, and refuses a signature over the empty message, which no OpenSSL
+  command it can rely on verifies, as that rather than as a failed signature;
+  `read_producer_public_key` reads only inside the anchor directory,
+  without following links; a bytes-subclass signature's refusal names its
+  type rather than its length.
+- `receipt._names`: a portable component is at most 255 bytes, and pinned
+  suffixes must be exactly `str`.
+
+Inputs that now verify, each refused in 0.6.1 for a reason that was not true:
+
+- A repository root spelled in another case on a case-insensitive volume, or
+  whose name holds a Unicode line separator.
+- An ancestry through a commit whose root tree uses a legacy mode Git accepts:
+  walked root trees are rehashed and type-bound without the content grammar,
+  and no longer held in memory for the snapshot's lifetime.
+- A spec that defines a dataclass or pickles its own objects: the spec is
+  compiled without the loader's `__future__` flags and executed as a module
+  registered in `sys.modules`. On Python 3.11 to 3.13 a spec's module-level
+  annotations are therefore evaluated, as they are when the file runs.
+
+`verify_commit` logs the certificate's `subjectAlternativeName` that gh
+enforced, even if the caller's `buildConfigURI` is also allowlisted, and
+reads output it cannot parse as naming
+no identity; acceptance is gh's exit status, as before.
+
+
+Two refusals, each an input 0.6.2 and 0.6.1 accepted into a verdict about
+something other than what it named. Both are the high findings of the full
+review of 0.6.2, and both were already present in 0.6.1.
+
+- `receipt verify` without `--root` finds the repository from the spec's path
+  as the auditor named it, not from its resolution, and refuses when a symlink
+  lies between the spec and the nearest directory above it holding `.git`,
+  that directory included: `the spec's path crosses a symlink at or below its
+  repository top level, so the repository to verify is ambiguous; supply
+  --root: <path>`. 0.6.2 and 0.6.1 resolved the path first, so a directory
+  committed as a symlink beside the spec could move the walk into another
+  repository, and the command then verified that repository's commit and
+  tree, exiting 0, while the clone's own rule files went unchecked. Pinning
+  the spec and the anchor set did not catch it, because the other repository
+  can carry the same spec and anchors. It also refuses when the spec path,
+  resolved, is not the file the walk names below that top level, which a `..`
+  after a link in the supplied path can cause: `the spec's path resolves to a
+  file other than the one it names below its repository top level; supply
+  --root: <path>`. An auditor can now conclude that a PASS without `--root` is
+  about the repository the named spec lies in, with that spec loaded. `--root`
+  is unchanged, and so is every run whose spec path crosses no symlink at or
+  below the top level; links above the top level are not examined, but a
+  checkout named through a link to its top level itself now refuses and needs
+  `--root`. `tests/test_cli.py` checks the walk exhaustively over 512 layouts
+  (three directories between a base and the spec, each real or a link and
+  each holding `.git` or not; the base holding `.git` or not and named
+  directly or through a link; the link targets inside a repository or not):
+  the refusal is exact, a returned top level contains the spec at the path
+  named, and where nothing refuses the result resolves to the earlier walk's.
+  The earlier walk, the same in 0.6.2 and 0.6.1, named a repository other than
+  the named spec's in 140 of them.
+- `receipt.attest` sweeps the whole history of the repository it is given.
+  `enforcement_epoch`, `records_commits` and `commit_in_scope` refuse a
+  shallow repository with `shallow repositories are unsupported` and one with
+  a graft file with `repository grafts are unsupported`; every git command
+  runs with `--no-replace-objects` and `core.commitGraph=false` and with every
+  inherited `GIT_*` variable dropped; and revisions are passed after
+  `--end-of-options`. In 0.6.2 and 0.6.1 a shallow clone, the GitHub Actions
+  checkout default, made its boundary the enforcement epoch, so an unattested
+  protected-tree commit at a depth-1 clone's tip was exempt and the sweep
+  accepted it. A replace ref, an inherited `GIT_DIR`, `GIT_GRAFT_FILE` or
+  `GIT_REPLACE_REF_BASE`, an altered commit-graph file (a cache git reads
+  parents and trees from without checking them against the commits), or a
+  range git read as an option could likewise keep commits out of the sweep.
+  An auditor can now conclude that an accepted sweep saw every protected-tree
+  commit after the epoch in the named repository's own history. The 0.5.2
+  note that `receipt.attest` "runs its own git commands under the ambient
+  environment and is neither guarded nor claimed to be" no longer holds; it
+  drops the variables rather than refusing them, because it reads the
+  repository only through git, so a drop leaves one subject. Configuration
+  files are still read where git finds them. The pinned upstream verifier
+  accepts the shallow clone; `tests/test_attest_equivalence.py` records that
+  divergence against the oracle, and `tests/test_attest.py` pins the rest and
+  checks the sweep exhaustively over 64 combinations (two histories, every
+  subset of four inherited variables that can move a git read, and a replace
+  ref present or absent): the epoch and the commits in scope are the
+  reference's in every one.
+
 ## 0.6.2
 
 One widening, in the consumer's hands: an anchor can pin more than one

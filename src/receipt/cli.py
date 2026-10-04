@@ -4,8 +4,9 @@ A clone, commodity tools, one offline fail-closed verdict. No network, no
 credentials, no service to ask. The loaded spec selects every configured key
 and anchor, and its SHA-256 is printed so that configuration can be quoted.
 Those bytes become auditor-owned trust only when the auditor supplies
-``--expect-spec-sha256``; otherwise the verdict explicitly treats the spec and
-the anchor set it proposes as untrusted.
+``--expect-spec-sha256``. Otherwise the spec is the producer's code, running
+in this process: the verdict treats the anchor set it proposes as untrusted
+and says the verdict is only as good as the spec the producer committed.
 
 The output is deliberately two-part. What the command *established* is stated
 without hedging. What it *did not* establish — that any declared gate actually
@@ -241,6 +242,14 @@ The boundaries below catch ``BaseException``, because ``SystemExit`` is not an
 ``Exception``: a spec or a pass that raised one exited the interpreter with a
 status of its own choosing and printed no verdict at all. ``KeyboardInterrupt``
 is the single deliberate exception — the operator's interrupt is not a verdict.
+
+Every promise above — at most one JSON object, the module's own text as the
+last line, a status the spec cannot choose — is about this module's code. The
+boundaries stop a spec that *raises*. They cannot stop spec code, which runs
+in this process, from writing to the streams, patching this module, or leaving
+the interpreter by other means. Only ``--expect-spec-sha256`` over a spec the
+auditor has read rules that out; without it, the verdict is only as good as
+the spec the producer committed, and the verdict says so.
 """
 
 from __future__ import annotations
@@ -249,6 +258,7 @@ import argparse
 import codecs
 import io
 import json
+import os
 import pathlib
 import sys
 import unicodedata
@@ -263,6 +273,8 @@ from receipt.verify import (
     TIER_MEANING,
     VerifyResult,
     VerifySpecError,
+    _described_exception,
+    _exception_message,
     load_spec,
     result_to_dict,
     run_verification,
@@ -303,7 +315,11 @@ def _build_parser() -> argparse.ArgumentParser:
     verify.add_argument(
         "--expect-spec-sha256",
         default=None,
-        help="require the exact spec source digest before its code executes",
+        help=(
+            "require the exact spec source digest before its code executes; "
+            "without it the spec is producer code and the verdict is only as "
+            "good as the spec the producer committed"
+        ),
     )
     verify.add_argument(
         "--root",
@@ -311,7 +327,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "repository top level to verify "
-            "(default: walk upward from the spec to its repository top level)"
+            "(default: the nearest directory above the spec, as named, that "
+            "holds .git; refused if that walk crosses a symlink)"
         ),
     )
     verify.add_argument(
@@ -355,14 +372,60 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _default_root(spec_path: pathlib.Path) -> pathlib.Path:
-    """Walk up from the spec to the enclosing repository root."""
+class _DefaultRootError(Exception):
+    """The walk from the spec to its repository cannot name the verdict's subject."""
 
-    current = spec_path.resolve().parent
-    for candidate in (current, *current.parents):
+
+def _default_root(spec_path: pathlib.Path) -> pathlib.Path:
+    """Walk up from the spec, as named, to the repository top level holding it.
+
+    The walk is lexical: it climbs the parents of the path the auditor
+    supplied, made absolute and normalized, and never those of its
+    resolution. It resolved first, so a directory the producer committed as a
+    symlink beside the spec could move the walk into another repository, and
+    the command then verified that repository's commit and tree instead of
+    the clone's. Pinning the spec did not help, because the other repository
+    can carry the same spec and anchors.
+
+    The top level is the nearest directory above the spec holding ``.git``.
+    Every directory from the spec's own up to that top level, the top level
+    included, must be a real directory: a symlink there is either the
+    producer's (committed in the checkout, so it can name any repository) or,
+    for a checkout reached through a link to its top level, not
+    distinguishable from one here, and both refuse and ask for ``--root``.
+    Links above the top level are the auditor's own filesystem and are not
+    examined. The spec as loaded, resolved, must then be the file the walk
+    names below that top level, which a ``..`` after a link in the supplied
+    path can otherwise break. With no ``.git`` above the spec, the spec's own
+    directory is returned and repository discovery refuses it.
+    """
+
+    named = pathlib.Path(os.path.abspath(spec_path))
+    walked: list[pathlib.Path] = []
+    for candidate in (named.parent, *named.parent.parents):
+        walked.append(candidate)
         if (candidate / ".git").exists():
-            return candidate
-    return current
+            break
+    else:
+        return named.parent
+    for directory in walked:
+        if directory.is_symlink():
+            raise _DefaultRootError(
+                "the spec's path crosses a symlink at or below its repository "
+                "top level, so the repository to verify is ambiguous; supply "
+                f"--root: {directory}"
+            )
+    root = walked[-1]
+    # Normalizing removes a ``..`` lexically, but the spec was loaded through
+    # the operating system, which applies it after any link before it: from
+    # ``link/../spec.py`` the two name different files. The spec loaded must
+    # be the file the walk found below its top level.
+    if pathlib.Path(spec_path).resolve() != root.resolve() / named.relative_to(root):
+        raise _DefaultRootError(
+            "the spec's path resolves to a file other than the one it names "
+            f"below its repository top level; supply --root: {spec_path}"
+        )
+    return root
 
 
 #: Every code point that can move a cursor, clear a line, or split one line
@@ -839,9 +902,23 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
         )
         lines.append("  equal the verified tree.")
         if not result._spec_pinned:
+            # An unpinned spec is the producer's code, and it ran in this
+            # process: it could have changed this verdict and the exit status
+            # (L5 F2 of the 0.6.2 review). Say so in plain words rather than
+            # leave "was trusted" to read as a remark about which keys the
+            # spec chose.
             lines.append(
                 "  It does NOT establish that the spec's code was trusted."
             )
+            lines.append(
+                "  The spec is unpinned (no --expect-spec-sha256): its code ran "
+                "in this"
+            )
+            lines.append(
+                "  process and could have changed this verdict, so the verdict "
+                "is only as"
+            )
+            lines.append("  good as the spec the producer committed.")
         if not result._anchor_set_pinned:
             lines.append(
                 "  It does NOT establish that the anchor set is one the "
@@ -1731,14 +1808,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             expect_sha256=args.expect_spec_sha256,
         )
     except VerifySpecError as exc:
-        return _refuse(as_json, "spec", str(exc), EXIT_USAGE)
+        message = _exception_message(exc)
+        return _refuse(
+            as_json,
+            "spec",
+            message if message is not None else _described_exception(exc),
+            EXIT_USAGE,
+        )
     except KeyboardInterrupt:  # the operator's interrupt, never a verdict
         raise
     except BaseException as exc:  # noqa: BLE001 - reading the spec is fail-closed
         return _refuse(
             as_json,
             "spec",
-            f"unable to read the spec: {type(exc).__name__}: {exc}",
+            f"unable to read the spec: {_described_exception(exc)}",
             EXIT_USAGE,
         )
 
@@ -1747,11 +1830,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         root_ok = root.is_dir()
     except KeyboardInterrupt:  # the operator's interrupt, never a verdict
         raise
+    except _DefaultRootError as exc:
+        return _refuse(as_json, "root", str(exc), EXIT_USAGE)
     except BaseException as exc:  # noqa: BLE001 - resolving the root is fail-closed
         return _refuse(
             as_json,
             "root",
-            f"unable to resolve the root: {type(exc).__name__}: {exc}",
+            f"unable to resolve the root: {_described_exception(exc)}",
             EXIT_USAGE,
         )
     if not root_ok:
@@ -1775,7 +1860,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             as_json,
             "verification",
             "verification aborted, refusing to return a verdict: "
-            f"{type(exc).__name__}: {exc}",
+            f"{_described_exception(exc)}",
             EXIT_FAIL,
         )
 
@@ -1811,7 +1896,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 as_json,
                 "render",
                 "verdict could not be rendered; treat the run as unverified: "
-                f"{type(exc).__name__}: {exc}",
+                f"{_described_exception(exc)}",
                 EXIT_FAIL,
             )
     else:
@@ -1840,7 +1925,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 False,
                 "render",
                 "verdict could not be rendered; treat the run as unverified: "
-                f"{type(exc).__name__}: {exc}",
+                f"{_described_exception(exc)}",
                 EXIT_FAIL,
             )
     return EXIT_OK if result.ok else EXIT_FAIL

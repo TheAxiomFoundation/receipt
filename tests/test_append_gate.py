@@ -2863,7 +2863,14 @@ def test_a_content_field_past_the_bound_is_refused_by_name(
 
     assert "filters" in GATE_SPEC.assertion_content_keys
     candidate = base_repository(tmp_path)
-    _append_raw_row(candidate.root, filters=_DEEP)
+    # Construct the deep value as text: Python 3.11's encoder cannot write
+    # a 5,000-level list, so serializing _DEEP would fail before the gate.
+    row = observation_row(BASE_ROW_COUNT + 1)
+    del row["filters"]
+    _write_raw_line(
+        candidate.root,
+        jsonl_line(row)[:-1] + ',"filters":' + "[" * 5000 + "0" + "]" * 5000 + "}",
+    )
     with pytest.raises(AppendError) as caught:
         run_gate(candidate)
     assert str(caught.value).startswith(
@@ -2995,3 +3002,339 @@ def test_the_content_address_refuses_what_it_cannot_encode() -> None:
             assert expected_assertion_version_id({**row, field: falsy}, GATE_SPEC).startswith(
                 "av2:"
             )
+
+# --- 0.6.2 review, L6 findings 6-8: appended rows carry the types they name
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        pytest.param(
+            {"value": True},
+            "appended line 3 (fixture.series.observation_3) value is not a JSON number",
+            id="value-true",
+        ),
+        pytest.param(
+            {"observed_at": "２０２６-０７-０１"},
+            "appended line 3 (fixture.series.observation_3) observed_at is not an "
+            "ASCII YYYY-MM-DD calendar date",
+            id="fullwidth-digits",
+        ),
+        pytest.param(
+            {"observed_at": "٢٠٢٦-٠٧-٠١"},
+            "appended line 3 (fixture.series.observation_3) observed_at is not an "
+            "ASCII YYYY-MM-DD calendar date",
+            id="arabic-indic-digits",
+        ),
+        pytest.param(
+            {"observed_at": "2026-99-99"},
+            "appended line 3 (fixture.series.observation_3) observed_at is not an "
+            "ASCII YYYY-MM-DD calendar date",
+            id="no-such-day",
+        ),
+        pytest.param(
+            {"source_record_id": True},
+            "appended line 3 source_record_id is not a string",
+            id="id-true",
+        ),
+        pytest.param(
+            {"source_record_id": {"a": 1}},
+            "appended line 3 source_record_id is not a string",
+            id="id-object",
+        ),
+        pytest.param(
+            {"source_record_id": 7},
+            "appended line 3 source_record_id is not a string",
+            id="id-integer",
+        ),
+    ],
+)
+def test_an_appended_row_is_refused_for_a_type_its_refusals_already_name(
+    tmp_path: pathlib.Path, overrides: dict[str, Any], message: str
+) -> None:
+    """``bool`` subclasses ``int``, ``\\d`` matches every Unicode digit, the
+    date pattern had no calendar, and a record id could be any truthy value
+    keyed through ``str()`` -- so ``7`` and ``"7"`` were one record, one able
+    to supersede the other. Each passed a check whose refusal text says it
+    is refused."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate, **overrides)
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == message
+
+
+def test_a_prefix_row_keeps_the_rule_it_was_admitted_under(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The new checks apply after the frozen prefix only: an immutable row
+    cannot be corrected, so a loose prefix row keeps verifying and a clean
+    append over it passes."""
+
+    assert PREFIX_LINE_COUNT == 1
+    rows = [observation_row(1, value=True), observation_row(2)]
+    root = tmp_path / "loose-base"
+    root.mkdir()
+    write_ledger(root, rows)
+    write_prefix_manifest(root, rows)
+    releases = root / "releases"
+    releases.mkdir()
+    (releases / "README.md").write_text("fixture\n", encoding="utf-8")
+    git(root, "init", "--quiet")
+    git(root, "config", "user.email", "fixture@example.invalid")
+    git(root, "config", "user.name", "Append Gate Fixture")
+    git(root, "add", "-A")
+    git(root, "commit", "--quiet", "-m", "base ledger")
+    candidate = Candidate(root=root, base=git(root, "rev-parse", "HEAD"))
+    write_ledger(root, [*rows, observation_row(3)])
+    assert "3 rows" in run_gate(candidate)
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["top-level", "nested"])
+def test_an_appended_row_repeating_a_json_key_is_refused(
+    tmp_path: pathlib.Path, nested: bool
+) -> None:
+    """0.6.2 review, L6 finding 9: the last value won, and the address bound it.
+
+    ``json.loads`` keeps the last of two equal keys, so a row reading
+    ``"value": 3.0, ..., "value": 999.0`` was accepted and its
+    ``assertionVersion.id`` computed over 999.0, while a first-wins reader
+    of the same bytes sees 3.0 and a strict one refuses the row.
+    """
+
+    candidate = base_repository(tmp_path)
+    rows = [observation_row(number) for number in range(1, BASE_ROW_COUNT + 1)]
+    # The address is computed over the value json.loads keeps: the last one.
+    rows.append(observation_row(BASE_ROW_COUNT + 1, value=999.0))
+    lines = [jsonl_line(row) for row in rows]
+    if nested:
+        lines[-1] = lines[-1].replace(
+            '"measure":{', '"measure":{"unit":"shadowed",', 1
+        )
+        key = "unit"
+    else:
+        lines[-1] = '{"value":3.0,' + lines[-1][1:]
+        key = "value"
+    assert lines[-1].count(f'"{key}":') == 2
+    path = candidate.root / CHAIN_SPEC.state_relative
+    path.write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    assert str(refusal.value) == f"appended line 3 repeats the JSON key '{key}'"
+
+
+# --- 0.6.2 review, L6 finding 10: "exactly" means as JSON values
+
+
+def _rewrite_prefix_count(candidate: Candidate, count: object) -> None:
+    path = candidate.root / CHAIN_SPEC.prefix_relative
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["prefixLineCount"] = count
+    path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("count", [True, 1.0], ids=["true", "float"])
+def test_a_prefix_count_equal_only_in_python_is_refused(
+    tmp_path: pathlib.Path, count: object
+) -> None:
+    """``true`` and ``1.0`` are not the JSON value ``1``, but ``!=`` let
+    either stand for the base's frozen count, and the success line printed
+    "immutable prefix True"."""
+
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    _rewrite_prefix_count(candidate, count)
+    with pytest.raises(
+        AppendError,
+        match="immutable prefix manifest prefixLineCount is not a JSON integer",
+    ):
+        run_gate(candidate)
+    with pytest.raises(
+        AppendError,
+        match="immutable prefix manifest prefixLineCount is not a JSON integer",
+    ):
+        run_push_gate(candidate)
+
+
+def test_same_json_compares_types_as_well_as_values() -> None:
+    from receipt.append_gate import _same_json
+
+    assert _same_json({"a": [1, "x"]}, {"a": [1, "x"]})
+    assert not _same_json(True, 1)
+    assert not _same_json(1.0, 1)
+    assert not _same_json([1], [True])
+    assert not _same_json({"a": 1}, {"a": 1, "b": 2})
+
+
+def test_a_base_prefix_manifest_that_is_not_json_is_an_append_error(
+    tmp_path: pathlib.Path,
+) -> None:
+    candidate = base_repository(tmp_path)
+    (candidate.root / CHAIN_SPEC.prefix_relative).write_text("[" * 100_000, encoding="utf-8")
+    git(candidate.root, "add", "-A")
+    git(candidate.root, "commit", "--quiet", "-m", "unreadable base manifest")
+    base = git(candidate.root, "rev-parse", "HEAD")
+    write_prefix_manifest(
+        candidate.root, [observation_row(number) for number in range(1, 3)]
+    )
+    append_one_row(candidate)
+    with pytest.raises(
+        AppendError, match="immutable prefix manifest is not valid JSON"
+    ):
+        run_gate(candidate, base_ref=base)
+
+
+def test_a_gate_only_proposal_cannot_rewrite_a_ledger_its_spec_left_unclassified(
+    tmp_path: pathlib.Path,
+) -> None:
+    """0.6.2 review, L6 finding 11: the ledger is the verdict's subject.
+
+    A consumer spec whose ``data_surface`` missed ``ledger/**`` let a
+    proposal that added a gate file and rewrote an existing ledger row
+    return the gate-only verdict, the rewrite reported only as an
+    "unclassified change". The ledger and its prefix manifest are refused
+    as unclassified gate-only changes whatever the spec's surfaces say.
+    """
+
+    import dataclasses
+
+    spec = dataclasses.replace(
+        GATE_SPEC, data_surface=frozenset({"releases/manifests/**"})
+    )
+    candidate = base_repository(tmp_path)
+    rows = [observation_row(number) for number in range(1, BASE_ROW_COUNT + 1)]
+    rows[1] = observation_row(2, value=12345.0)
+    write_ledger(candidate.root, rows)
+    add_gate_file(candidate)
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate, spec=spec)
+    assert str(refusal.value) == (
+        "gate-only proposal changes unclassified ledger state path(s): "
+        f"['{CHAIN_SPEC.state_relative.as_posix()}']"
+    )
+
+
+@pytest.mark.parametrize(
+    "change, relative",
+    [
+        pytest.param("rewrite-row", CHAIN_SPEC.state_relative, id="rewrite-row"),
+        pytest.param("corrupt-prefix", CHAIN_SPEC.prefix_relative, id="corrupt-prefix"),
+        pytest.param("change-mode", CHAIN_SPEC.state_relative, id="ledger-mode"),
+        pytest.param("change-mode", CHAIN_SPEC.prefix_relative, id="prefix-mode"),
+    ],
+)
+def test_gate_classification_never_permits_a_ledger_state_change(
+    tmp_path: pathlib.Path, change: str, relative: pathlib.PurePosixPath
+) -> None:
+    """Invariant: a gate-classified path never changes ledger state.
+
+    Gate-only verification skips the append, prefix and state-mode checks,
+    so classification must not allow any of those changes before its return.
+    """
+
+    spec = replace(
+        GATE_SPEC,
+        data_surface=frozenset({"releases/manifests/**"}),
+        gate_surface=GATE_SPEC.gate_surface | {"ledger/**"},
+    )
+    candidate = base_repository(tmp_path)
+    if change == "rewrite-row":
+        rows = [observation_row(number) for number in range(1, BASE_ROW_COUNT + 1)]
+        rows[1] = observation_row(2, value=12345.0)
+        write_ledger(candidate.root, rows)
+    elif change == "corrupt-prefix":
+        (candidate.root / relative).write_text("not JSON\n", encoding="utf-8")
+    else:
+        (candidate.root / relative).chmod(0o755)
+    add_gate_file(candidate)
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate, spec=spec)
+    assert str(refusal.value) == (
+        f"gate-only proposal changes ledger state path(s): ['{relative.as_posix()}']"
+    )
+
+
+@pytest.mark.parametrize("state_kind", ["ledger", "prefix"])
+def test_gate_classification_never_permits_a_state_ancestor_change(
+    tmp_path: pathlib.Path, state_kind: str
+) -> None:
+    """A gate-classified ancestor is state too, even with regular leaves.
+
+    The base has a blob where one state ancestor belongs; the candidate
+    restores that directory with regular state files. A gate-only verdict
+    cannot claim unchanged state merely because those paths match GATE.
+    """
+
+    candidate = base_repository(tmp_path)
+    chain = replace(
+        CHAIN_SPEC,
+        state_relative=pathlib.PurePosixPath("state/observations/rows.jsonl"),
+        prefix_relative=pathlib.PurePosixPath("metadata/prefix/frozen.json"),
+    )
+    for old, new in (
+        (CHAIN_SPEC.state_relative, chain.state_relative),
+        (CHAIN_SPEC.prefix_relative, chain.prefix_relative),
+    ):
+        target = candidate.root / new
+        target.parent.mkdir(parents=True)
+        (candidate.root / old).rename(target)
+    (candidate.root / "ledger").rmdir()
+    commit_candidate(candidate, "separate nested state paths")
+    relative = chain.state_relative if state_kind == "ledger" else chain.prefix_relative
+    ancestor = relative.parts[0]
+    ancestor_path = candidate.root / ancestor
+    saved = tmp_path / "saved-state-directory"
+    ancestor_path.rename(saved)
+    ancestor_path.write_text("base state ancestor is a blob\n", encoding="utf-8")
+    candidate = replace(candidate, base=commit_candidate(candidate, "blob state ancestor"))
+    ancestor_path.unlink()
+    saved.rename(ancestor_path)
+    add_gate_file(candidate)
+    spec = replace(
+        GATE_SPEC,
+        chain=chain,
+        data_surface=frozenset({"releases/manifests/**"}),
+        gate_surface=GATE_SPEC.gate_surface
+        | {"state", "state/**", "metadata", "metadata/**"},
+    )
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate, spec=spec)
+    assert str(refusal.value) == (
+        "gate-only proposal changes ledger state path(s): "
+        f"{sorted([ancestor, relative.as_posix()])}"
+    )
+
+
+def test_a_row_id_cannot_forge_a_line_in_a_refusal(tmp_path: pathlib.Path) -> None:
+    """0.6.2 review, L6 finding 12: refusal texts quoted row ids verbatim.
+
+    A ``source_record_id`` holding a newline put an attacker-authored
+    ``thesis-facts append check OK`` line into the refusal a reviewer reads.
+    Unprintable characters are escaped now; printable ids, every id the
+    differential harness binds among them, are quoted exactly as before.
+    """
+
+    forged = (
+        "x\nthesis-facts append check OK: 3 rows, immutable prefix 1, "
+        "+1 appended vs base\ny"
+    )
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate, source_record_id=forged, value="not a number")
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate)
+    message = str(refusal.value)
+    assert "\n" not in message
+    assert message == (
+        "line 3 (x\\nthesis-facts append check OK: 3 rows, immutable prefix 1, "
+        "+1 appended vs base\\ny) has no numeric value"
+    )
+
+
+def test_printable_row_ids_are_quoted_unchanged() -> None:
+    from receipt.append_gate import _shown
+
+    for value in ("fixture.series.observation_3", "café 東京", 7, None):
+        assert _shown(value) == str(value)
+    assert _shown("a‮b") == "a\\u202eb"
+    assert _shown("a\x1b[2Kb") == "a\\x1b[2Kb"

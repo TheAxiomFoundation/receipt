@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import pytest
+from hypothesis import HealthCheck, given, settings, strategies as st
 
 import receipt.verify as verify_module
 from receipt.corpus import CorpusVerification
@@ -181,6 +182,59 @@ def test_expected_digest_refuses_before_compile_or_exec(
     assert not marker.exists()
 
 
+def _assert_load_spec_keeps_compiler_refusal(
+    tmp_path: pathlib.Path, source: bytes
+) -> None:
+    path = _spec_file(tmp_path, source)
+    resolved = path.resolve()
+    with pytest.raises(SyntaxError) as compiler_caught:
+        compile(source, str(resolved), "exec")
+
+    with pytest.raises(VerifySpecError) as loader_caught:
+        load_spec(path)
+
+    assert str(loader_caught.value) == (
+        f"spec module raised on load: {resolved}: {compiler_caught.value}"
+    )
+    cause = loader_caught.value.__cause__
+    assert type(cause) is type(compiler_caught.value)
+    assert cause.args == compiler_caught.value.args
+
+
+@pytest.mark.parametrize(
+    "source",
+    [b"(", b"\x00", b"\xff", b"# coding: no-such-encoding\n"],
+    ids=["syntax", "null-byte", "invalid-utf8", "unknown-encoding"],
+)
+def test_load_spec_keeps_the_compilers_own_refusals(
+    tmp_path: pathlib.Path, source: bytes
+) -> None:
+    _assert_load_spec_keeps_compiler_refusal(tmp_path, source)
+
+
+@settings(
+    max_examples=500,
+    deadline=None,
+    derandomize=True,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+@given(
+    prefix=st.text(
+        alphabet=st.characters(min_codepoint=32, max_codepoint=126), max_size=40
+    ),
+    invalid_byte=st.sampled_from([*range(0x80, 0xC0), *range(0xF5, 0x100)]),
+)
+def test_load_spec_preserves_compiler_refusals_for_invalid_utf8(
+    tmp_path: pathlib.Path, prefix: str, invalid_byte: int
+) -> None:
+    """Every invalid UTF-8 byte stays refused with the compiler's own message."""
+
+    source = (
+        b"# coding: utf-8\n# " + prefix.encode() + b"\n" + bytes([invalid_byte]) + b"\n"
+    )
+    _assert_load_spec_keeps_compiler_refusal(tmp_path, source)
+
+
 JOURNAL_BYTES = b'{"one":"row"}\n'
 PREFIX_BYTES = b'{"prefix":true}\n'
 CANDIDATE_COMMIT = "c" * 40
@@ -196,6 +250,8 @@ def _install_verification_pipeline(
     materialized_anchor: str = ANCHOR_DIGEST,
     verified_anchor: str | None = None,
     object_failure: str | None = None,
+    close_revision: str | None = None,
+    close_error: BaseException | None = None,
 ) -> dict[str, Any]:
     """Install a recording snapshot around the spanning composition.
 
@@ -237,6 +293,8 @@ def _install_verification_pipeline(
 
     class FakeSnapshot:
         def __init__(self, revision: str) -> None:
+            self.revision = revision
+            self.close_errors: tuple[BaseException, ...] = ()
             if revision == "base-ref":
                 self.commit = BASE_COMMIT
                 self.tree = BASE_TREE
@@ -271,8 +329,18 @@ def _install_verification_pipeline(
         def __enter__(self) -> FakeSnapshot:
             return self
 
-        def __exit__(self, *args: object) -> None:
-            del args
+        def __exit__(
+            self, _type: object, exc: BaseException | None, _tb: object
+        ) -> None:
+            if self.revision == close_revision:
+                failure = close_error if close_error is not None else SnapshotError(
+                    "repository configuration changed during verification"
+                )
+                self.close_errors = (failure,)
+                if exc is not None:
+                    exc.add_note(f"Snapshot close also failed: {failure}")
+                else:
+                    raise failure
 
         def assert_ancestor(self, base: FakeSnapshot) -> str:
             calls["ancestor"] = (self, base)
@@ -782,3 +850,168 @@ def test_attribute_verdict_is_independent_of_ignorecase(
         "releases/anchors/alpha-root.pem"
     )
     assert results[0]["passesCompleted"] == []
+
+
+# A failed closure never leaves an affected claim established, even when a
+# binding or declaration exception is already unwinding either snapshot.
+@pytest.mark.parametrize("phase", ["binding", "declaration"])
+@pytest.mark.parametrize("close_revision", ["candidate-ref", "base-ref"])
+def test_close_failure_invalidates_claims_during_a_failed_pass(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    close_revision: str,
+) -> None:
+    _install_verification_pipeline(monkeypatch, close_revision=close_revision)
+    loaded = load_spec(
+        _spec_file(tmp_path),
+        expect_sha256=hashlib.sha256(SPEC_SOURCE).hexdigest(),
+    )
+
+    def fail_pass(*_args: object, **_kwargs: object) -> None:
+        raise verify_module.CorpusError(f"{phase} failed before snapshot closure")
+
+    operation = (
+        "verify_corpus_binding" if phase == "binding" else "verify_declarations"
+    )
+    monkeypatch.setattr(verify_module, operation, fail_pass)
+    result = run_verification(
+        tmp_path,
+        loaded,
+        commit="candidate-ref",
+        base_ref="base-ref",
+        expect_commit=CANDIDATE_COMMIT,
+        verify_objects=True,
+    )
+    payload = result_to_dict(result)
+
+    assert payload["verdict"] == "FAIL"
+    assert payload["passesCompleted"] == []
+    assert payload["scope"]["established"] == []
+    assert result.chain is None and result.corpus is None
+    assert result.object_store is None
+    assert payload["objectStore"] == {"requested": True, "report": None}
+    assert [item.name for item in result.passes] == ["custody", "binding"]
+    assert (
+        "repository configuration changed during verification"
+        in result.passes[0].failure
+    )
+
+
+def test_a_pinned_missing_gate_cannot_hide_concurrent_close_failure(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The declaration error is a real absent gate; only the writer is injected."""
+
+    from corpus_fixture import _git, build_corpus
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    build_corpus(root, tmp_path / "keys")
+    commit = _git(root, "rev-parse", "HEAD")
+    spec_path = tmp_path / "auditor-spec.py"
+    spec_path.write_bytes(
+        (root / "verification/spec.py").read_bytes()
+        + b"\nimport dataclasses\n"
+        + b"SPEC = dataclasses.replace(SPEC, corpus=dataclasses.replace(\n"
+        + b"    SPEC.corpus, required_gates=SPEC.corpus.required_gates | "
+        + b"frozenset({'audit/missing'})))\n"
+    )
+    loaded = load_spec(
+        spec_path,
+        expect_sha256=hashlib.sha256(spec_path.read_bytes()).hexdigest(),
+    )
+    control = run_verification(
+        root, loaded, base_ref=commit, expect_commit=commit
+    )
+    control_payload = result_to_dict(control)
+    assert control_payload["spec"]["pinned"] is True
+    assert control_payload["passesCompleted"] == ["history", "custody", "binding"]
+    assert len(control_payload["scope"]["established"]) == 3
+    assert "'audit/missing'" in control.passes[-1].failure
+
+    original = verify_module.verify_declarations
+
+    def declarations_with_concurrent_writer(
+        *args: object, **kwargs: object
+    ) -> object:
+        with open(root / ".git" / "config", "a") as handle:
+            handle.write("[receiptprobe]\n\tconcurrent = 1\n")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        verify_module, "verify_declarations", declarations_with_concurrent_writer
+    )
+    result = run_verification(
+        root, loaded, base_ref=commit, expect_commit=commit
+    )
+    payload = result_to_dict(result)
+    assert payload["spec"]["pinned"] is True
+    assert payload["verdict"] == "FAIL"
+    assert payload["passesCompleted"] == []
+    assert payload["scope"]["established"] == []
+    assert result.chain is None and result.corpus is None
+    assert (
+        "repository configuration changed during verification"
+        in result.passes[0].failure
+    )
+
+
+def test_an_unprintable_close_error_still_invalidates_claims(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnprintableCloseError(BaseException):
+        def __str__(self) -> str:
+            raise SystemExit(0)
+
+    _install_verification_pipeline(
+        monkeypatch,
+        close_revision="candidate-ref",
+        close_error=UnprintableCloseError(),
+    )
+    loaded = load_spec(_spec_file(tmp_path))
+
+    def fail_declaration(*_args: object, **_kwargs: object) -> None:
+        raise verify_module.CorpusError("declaration failed")
+
+    monkeypatch.setattr(verify_module, "verify_declarations", fail_declaration)
+    result = run_verification(tmp_path, loaded, commit="candidate-ref")
+    payload = result_to_dict(result)
+
+    assert payload["passesCompleted"] == []
+    assert payload["scope"]["established"] == []
+    assert result.passes[0].failure == (
+        "UnprintableCloseError (its message could not be rendered)"
+    )
+
+
+@pytest.mark.parametrize("phase", ["custody", "binding", "declaration"])
+def test_a_pass_failure_with_clean_closure_keeps_earlier_claims(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    _install_verification_pipeline(monkeypatch)
+    loaded = load_spec(_spec_file(tmp_path))
+
+    def fail_pass(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError(f"{phase} failed")
+
+    operation = {
+        "custody": "verify_release_chain",
+        "binding": "verify_corpus_binding",
+        "declaration": "verify_declarations",
+    }[phase]
+    monkeypatch.setattr(verify_module, operation, fail_pass)
+    result = run_verification(
+        tmp_path, loaded, base_ref="base-ref", expect_commit=CANDIDATE_COMMIT
+    )
+    payload = result_to_dict(result)
+    expected = ["history", "custody", "binding"][:
+        {"custody": 1, "binding": 2, "declaration": 3}[phase]
+    ]
+    assert payload["passesCompleted"] == expected
+    assert len(payload["scope"]["established"]) == len(expected)
+    assert next(item for item in result.passes if not item.ok).name == phase

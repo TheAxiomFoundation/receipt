@@ -992,6 +992,9 @@ def test_every_git_child_receives_frozen_environment_and_allowed_command(
         ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
         ("object", "rev-parse", "--verify", "--end-of-options", "<rev>^{commit}"),
         ("object", "cat-file", "--batch-command"),
+        # The configuration re-audit before the entered batch child starts
+        # (0.6.2 review, L3 finding 7), then the child, then close's re-audit.
+        ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
         ("object", "cat-file", "--batch-command"),
         ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
     ]
