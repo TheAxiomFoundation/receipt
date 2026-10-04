@@ -585,6 +585,9 @@ def test_repository_history_sentinels_precede_sha256_refusal(
 
 
 def test_select_refuses_an_existing_nonrepository(tmp_path: pathlib.Path) -> None:
+    # Stop Git discovery at the fixture's parent even when pytest's temporary
+    # directory lives inside a checkout. The selected root stays empty.
+    (tmp_path / ".git").write_text("gitdir: missing-git-directory\n", encoding="utf-8")
     root = tmp_path / "not-a-repository"
     root.mkdir()
 
@@ -1090,6 +1093,9 @@ def test_full_verify_objects_uses_exact_commands_heads_and_environment(
             "<rev>^{commit}",
         ),
         ("object", "cat-file", "--batch-command"),
+        # Configuration is re-audited before every child an entered snapshot
+        # starts (0.6.2 review, L3 finding 7).
+        ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
         ("object", "cat-file", "--batch-command"),
         ("setup", "config", "-f", "<global>", "safe.directory", "<root>"),
         ("discovery", "version"),
@@ -1112,8 +1118,11 @@ def test_full_verify_objects_uses_exact_commands_heads_and_environment(
             "<rev>^{commit}",
         ),
         ("object", "cat-file", "--batch-command"),
+        ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
         ("object", "cat-file", "--batch-command"),
+        ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
         ("object", "count-objects", "-v"),
+        ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
         (
             "object",
             "-c",
