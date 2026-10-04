@@ -2714,7 +2714,14 @@ def test_refuses_removed_paths_over_the_verdict_budget(
     """removedPaths is the other producer list the verdict renders verbatim."""
 
     content = dict(CONTENT)
-    names = [f"rules/tax/{'r' * 900}{index:04d}.yaml" for index in range(300)]
+    # Four 225-byte components rather than one 900-byte one: a portable
+    # component is at most 255 bytes (0.6.2 review, L7 finding 11), and this
+    # test is about the removedPaths budget, not the name rule.
+    segment = "r" * 225
+    names = [
+        f"rules/tax/{segment}/{segment}/{segment}/{segment}{index:04d}.yaml"
+        for index in range(300)
+    ]
     for name in names:
         content[name] = "name: r\n"
     rows = journal_rows(content=content)
@@ -5248,3 +5255,196 @@ def test_alias_capability_is_bounded_at_both_ends() -> None:
     # And ASCII is what makes the written length the folded length.
     for pin in (".y", ".yml", ".YAML", ".t3st"):
         assert len(_path_fold(pin)) == len(pin)
+
+
+# --- 0.6.2 review, L4 finding 3: every journal decode failure is a CorpusError
+
+
+@pytest.mark.parametrize(
+    "row, reason",
+    [
+        pytest.param(
+            b'{"entryIndex":' + b"1" * 4301 + b"}\n", "ValueError", id="wide-integer"
+        ),
+        pytest.param(
+            b"[" * 200_000 + b"]" * 200_000 + b"\n", "RecursionError", id="deep-array"
+        ),
+        pytest.param(
+            b'{"a":' * 100_000 + b"1" + b"}" * 100_000 + b"\n",
+            "RecursionError",
+            id="deep-object",
+        ),
+    ],
+)
+def test_journal_rows_json_cannot_decode_refuse_as_corpus_errors(
+    row: bytes, reason: str
+) -> None:
+    """``json.loads`` refuses an integer literal over the interpreter's digit
+    limit with ``ValueError`` and nesting past its stack with
+    ``RecursionError``. Neither is a ``JSONDecodeError``, so both escaped
+    ``parse_journal`` and ``verify_corpus_binding`` as interpreter exceptions
+    where the module's contract is a ``CorpusError``."""
+
+    from receipt.corpus import parse_journal
+
+    assert len(row) < MAX_JOURNAL_ROW_BYTES
+    with pytest.raises(CorpusError) as caught:
+        parse_journal(row, spec=corpus_spec())
+    assert str(caught.value) == (
+        "journal row 1 cannot be decoded within the interpreter's limits: "
+        f"{reason}"
+    )
+
+
+# --- 0.6.2 review, L4 finding 6: caller and spec arguments refuse, not crash
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        (
+            {"required_gates": frozenset({1})},
+            "CorpusSpec required_gates must contain only strings: found int",
+        ),
+        (
+            {"required_gates": frozenset({b"x"})},
+            "CorpusSpec required_gates must contain only strings: found bytes",
+        ),
+        (
+            {"required_gates": frozenset({1, "a"})},
+            "CorpusSpec required_gates must contain only strings: found int",
+        ),
+        (
+            {"required_attested_paths": frozenset({1, "a"})},
+            "CorpusSpec required_attested_paths must contain only strings: found int",
+        ),
+        (
+            {"accepted_gate_tiers": frozenset({1, "public"})},
+            "CorpusSpec accepted_gate_tiers must contain only strings: found int",
+        ),
+    ],
+)
+def test_corpus_spec_set_members_must_be_strings(
+    overrides: dict[str, object], message: str
+) -> None:
+    with pytest.raises(CorpusError) as caught:
+        corpus_spec(**overrides)
+    assert str(caught.value) == message
+
+
+def test_parse_journal_and_verify_declarations_refuse_wrong_argument_types() -> None:
+    from receipt.corpus import parse_journal
+
+    spec = corpus_spec()
+    with pytest.raises(CorpusError, match="corpus journal must be bytes, not str"):
+        parse_journal("x\n", spec=spec)  # type: ignore[arg-type]
+    with pytest.raises(
+        CorpusError, match="corpus journal must be bytes, not memoryview"
+    ):
+        parse_journal(memoryview(b"x\n"), spec=spec)  # type: ignore[arg-type]
+    with pytest.raises(CorpusError, match="spec must be a CorpusSpec, not NoneType"):
+        parse_journal(b"x\n", spec=None)  # type: ignore[arg-type]
+    with pytest.raises(
+        CorpusError, match="verification must be a CorpusVerification, not NoneType"
+    ):
+        verify_declarations(None, spec=spec)  # type: ignore[arg-type]
+
+
+def test_a_gate_only_journal_is_a_closed_world_of_zero_content_files() -> None:
+    """0.6.2 review, L4 finding 7: "genesis must bind content" never ran.
+
+    The branch carrying that message sat after the trailing-LF check, where
+    splitting always yields at least one row, so a journal of gate rows alone
+    has always parsed as zero content files. The unreachable branch is gone
+    and the docstring states the behaviour that was always there.
+    """
+
+    import receipt.corpus as corpus_module
+    from receipt.corpus import parse_journal
+
+    rows = journal_rows(content={}, attested={})
+    assert {row["kind"] for row in rows} == {"gate"}
+    content, attested, gates, removed = parse_journal(
+        render_journal(rows), spec=corpus_spec(required_attested_paths=frozenset())
+    )
+    assert (content, attested, removed) == ({}, {}, ())
+    assert gates
+    documented = " ".join((corpus_module.parse_journal.__doc__ or "").split())
+    assert "A journal of gate rows alone is a closed world of zero content files" in (
+        documented
+    )
+    with pytest.raises(CorpusError, match="journal row 1 is blank"):
+        parse_journal(b"\n", spec=corpus_spec())
+
+
+def test_a_case_only_rename_cannot_be_journalled(tmp_path: pathlib.Path) -> None:
+    """0.6.2 review, L4 finding 5: the tombstone rule's permanent consequence.
+
+    ``rules/tax/rate.yaml`` renamed to ``rules/tax/Rate.yaml`` with the same
+    bytes, journalled honestly: removing the old spelling refuses because the
+    new spelling aliases it, and keeping both refuses because two declared
+    paths would alias. The rule is intended -- a survivor under a fold-equal
+    spelling answers to the tombstoned name on a case-insensitive checkout --
+    and the module docstring now says what it costs.
+    """
+
+    import receipt.corpus as corpus_module
+
+    body = CONTENT["rules/tax/rate.yaml"]
+    renamed = {
+        ("rules/tax/Rate.yaml" if path == "rules/tax/rate.yaml" else path): text
+        for path, text in CONTENT.items()
+    }
+    write_tree(tmp_path, content=renamed)
+    rows = journal_rows()
+    base = len(rows)
+    rows.append(
+        {
+            "schemaVersion": JOURNAL_SCHEMA,
+            "kind": "content",
+            "path": "rules/tax/rate.yaml",
+            "sha256": sha256_text(body),
+            "state": "removed",
+        }
+    )
+    rows.append(
+        {
+            "schemaVersion": JOURNAL_SCHEMA,
+            "kind": "content",
+            "path": "rules/tax/Rate.yaml",
+            "sha256": sha256_text(body),
+            "state": "present",
+        }
+    )
+    reindex(rows)
+    with pytest.raises(CorpusError, match="still present in the tree"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+    kept = rows[:base] + rows[base + 1 :]
+    reindex(kept)
+    with pytest.raises(CorpusError, match="two declared paths would alias"):
+        verify_corpus_binding(tmp_path, render_journal(kept), spec=corpus_spec())
+
+    documented = " ".join((corpus_module.__doc__ or "").split())
+    assert "a case-only rename (``rate.yaml`` to ``Rate.yaml``) cannot be journalled" in (
+        documented
+    )
+
+
+
+def test_a_journal_path_with_an_over_long_component_names_the_length(
+    tmp_path: pathlib.Path,
+) -> None:
+    """0.6.2 review, L7 finding 11: the corpus relabelled every name-policy
+    refusal as "not a portable name (ASCII letters, ...)"; a 256-byte
+    component is refused for its length, and says so."""
+
+    from receipt.corpus import parse_journal
+
+    content = dict(CONTENT)
+    long_name = f"rules/tax/{'r' * 251}.yaml"
+    content[long_name] = "name: r\n"
+    with pytest.raises(CorpusError) as caught:
+        parse_journal(render_journal(journal_rows(content=content)), spec=corpus_spec())
+    assert "has a component longer than 255 bytes" in str(caught.value)
+    assert "is not a portable name" not in str(caught.value)
