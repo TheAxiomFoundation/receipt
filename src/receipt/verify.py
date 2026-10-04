@@ -673,6 +673,7 @@ def run_verification(
         return result(incomplete="binding")
 
     phase = "custody"
+    snapshots: list[TreeSnapshot] = []
     try:
         # A single normalized ChainSpec instance is shared by the pre-crypto
         # anchor digest and the directory verifier. Stateful PathLike values
@@ -685,6 +686,7 @@ def run_verification(
             expect_commit=expect_commit,
             expect_tree=expect_tree,
         )
+        snapshots.append(selected)
         candidate_commit = selected.commit
         candidate_tree = selected.tree
         object_format = selected.object_format
@@ -694,7 +696,9 @@ def run_verification(
             base: TreeSnapshot | None = None
             if base_ref is not None:
                 phase = "history"
-                base = stack.enter_context(TreeSnapshot.select(root, base_ref))
+                selected_base = TreeSnapshot.select(root, base_ref)
+                snapshots.append(selected_base)
+                base = stack.enter_context(selected_base)
                 base_commit = base.commit
                 base_tree = base.tree
                 candidate.assert_ancestor(base)
@@ -842,6 +846,25 @@ def run_verification(
     except KeyboardInterrupt:  # the operator's interrupt, never a verdict
         raise
     except BaseException as exc:  # noqa: BLE001 - every other raise is a FAIL
+        close_errors = [
+            error for snapshot in snapshots for error in snapshot.close_errors
+        ]
+        if close_errors:
+            # A failed closure never leaves an affected claim established.
+            # Check both snapshots independently of the active pass: closure
+            # may only have added notes to an already-unwinding pass error.
+            passes.clear()
+            chain = None
+            corpus = None
+            object_store = None
+            failure = "; ".join(
+                dict.fromkeys(
+                    failed("custody", error, (ReleaseChainError, SnapshotError))
+                    for error in close_errors
+                )
+            )
+            passes.append(PassResult("custody", False, "", failure))
+            return result(incomplete="binding")
         if phase == "history":
             passes.append(
                 PassResult(
@@ -854,12 +877,9 @@ def run_verification(
             )
             return result(incomplete="custody")
         if phase in {"custody", "finalize"}:
-            # A close-time repository re-audit invalidates every tree-derived
-            # pass even if its body happened to finish first. That includes
-            # history, which read the same snapshots: keeping it reported a
-            # FAIL whose "established" list still carried the history claim
-            # (0.6.2 review, L4 finding 4). A custody failure before close
-            # leaves a completed history pass standing, as before.
+            # A custody failure with clean closure leaves a completed history
+            # pass standing, as before. A failure after every pass completed
+            # cannot leave any of those passes established.
             passes[:] = [
                 item
                 for item in passes

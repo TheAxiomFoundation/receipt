@@ -315,6 +315,7 @@ class _SnapshotState:
     )
     entered: bool = False
     closed: bool = False
+    close_errors: tuple[BaseException, ...] = ()
     abandoned: bool = False
     active_digest_token: object | None = None
     batch: "_BatchReader | None" = None
@@ -2300,6 +2301,10 @@ class TreeSnapshot:
                 self._state.global_config = None
                 self._state.entered = False
                 self._state.closed = True
+        # Keep closure failures observable when an active body exception must
+        # retain precedence. Its notes alone do not tell the composition that
+        # every pass which read this snapshot has been invalidated.
+        self._state.close_errors = tuple(closing_errors)
         if closing_errors:
             if exc is not None:
                 for closing_error in closing_errors:
@@ -2309,6 +2314,12 @@ class TreeSnapshot:
                 for closing_error in additional:
                     primary.add_note(f"Snapshot close also failed: {closing_error}")
                 raise primary
+
+    @property
+    def close_errors(self) -> tuple[BaseException, ...]:
+        """Failures from closure, including those noted on a body exception."""
+
+        return self._state.close_errors
 
     @property
     def root(self) -> pathlib.Path:
