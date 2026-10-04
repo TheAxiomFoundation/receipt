@@ -249,6 +249,7 @@ import argparse
 import codecs
 import io
 import json
+import os
 import pathlib
 import sys
 import unicodedata
@@ -311,7 +312,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "repository top level to verify "
-            "(default: walk upward from the spec to its repository top level)"
+            "(default: the nearest directory above the spec, as named, that "
+            "holds .git; refused if that walk crosses a symlink)"
         ),
     )
     verify.add_argument(
@@ -355,14 +357,60 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _default_root(spec_path: pathlib.Path) -> pathlib.Path:
-    """Walk up from the spec to the enclosing repository root."""
+class _DefaultRootError(Exception):
+    """The walk from the spec to its repository cannot name the verdict's subject."""
 
-    current = spec_path.resolve().parent
-    for candidate in (current, *current.parents):
+
+def _default_root(spec_path: pathlib.Path) -> pathlib.Path:
+    """Walk up from the spec, as named, to the repository top level holding it.
+
+    The walk is lexical: it climbs the parents of the path the auditor
+    supplied, made absolute and normalized, and never those of its
+    resolution. It resolved first, so a directory the producer committed as a
+    symlink beside the spec could move the walk into another repository, and
+    the command then verified that repository's commit and tree instead of
+    the clone's. Pinning the spec did not help, because the other repository
+    can carry the same spec and anchors.
+
+    The top level is the nearest directory above the spec holding ``.git``.
+    Every directory from the spec's own up to that top level, the top level
+    included, must be a real directory: a symlink there is either the
+    producer's (committed in the checkout, so it can name any repository) or,
+    for a checkout reached through a link to its top level, not
+    distinguishable from one here, and both refuse and ask for ``--root``.
+    Links above the top level are the auditor's own filesystem and are not
+    examined. The spec as loaded, resolved, must then be the file the walk
+    names below that top level, which a ``..`` after a link in the supplied
+    path can otherwise break. With no ``.git`` above the spec, the spec's own
+    directory is returned and repository discovery refuses it.
+    """
+
+    named = pathlib.Path(os.path.abspath(spec_path))
+    walked: list[pathlib.Path] = []
+    for candidate in (named.parent, *named.parent.parents):
+        walked.append(candidate)
         if (candidate / ".git").exists():
-            return candidate
-    return current
+            break
+    else:
+        return named.parent
+    for directory in walked:
+        if directory.is_symlink():
+            raise _DefaultRootError(
+                "the spec's path crosses a symlink at or below its repository "
+                "top level, so the repository to verify is ambiguous; supply "
+                f"--root: {directory}"
+            )
+    root = walked[-1]
+    # Normalizing removes a ``..`` lexically, but the spec was loaded through
+    # the operating system, which applies it after any link before it: from
+    # ``link/../spec.py`` the two name different files. The spec loaded must
+    # be the file the walk found below its top level.
+    if pathlib.Path(spec_path).resolve() != root.resolve() / named.relative_to(root):
+        raise _DefaultRootError(
+            "the spec's path resolves to a file other than the one it names "
+            f"below its repository top level; supply --root: {spec_path}"
+        )
+    return root
 
 
 #: Every code point that can move a cursor, clear a line, or split one line
@@ -1747,6 +1795,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         root_ok = root.is_dir()
     except KeyboardInterrupt:  # the operator's interrupt, never a verdict
         raise
+    except _DefaultRootError as exc:
+        return _refuse(as_json, "root", str(exc), EXIT_USAGE)
     except BaseException as exc:  # noqa: BLE001 - resolving the root is fail-closed
         return _refuse(
             as_json,
