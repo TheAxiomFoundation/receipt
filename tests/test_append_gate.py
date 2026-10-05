@@ -2917,9 +2917,7 @@ def test_the_depth_bound_is_a_new_refusal_of_rows_0_6_1_accepted(
     deeper row too, as long as json.loads could parse it and the field was
     outside the content address, and so would have taken later appends on
     top of it; the bound refuses it, and every later append to a ledger
-    holding it, whatever the interpreter's stack. No real ledger comes near:
-    the deepest row or document in the thesis and chronicle repositories is
-    9 levels."""
+    holding it, whatever the interpreter's stack."""
 
     (tmp_path / "at-the-bound").mkdir()
     (tmp_path / "past-the-bound").mkdir()

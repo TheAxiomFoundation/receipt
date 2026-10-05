@@ -18,8 +18,10 @@ decode producer bytes, so the two bounds are stated once, here:
 * ``MAX_DEPTH`` open containers (arrays and objects together). 128 is also
   ``serde_json``'s default recursion limit (which admits 127 levels), and it
   is well below the recursion ``receipt.canonical`` needs for the same value
-  (two frames per list level), so a decoded value can be canonicalised when
-  the caller has an ordinary stack left;
+  (two frames per list level), so depth alone never stops a decoded value
+  from being canonicalised when the caller has an ordinary stack left. Other
+  values still can: ``NaN``, the infinities and integers too large for a
+  float decode here and are refused by ``receipt.canonical``;
 * ``MAX_INTEGER_DIGITS`` digits in one integer literal, the interpreter's own
   default, enforced by a ``parse_int`` hook so that it holds whatever the
   process configured.
@@ -28,8 +30,10 @@ The ceilings are fixed; acceptance below them is not wholly independent of
 context. ``json.loads`` can still exhaust the caller's remaining stack, or a
 process can lower its integer-digit limit below ``MAX_INTEGER_DIGITS``, on
 text under both ceilings. Those failures are raised as ``JsonBoundError``
-too, so a caller gets this module's refusal and never an interpreter
-exception, but whether such text is accepted depends on where it is read.
+too, so a caller gets this module's refusal rather than an interpreter
+exception (unless the caller is already within a frame or two of the
+recursion limit, where the depth scan itself can raise ``RecursionError``),
+but whether such text is accepted depends on where it is read.
 
 Everything else is ``json.loads``: the same grammar, the same values and, for
 malformed text, the same ``JSONDecodeError`` with the same message. A

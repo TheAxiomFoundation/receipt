@@ -2,7 +2,7 @@
 
 The claims are that it decodes what ``json.loads`` decodes, refuses
 malformed text with exactly ``json.loads``'s error, and otherwise refuses
-with ``JsonBoundError``, never an interpreter exception: always for text
+with ``JsonBoundError`` rather than an interpreter exception: always for text
 nested deeper than ``MAX_DEPTH`` or holding an integer literal longer than
 ``MAX_INTEGER_DIGITS``, and also for shallower text when the call stack or
 the process's own int-string limit runs out first.

@@ -103,9 +103,15 @@ establish totality for arbitrary public helper arguments.
   row no UTF-8 can encode (which only a direct caller of `check_prefix` can
   pass), `line <n> is not valid UTF-8`. The decoding bounds get the existing
   `line <n> is not valid JSON: ...`. A rewritten row that is not an object is
-  named `(?)`. Every input the old code accepted gets the verdict and text it
-  got before, with one exception: a row or manifest nested more than 128 deep
-  is now refused as not valid JSON. An input the old code already refused can
+  named `(?)`. Under the default integer-digit limit, every input the old
+  gate accepted gets the verdict and text it got before, with one exception:
+  a row or manifest nested more than 128 deep is now refused as not valid
+  JSON. A process that raised the limit could have had the old gate accept a
+  row holding an integer of more than 4,300 digits outside the content
+  address; it is now refused as not valid JSON. A direct caller of
+  `check_prefix` now gets the strict-count refusal for a `prefixLineCount` of
+  `"1"`, `true` or `1.0`, which the old `check_prefix` accepted (the old gate
+  applied that check just after it). An input the old code already refused can
   now meet a stricter guard first and get a different refusal: a committed
   manifest whose `prefixLineCount` is the string `"1"` with an empty
   `lineSha256s` was refused as `prefix manifest line hashes disagree with its
