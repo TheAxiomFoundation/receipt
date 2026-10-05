@@ -1,4 +1,4 @@
-"""JSON decoding whose two limits are properties of the input alone.
+"""JSON decoding with two fixed ceilings that the input alone can exceed.
 
 ``json.loads`` already refuses some inputs with something other than
 ``JSONDecodeError``, and neither limit is stated by the bytes:
@@ -16,14 +16,20 @@ interpreter exception instead of the module's refusal. Several modules
 decode producer bytes, so the two bounds are stated once, here:
 
 * ``MAX_DEPTH`` open containers (arrays and objects together). 128 is also
-  ``serde_json``'s default recursion limit (which admits 127 levels), more
-  than fourteen times the deepest record, ledger row or manifest in the
-  thesis and chronicle repositories (9), and far enough below the recursion
-  ``receipt.canonical`` needs for the same value (two frames per list level)
-  that a decoded value can always be canonicalised;
+  ``serde_json``'s default recursion limit (which admits 127 levels), and it
+  is well below the recursion ``receipt.canonical`` needs for the same value
+  (two frames per list level), so a decoded value can be canonicalised when
+  the caller has an ordinary stack left;
 * ``MAX_INTEGER_DIGITS`` digits in one integer literal, the interpreter's own
   default, enforced by a ``parse_int`` hook so that it holds whatever the
   process configured.
+
+The ceilings are fixed; acceptance below them is not wholly independent of
+context. ``json.loads`` can still exhaust the caller's remaining stack, or a
+process can lower its integer-digit limit below ``MAX_INTEGER_DIGITS``, on
+text under both ceilings. Those failures are raised as ``JsonBoundError``
+too, so a caller gets this module's refusal and never an interpreter
+exception, but whether such text is accepted depends on where it is read.
 
 Everything else is ``json.loads``: the same grammar, the same values and, for
 malformed text, the same ``JSONDecodeError`` with the same message. A

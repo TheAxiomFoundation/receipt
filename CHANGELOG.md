@@ -103,9 +103,14 @@ establish totality for arbitrary public helper arguments.
   row no UTF-8 can encode (which only a direct caller of `check_prefix` can
   pass), `line <n> is not valid UTF-8`. The decoding bounds get the existing
   `line <n> is not valid JSON: ...`. A rewritten row that is not an object is
-  named `(?)`. Each guard fires only where the old code raised, so every other
-  input gets the verdict and text it got before, with one exception: a row or
-  manifest nested more than 128 deep is now refused as not valid JSON. 0.6.1
+  named `(?)`. Every input the old code accepted gets the verdict and text it
+  got before, with one exception: a row or manifest nested more than 128 deep
+  is now refused as not valid JSON. An input the old code already refused can
+  now meet a stricter guard first and get a different refusal: a committed
+  manifest whose `prefixLineCount` is the string `"1"` with an empty
+  `lineSha256s` was refused as `prefix manifest line hashes disagree with its
+  count` and is now refused as `immutable prefix manifest prefixLineCount is
+  not a JSON integer`. 0.6.1
   accepted such a row whenever `json.loads` could parse it and the deep value
   sat outside the content address, and took later appends on top of it; the
   bound refuses the row and every later append to a ledger that holds it.
