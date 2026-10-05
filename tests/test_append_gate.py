@@ -375,6 +375,28 @@ def test_an_ordinary_append_is_accepted(tmp_path: pathlib.Path) -> None:
     )
 
 
+def test_an_append_with_a_zero_row_frozen_prefix_is_accepted(
+    tmp_path: pathlib.Path,
+) -> None:
+    """An empty frozen prefix keeps the historical checksum of one newline."""
+
+    candidate = base_repository(tmp_path)
+    manifest = {
+        "schemaVersion": GATE_SPEC.prefix_schema_version,
+        "prefixLineCount": 0,
+        "lineSha256s": [],
+        "prefixSha256": hashlib.sha256(b"\n").hexdigest(),
+    }
+    (candidate.root / CHAIN_SPEC.prefix_relative).write_text(
+        json.dumps(manifest) + "\n", encoding="utf-8"
+    )
+    candidate = replace(candidate, base=commit_candidate(candidate, "zero-row prefix"))
+    append_one_row(candidate)
+    assert run_gate(candidate) == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 0, +1 appended vs base"
+    )
+
+
 @pytest.mark.parametrize("unicode_prefix", [False, True])
 def test_a_utf8_append_accepts_under_the_c_locale(
     tmp_path: pathlib.Path, unicode_prefix: bool

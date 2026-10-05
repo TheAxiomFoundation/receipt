@@ -6,18 +6,20 @@ input the package used to accept, or accept for the wrong reason.
 
 ## 0.6.3 (unreleased)
 
-Findings of the full Opus 5.5 review of 0.6.2, all in code 0.6.1 already
-shipped, and three more of the same kinds found while fixing them. One is a
-wrongful refusal of genuine tokens. The rest are inputs that ended a
-verification with an interpreter exception (`ValueError`, `OverflowError`,
-`RecursionError`, `AttributeError`, `TypeError`, ...) where the module's own
-refusal belonged, or took hours to reach that refusal. No refusal is reworded.
-Two changes reach inputs that did not crash before, and both are named below:
-a refusal that quotes an instant with a fraction now renders it correctly, and
-JSON nested more than 128 deep is refused, including JSON 0.6.1 accepted.
+Corrections to code shipped in 0.6.1 and 0.6.2. One fixes a wrongful refusal
+of genuine tokens. Others replace interpreter exceptions (`ValueError`,
+`OverflowError`, `RecursionError`, `AttributeError`, `TypeError`, ...) with the
+module's own refusal, or avoid repeated copying before a refusal. Changes for
+inputs that did not crash before include corrected fractional instant text,
+refusal of genTimes with nonzero digits past the sixth fractional digit, and
+refusal of JSON nested more than 128 deep, including JSON 0.6.1 accepted.
+The properties sample typed parser and time-check inputs: bytes, strings,
+dictionary payloads, aware datetimes and integer allowances. They do not
+establish totality for arbitrary public helper arguments.
 
-- A timestamp token whose genTime carries fractional seconds verifies. The
-  formatter trimmed trailing zeros from the whole ISO string, so it ate the
+- A timestamp token whose genTime carries fractional seconds exactly
+  representable in microseconds verifies. The formatter trimmed trailing
+  zeros from the whole ISO string, so it ate the
   zeros of `+00:00` and wrote `...12:00:00.249000+00:`. `verify_witness` then
   refused every such token as `invalid timestamp claim token genTime`, and
   `verify_timestamp_token` accepted it but reported that string as its
@@ -31,6 +33,9 @@ JSON nested more than 128 deep is refused, including JSON 0.6.1 accepted.
   represent without moving it earlier than the signed instant
   (`RFC 3161 genTime is finer than a microsecond, which this verifier cannot
   represent exactly: ...`, the rule `receipt.release_chain` already applied).
+  The direct token verifier in 0.6.1 accepted those genTimes by truncating the
+  fraction; it now refuses them. Trailing zero digits beyond the sixth remain
+  accepted.
 - Token bytes that name no instant or no decodable OID are refused by name.
   The TSTInfo is parsed from the unauthenticated extraction before either
   OpenSSL verification, so anyone who can write a token file and its sidecar
@@ -39,8 +44,8 @@ JSON nested more than 128 deep is refused, including JSON 0.6.1 accepted.
   is now `invalid RFC 3161 genTime: '20261301000000Z'`. An OID arc whose
   decimal form would exceed 4,300 digits, which the interpreter refuses to
   write, is `oversized OID subidentifier in RFC 3161 token`, and the decode
-  stops as soon as the bound is crossed. Every genTime and OID that parsed
-  before parses to the same value.
+  stops as soon as the bound is crossed. Previously parsed genTimes still
+  accepted, and OIDs still decoded, keep their parsed values.
 - A creation claim at either end of the datetime range is decided, not
   crashed on. The lead check shifted the claim by the allowance
   (`claim - timedelta(seconds=300)`), which has no datetime for a record
@@ -56,17 +61,18 @@ JSON nested more than 128 deep is refused, including JSON 0.6.1 accepted.
   sidecar, the chain genesis and a trust bundle are all producer-written, and
   `json.loads` let 100,000 levels of nesting out as `RecursionError` and a
   5,000-digit integer out as a bare `ValueError`. They are now decoded by
-  `receipt._bounded_json`: `json.loads` with two bounds the bytes alone
-  decide, at most 128 nested containers and at most 4,300 digits in an
-  integer literal, both independent of the call stack and of the process's
-  own int-string limit. Past either bound the file gets the existing
-  `cannot read JSON <path>: ...` refusal, and a file `json.loads` refused
-  keeps its message. New refusal: a JSON value nested more than 128 deep.
+  `receipt._bounded_json`: `json.loads` with fixed ceilings of at most 128
+  nested containers and at most 4,300 digits in an integer literal. Acceptance
+  below those ceilings can still depend on the caller's remaining stack and
+  the interpreter's configured integer-digit limit. A recursion or integer
+  conversion failure in `json.loads` becomes `JsonBoundError`, translated to
+  the same `cannot read JSON <path>: ...` refusal as exceeding a ceiling. A
+  `JSONDecodeError` keeps `json.loads`'s message. New refusal: a JSON value
+  nested more than 128 deep.
   0.6.1 accepted such a record whenever `json.loads` could parse it, and
   refused such a sidecar, genesis or bundle by its shape
   (`record must be a JSON object: ...`) or its content; each now gets the
-  depth refusal. The deepest document in the thesis and chronicle
-  repositories is 9 levels. A trust bundle whose payload canonical JSON
+  depth refusal. A trust bundle whose payload canonical JSON
   cannot encode (NaN, an infinity, an integer beyond the Number range), which
   crashed the canonical check that runs before the commitment is compared, is
   now the existing `TSA trust configuration is not canonical JSON: <path>`.
@@ -74,11 +80,10 @@ JSON nested more than 128 deep is refused, including JSON 0.6.1 accepted.
   refused before gets the same refusal.
 - A commit whose `tree` or `parent` header has continuation lines is refused
   at the first one. `receipt.snapshot` rejoined every continuation into the
-  header's value before refusing it, copying the value once per line, so a
-  commit of one-byte continuations near the 64 MiB object budget, about 65 KB
-  as a loose object, kept `select()` or `assert_ancestor()` busy for about
-  three hours of CPU before the refusal. No value holding a newline is an
-  object name, so the verdict and the text
+  header's value before refusing it, copying the growing value once per line.
+  The tests check refusal at the first continuation and exercise 800,000
+  continuation lines through the parser and `select()`. No value holding a
+  newline is an object name, so the verdict and the text
   (`commit <oid> is not a canonical commit object`) are what they always
   were; a differential against the 0.6.1 parser checks this.
 - `verify_append_gate` refuses malformed candidate ledger and prefix bytes
@@ -108,8 +113,8 @@ JSON nested more than 128 deep is refused, including JSON 0.6.1 accepted.
   callers, and a falsy `measure`, `source` or `responseArchive` still reads
   as absent.
 - A release manifest past the decoding bounds, or with a count past the
-  Number range, is refused. Found while fixing the append gate, which reaches
-  it: `load_manifest` parses a manifest before its filename digest is
+  Number range, is refused. The append gate reaches it: `load_manifest`
+  parses a manifest before its filename digest is
   compared, and `json.loads` let deep nesting and 5,000-digit integers out as
   `RecursionError` and `ValueError`. A count such as `state.lineCount` of
   `10**400` passed the schema, which bounds counts only from below, and
@@ -123,7 +128,7 @@ JSON nested more than 128 deep is refused, including JSON 0.6.1 accepted.
   status was checked for membership in a set, which hashes the producer's
   value, so a list or object raised `TypeError` where a number or a stray
   string got `invalid witness status for <path>: ...`. Both now get that
-  refusal. Found by the adversarial sweep over these fixes.
+  refusal.
 - The release chain's time bounds decide the ends of the datetime range. A
   producer-signed, witnessed manifest created in the first five minutes of year
   1 made `created_at - timedelta(seconds=clock_skew_seconds)` raise
@@ -133,7 +138,7 @@ JSON nested more than 128 deep is refused, including JSON 0.6.1 accepted.
   last five minutes of year 9999. The bounds are now differences of instants,
   which decide those cases and every other case exactly as before; the
   refusal texts are unchanged. This is the release-chain counterpart of the
-  creation-claim fix above, found by the adversarial sweep over these fixes.
+  creation-claim fix above.
 
 Corrections from a full review of the 0.6.1 code, present in 0.6.1 and 0.6.2
 alike. Several are refusals of inputs those releases accepted; a few are inputs

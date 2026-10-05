@@ -16,7 +16,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from hypothesis import HealthCheck, given, settings, strategies as st
+from hypothesis import HealthCheck, example, given, settings, strategies as st
 
 import test_append_gate as fixture
 from receipt import _bounded_json as bounded_json
@@ -65,6 +65,32 @@ def dumps(value: object) -> str:
 
 def base_lines() -> list[str]:
     return [fixture.jsonl_line(fixture.observation_row(n)) for n in (1, 2)]
+
+
+@PROPERTY
+@given(st.lists(st.text(alphabet=st.characters(codec="utf-8"), max_size=80), max_size=12))
+@example(lines=[])
+@example(lines=["", "caf\u00e9", "\U0001f600", "embedded\nnewline"])
+def test_every_prefix_hash_matches_the_release_implementation(lines: list[str]) -> None:
+    """Every count, including zero, hashes the release's exact UTF-8 bytes."""
+
+    for count in range(len(lines) + 1):
+        manifest = {
+            "schemaVersion": SPEC.prefix_schema_version,
+            "prefixLineCount": count,
+            "lineSha256s": [
+                hashlib.sha256(line.encode("utf-8")).hexdigest()
+                for line in lines[:count]
+            ],
+            # The checksum input in release/0.6.x, v0.6.1 and v0.6.2.
+            "prefixSha256": hashlib.sha256(
+                ("\n".join(lines[:count]) + "\n").encode("utf-8")
+            ).hexdigest(),
+        }
+        assert check_prefix(lines, dumps(manifest), SimpleNamespace(spec=SPEC)) == manifest
+        manifest["prefixSha256"] = "0" * 64
+        with pytest.raises(AppendError, match="^immutable prefix cumulative hash mismatch$"):
+            check_prefix(lines, dumps(manifest), SimpleNamespace(spec=SPEC))
 
 
 @PROPERTY

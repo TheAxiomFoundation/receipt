@@ -451,11 +451,12 @@ def check_prefix(
             raise AppendError(
                 f"immutable prefix line {index + 1} ({_shown(row_id)}) was rewritten"
             )
+    # The release checksum always included a final LF, even for zero rows.
     joined = hashlib.sha256(
         b"".join(
             _utf8(line, number) + b"\n"
             for number, line in enumerate(lines[:count], start=1)
-        )
+        ) or b"\n"
     ).hexdigest()
     if joined != _manifest_field(prefix, "prefixSha256"):
         raise AppendError("immutable prefix cumulative hash mismatch")
