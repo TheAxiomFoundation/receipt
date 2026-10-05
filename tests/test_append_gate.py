@@ -21,6 +21,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from types import SimpleNamespace
 from dataclasses import dataclass, replace
 from typing import Any
@@ -371,6 +372,28 @@ def test_an_ordinary_append_is_accepted(tmp_path: pathlib.Path) -> None:
     append_one_row(candidate)
     assert run_gate(candidate) == (
         "thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base"
+    )
+
+
+def test_an_append_with_a_zero_row_frozen_prefix_is_accepted(
+    tmp_path: pathlib.Path,
+) -> None:
+    """An empty frozen prefix keeps the historical checksum of one newline."""
+
+    candidate = base_repository(tmp_path)
+    manifest = {
+        "schemaVersion": GATE_SPEC.prefix_schema_version,
+        "prefixLineCount": 0,
+        "lineSha256s": [],
+        "prefixSha256": hashlib.sha256(b"\n").hexdigest(),
+    }
+    (candidate.root / CHAIN_SPEC.prefix_relative).write_text(
+        json.dumps(manifest) + "\n", encoding="utf-8"
+    )
+    candidate = replace(candidate, base=commit_candidate(candidate, "zero-row prefix"))
+    append_one_row(candidate)
+    assert run_gate(candidate) == (
+        "thesis-facts append check OK: 3 rows, immutable prefix 0, +1 appended vs base"
     )
 
 
@@ -2652,6 +2675,353 @@ def test_disjoint_unused_tree_anchors_agree_on_push_and_base_paths(
         "+0 appended vs base, release 0"
     )
 
+
+# ---------------------------------------------------------------------------
+# Candidate bytes that escaped as interpreter exceptions (full Opus 5.5
+# review of 0.6.2, L6 F5): each is now an AppendError with a named reason.
+
+
+def _base_lines() -> list[str]:
+    return [jsonl_line(observation_row(n)) for n in range(1, BASE_ROW_COUNT + 1)]
+
+
+def _append_raw_row(root: pathlib.Path, **fields: Any) -> None:
+    """The ordinary one-row proposal with ``fields`` written as given.
+
+    The row is serialized with ``allow_nan`` so NaN and the infinities reach
+    the gate as the JSON literals a producer could write."""
+
+    row = observation_row(BASE_ROW_COUNT + 1)
+    row.update(fields)
+    (root / CHAIN_SPEC.state_relative).write_text(
+        "".join(f"{line}\n" for line in _base_lines())
+        + json.dumps(row, ensure_ascii=False, separators=(",", ":"), allow_nan=True)
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_raw_line(root: pathlib.Path, text: str) -> None:
+    (root / CHAIN_SPEC.state_relative).write_text(
+        "".join(f"{line}\n" for line in _base_lines()) + text + "\n", encoding="utf-8"
+    )
+
+
+def _rewrite_prefix_line(root: pathlib.Path, text: str) -> None:
+    lines = _base_lines()
+    lines[0] = text
+    (root / CHAIN_SPEC.state_relative).write_text(
+        "".join(f"{line}\n" for line in lines), encoding="utf-8"
+    )
+
+
+def _prefix_manifest(root: pathlib.Path, text: str) -> None:
+    (root / CHAIN_SPEC.prefix_relative).write_text(text, encoding="utf-8")
+    append_one_row(Candidate(root=root, base=""))
+
+
+def _prefix_fields(root: pathlib.Path, **fields: Any) -> None:
+    path = root / CHAIN_SPEC.prefix_relative
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    for key, value in fields.items():
+        if value is _ABSENT:
+            manifest.pop(key)
+        else:
+            manifest[key] = value
+    _prefix_manifest(root, json.dumps(manifest, allow_nan=True) + "\n")
+
+
+_ABSENT = object()
+_ROW3 = f"line 3 (fixture.series.observation_{BASE_ROW_COUNT + 1})"
+_DEEP: Any = 0
+for _ in range(5000):
+    _DEEP = [_DEEP]
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected"),
+    [
+        pytest.param(
+            lambda root: _rewrite_prefix_line(root, "garbage"),
+            "immutable prefix line 1 (?) was rewritten",
+            id="prefix-line-not-json",
+        ),
+        pytest.param(
+            lambda root: _rewrite_prefix_line(root, "[1]"),
+            "immutable prefix line 1 (?) was rewritten",
+            id="prefix-line-an-array",
+        ),
+        pytest.param(
+            lambda root: _prefix_manifest(root, "not json\n"),
+            "prefix manifest is not valid JSON: Expecting value: line 1 column 1 (char 0)",
+            id="manifest-not-json",
+        ),
+        pytest.param(
+            lambda root: _prefix_manifest(root, "[]\n"),
+            "prefix manifest is not a JSON object",
+            id="manifest-an-array",
+        ),
+        pytest.param(
+            lambda root: _prefix_manifest(root, "[" * 200 + "]" * 200 + "\n"),
+            "prefix manifest is not valid JSON: JSON nesting exceeds 128 levels at char 128",
+            id="manifest-deep",
+        ),
+        pytest.param(
+            lambda root: _prefix_fields(root, prefixLineCount=_ABSENT),
+            "prefix manifest lacks prefixLineCount",
+            id="count-missing",
+        ),
+        pytest.param(
+            lambda root: _prefix_fields(root, prefixLineCount=float("inf")),
+            "prefix manifest prefixLineCount is not a line count: inf",
+            id="count-infinite",
+        ),
+        pytest.param(
+            lambda root: _prefix_fields(root, prefixLineCount=float("nan")),
+            "prefix manifest prefixLineCount is not a line count: nan",
+            id="count-nan",
+        ),
+        pytest.param(
+            lambda root: _prefix_fields(root, prefixLineCount=None),
+            "prefix manifest prefixLineCount is not a line count: None",
+            id="count-null",
+        ),
+        pytest.param(
+            lambda root: _prefix_fields(root, prefixLineCount="x"),
+            "prefix manifest prefixLineCount is not a line count: 'x'",
+            id="count-not-numeric",
+        ),
+        pytest.param(
+            lambda root: _prefix_fields(root, prefixLineCount={"n": 1}),
+            "prefix manifest prefixLineCount is not a line count: {'n': 1}",
+            id="count-an-object",
+        ),
+        pytest.param(
+            lambda root: _prefix_fields(root, lineSha256s=_ABSENT),
+            "prefix manifest lacks lineSha256s",
+            id="hashes-missing",
+        ),
+        pytest.param(
+            lambda root: _prefix_fields(root, lineSha256s=5),
+            "prefix manifest lineSha256s is not a list",
+            id="hashes-a-number",
+        ),
+        pytest.param(
+            lambda root: _prefix_fields(root, lineSha256s={"0": "x"}),
+            "prefix manifest lineSha256s is not a list",
+            id="hashes-an-object-of-the-right-size",
+        ),
+        pytest.param(
+            lambda root: _prefix_fields(root, prefixSha256=_ABSENT),
+            "prefix manifest lacks prefixSha256",
+            id="cumulative-hash-missing",
+        ),
+        pytest.param(
+            lambda root: _append_raw_row(root, measure="percent"),
+            f"{_ROW3} measure is not an object",
+            id="measure-a-string",
+        ),
+        pytest.param(
+            lambda root: _append_raw_row(root, source=["x"]),
+            f"{_ROW3} source is not an object",
+            id="source-a-list",
+        ),
+        pytest.param(
+            lambda root: _append_raw_row(root, responseArchive="abc"),
+            f"{_ROW3} responseArchive is not an object",
+            id="response-archive-a-string",
+        ),
+        pytest.param(
+            lambda root: _append_raw_row(root, value=float("nan")),
+            f"{_ROW3} assertion content is not canonical JSON: "
+            "Canonical JSON cannot serialize non-finite number: nan",
+            id="value-nan",
+        ),
+        pytest.param(
+            lambda root: _append_raw_row(root, value=float("inf")),
+            f"{_ROW3} assertion content is not canonical JSON: "
+            "Canonical JSON cannot serialize non-finite number: inf",
+            id="value-infinity",
+        ),
+        pytest.param(
+            lambda root: _append_raw_row(root, value=2**1100),
+            f"{_ROW3} assertion content is not canonical JSON: "
+            f"Canonical JSON integer exceeds Number range: {2**1100}",
+            id="value-beyond-number-range",
+        ),
+        pytest.param(
+            lambda root: _write_raw_line(root, '{"value": ' + "9" * 5000 + "}"),
+            "line 3 is not valid JSON: JSON integer literal has 5000 digits, more than 4300",
+            id="value-5000-digits",
+        ),
+        pytest.param(
+            lambda root: _write_raw_line(root, "[" * 200_000 + "]" * 200_000),
+            "line 3 is not valid JSON: JSON nesting exceeds 128 levels at char 128",
+            id="row-nested-200000-deep",
+        ),
+    ],
+)
+def test_candidate_bytes_are_refused_by_name_not_crashed_on(
+    tmp_path: pathlib.Path, mutate: Callable[[pathlib.Path], None], expected: str
+) -> None:
+    """The lane's probe_append_rows cases, each a committed candidate run
+    through the public gate against its base. Every one raised
+    JSONDecodeError, AttributeError, KeyError, TypeError, ValueError,
+    OverflowError or RecursionError out of ``verify_append_gate``."""
+
+    candidate = base_repository(tmp_path)
+    mutate(candidate.root)
+    with pytest.raises(AppendError) as caught:
+        run_gate(candidate)
+    assert str(caught.value) == expected
+
+
+def test_a_content_field_past_the_bound_is_refused_by_name(
+    tmp_path: pathlib.Path,
+) -> None:
+    """``filters`` is part of the content address, and 5,000 deep it was
+    parsed by json.loads and then recursed out of receipt.canonical. The
+    decoding bound refuses it first, by name."""
+
+    assert "filters" in GATE_SPEC.assertion_content_keys
+    candidate = base_repository(tmp_path)
+    # Construct the deep value as text: Python 3.11's encoder cannot write
+    # a 5,000-level list, so serializing _DEEP would fail before the gate.
+    row = observation_row(BASE_ROW_COUNT + 1)
+    del row["filters"]
+    _write_raw_line(
+        candidate.root,
+        jsonl_line(row)[:-1] + ',"filters":' + "[" * 5000 + "0" + "]" * 5000 + "}",
+    )
+    with pytest.raises(AppendError) as caught:
+        run_gate(candidate)
+    assert str(caught.value).startswith(
+        "line 3 is not valid JSON: JSON nesting exceeds 128 levels at char "
+    )
+
+
+def _nested(levels: int) -> Any:
+    value: Any = 0
+    for _ in range(levels):
+        value = [value]
+    return value
+
+
+def test_the_depth_bound_is_a_new_refusal_of_rows_0_6_1_accepted(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The one verdict change the decoding bound makes, pinned on both sides.
+
+    A row is level 1, so a field holding 127 nested lists makes a row 128
+    deep, which is accepted; one more level is refused. 0.6.1 accepted the
+    deeper row too, as long as json.loads could parse it and the field was
+    outside the content address, and so would have taken later appends on
+    top of it; the bound refuses it, and every later append to a ledger
+    holding it, whatever the interpreter's stack."""
+
+    (tmp_path / "at-the-bound").mkdir()
+    (tmp_path / "past-the-bound").mkdir()
+    accepted = base_repository(tmp_path / "at-the-bound")
+    _append_raw_row(accepted.root, note=_nested(127))
+    assert run_gate(accepted).startswith("thesis-facts append check OK: 3 rows")
+
+    refused = base_repository(tmp_path / "past-the-bound")
+    _append_raw_row(refused.root, note=_nested(128))
+    with pytest.raises(AppendError) as caught:
+        run_gate(refused)
+    assert str(caught.value).startswith(
+        "line 3 is not valid JSON: JSON nesting exceeds 128 levels at char "
+    )
+
+
+def test_a_rewritten_deep_row_keeps_its_name_in_the_refusal(tmp_path: pathlib.Path) -> None:
+    """The rewritten-line label is read with json.loads, not the bounded
+    decoder, so a row json.loads can read is named as it was under 0.6.1."""
+
+    candidate = base_repository(tmp_path)
+    _rewrite_prefix_line(
+        candidate.root, jsonl_line(observation_row(1, note=_nested(200)))
+    )
+    with pytest.raises(AppendError) as caught:
+        run_gate(candidate)
+    assert str(caught.value) == (
+        "immutable prefix line 1 (fixture.series.observation_1) was rewritten"
+    )
+
+
+def test_a_prefix_row_without_a_utf8_form_is_refused_by_name() -> None:
+    """A direct caller's row may hold a lone surrogate, which has no UTF-8
+    bytes to hash; ``check_prefix`` refused nothing and raised
+    UnicodeEncodeError. The gate itself decodes strict UTF-8 and cannot
+    reach this."""
+
+    manifest = json.dumps(
+        {
+            "schemaVersion": GATE_SPEC.prefix_schema_version,
+            "prefixLineCount": 1,
+            "lineSha256s": ["0" * 64],
+            "prefixSha256": "0" * 64,
+        }
+    )
+    with pytest.raises(AppendError, match="^line 1 is not valid UTF-8$"):
+        append_gate.check_prefix(["\ud800"], manifest, SimpleNamespace(spec=GATE_SPEC))
+
+
+def test_the_push_path_refuses_a_malformed_manifest_by_name(tmp_path: pathlib.Path) -> None:
+    candidate = base_repository(tmp_path)
+    _prefix_manifest(candidate.root, "null\n")
+    with pytest.raises(AppendError) as caught:
+        run_push_gate(candidate)
+    assert str(caught.value) == "prefix manifest is not a JSON object"
+
+
+def test_a_rewritten_base_line_that_is_not_json_is_named_by_position(
+    tmp_path: pathlib.Path,
+) -> None:
+    """``check_append_only`` names a rewritten line by the base row's id; a
+    base row that is not a JSON object has none, and asking for it raised."""
+
+    root = tmp_path / "candidate"
+    candidate = base_repository(tmp_path)
+    lines = _base_lines()
+    lines[1] = "not a row"
+    (root / CHAIN_SPEC.state_relative).write_text(
+        "".join(f"{line}\n" for line in lines), encoding="utf-8"
+    )
+    base = commit_candidate(candidate, "base with a malformed second line")
+    candidate = Candidate(root=root, base=base)
+    rewritten = _base_lines()
+    (root / CHAIN_SPEC.state_relative).write_text(
+        "".join(f"{line}\n" for line in rewritten), encoding="utf-8"
+    )
+    with pytest.raises(AppendError) as caught:
+        run_gate(candidate)
+    assert str(caught.value) == (
+        "change rewrites existing line 2 (?); the ledger is append-only — "
+        "supersede instead"
+    )
+
+
+def test_the_content_address_refuses_what_it_cannot_encode() -> None:
+    """``expected_assertion_version_id`` is public: a row it cannot address
+    is an AppendError for its callers too, never an AttributeError."""
+
+    row = observation_row(1)
+    for field, value, reason in [
+        ("measure", "percent", "measure is not an object"),
+        ("source", ["x"], "source is not an object"),
+        ("responseArchive", "abc", "responseArchive is not an object"),
+    ]:
+        with pytest.raises(AppendError, match=f"^{reason}$"):
+            expected_assertion_version_id({**row, field: value}, GATE_SPEC)
+    with pytest.raises(AppendError, match="^assertion content is not canonical JSON: "):
+        expected_assertion_version_id({**row, "value": float("nan")}, GATE_SPEC)
+    # A falsy value still reads as absent, as it always has.
+    for field in ("measure", "source", "responseArchive"):
+        for falsy in (None, 0, "", [], {}):
+            assert expected_assertion_version_id({**row, field: falsy}, GATE_SPEC).startswith(
+                "av2:"
+            )
 
 # --- 0.6.2 review, L6 findings 6-8: appended rows carry the types they name
 

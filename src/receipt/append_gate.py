@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
+from receipt import _bounded_json as bounded_json
 from receipt.canonical import canonical_sha256
 from receipt.corpus import MAX_JOURNAL_BYTES
 from receipt.release_chain import (
@@ -325,6 +326,16 @@ def expected_assertion_version_id(row: dict[str, Any], spec: AppendGateSpec) -> 
     """
     measure = row.get("measure") or {}
     source = row.get("source") or {}
+    archive = row.get("responseArchive") or {}
+    # A falsy value reads as absent, as it always has; any other value that
+    # is not an object used to reach ``.get`` and raise AttributeError.
+    for label, value in (
+        ("measure", measure),
+        ("source", source),
+        ("responseArchive", archive),
+    ):
+        if not isinstance(value, dict):
+            raise AppendError(f"{label} is not an object")
     projection = {key: row.get(key) for key in spec.assertion_content_keys}
     projection["measure"] = {
         "concept": measure.get("concept"),
@@ -346,10 +357,15 @@ def expected_assertion_version_id(row: dict[str, Any], spec: AppendGateSpec) -> 
         "source_row_keys": row.get("source_row_keys"),
         "source_cell_keys": row.get("source_cell_keys"),
     }
-    projection["responseArchiveSha256"] = (row.get("responseArchive") or {}).get(
-        "sha256"
-    )
-    return f"av2:{canonical_sha256(projection)}"
+    projection["responseArchiveSha256"] = archive.get("sha256")
+    try:
+        digest = canonical_sha256(projection)
+    except (ValueError, TypeError, RecursionError) as exc:
+        # NaN, an infinity or an integer beyond the Number range has no
+        # canonical encoding, so no content address; receipt.canonical says
+        # so with ValueError, and the row is refused here instead.
+        raise AppendError(f"assertion content is not canonical JSON: {exc}") from exc
+    return f"av2:{digest}"
 
 
 def _effective_assertion_id(row: dict[str, Any], spec: AppendGateSpec) -> str:
@@ -391,14 +407,31 @@ def check_prefix(
 ) -> dict[str, Any]:
     # The caller supplies the selected prefix blob once, so the refusals below
     # retain their established order over authenticated bytes.
-    prefix = json.loads(prefix_text)
+    #
+    # The manifest is candidate-controlled, so each step that used to raise
+    # an interpreter exception on a malformed one -- the parse, ``.get`` on a
+    # non-object, ``int()``, ``len()``, indexing, a missing key -- now
+    # refuses by name at the same point. The release's strict integer rule
+    # also refuses coercible noninteger counts; existing parse and conversion
+    # refusal reasons are retained. The decoder additionally refuses JSON
+    # nested more than 128 deep.
+    try:
+        prefix = bounded_json.loads(prefix_text)
+    except (json.JSONDecodeError, bounded_json.JsonBoundError) as exc:
+        raise AppendError(f"prefix manifest is not valid JSON: {exc}") from exc
+    if not isinstance(prefix, dict):
+        raise AppendError("prefix manifest is not a JSON object")
     if prefix.get("schemaVersion") != candidate.spec.prefix_schema_version:
         raise AppendError(
             f"unsupported prefix manifest schema {prefix.get('schemaVersion')!r}"
         )
-    count = int(prefix["prefixLineCount"])
-    hashes = prefix["lineSha256s"]
-    if len(hashes) != count:
+    count = _prefix_line_count(prefix)
+    hashes = _manifest_field(prefix, "lineSha256s")
+    try:
+        declared = len(hashes)
+    except TypeError:
+        raise AppendError("prefix manifest lineSha256s is not a list") from None
+    if declared != count:
         raise AppendError("prefix manifest line hashes disagree with its count")
     if len(lines) < count:
         raise AppendError(
@@ -406,18 +439,86 @@ def check_prefix(
             f"requires at least {count}"
         )
     for index in range(count):
-        digest = hashlib.sha256(lines[index].encode("utf-8")).hexdigest()
-        if digest != hashes[index]:
-            row_id = json.loads(lines[index]).get("source_record_id", "?")
+        digest = hashlib.sha256(_utf8(lines[index], index + 1)).hexdigest()
+        try:
+            expected = hashes[index]
+        except (KeyError, TypeError):
+            # An object whose size matches the count: indexed by position,
+            # it has no entries.
+            raise AppendError("prefix manifest lineSha256s is not a list") from None
+        if digest != expected:
+            row_id = _row_label(lines[index])
             raise AppendError(
                 f"immutable prefix line {index + 1} ({_shown(row_id)}) was rewritten"
             )
+    # The release checksum always included a final LF, even for zero rows.
     joined = hashlib.sha256(
-        ("\n".join(lines[:count]) + "\n").encode("utf-8")
+        b"".join(
+            _utf8(line, number) + b"\n"
+            for number, line in enumerate(lines[:count], start=1)
+        ) or b"\n"
     ).hexdigest()
-    if joined != prefix["prefixSha256"]:
+    if joined != _manifest_field(prefix, "prefixSha256"):
         raise AppendError("immutable prefix cumulative hash mismatch")
     return prefix
+
+
+def _utf8(line: str, number: int) -> bytes:
+    """A row's UTF-8 bytes, which is what its hash is taken over.
+
+    The gate decodes the ledger as strict UTF-8, so its rows always encode;
+    a direct caller's row may hold a lone surrogate, which has no UTF-8 form
+    and so no hash, and was ``UnicodeEncodeError`` out of ``check_prefix``.
+    """
+
+    try:
+        return line.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise AppendError(f"line {number} is not valid UTF-8") from exc
+
+
+def _manifest_field(prefix: dict[str, Any], field: str) -> Any:
+    try:
+        return prefix[field]
+    except KeyError:
+        raise AppendError(f"prefix manifest lacks {field}") from None
+
+
+def _prefix_line_count(prefix: dict[str, Any], owner: str = "") -> int:
+    """Require a JSON integer, retaining named refusals for invalid counts."""
+
+    value = _manifest_field(prefix, "prefixLineCount")
+    try:
+        int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise AppendError(
+            f"prefix manifest prefixLineCount is not a line count: {value!r}"
+        ) from None
+    # Unconvertible values retain the crash-to-refusal reason above. Values
+    # such as true, 1.0 and "1" convert, but are not JSON integer counts.
+    if type(value) is not int:
+        raise AppendError(
+            f"{owner}immutable prefix manifest prefixLineCount is not a JSON "
+            "integer"
+        )
+    return value
+
+
+def _row_label(line: str) -> Any:
+    """The ``source_record_id`` a refusal names a row by, or ``"?"``.
+
+    Only ever called for a row that is being refused, and the row may be the
+    reason: not JSON, not an object, too deep or too wide for ``json.loads``.
+    Each of those used to raise from inside the refusal's own message.  The
+    label is read with ``json.loads`` itself, not the bounded decoder, so a
+    row ``json.loads`` could read keeps the name it was refused under before.
+    """
+
+    try:
+        row = json.loads(line)
+    except (ValueError, RecursionError):
+        return "?"
+    return row.get("source_record_id", "?") if isinstance(row, dict) else "?"
 
 
 def _is_canonical_rfc3339(value: Any) -> bool:
@@ -468,8 +569,8 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
     active_by_record_id: dict[str, tuple[int, str | None]] = {}
     for number, line in enumerate(lines, start=1):
         try:
-            row = json.loads(line)
-        except json.JSONDecodeError as exc:
+            row = bounded_json.loads(line)
+        except (json.JSONDecodeError, bounded_json.JsonBoundError) as exc:
             raise AppendError(f"line {number} is not valid JSON: {exc}") from exc
         if not isinstance(row, dict):
             raise AppendError(f"line {number} is not a JSON object")
@@ -484,13 +585,21 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
             raise AppendError(
                 f"line {number} ({_shown(record_id)}) has no observed_at date"
             )
-        unit = (row.get("measure") or {}).get("unit")
+        measure = row.get("measure") or {}
+        if not isinstance(measure, dict):
+            raise AppendError(
+                f"line {number} ({_shown(record_id)}) measure is not an object"
+            )
+        unit = measure.get("unit")
         if not unit:
             raise AppendError(
                 f"line {number} ({_shown(record_id)}) has no measure unit"
             )
 
-        recomputed = expected_assertion_version_id(row, spec)
+        try:
+            recomputed = expected_assertion_version_id(row, spec)
+        except AppendError as exc:
+            raise AppendError(f"line {number} ({_shown(record_id)}) {exc}") from exc
         version = row.get("assertionVersion")
         supersedes = None
         if version is not None:
@@ -611,7 +720,7 @@ def check_append_only(
         )
     for index, line in enumerate(base_lines):
         if lines[index] != line:
-            row_id = json.loads(line).get("source_record_id", "?")
+            row_id = _row_label(line)
             raise AppendError(
                 f"change rewrites existing line {index + 1} ({_shown(row_id)}); "
                 "the ledger is append-only — supersede instead"
@@ -676,18 +785,6 @@ def _same_json(left: Any, right: Any) -> bool:
             _same_json(item, other) for item, other in zip(left, right)
         )
     return bool(left == right)
-
-
-def _prefix_line_count(prefix: dict[str, Any], owner: str = "") -> int:
-    """``prefixLineCount`` as the JSON integer the manifest must carry."""
-
-    count = prefix.get("prefixLineCount")
-    if type(count) is not int:
-        raise AppendError(
-            f"{owner}immutable prefix manifest prefixLineCount is not a JSON "
-            "integer"
-        )
-    return count
 
 
 def _is_calendar_date(value: Any) -> bool:
