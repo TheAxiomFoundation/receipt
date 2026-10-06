@@ -1,0 +1,2 @@
+test_a_witness_status_that_is_a_list_or_object_is_refused_by_name
+test_an_unavailable_witness_with_an_object_status_is_refused_by_name

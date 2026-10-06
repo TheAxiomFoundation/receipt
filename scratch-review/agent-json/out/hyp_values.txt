@@ -1,0 +1,3 @@
+receipt: /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/trees/f8b1ddc/src/receipt/__init__.py
+PASS values 3000
+{('value', 'value'): 2111, ('value', 'bound'): 889}

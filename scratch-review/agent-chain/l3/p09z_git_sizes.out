@@ -1,0 +1,3 @@
+core.looseCompression: (unset -> git default)
+payload 67,108,758 B (MAX_TREE_OBJECT_BYTES=67,108,864); loose object 292,923 B
+pack-objects --stdout (one object): 65,335 B

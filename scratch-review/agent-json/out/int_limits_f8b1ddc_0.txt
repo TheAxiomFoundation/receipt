@@ -1,0 +1,22 @@
+receipt: /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/trees/f8b1ddc/src/receipt/__init__.py int_max_str_digits: 0
+load_json obj_int4300: ACCEPT dict keys=x
+load_json obj_int4301: TsaError: cannot read JSON <W>/obj_int4301.json: JSON integer literal has 4301 digits, more than 4300
+load_json obj_int5000: TsaError: cannot read JSON <W>/obj_int5000.json: JSON integer literal has 5000 digits, more than 4300
+load_json obj_negint5000: TsaError: cannot read JSON <W>/obj_negint5000.json: JSON integer literal has 5000 digits, more than 4300
+load_json obj_int700: ACCEPT dict keys=x
+load_json obj_int640: ACCEPT dict keys=x
+load_json obj_neg0: ACCEPT dict keys=x
+load_json obj_float5000: ACCEPT dict keys=x
+load_json obj_1e400: ACCEPT dict keys=x
+load_json obj_int5000_then_syntax_error: TsaError: cannot read JSON <W>/obj_int5000_then_syntax_error.json: JSON integer literal has 5000 digits, more than 4300
+load_json obj_int700_then_syntax_error: TsaError: cannot read JSON <W>/obj_int700_then_syntax_error.json: Illegal trailing comma before end of object: line 1 column 707 (char 706)
+load_json arr_int5000: TsaError: cannot read JSON <W>/arr_int5000.json: JSON integer literal has 5000 digits, more than 4300
+load_json arr_int700: TsaError: record must be a JSON object: <W>/arr_int700.json
+load_manifest releaseIndex5000: ReleaseChainError: manifest is not valid JSON: <W>/m-releaseIndex5000.json: JSON integer literal has 5000 digits, more than 4300
+load_manifest releaseIndex700: ReleaseChainError: releaseIndex 999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999
+load_manifest releaseIndex4300: ReleaseChainError: releaseIndex 999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999
+load_manifest schemaVersion5000: ReleaseChainError: manifest is not valid JSON: <W>/m-schemaVersion5000.json: JSON integer literal has 5000 digits, more than 4300
+verify_witness control: VERIFIED (available)
+verify_witness big5000: TsaError: cannot read JSON <W>/rec-big5000/records/2026-09-02/record-0001.json: JSON integer literal has 5000 digits, more than 4300
+verify_witness big700: VERIFIED (available)
+verify_witness big5000_then_syntax_error: TsaError: cannot read JSON <W>/rec-big5000_then_syntax_error/records/2026-09-02/record-0001.json: JSON integer literal has 5000 digits, more than 4300

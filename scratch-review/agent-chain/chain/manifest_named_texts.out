@@ -1,0 +1,44 @@
+9c47a3d count|gen|state.lineCount|1e400 => CRASH ValueError: Canonical JSON integer exceeds Number range: 100000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+f8b1ddc count|gen|state.lineCount|1e400 => ReleaseChainError: manifest bytes are not canonical JSON plus one newline: <P>
+9c47a3d count|rel|append.previousLineCount|1e400 => CRASH ValueError: Canonical JSON integer exceeds Number range: 100000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+f8b1ddc count|rel|append.previousLineCount|1e400 => ReleaseChainError: manifest bytes are not canonical JSON plus one newline: <P>
+9c47a3d count|gen|state.lineCount|d5000 => CRASH ValueError: Exceeds the limit (4300 digits) for integer string conversion: value has 5000 digits; use sys.set_int_max_str_digits() to increase t
+f8b1ddc count|gen|state.lineCount|d5000 => ReleaseChainError: manifest is not valid JSON: <P>: JSON integer literal has 5000 digits, more than 4300
+9c47a3d count|gen|state.lineCount|NaN => ReleaseChainError: manifest contains non-JSON number 'NaN'
+f8b1ddc count|gen|state.lineCount|NaN => ReleaseChainError: manifest contains non-JSON number 'NaN'
+9c47a3d count|gen|state.lineCount|Infinity => ReleaseChainError: manifest contains non-JSON number 'Infinity'
+f8b1ddc count|gen|state.lineCount|Infinity => ReleaseChainError: manifest contains non-JSON number 'Infinity'
+9c47a3d count|gen|state.lineCount|negInfinity => ReleaseChainError: manifest contains non-JSON number '-Infinity'
+f8b1ddc count|gen|state.lineCount|negInfinity => ReleaseChainError: manifest contains non-JSON number '-Infinity'
+9c47a3d count|gen|state.lineCount|f1e400 => ReleaseChainError: state.lineCount must be an integer, not a boolean
+f8b1ddc count|gen|state.lineCount|f1e400 => ReleaseChainError: state.lineCount must be an integer, not a boolean
+9c47a3d count|gen|state.lineCount|true => ReleaseChainError: state.lineCount must be an integer, not a boolean
+f8b1ddc count|gen|state.lineCount|true => ReleaseChainError: state.lineCount must be an integer, not a boolean
+9c47a3d count|gen|state.lineCount|f1.0 => ReleaseChainError: state.lineCount must be an integer, not a boolean
+f8b1ddc count|gen|state.lineCount|f1.0 => ReleaseChainError: state.lineCount must be an integer, not a boolean
+9c47a3d pos|gen|extra-key|f1e400 => ReleaseChainError: manifest keys are not closed-world: missing=[], unknown=['zzz']
+f8b1ddc pos|gen|extra-key|f1e400 => ReleaseChainError: manifest keys are not closed-world: missing=[], unknown=['zzz']
+9c47a3d pos|gen|schemaVersion|f1e400 => ReleaseChainError: unsupported manifest schema inf
+f8b1ddc pos|gen|schemaVersion|f1e400 => ReleaseChainError: unsupported manifest schema inf
+9c47a3d dup|state|lineCount => ReleaseChainError: manifest has duplicate key 'lineCount'
+f8b1ddc dup|state|lineCount => ReleaseChainError: manifest has duplicate key 'lineCount'
+9c47a3d depth|dup-before|1000 => ReleaseChainError: manifest has duplicate key 'a'
+f8b1ddc depth|dup-before|1000 => ReleaseChainError: manifest has duplicate key 'a'
+9c47a3d depth|nan-before|1000 => ReleaseChainError: manifest contains non-JSON number 'NaN'
+f8b1ddc depth|nan-before|1000 => ReleaseChainError: manifest contains non-JSON number 'NaN'
+9c47a3d depth|unclosed|1000 => ReleaseChainError: manifest is not valid JSON: <P>: Expecting value: line 1 column 1117 (char 1116)
+f8b1ddc depth|unclosed|1000 => ReleaseChainError: manifest is not valid JSON: <P>: Expecting value: line 1 column 1117 (char 1116)
+9c47a3d depth|producer.repo|128 => ReleaseChainError: producer.repo must be a string and non-empty
+f8b1ddc depth|producer.repo|128 => ReleaseChainError: producer.repo must be a string and non-empty
+9c47a3d count|gen|state.lineCount|2p53 => ACCEPT 3846f8d829f4bb0bceba4ed65467a2a61823925f52ab501c8c1e63a2a2273044
+f8b1ddc count|gen|state.lineCount|2p53 => ACCEPT 3846f8d829f4bb0bceba4ed65467a2a61823925f52ab501c8c1e63a2a2273044
+9c47a3d count|gen|state.lineCount|1e20 => ACCEPT c7daf3ffc643d5fdf980f7a2b900fae7b4a1b19dc5da83597ece519876efff08
+f8b1ddc count|gen|state.lineCount|1e20 => ACCEPT c7daf3ffc643d5fdf980f7a2b900fae7b4a1b19dc5da83597ece519876efff08
+9c47a3d count|gen|state.lineCount|1e21 => ReleaseChainError: manifest bytes are not canonical JSON plus one newline: <P>
+f8b1ddc count|gen|state.lineCount|1e21 => ReleaseChainError: manifest bytes are not canonical JSON plus one newline: <P>
+9c47a3d count|gen|state.lineCount|d4300 => CRASH ValueError: Canonical JSON integer exceeds Number range: 999999999999999999999999999999999999999999999999999999999999999999999999999999999999999
+f8b1ddc count|gen|state.lineCount|d4300 => ReleaseChainError: manifest bytes are not canonical JSON plus one newline: <P>
+9c47a3d count|gen|state.lineCount|negd4300 => ReleaseChainError: state.lineCount must be >= 0
+f8b1ddc count|gen|state.lineCount|negd4300 => ReleaseChainError: state.lineCount must be >= 0
+9c47a3d count|gen|releaseIndex|1e400 => ReleaseChainError: releaseIndex 1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+f8b1ddc count|gen|releaseIndex|1e400 => ReleaseChainError: releaseIndex 1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000

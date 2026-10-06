@@ -1,0 +1,10 @@
+receipt: /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/trees/f8b1ddc/src/receipt/__init__.py limit: 1000
+stack_size=0KiB {'json.loads deepest': 116352, 'bounded loads(128-deep)': 'ACCEPT', 'json.loads(128-deep)': 'ACCEPT', 'load_json(128-deep obj)': 'ACCEPT', 'canonical deepest list': 496, 'canonical deepest dict': 992, 'canonical(128-deep list)': 'ACCEPT'}
+stack_size 32768: size must be at least 53248 bytes
+stack_size 49152: size must be at least 53248 bytes
+stack_size=64KiB {'json.loads deepest': 299, 'bounded loads(128-deep)': 'ACCEPT', 'json.loads(128-deep)': 'ACCEPT', 'load_json(128-deep obj)': 'ACCEPT', 'canonical deepest list': 52, 'canonical deepest dict': 992, 'canonical(128-deep list)': 'RecursionError: Stack overflow (used 44 kB) in __instancecheck__'}
+stack_size=96KiB {'json.loads deepest': 527, 'bounded loads(128-deep)': 'ACCEPT', 'json.loads(128-deep)': 'ACCEPT', 'load_json(128-deep obj)': 'ACCEPT', 'canonical deepest list': 93, 'canonical deepest dict': 992, 'canonical(128-deep list)': 'RecursionError: Stack overflow (used 76 kB)'}
+stack_size=128KiB {'json.loads deepest': 754, 'bounded loads(128-deep)': 'ACCEPT', 'json.loads(128-deep)': 'ACCEPT', 'load_json(128-deep obj)': 'ACCEPT', 'canonical deepest list': 133, 'canonical deepest dict': 992, 'canonical(128-deep list)': 'ACCEPT'}
+stack_size=256KiB {'json.loads deepest': 1665, 'bounded loads(128-deep)': 'ACCEPT', 'json.loads(128-deep)': 'ACCEPT', 'load_json(128-deep obj)': 'ACCEPT', 'canonical deepest list': 293, 'canonical deepest dict': 992, 'canonical(128-deep list)': 'ACCEPT'}
+stack_size=512KiB {'json.loads deepest': 3485, 'bounded loads(128-deep)': 'ACCEPT', 'json.loads(128-deep)': 'ACCEPT', 'load_json(128-deep obj)': 'ACCEPT', 'canonical deepest list': 496, 'canonical deepest dict': 992, 'canonical(128-deep list)': 'ACCEPT'}
+stack_size=1024KiB {'json.loads deepest': 7126, 'bounded loads(128-deep)': 'ACCEPT', 'json.loads(128-deep)': 'ACCEPT', 'load_json(128-deep obj)': 'ACCEPT', 'canonical deepest list': 496, 'canonical deepest dict': 992, 'canonical(128-deep list)': 'ACCEPT'}

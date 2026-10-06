@@ -1,0 +1,8 @@
+{"entryIndex":0,"kind":"content","path":"rules/benefit/amount.yaml","schemaVersion":"receipt/test-corpus-journal/v1","sha256":"08e6f34303ef62e74e9b84e142c80bf315851132a0f43fda09a590a78f9fa1f0","state":"present"}
+{"entryIndex":1,"kind":"content","path":"rules/tax/rate.test.yaml","schemaVersion":"receipt/test-corpus-journal/v1","sha256":"67fd4cc91da7c4d6870049981fed4d367327a4bb687e73666652796d80b533b8","state":"present"}
+{"entryIndex":2,"kind":"content","path":"rules/tax/rate.yaml","schemaVersion":"receipt/test-corpus-journal/v1","sha256":"e218ac6d2f126c76eb6e74203814e06e3fd528afc809576cede2e2b2546bdc49","state":"present"}
+{"entryIndex":3,"kind":"attested","path":".axiom/toolchain.toml","schemaVersion":"receipt/test-corpus-journal/v1","sha256":"75312e9184f8c106c14e7fbb7d258bf50a5467751b16e2d4564166200053b61b","state":"present"}
+{"entryIndex":4,"evidence":{"command":"make validate"},"gateId":"rulespec/compile","kind":"gate","outcome":"pass","schemaVersion":"receipt/test-corpus-journal/v1","tier":"public"}
+{"entryIndex":5,"evidence":{"restrictedInput":"licensed bundle"},"gateId":"oracle/licensed-parity","kind":"gate","outcome":"pass","schemaVersion":"receipt/test-corpus-journal/v1","tier":"restricted"}
+{"entryIndex":6,"evidence":{"workflow":"repository-checks.yml"},"gateId":"ci/repository-checks","kind":"gate","outcome":"pass","schemaVersion":"receipt/test-corpus-journal/v1","tier":"ci-attested"}
+{"entryIndex":7,"kind":"content","path":"rules/extra.yaml","schemaVersion":"receipt/test-corpus-journal/v1","sha256":"c2bef2eec199f711da644ec975025dc75f7fc9e31c3e86f1c0aa32cfd734830e","state":"present"}

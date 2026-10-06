@@ -1,0 +1,16 @@
+== p09 9c47a3d
+receipt.snapshot from /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/agent-chain/trees/9c47a3d/src/receipt/snapshot.py
+N= 25,000 payload= 0.05 MB  CPU=   0.01s  -> SnapshotError(commit 000000000000000000000000000000000000000
+N= 50,000 payload= 0.10 MB  CPU=   0.03s (3.7x previous)  -> SnapshotError(commit 000000000000000000000000000000000000000
+N=100,000 payload= 0.20 MB  CPU=   0.12s (3.5x previous)  -> SnapshotError(commit 000000000000000000000000000000000000000
+N=200,000 payload= 0.40 MB  CPU=   0.42s (3.6x previous)  -> SnapshotError(commit 000000000000000000000000000000000000000
+extrapolated CPU at the 64 MiB object ceiling (N=33,554,332): ~3 hours
+select (N=200,000; loose object 1,856 bytes on disk): refused after 2.6s wall: commit 174dec96bcfd33eb13783705c98b758a24ae507e is not a canonical commit object
+== p09 f8b1ddc
+receipt.snapshot from /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/agent-chain/trees/f8b1ddc/src/receipt/snapshot.py
+N= 25,000 payload= 0.05 MB  CPU=   0.00s  -> SnapshotError(commit 000000000000000000000000000000000000000
+N= 50,000 payload= 0.10 MB  CPU=   0.00s (0.9x previous)  -> SnapshotError(commit 000000000000000000000000000000000000000
+N=100,000 payload= 0.20 MB  CPU=   0.00s (1.6x previous)  -> SnapshotError(commit 000000000000000000000000000000000000000
+N=200,000 payload= 0.40 MB  CPU=   0.00s (1.9x previous)  -> SnapshotError(commit 000000000000000000000000000000000000000
+extrapolated CPU at the 64 MiB object ceiling (N=33,554,332): ~0 hours
+select (N=200,000; loose object 1,856 bytes on disk): refused after 0.6s wall: commit 174dec96bcfd33eb13783705c98b758a24ae507e is not a canonical commit object

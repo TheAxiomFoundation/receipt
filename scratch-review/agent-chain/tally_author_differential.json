@@ -1,0 +1,12 @@
+{
+  "receipt_file": "/Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/agent-chain/trees/f8b1ddc/src/receipt/snapshot.py",
+  "counts": {
+    "calls": 3000,
+    "parse": 629,
+    "refused_noncanonical": 2290,
+    "any_cont_tp": 1161,
+    "new_site": 871,
+    "budget": 81,
+    "distinct_inputs": 2692
+  }
+}

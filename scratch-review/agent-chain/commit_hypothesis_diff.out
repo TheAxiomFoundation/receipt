@@ -1,0 +1,21 @@
+..                                                                       [100%]
+============================ Hypothesis Statistics =============================
+scratch-review/agent-chain/test_commit_hypothesis_diff.py::test_structured:
+
+  - during generate phase (42.62 seconds):
+    - Typical runtimes: ~ 1-53 ms, of which ~ 0-45 ms in data generation
+    - 3000 passing, 0 failing, and 376 invalid test cases
+
+  - Stopped because settings.max_examples=3000
+
+
+scratch-review/agent-chain/test_commit_hypothesis_diff.py::test_token_soup:
+
+  - during generate phase (12.74 seconds):
+    - Typical runtimes: ~ 0-5 ms, of which ~ 0-1 ms in data generation
+    - 3000 passing, 0 failing, and 308 invalid test cases
+
+  - Stopped because settings.max_examples=3000
+
+
+2 passed in 56.85s

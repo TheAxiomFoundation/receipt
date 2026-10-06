@@ -1,0 +1,31 @@
+# receipt loaded from /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/trees/9c47a3d/src/receipt/__init__.py
+[token genTime 20261301000000Z (month 13), bytes patched, unsigned]
+    ** builtins.ValueError (NOT TsaError): unconverted data remains: 0
+[token genTime 20260230000000Z (Feb 30)]
+    ** builtins.ValueError (NOT TsaError): day 30 must be in range 1..28 for month 2 in year 2026
+[token genTime 20261231235960Z (leap second)]
+    ** builtins.ValueError (NOT TsaError): second must be in 0..59, not 60
+[token policy OID with a 2100-octet subidentifier]
+    ** builtins.ValueError (NOT TsaError): Exceeds the limit (4300 digits) for integer string conversion; use sys.set_int_max_str_digits() to increase the limit
+[record recordedAt 0001-01-01T00:00:00Z (lead 300)]
+    ** builtins.OverflowError (NOT TsaError): date value out of range
+[record recordedAt 0001-01-01T00:00:00+14:00]
+    ** builtins.OverflowError (NOT TsaError): date value out of range
+[sidecar nested 100000 deep]
+    ** builtins.RecursionError (NOT TsaError): Stack overflow (used 8144 kB) while decoding a JSON array from a unicode string
+[sidecar holding a 5000-digit integer]
+    ** builtins.ValueError (NOT TsaError): Exceeds the limit (4300 digits) for integer string conversion: value has 5000 digits; use sys.set_int_max_str_digits() to increase the limit
+[record nested 100000 deep]
+    ** builtins.RecursionError (NOT TsaError): Stack overflow (used 8144 kB) while decoding a JSON array from a unicode string
+[record holding a 5000-digit integer]
+    ** builtins.ValueError (NOT TsaError): Exceeds the limit (4300 digits) for integer string conversion: value has 5000 digits; use sys.set_int_max_str_digits() to increase the limit
+[genesis nested 100000 deep]
+    ** builtins.RecursionError (NOT TsaError): Stack overflow (used 8144 kB) while decoding a JSON array from a unicode string
+[bundle file with NaN]
+    ** builtins.ValueError (NOT TsaError): Canonical JSON cannot serialize non-finite number: nan
+[bundle file nested 600 deep]
+    ** builtins.RecursionError (NOT TsaError): maximum recursion depth exceeded
+[bundle file holding a 5000-digit integer]
+    ** builtins.ValueError (NOT TsaError): Exceeds the limit (4300 digits) for integer string conversion: value has 5000 digits; use sys.set_int_max_str_digits() to increase the limit
+[control: bundle file with an extra ordinary key]
+    TsaError: TSA trust configuration is not canonical JSON: /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/agent-tsa/tmp/l2-tree-9p_ooer9/records/trust/tsa-anchors-v1.json

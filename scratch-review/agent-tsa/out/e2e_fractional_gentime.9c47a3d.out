@@ -1,0 +1,7 @@
+# receipt loaded from /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/trees/9c47a3d/src/receipt/__init__.py
+_format_utc on 12:00:00.5 UTC -> '2026-09-27T12:00:00.500000+00:'
+genTime per `openssl ts -reply -text`: Sep 28 18:43:55.243 2026 GMT
+control: `openssl ts -verify` against the pinned root accepts: True
+verify_witness: TsaError: invalid timestamp claim token genTime: '2026-09-28T18:43:55.243000+00:'
+verify_timestamp_token accepted; evidence.gen_time = '2026-09-28T18:43:55.243000+00:'
+declaring tsaGenTime='2026-09-28T18:43:55.243000Z': TsaError: witness tsaGenTime mismatch for /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/agent-tsa/tmp/l2-tree-thhscgt7/records/2026-09-02/record-0001.json: expected 2026-09-28T18:43:55.

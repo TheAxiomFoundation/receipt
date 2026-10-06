@@ -1,0 +1,28 @@
+{"kind": "OK", "msg": "thesis-facts append check OK: 3 rows, immutable prefix True, +1 appended vs base", "case": "count=True push=False"}
+{"kind": "AppendError", "msg": "immutable prefix manifest prefixLineCount changed vs base a08fba658aefd9d17beaa78786d334d3fe0a3c45; the frozen prefix cannot grow through the automated append path \u2014 growing it is an explicit reviewed migration", "case": "count='1' push=False"}
+{"kind": "AppendError", "msg": "prefix manifest line hashes disagree with its count", "case": "count='1_0' push=False"}
+{"kind": "OK", "msg": "thesis-facts append check OK: 3 rows, immutable prefix True", "case": "count=True push=True"}
+{"kind": "OK", "msg": "thesis-facts append check OK: 3 rows, immutable prefix 1", "case": "count='1' push=True"}
+{"kind": "AppendError", "msg": "prefix manifest line hashes disagree with its count", "case": "count='1_0' push=True"}
+{"kind": "AppendError", "msg": "immutable prefix line 1 (fixture.series.observation_1) was rewritten", "case": "lineSha256s string len1 push=False"}
+{"kind": "AppendError", "msg": "prefix manifest line hashes disagree with its count", "case": "lineSha256s longer push=False"}
+{"kind": "AppendError", "msg": "immutable prefix line 1 (fixture.series.observation_1) was rewritten", "case": "lineSha256s string len1 push=True"}
+{"kind": "AppendError", "msg": "prefix manifest line hashes disagree with its count", "case": "lineSha256s longer push=True"}
+{"kind": "CRASH:AttributeError", "msg": "'list' object has no attribute 'get'", "at": "append_gate.py:365", "case": "prefix2 line2 rewritten '[1]' push=False"}
+{"kind": "AppendError", "msg": "immutable prefix line 2 (?) was rewritten", "case": "prefix2 line2 rewritten '{\"a\":1}' push=True"}
+{"kind": "AppendError", "msg": "immutable prefix line 2 () was rewritten", "case": "prefix2 line2 rewritten '{\"source_record_id\":\"\"}' push=False"}
+{"kind": "CRASH:AttributeError", "msg": "'NoneType' object has no attribute 'get'", "at": "append_gate.py:365", "case": "prefix2 line2 rewritten 'null' push=True"}
+{"kind": "AppendError", "msg": "immutable prefix line 2 (id) was rewritten", "case": "prefix2 line2 rewritten '{\"source_record_id\":\"id\",\"d\":[' push=False"}
+{"kind": "CRASH:ValueError", "msg": "Exceeds the limit (4300 digits) for integer string conversion: value has 5000 digits; use sys.set_int_max_str_digits() to increase the limit", "at": "decoder.py:361", "case": "prefix2 line2 rewritten '{\"source_record_id\":\"id\",\"n\":9' push=True"}
+{"kind": "OK", "msg": "thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base", "case": "base line 2 is 201 deep, candidate appends one row"}
+{"kind": "AppendError", "msg": "line 3 (fixture.series.observation_3) has no measure unit", "case": "appended measure=0"}
+{"kind": "AppendError", "msg": "line 3 (fixture.series.observation_3) has no measure unit", "case": "appended measure=False"}
+{"kind": "CRASH:AttributeError", "msg": "'int' object has no attribute 'get'", "at": "append_gate.py:437", "case": "appended measure=1"}
+{"kind": "CRASH:AttributeError", "msg": "'bool' object has no attribute 'get'", "at": "append_gate.py:437", "case": "appended measure=True"}
+{"kind": "OK", "msg": "thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base", "case": "appended source=[]"}
+{"kind": "OK", "msg": "thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base", "case": "appended source={}"}
+{"kind": "CRASH:AttributeError", "msg": "'list' object has no attribute 'get'", "at": "append_gate.py:292", "case": "appended source=[0]"}
+{"kind": "AppendError", "msg": "appended line 3 (fixture.series.observation_3) lacks responseArchive", "case": "appended responseArchive=''"}
+{"kind": "AppendError", "msg": "appended line 3 (fixture.series.observation_3) lacks responseArchive", "case": "appended responseArchive=None"}
+{"kind": "CRASH:AttributeError", "msg": "'str' object has no attribute 'get'", "at": "append_gate.py:303", "case": "appended responseArchive='x'"}
+{"kind": "OK", "msg": "thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base", "case": "ordinary append"}

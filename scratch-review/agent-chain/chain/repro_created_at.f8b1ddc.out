@@ -1,0 +1,25 @@
+release_chain module: /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/agent-chain/trees/f8b1ddc/src/receipt/release_chain.py
+A load_manifest accepts createdAtUtc=0001-01-01T00:00:00Z: 0001-01-01T00:00:00Z
+A verify_release_chain createdAtUtc=0001-01-01T00:00:00Z: ReleaseChainError: HEAD release lineCount 7 does not match working-tree line count 8
+A load_manifest accepts createdAtUtc=0001-01-01T00:04:59Z: 0001-01-01T00:04:59Z
+A verify_release_chain createdAtUtc=0001-01-01T00:04:59Z: ReleaseChainError: HEAD release lineCount 7 does not match working-tree line count 8
+A load_manifest accepts createdAtUtc=0001-01-01T00:05:00Z: 0001-01-01T00:05:00Z
+A verify_release_chain createdAtUtc=0001-01-01T00:05:00Z: ReleaseChainError: HEAD release lineCount 7 does not match working-tree line count 8
+B verify_release_chain clock_skew_seconds=10**15: VERIFIED (2 releases)
+B verify_release_chain clock_skew_seconds=10**6: VERIFIED (2 releases)
+C verify_release_chain now=datetime.max(UTC): VERIFIED (2 releases)
+C verify_release_chain now=9999-12-31T23:55:00Z: VERIFIED (2 releases)
+B2 verify_release_chain clock_skew_seconds=0: VERIFIED (2 releases)
+B2 verify_release_chain clock_skew_seconds=1: VERIFIED (2 releases)
+B2 verify_release_chain clock_skew_seconds=100000000000000000000000: VERIFIED (2 releases)
+B2 verify_release_chain clock_skew_seconds=100000000000000000000000: VERIFIED (2 releases)
+B2 verify_release_chain clock_skew_seconds=86399999999999: VERIFIED (2 releases)
+B2 verify_release_chain clock_skew_seconds=86400000000000: VERIFIED (2 releases)
+B3 verify_release_chain clock_skew_seconds=True: ReleaseChainError: clock_skew_seconds must be a non-negative integer
+B3 verify_release_chain clock_skew_seconds=1.5: ReleaseChainError: clock_skew_seconds must be a non-negative integer
+B3 verify_release_chain clock_skew_seconds=-1: ReleaseChainError: clock_skew_seconds must be a non-negative integer
+B3 verify_release_chain clock_skew_seconds=inf: ReleaseChainError: clock_skew_seconds must be a non-negative integer
+C2 verify_release_chain now=datetime.min(UTC): ReleaseChainError: RFC 3161 genTime 2026-09-28T18:54:16+00:00 for 0000-74713423745fc204.beta.tsr postdates verifier time 0001-01-01T00:00:00+00:00
+C3 verify_release_chain now=9999-12-31T23:54:59Z: VERIFIED (2 releases)
+D verify_release_chain createdAtUtc=9999-12-31T23:59:59.999999Z: ReleaseChainError: release 0 alpha genTime 2026-09-28T19:06:52+00:00 impossibly precedes createdAtUtc 9999-12-31T23:59:59.999999+00:00
+D verify_release_chain createdAtUtc=9999-12-31T23:59:59.999999Z skew=10**30: ReleaseChainError: HEAD release lineCount 7 does not match working-tree line count 8

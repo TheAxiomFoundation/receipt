@@ -1,0 +1,16 @@
+== f8b1ddc
+receipt.snapshot from /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/agent-chain/trees/f8b1ddc/src/receipt/snapshot.py
+tree-continuations N=200,000: CPU 0.000s -> SnapshotError: commit ffffffffffffffffffffffffffffffffffffffff is not 
+tree-continuations N=400,000: CPU 0.000s -> SnapshotError: commit ffffffffffffffffffffffffffffffffffffffff is not 
+tree-continuations N=800,000: CPU 0.001s -> SnapshotError: commit ffffffffffffffffffffffffffffffffffffffff is not 
+receipt.snapshot from /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/agent-chain/trees/f8b1ddc/src/receipt/snapshot.py
+count[tree]: header lines read = 2 -> SnapshotError: commit ffffffffffffffffffffffffffffffffffffff
+count[parent]: header lines read = 3 -> SnapshotError: commit ffffffffffffffffffffffffffffffffffffff
+== 9c47a3d
+receipt.snapshot from /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/agent-chain/trees/9c47a3d/src/receipt/snapshot.py
+tree-continuations N=200,000: CPU 0.426s -> SnapshotError: commit ffffffffffffffffffffffffffffffffffffffff is not 
+tree-continuations N=400,000: CPU 1.588s -> SnapshotError: commit ffffffffffffffffffffffffffffffffffffffff is not 
+tree-continuations N=800,000: CPU 6.666s -> SnapshotError: commit ffffffffffffffffffffffffffffffffffffffff is not 
+receipt.snapshot from /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/agent-chain/trees/9c47a3d/src/receipt/snapshot.py
+count[tree]: header lines read = 10002 -> SnapshotError: commit ffffffffffffffffffffffffffffffffffffff
+count[parent]: header lines read = 10003 -> SnapshotError: commit ffffffffffffffffffffffffffffffffffffff

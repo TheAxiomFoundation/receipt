@@ -1,0 +1,28 @@
+{"kind": "OK", "msg": "thesis-facts append check OK: 3 rows, immutable prefix 1.0, +1 appended vs base", "case": "count=1.0 push=False"}
+{"kind": "AppendError", "msg": "immutable prefix manifest prefixLineCount changed vs base c3c8e4708603dfee9ed002de26566f89b3c65dcb; the frozen prefix cannot grow through the automated append path \u2014 growing it is an explicit reviewed migration", "case": "count=' 1 ' push=False"}
+{"kind": "AppendError", "msg": "immutable prefix manifest prefixLineCount changed vs base de1f56f6c69822602f41b4c1a608aeeb9b65a13f; the frozen prefix cannot grow through the automated append path \u2014 growing it is an explicit reviewed migration", "case": "count='+1' push=False"}
+{"kind": "OK", "msg": "thesis-facts append check OK: 3 rows, immutable prefix 1.0", "case": "count=1.0 push=True"}
+{"kind": "OK", "msg": "thesis-facts append check OK: 3 rows, immutable prefix  1 ", "case": "count=' 1 ' push=True"}
+{"kind": "OK", "msg": "thesis-facts append check OK: 3 rows, immutable prefix +1", "case": "count='+1' push=True"}
+{"kind": "AppendError", "msg": "ledger has 3 rows but the immutable prefix requires at least 64", "case": "lineSha256s string = the hash itself, count 64 push=False"}
+{"kind": "AppendError", "msg": "ledger has 3 rows but the immutable prefix requires at least 5", "case": "count 5 > rows push=False"}
+{"kind": "AppendError", "msg": "ledger has 3 rows but the immutable prefix requires at least 64", "case": "lineSha256s string = the hash itself, count 64 push=True"}
+{"kind": "AppendError", "msg": "ledger has 3 rows but the immutable prefix requires at least 5", "case": "count 5 > rows push=True"}
+{"kind": "CRASH:AttributeError", "msg": "'list' object has no attribute 'get'", "at": "append_gate.py:365", "case": "prefix2 line2 rewritten '[1]' push=True"}
+{"kind": "AppendError", "msg": "immutable prefix line 2 (None) was rewritten", "case": "prefix2 line2 rewritten '{\"source_record_id\":null}' push=False"}
+{"kind": "AppendError", "msg": "immutable prefix line 2 () was rewritten", "case": "prefix2 line2 rewritten '{\"source_record_id\":\"\"}' push=True"}
+{"kind": "CRASH:JSONDecodeError", "msg": "Expecting value: line 1 column 1 (char 0)", "at": "decoder.py:363", "case": "prefix2 line2 rewritten 'garbage' push=False"}
+{"kind": "AppendError", "msg": "immutable prefix line 2 (id) was rewritten", "case": "prefix2 line2 rewritten '{\"source_record_id\":\"id\",\"d\":[' push=True"}
+{"kind": "AppendError", "msg": "change rewrites existing line 2 (fixture.series.observation_2); the ledger is append-only \u2014 supersede instead", "case": "base line 2 rewritten (object with id)"}
+{"kind": "CRASH:AttributeError", "msg": "'list' object has no attribute 'get'", "at": "append_gate.py:562", "case": "base line 2 is [1], candidate rewrites it"}
+{"kind": "AppendError", "msg": "line 3 (fixture.series.observation_3) has no measure unit", "case": "appended measure=''"}
+{"kind": "AppendError", "msg": "line 3 (fixture.series.observation_3) has no measure unit", "case": "appended measure=None"}
+{"kind": "CRASH:AttributeError", "msg": "'str' object has no attribute 'get'", "at": "append_gate.py:437", "case": "appended measure='x'"}
+{"kind": "OK", "msg": "thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base", "case": "appended source=0"}
+{"kind": "OK", "msg": "thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base", "case": "appended source=False"}
+{"kind": "CRASH:AttributeError", "msg": "'int' object has no attribute 'get'", "at": "append_gate.py:292", "case": "appended source=1"}
+{"kind": "CRASH:AttributeError", "msg": "'bool' object has no attribute 'get'", "at": "append_gate.py:292", "case": "appended source=True"}
+{"kind": "AppendError", "msg": "appended line 3 (fixture.series.observation_3) lacks responseArchive", "case": "appended responseArchive=[]"}
+{"kind": "AppendError", "msg": "appended line 3 (fixture.series.observation_3) lacks responseArchive", "case": "appended responseArchive={}"}
+{"kind": "CRASH:AttributeError", "msg": "'list' object has no attribute 'get'", "at": "append_gate.py:303", "case": "appended responseArchive=[0]"}
+{"kind": "OK", "msg": "thesis-facts append check OK: 3 rows, immutable prefix 1", "case": "ordinary append, push"}

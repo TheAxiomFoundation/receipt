@@ -1,0 +1,2180 @@
+{
+ "arr127_plain": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj127_plain": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr127_str_brackets": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj127_str_brackets": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr127_str_closers": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj127_str_closers": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr127_esc_quote": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj127_esc_quote": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr127_esc_bs": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj127_esc_bs": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr127_esc_bs_then_brackets": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj127_esc_bs_then_brackets": {
+  "ref": [
+   "error",
+   "Expecting ':' delimiter: line 1 column 648 (char 647)"
+  ],
+  "got": [
+   "error",
+   "Expecting ':' delimiter: line 1 column 648 (char 647)"
+  ],
+  "problem": null
+ },
+ "arr127_u_quote": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj127_u_quote": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr127_u_bs": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj127_u_bs": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr127_u_bs_bracket": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj127_u_bs_bracket": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr127_odd_bs_run": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj127_odd_bs_run": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr127_even_bs_run": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj127_even_bs_run": {
+  "ref": [
+   "error",
+   "Expecting ':' delimiter: line 1 column 661 (char 660)"
+  ],
+  "got": [
+   "error",
+   "Expecting ':' delimiter: line 1 column 661 (char 660)"
+  ],
+  "problem": null
+ },
+ "arr127_u2028": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj127_u2028": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr127_surrogate": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj127_surrogate": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr127_u_surrogate": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj127_u_surrogate": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr127_nan": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj127_nan": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr127_neg_inf": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj127_neg_inf": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr127_big_float": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj127_big_float": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr127_exp400": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj127_exp400": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr127_neg0": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj127_neg0": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "keys127": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "mixed127": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "ws127_' '": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "ws127_'\\t'": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "ws127_'\\n'": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "ws127_'\\r'": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "ws127_'\\r\\n'": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr128_plain": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj128_plain": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr128_str_brackets": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj128_str_brackets": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr128_str_closers": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj128_str_closers": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr128_esc_quote": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj128_esc_quote": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr128_esc_bs": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj128_esc_bs": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr128_esc_bs_then_brackets": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj128_esc_bs_then_brackets": {
+  "ref": [
+   "error",
+   "Expecting ':' delimiter: line 1 column 653 (char 652)"
+  ],
+  "got": [
+   "error",
+   "Expecting ':' delimiter: line 1 column 653 (char 652)"
+  ],
+  "problem": null
+ },
+ "arr128_u_quote": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj128_u_quote": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr128_u_bs": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj128_u_bs": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr128_u_bs_bracket": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj128_u_bs_bracket": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr128_odd_bs_run": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj128_odd_bs_run": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr128_even_bs_run": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj128_even_bs_run": {
+  "ref": [
+   "error",
+   "Expecting ':' delimiter: line 1 column 666 (char 665)"
+  ],
+  "got": [
+   "error",
+   "Expecting ':' delimiter: line 1 column 666 (char 665)"
+  ],
+  "problem": null
+ },
+ "arr128_u2028": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj128_u2028": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr128_surrogate": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj128_surrogate": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr128_u_surrogate": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj128_u_surrogate": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr128_nan": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj128_nan": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr128_neg_inf": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj128_neg_inf": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr128_big_float": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj128_big_float": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr128_exp400": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj128_exp400": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr128_neg0": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "obj128_neg0": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "keys128": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "mixed128": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "ws128_' '": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "ws128_'\\t'": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "ws128_'\\n'": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "ws128_'\\r'": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "ws128_'\\r\\n'": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "arr129_plain": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 128"
+  ],
+  "problem": null
+ },
+ "obj129_plain": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 640"
+  ],
+  "problem": null
+ },
+ "arr129_str_brackets": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 128"
+  ],
+  "problem": null
+ },
+ "obj129_str_brackets": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 640"
+  ],
+  "problem": null
+ },
+ "arr129_str_closers": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 128"
+  ],
+  "problem": null
+ },
+ "obj129_str_closers": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 640"
+  ],
+  "problem": null
+ },
+ "arr129_esc_quote": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 128"
+  ],
+  "problem": null
+ },
+ "obj129_esc_quote": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 640"
+  ],
+  "problem": null
+ },
+ "arr129_esc_bs": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 128"
+  ],
+  "problem": null
+ },
+ "obj129_esc_bs": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 640"
+  ],
+  "problem": null
+ },
+ "arr129_esc_bs_then_brackets": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 128"
+  ],
+  "problem": null
+ },
+ "obj129_esc_bs_then_brackets": {
+  "ref": [
+   "error",
+   "Expecting ':' delimiter: line 1 column 658 (char 657)"
+  ],
+  "got": [
+   "error",
+   "Expecting ':' delimiter: line 1 column 658 (char 657)"
+  ],
+  "problem": null
+ },
+ "arr129_u_quote": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 128"
+  ],
+  "problem": null
+ },
+ "obj129_u_quote": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 640"
+  ],
+  "problem": null
+ },
+ "arr129_u_bs": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 128"
+  ],
+  "problem": null
+ },
+ "obj129_u_bs": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 640"
+  ],
+  "problem": null
+ },
+ "arr129_u_bs_bracket": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 128"
+  ],
+  "problem": null
+ },
+ "obj129_u_bs_bracket": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 640"
+  ],
+  "problem": null
+ },
+ "arr129_odd_bs_run": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 128"
+  ],
+  "problem": null
+ },
+ "obj129_odd_bs_run": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 640"
+  ],
+  "problem": null
+ },
+ "arr129_even_bs_run": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 128"
+  ],
+  "problem": null
+ },
+ "obj129_even_bs_run": {
+  "ref": [
+   "error",
+   "Expecting ':' delimiter: line 1 column 671 (char 670)"
+  ],
+  "got": [
+   "error",
+   "Expecting ':' delimiter: line 1 column 671 (char 670)"
+  ],
+  "problem": null
+ },
+ "arr129_u2028": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 128"
+  ],
+  "problem": null
+ },
+ "obj129_u2028": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 640"
+  ],
+  "problem": null
+ },
+ "arr129_surrogate": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 128"
+  ],
+  "problem": null
+ },
+ "obj129_surrogate": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 640"
+  ],
+  "problem": null
+ },
+ "arr129_u_surrogate": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 128"
+  ],
+  "problem": null
+ },
+ "obj129_u_surrogate": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 640"
+  ],
+  "problem": null
+ },
+ "arr129_nan": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 128"
+  ],
+  "problem": null
+ },
+ "obj129_nan": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 640"
+  ],
+  "problem": null
+ },
+ "arr129_neg_inf": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 128"
+  ],
+  "problem": null
+ },
+ "obj129_neg_inf": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 640"
+  ],
+  "problem": null
+ },
+ "arr129_big_float": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 128"
+  ],
+  "problem": null
+ },
+ "obj129_big_float": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 640"
+  ],
+  "problem": null
+ },
+ "arr129_exp400": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 128"
+  ],
+  "problem": null
+ },
+ "obj129_exp400": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 640"
+  ],
+  "problem": null
+ },
+ "arr129_neg0": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 128"
+  ],
+  "problem": null
+ },
+ "obj129_neg0": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 640"
+  ],
+  "problem": null
+ },
+ "keys129": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 1408"
+  ],
+  "problem": null
+ },
+ "mixed129": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 384"
+  ],
+  "problem": null
+ },
+ "ws129_' '": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 256"
+  ],
+  "problem": null
+ },
+ "ws129_'\\t'": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 256"
+  ],
+  "problem": null
+ },
+ "ws129_'\\n'": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 256"
+  ],
+  "problem": null
+ },
+ "ws129_'\\r'": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 256"
+  ],
+  "problem": null
+ },
+ "ws129_'\\r\\n'": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 384"
+  ],
+  "problem": null
+ },
+ "bs_newline_in_string": {
+  "ref": [
+   "error",
+   "Invalid \\escape: line 1 column 2 (char 1)"
+  ],
+  "got": [
+   "error",
+   "Invalid \\escape: line 1 column 2 (char 1)"
+  ],
+  "problem": null
+ },
+ "bs_cr_in_string": {
+  "ref": [
+   "error",
+   "Invalid \\escape: line 1 column 2 (char 1)"
+  ],
+  "got": [
+   "error",
+   "Invalid \\escape: line 1 column 2 (char 1)"
+  ],
+  "problem": null
+ },
+ "raw_newline_in_string": {
+  "ref": [
+   "error",
+   "Invalid control character at: line 1 column 3 (char 2)"
+  ],
+  "got": [
+   "error",
+   "Invalid control character at: line 1 column 3 (char 2)"
+  ],
+  "problem": null
+ },
+ "raw_cr_in_string": {
+  "ref": [
+   "error",
+   "Invalid control character at: line 1 column 3 (char 2)"
+  ],
+  "got": [
+   "error",
+   "Invalid control character at: line 1 column 3 (char 2)"
+  ],
+  "problem": null
+ },
+ "nul_in_string": {
+  "ref": [
+   "error",
+   "Invalid control character at: line 1 column 3 (char 2)"
+  ],
+  "got": [
+   "error",
+   "Invalid control character at: line 1 column 3 (char 2)"
+  ],
+  "problem": null
+ },
+ "ctl_1f": {
+  "ref": [
+   "error",
+   "Invalid control character at: line 1 column 3 (char 2)"
+  ],
+  "got": [
+   "error",
+   "Invalid control character at: line 1 column 3 (char 2)"
+  ],
+  "problem": null
+ },
+ "tab_in_string": {
+  "ref": [
+   "error",
+   "Invalid control character at: line 1 column 3 (char 2)"
+  ],
+  "got": [
+   "error",
+   "Invalid control character at: line 1 column 3 (char 2)"
+  ],
+  "problem": null
+ },
+ "bom_prefix": {
+  "ref": [
+   "error",
+   "Unexpected UTF-8 BOM (decode using utf-8-sig): line 1 column 1 (char 0)"
+  ],
+  "got": [
+   "error",
+   "Unexpected UTF-8 BOM (decode using utf-8-sig): line 1 column 1 (char 0)"
+  ],
+  "problem": null
+ },
+ "bom_prefix_deep": {
+  "ref": [
+   "error",
+   "Unexpected UTF-8 BOM (decode using utf-8-sig): line 1 column 1 (char 0)"
+  ],
+  "got": [
+   "error",
+   "Unexpected UTF-8 BOM (decode using utf-8-sig): line 1 column 1 (char 0)"
+  ],
+  "problem": null
+ },
+ "unterminated_brackets": {
+  "ref": [
+   "error",
+   "Unterminated string starting at: line 1 column 2 (char 1)"
+  ],
+  "got": [
+   "error",
+   "Unterminated string starting at: line 1 column 2 (char 1)"
+  ],
+  "problem": null
+ },
+ "unterminated_bs": {
+  "ref": [
+   "error",
+   "Invalid \\escape: line 1 column 3 (char 2)"
+  ],
+  "got": [
+   "error",
+   "Invalid \\escape: line 1 column 3 (char 2)"
+  ],
+  "problem": null
+ },
+ "extra_data": {
+  "ref": [
+   "error",
+   "Extra data: line 1 column 3 (char 2)"
+  ],
+  "got": [
+   "error",
+   "Extra data: line 1 column 3 (char 2)"
+  ],
+  "problem": null
+ },
+ "extra_data_ws": {
+  "ref": [
+   "error",
+   "Extra data: line 1 column 4 (char 3)"
+  ],
+  "got": [
+   "error",
+   "Extra data: line 1 column 4 (char 3)"
+  ],
+  "problem": null
+ },
+ "extra_string": {
+  "ref": [
+   "error",
+   "Extra data: line 1 column 5 (char 4)"
+  ],
+  "got": [
+   "error",
+   "Extra data: line 1 column 5 (char 4)"
+  ],
+  "problem": null
+ },
+ "nan_deep": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 128"
+  ],
+  "problem": null
+ },
+ "minus": {
+  "ref": [
+   "error",
+   "Expecting value: line 1 column 201 (char 200)"
+  ],
+  "got": [
+   "error",
+   "Expecting value: line 1 column 201 (char 200)"
+  ],
+  "problem": null
+ },
+ "one_e": {
+  "ref": [
+   "error",
+   "Expecting ',' delimiter: line 1 column 202 (char 201)"
+  ],
+  "got": [
+   "error",
+   "Expecting ',' delimiter: line 1 column 202 (char 201)"
+  ],
+  "problem": null
+ },
+ "leading_zero": {
+  "ref": [
+   "error",
+   "Expecting ',' delimiter: line 1 column 202 (char 201)"
+  ],
+  "got": [
+   "error",
+   "Expecting ',' delimiter: line 1 column 202 (char 201)"
+  ],
+  "problem": null
+ },
+ "leading_zero_shallow": {
+  "ref": [
+   "error",
+   "Expecting ',' delimiter: line 1 column 3 (char 2)"
+  ],
+  "got": [
+   "error",
+   "Expecting ',' delimiter: line 1 column 3 (char 2)"
+  ],
+  "problem": null
+ },
+ "minus_shallow": {
+  "ref": [
+   "error",
+   "Expecting value: line 1 column 2 (char 1)"
+  ],
+  "got": [
+   "error",
+   "Expecting value: line 1 column 2 (char 1)"
+  ],
+  "problem": null
+ },
+ "one_e_shallow": {
+  "ref": [
+   "error",
+   "Expecting ',' delimiter: line 1 column 3 (char 2)"
+  ],
+  "got": [
+   "error",
+   "Expecting ',' delimiter: line 1 column 3 (char 2)"
+  ],
+  "problem": null
+ },
+ "bad_escape_x": {
+  "ref": [
+   "error",
+   "Invalid \\escape: line 1 column 2 (char 1)"
+  ],
+  "got": [
+   "error",
+   "Invalid \\escape: line 1 column 2 (char 1)"
+  ],
+  "problem": null
+ },
+ "bad_u": {
+  "ref": [
+   "error",
+   "Invalid \\uXXXX escape: line 1 column 3 (char 2)"
+  ],
+  "got": [
+   "error",
+   "Invalid \\uXXXX escape: line 1 column 3 (char 2)"
+  ],
+  "problem": null
+ },
+ "deep_then_bad": {
+  "ref": [
+   "error",
+   "Expecting ',' delimiter: line 1 column 259 (char 258)"
+  ],
+  "got": [
+   "error",
+   "Expecting ',' delimiter: line 1 column 259 (char 258)"
+  ],
+  "problem": null
+ },
+ "deep_close_mismatch": {
+  "ref": [
+   "error",
+   "Expecting value: line 1 column 201 (char 200)"
+  ],
+  "got": [
+   "error",
+   "Expecting value: line 1 column 201 (char 200)"
+  ],
+  "problem": null
+ },
+ "just_closers": {
+  "ref": [
+   "error",
+   "Expecting value: line 1 column 1 (char 0)"
+  ],
+  "got": [
+   "error",
+   "Expecting value: line 1 column 1 (char 0)"
+  ],
+  "problem": null
+ },
+ "closers_then_value": {
+  "ref": [
+   "error",
+   "Expecting value: line 1 column 1 (char 0)"
+  ],
+  "got": [
+   "error",
+   "Expecting value: line 1 column 1 (char 0)"
+  ],
+  "problem": null
+ },
+ "u2028_ws": {
+  "ref": [
+   "error",
+   "Expecting value: line 1 column 1 (char 0)"
+  ],
+  "got": [
+   "error",
+   "Expecting value: line 1 column 1 (char 0)"
+  ],
+  "problem": null
+ },
+ "nbsp_ws": {
+  "ref": [
+   "error",
+   "Expecting value: line 1 column 1 (char 0)"
+  ],
+  "got": [
+   "error",
+   "Expecting value: line 1 column 1 (char 0)"
+  ],
+  "problem": null
+ },
+ "vt_ws": {
+  "ref": [
+   "error",
+   "Expecting value: line 1 column 1 (char 0)"
+  ],
+  "got": [
+   "error",
+   "Expecting value: line 1 column 1 (char 0)"
+  ],
+  "problem": null
+ },
+ "empty": {
+  "ref": [
+   "error",
+   "Expecting value: line 1 column 1 (char 0)"
+  ],
+  "got": [
+   "error",
+   "Expecting value: line 1 column 1 (char 0)"
+  ],
+  "problem": null
+ },
+ "ws_only": {
+  "ref": [
+   "error",
+   "Expecting value: line 2 column 3 (char 4)"
+  ],
+  "got": [
+   "error",
+   "Expecting value: line 2 column 3 (char 4)"
+  ],
+  "problem": null
+ },
+ "deep_1000": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 128"
+  ],
+  "problem": null
+ },
+ "deep_100000": {
+  "ref": [
+   "recursion",
+   "Stack overflow (used 8144 kB) while decoding a JSON array from a unicode string"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 128"
+  ],
+  "problem": null
+ },
+ "deep_100000_bad": {
+  "ref": [
+   "recursion",
+   "Stack overflow (used 8144 kB) while decoding a JSON array from a unicode string"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 128"
+  ],
+  "problem": null
+ },
+ "deep_100000_unterminated_str": {
+  "ref": [
+   "recursion",
+   "Stack overflow (used 8144 kB) while decoding a JSON array from a unicode string"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 128"
+  ],
+  "problem": null
+ },
+ "deep_obj_100000": {
+  "ref": [
+   "recursion",
+   "Stack overflow (used 8144 kB) while decoding a JSON object from a unicode string"
+  ],
+  "got": [
+   "bound",
+   "JSON nesting exceeds 128 levels at char 640"
+  ],
+  "problem": null
+ },
+ "string_then_deep_closers": {
+  "ref": [
+   "error",
+   "Unterminated string starting at: line 1 column 1 (char 0)"
+  ],
+  "got": [
+   "error",
+   "Unterminated string starting at: line 1 column 1 (char 0)"
+  ],
+  "problem": null
+ },
+ "int1": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "int1_in_arr": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "int4299": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "int4299_in_arr": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "int4300": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "int4300_in_arr": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "int4301": {
+  "ref": [
+   "valueerror",
+   "Exceeds the limit (4300 digits) for integer string conversion: value has 4301 digits; use sys.set_int_max_str_digits() to increase the limit"
+  ],
+  "got": [
+   "bound",
+   "JSON integer literal has 4301 digits, more than 4300"
+  ],
+  "problem": null
+ },
+ "int4301_in_arr": {
+  "ref": [
+   "valueerror",
+   "Exceeds the limit (4300 digits) for integer string conversion: value has 4301 digits; use sys.set_int_max_str_digits() to increase the limit"
+  ],
+  "got": [
+   "bound",
+   "JSON integer literal has 4301 digits, more than 4300"
+  ],
+  "problem": null
+ },
+ "int5000": {
+  "ref": [
+   "valueerror",
+   "Exceeds the limit (4300 digits) for integer string conversion: value has 5000 digits; use sys.set_int_max_str_digits() to increase the limit"
+  ],
+  "got": [
+   "bound",
+   "JSON integer literal has 5000 digits, more than 4300"
+  ],
+  "problem": null
+ },
+ "int5000_in_arr": {
+  "ref": [
+   "valueerror",
+   "Exceeds the limit (4300 digits) for integer string conversion: value has 5000 digits; use sys.set_int_max_str_digits() to increase the limit"
+  ],
+  "got": [
+   "bound",
+   "JSON integer literal has 5000 digits, more than 4300"
+  ],
+  "problem": null
+ },
+ "int-1": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "int-1_in_arr": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "int-4299": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "int-4299_in_arr": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "int-4300": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "int-4300_in_arr": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "int-4301": {
+  "ref": [
+   "valueerror",
+   "Exceeds the limit (4300 digits) for integer string conversion: value has 4301 digits; use sys.set_int_max_str_digits() to increase the limit"
+  ],
+  "got": [
+   "bound",
+   "JSON integer literal has 4301 digits, more than 4300"
+  ],
+  "problem": null
+ },
+ "int-4301_in_arr": {
+  "ref": [
+   "valueerror",
+   "Exceeds the limit (4300 digits) for integer string conversion: value has 4301 digits; use sys.set_int_max_str_digits() to increase the limit"
+  ],
+  "got": [
+   "bound",
+   "JSON integer literal has 4301 digits, more than 4300"
+  ],
+  "problem": null
+ },
+ "int-5000": {
+  "ref": [
+   "valueerror",
+   "Exceeds the limit (4300 digits) for integer string conversion: value has 5000 digits; use sys.set_int_max_str_digits() to increase the limit"
+  ],
+  "got": [
+   "bound",
+   "JSON integer literal has 5000 digits, more than 4300"
+  ],
+  "problem": null
+ },
+ "int-5000_in_arr": {
+  "ref": [
+   "valueerror",
+   "Exceeds the limit (4300 digits) for integer string conversion: value has 5000 digits; use sys.set_int_max_str_digits() to increase the limit"
+  ],
+  "got": [
+   "bound",
+   "JSON integer literal has 5000 digits, more than 4300"
+  ],
+  "problem": null
+ },
+ "int_then_decode_error": {
+  "ref": [
+   "valueerror",
+   "Exceeds the limit (4300 digits) for integer string conversion: value has 5000 digits; use sys.set_int_max_str_digits() to increase the limit"
+  ],
+  "got": [
+   "bound",
+   "JSON integer literal has 5000 digits, more than 4300"
+  ],
+  "problem": null
+ },
+ "decode_error_then_int": {
+  "ref": [
+   "error",
+   "Expecting value: line 1 column 2 (char 1)"
+  ],
+  "got": [
+   "error",
+   "Expecting value: line 1 column 2 (char 1)"
+  ],
+  "problem": null
+ },
+ "int4301_deep": {
+  "ref": [
+   "valueerror",
+   "Exceeds the limit (4300 digits) for integer string conversion: value has 4301 digits; use sys.set_int_max_str_digits() to increase the limit"
+  ],
+  "got": [
+   "bound",
+   "JSON integer literal has 4301 digits, more than 4300"
+  ],
+  "problem": null
+ },
+ "float_5000": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ },
+ "int_exp": {
+  "ref": [
+   "value",
+   "<value>"
+  ],
+  "got": [
+   "value",
+   "<value>"
+  ],
+  "problem": null
+ }
+}

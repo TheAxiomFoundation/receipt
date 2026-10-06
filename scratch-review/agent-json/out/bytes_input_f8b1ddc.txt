@@ -1,0 +1,9 @@
+receipt: /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/trees/f8b1ddc/src/receipt/__init__.py
+check_rows[bytes]: TypeError: cannot use a string pattern on a bytes-like object
+check_prefix[bytes]: TypeError: cannot use a string pattern on a bytes-like object
+check_rows[bytearray]: TypeError: cannot use a string pattern on a bytes-like object
+check_prefix[bytearray]: TypeError: cannot use a string pattern on a bytes-like object
+check_rows[str-subclass]: OK None
+check_prefix[str-subclass]: AppendError: prefix manifest lacks prefixSha256
+check_rows[str]: OK None
+check_prefix[str]: AppendError: prefix manifest lacks prefixSha256

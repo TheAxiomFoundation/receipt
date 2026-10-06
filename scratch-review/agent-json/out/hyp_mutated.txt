@@ -1,0 +1,3 @@
+receipt: /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/trees/f8b1ddc/src/receipt/__init__.py
+PASS mutated 3000
+{('value', 'value'): 1071, ('error', 'error'): 1594, ('value', 'bound'): 335}

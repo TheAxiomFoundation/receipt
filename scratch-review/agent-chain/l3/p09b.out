@@ -1,0 +1,8 @@
+== p09b f8b1ddc
+receipt.snapshot from /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/agent-chain/trees/f8b1ddc/src/receipt/snapshot.py
+select N=1,600,000 (payload 3.2 MB, loose object 14,064 bytes): refused after 2s wall / 0s CPU: commit 6a8b1d5675ec470d05b0b26e775bad68c3815617 is not a canonical commit object
+commit at the ceiling: 67,108,758 payload bytes -> 65,298 bytes as a loose object
+== p09b 9c47a3d
+receipt.snapshot from /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/agent-chain/trees/9c47a3d/src/receipt/snapshot.py
+select N=1,600,000 (payload 3.2 MB, loose object 14,064 bytes): refused after 124s wall / 29s CPU: commit 6a8b1d5675ec470d05b0b26e775bad68c3815617 is not a canonical commit object
+commit at the ceiling: 67,108,758 payload bytes -> 65,298 bytes as a loose object

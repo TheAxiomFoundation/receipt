@@ -1,0 +1,6 @@
+# receipt loaded from /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/trees/f8b1ddc/src/receipt/__init__.py
+E1 _format_utc over 1,000,000 microsecond values: 0 outputs not ending in 'Z' (first [], e.g. None); microsecond 0 -> '2026-09-27T12:00:00Z'
+E1b round trip on 1004 sampled microsecond values: {'round-trips': 1004}
+E2 _parse_generalized_time over 96000 field combinations: {'TsaError': 93080, 'parsed': 2920} examples: {'TsaError': '20260000000000Z', 'parsed': '20260101000000Z'}
+E3 recordedAt in the first 601 s of year 1, lead 300: {'accepted': 601}
+E4 _parse_rfc3339 at the range ends, 94 offsets: {'parsed': 48, 'TsaError': 46}

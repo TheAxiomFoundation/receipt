@@ -1,0 +1,31 @@
+# receipt loaded from /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/trees/f8b1ddc/src/receipt/__init__.py
+[token genTime 20261301000000Z (month 13), bytes patched, unsigned]
+    TsaError: invalid RFC 3161 genTime: '20261301000000Z'
+[token genTime 20260230000000Z (Feb 30)]
+    TsaError: invalid RFC 3161 genTime: '20260230000000Z'
+[token genTime 20261231235960Z (leap second)]
+    TsaError: invalid RFC 3161 genTime: '20261231235960Z'
+[token policy OID with a 2100-octet subidentifier]
+    TsaError: oversized OID subidentifier in RFC 3161 token
+[record recordedAt 0001-01-01T00:00:00Z (lead 300)]
+    TsaError: OpenSSL command failed (openssl ts -verify -config /dev/null -data /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/agent-tsa/tmp/thesis-tsa-y139_kmz/record.bin -in /Users/maxghe
+[record recordedAt 0001-01-01T00:00:00+14:00]
+    TsaError: invalid timestamp claim recordedAt: '0001-01-01T00:00:00+14:00'
+[sidecar nested 100000 deep]
+    TsaError: cannot read JSON /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/agent-tsa/tmp/l2-tree-kzelt8_c/records/2026-09-02/record-0001.witness.json: JSON nesting exceeds 128 levels at c
+[sidecar holding a 5000-digit integer]
+    TsaError: cannot read JSON /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/agent-tsa/tmp/l2-tree-nihcs052/records/2026-09-02/record-0001.witness.json: JSON integer literal has 5000 digits
+[record nested 100000 deep]
+    TsaError: cannot read JSON /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/agent-tsa/tmp/l2-tree-_f3v_gum/records/2026-09-02/record-0001.json: JSON nesting exceeds 128 levels at char 128
+[record holding a 5000-digit integer]
+    TsaError: cannot read JSON /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/agent-tsa/tmp/l2-tree-rozwcq44/records/2026-09-02/record-0001.json: JSON integer literal has 5000 digits, more t
+[genesis nested 100000 deep]
+    TsaError: cannot read JSON /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/agent-tsa/tmp/l2-tree-r69n945b/records/CHAIN_GENESIS.json: JSON nesting exceeds 128 levels at char 128
+[bundle file with NaN]
+    TsaError: TSA trust configuration is not canonical JSON: /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/agent-tsa/tmp/l2-tree-dvyh1dcz/records/trust/tsa-anchors-v1.json
+[bundle file nested 600 deep]
+    TsaError: cannot read JSON /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/agent-tsa/tmp/l2-tree-etspyr1i/records/trust/tsa-anchors-v1.json: JSON nesting exceeds 128 levels at char 205
+[bundle file holding a 5000-digit integer]
+    TsaError: cannot read JSON /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/agent-tsa/tmp/l2-tree-vwyplwnn/records/trust/tsa-anchors-v1.json: JSON integer literal has 5000 digits, more tha
+[control: bundle file with an extra ordinary key]
+    TsaError: TSA trust configuration is not canonical JSON: /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/agent-tsa/tmp/l2-tree-7tkffp58/records/trust/tsa-anchors-v1.json

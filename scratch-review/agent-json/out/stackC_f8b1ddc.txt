@@ -1,0 +1,7 @@
+receipt: /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/trees/f8b1ddc/src/receipt/__init__.py limit: 1000
+list: frames at call site=1, minimal recursion limit for 128 deep=260 (=259 frames for 128 levels, 2.02/level); deepest at default limit 1000 = 498
+dict: frames at call site=1, minimal recursion limit for 128 deep=132 (=131 frames for 128 levels, 1.02/level); deepest at default limit 1000 = 996
+mixed: frames at call site=1, minimal recursion limit for 128 deep=196 (=195 frames for 128 levels, 1.52/level); deepest at default limit 1000 = 664
+decode+canonical 128: ACCEPT
+decode+canonical 128: ACCEPT
+decode+canonical 128: ACCEPT

@@ -1,0 +1,41 @@
+receipt: /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/trees/f8b1ddc/src/receipt/__init__.py limit: 1000
+k= 1 obj_int=RecursionError | obj_str=RecursionError | deep128_noint=RecursionError | deep128_int=RecursionError
+k= 2 obj_int=RecursionError | obj_str=RecursionError | deep128_noint=RecursionError | deep128_int=RecursionError
+k= 3 obj_int=RecursionError | obj_str=RecursionError | deep128_noint=RecursionError | deep128_int=RecursionError
+k= 4 obj_int=RecursionError | obj_str=RecursionError | deep128_noint=RecursionError | deep128_int=RecursionError
+k= 5 obj_int=TsaError: cannot read JSON <W>/obj_int.json: JSON nesting exhausted the interpreter's recursion limi | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=TsaError: cannot read JSON <W>/deep128_int.json: JSON nesting exhausted the interpreter's recursion 
+k= 6 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k= 7 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k= 8 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k= 9 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=10 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=11 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=12 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=13 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=14 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=15 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=16 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=17 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=18 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=19 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=20 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=21 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=22 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=23 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=24 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=25 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=26 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=27 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=28 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=29 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=30 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=31 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=32 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=33 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=34 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=35 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=36 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=37 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=38 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=39 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT
+k=40 obj_int=ACCEPT | obj_str=ACCEPT | deep128_noint=ACCEPT | deep128_int=ACCEPT

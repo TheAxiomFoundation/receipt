@@ -1,0 +1,7 @@
+# receipt loaded from /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/trees/f8b1ddc/src/receipt/__init__.py
+_format_utc on 12:00:00.5 UTC -> '2026-09-27T12:00:00.5Z'
+genTime per `openssl ts -reply -text`: Sep 28 18:44:14.274 2026 GMT
+control: `openssl ts -verify` against the pinned root accepts: True
+verify_witness: ACCEPTED status='available'
+verify_timestamp_token accepted; evidence.gen_time = '2026-09-28T18:44:14.274Z'
+declaring tsaGenTime='2026-09-28T18:44:14.274Z': ACCEPTED status='available'

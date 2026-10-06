@@ -1,0 +1,42 @@
+receipt from /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/trees/f8b1ddc/src/receipt/__init__.py
+== control
+[ordinary append] ACCEPT  thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base
+== candidate-controlled bytes that escape as non-AppendError
+[prefix line 1 rewritten to non-JSON] REFUSE  immutable prefix line 1 (?) was rewritten
+[prefix line 1 rewritten to a JSON array] REFUSE  immutable prefix line 1 (?) was rewritten
+[prefix manifest not JSON] REFUSE  prefix manifest is not valid JSON: Expecting value: line 1 column 1 (char 0)
+[prefix manifest a JSON array] REFUSE  prefix manifest is not a JSON object
+[prefix manifest without prefixLineCount] REFUSE  prefix manifest lacks prefixLineCount
+[prefixLineCount = 1e400] REFUSE  prefix manifest prefixLineCount is not a line count: inf
+[prefixLineCount = null] REFUSE  prefix manifest prefixLineCount is not a line count: None
+[prefixLineCount = 'x'] REFUSE  prefix manifest prefixLineCount is not a line count: 'x'
+[lineSha256s = 5] REFUSE  prefix manifest lineSha256s is not a list
+[appended measure is a string] REFUSE  line 3 (fixture.series.observation_3) measure is not an object
+[appended source is a list] REFUSE  line 3 (fixture.series.observation_3) source is not an object
+[appended responseArchive is a string] REFUSE  line 3 (fixture.series.observation_3) responseArchive is not an object
+[appended value NaN] REFUSE  line 3 (fixture.series.observation_3) assertion content is not canonical JSON: Canonical JSON cannot serialize non-finite number: nan
+[appended value Infinity] REFUSE  line 3 (fixture.series.observation_3) assertion content is not canonical JSON: Canonical JSON cannot serialize non-finite number: inf
+[appended filters nested 5000 deep] REFUSE  line 3 is not valid JSON: JSON nesting exceeds 128 levels at char 305
+== values the row checks accept
+[appended value true (bool)] ACCEPT  thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base
+[appended observed_at fullwidth digits] ACCEPT  thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base
+[appended observed_at Arabic-Indic digits] ACCEPT  thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base
+[appended observed_at 2026-99-99] ACCEPT  thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base
+[appended source_record_id = true] ACCEPT  thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base
+[appended source_record_id = {'a': 1}] ACCEPT  thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base
+[appended row with duplicate 'value' keys (3.0 then 999.0)] ACCEPT  thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base
+[row id '7' then row id 7, no supersedes] REFUSE  line 4 duplicates 7 (line 3) without superseding an assertion version — corrections must be explicit
+[row id 7 supersedes row id '7'] ACCEPT  thesis-facts append check OK: 4 rows, immutable prefix 1, +2 appended vs base
+== newline handling
+[appended row terminated by CRLF] ACCEPT  thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base
+[appended row terminated by lone CR] ACCEPT  thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base
+[appended row, no trailing newline] REFUSE  ledger must end with exactly one trailing newline
+[appended row followed by a blank line] REFUSE  line 4 is blank or whitespace-only; a JSONL row is one non-empty line and a stray blank line is a tamper
+[appended row with trailing tab] ACCEPT  thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base
+[appended row with U+2028 after it] REFUSE  line 3 is not valid JSON: Extra data: line 1 column 962 (char 961)
+[appended row preceded by NBSP] REFUSE  line 3 is not valid JSON: Expecting value: line 1 column 1 (char 0)
+== prefix manifest equality under Python ==
+[candidate prefixLineCount true (base 1)] ACCEPT  thesis-facts append check OK: 3 rows, immutable prefix True, +1 appended vs base
+[candidate prefixLineCount 1.0 (base 1)] ACCEPT  thesis-facts append check OK: 3 rows, immutable prefix 1.0, +1 appended vs base
+== empty ledger
+[push path: zero-byte ledger, zero-line prefix] REFUSE  immutable prefix cumulative hash mismatch

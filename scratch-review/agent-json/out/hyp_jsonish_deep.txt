@@ -1,0 +1,3 @@
+receipt: /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/trees/f8b1ddc/src/receipt/__init__.py
+PASS jsonish_deep 3000
+{('error', 'error'): 2851, ('value', 'value'): 141, ('value', 'bound'): 8}

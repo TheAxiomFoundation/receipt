@@ -1,0 +1,9 @@
+receipt: /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/trees/9c47a3d/src/receipt/__init__.py
+check_rows[bytes]: OK None
+check_prefix[bytes]: KeyError: 'prefixSha256'
+check_rows[bytearray]: OK None
+check_prefix[bytearray]: KeyError: 'prefixSha256'
+check_rows[str-subclass]: OK None
+check_prefix[str-subclass]: KeyError: 'prefixSha256'
+check_rows[str]: OK None
+check_prefix[str]: KeyError: 'prefixSha256'

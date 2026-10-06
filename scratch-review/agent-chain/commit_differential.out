@@ -1,0 +1,11 @@
+{
+  "cases": 76052,
+  "mismatches": 0,
+  "head_outcome_kinds": {
+    "OK": 1260,
+    "SnapshotError": 74792
+  },
+  "head_new_site_hits": 26082,
+  "adversarial_new_site_hits": 14113,
+  "random_new_site_hits": 11969
+}

@@ -1,0 +1,42 @@
+receipt from /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/trees/9c47a3d/src/receipt/__init__.py
+== control
+[ordinary append] ACCEPT  thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base
+== candidate-controlled bytes that escape as non-AppendError
+[prefix line 1 rewritten to non-JSON] CRASH   JSONDecodeError at decoder.py:363: Expecting value: line 1 column 1 (char 0)
+[prefix line 1 rewritten to a JSON array] CRASH   AttributeError at append_gate.py:365: 'list' object has no attribute 'get'
+[prefix manifest not JSON] CRASH   JSONDecodeError at decoder.py:363: Expecting value: line 1 column 1 (char 0)
+[prefix manifest a JSON array] CRASH   AttributeError at append_gate.py:349: 'list' object has no attribute 'get'
+[prefix manifest without prefixLineCount] CRASH   KeyError at append_gate.py:353: 'prefixLineCount'
+[prefixLineCount = 1e400] CRASH   OverflowError at append_gate.py:353: cannot convert float infinity to integer
+[prefixLineCount = null] CRASH   TypeError at append_gate.py:353: int() argument must be a string, a bytes-like object or a real number, not 'NoneType'
+[prefixLineCount = 'x'] CRASH   ValueError at append_gate.py:353: invalid literal for int() with base 10: 'x'
+[lineSha256s = 5] CRASH   TypeError at append_gate.py:355: object of type 'int' has no len()
+[appended measure is a string] CRASH   AttributeError at append_gate.py:437: 'str' object has no attribute 'get'
+[appended source is a list] CRASH   AttributeError at append_gate.py:292: 'list' object has no attribute 'get'
+[appended responseArchive is a string] CRASH   AttributeError at append_gate.py:303: 'str' object has no attribute 'get'
+[appended value NaN] CRASH   ValueError at canonical.py:51: Canonical JSON cannot serialize non-finite number: nan
+[appended value Infinity] CRASH   ValueError at canonical.py:51: Canonical JSON cannot serialize non-finite number: inf
+[appended filters nested 5000 deep] CRASH   RecursionError at canonical.py:105: maximum recursion depth exceeded
+== values the row checks accept
+[appended value true (bool)] ACCEPT  thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base
+[appended observed_at fullwidth digits] ACCEPT  thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base
+[appended observed_at Arabic-Indic digits] ACCEPT  thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base
+[appended observed_at 2026-99-99] ACCEPT  thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base
+[appended source_record_id = true] ACCEPT  thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base
+[appended source_record_id = {'a': 1}] ACCEPT  thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base
+[appended row with duplicate 'value' keys (3.0 then 999.0)] ACCEPT  thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base
+[row id '7' then row id 7, no supersedes] REFUSE  line 4 duplicates 7 (line 3) without superseding an assertion version — corrections must be explicit
+[row id 7 supersedes row id '7'] ACCEPT  thesis-facts append check OK: 4 rows, immutable prefix 1, +2 appended vs base
+== newline handling
+[appended row terminated by CRLF] ACCEPT  thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base
+[appended row terminated by lone CR] ACCEPT  thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base
+[appended row, no trailing newline] REFUSE  ledger must end with exactly one trailing newline
+[appended row followed by a blank line] REFUSE  line 4 is blank or whitespace-only; a JSONL row is one non-empty line and a stray blank line is a tamper
+[appended row with trailing tab] ACCEPT  thesis-facts append check OK: 3 rows, immutable prefix 1, +1 appended vs base
+[appended row with U+2028 after it] REFUSE  line 3 is not valid JSON: Extra data: line 1 column 962 (char 961)
+[appended row preceded by NBSP] REFUSE  line 3 is not valid JSON: Expecting value: line 1 column 1 (char 0)
+== prefix manifest equality under Python ==
+[candidate prefixLineCount true (base 1)] ACCEPT  thesis-facts append check OK: 3 rows, immutable prefix True, +1 appended vs base
+[candidate prefixLineCount 1.0 (base 1)] ACCEPT  thesis-facts append check OK: 3 rows, immutable prefix 1.0, +1 appended vs base
+== empty ledger
+[push path: zero-byte ledger, zero-line prefix] ACCEPT  thesis-facts append check OK: 0 rows, immutable prefix 0

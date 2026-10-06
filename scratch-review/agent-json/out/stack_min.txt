@@ -1,0 +1,17 @@
+receipt: /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/trees/f8b1ddc/src/receipt/__init__.py
+json.loads depth 100 -> ACCEPT
+bj.loads depth 100 -> ACCEPT
+json.loads depth 128 -> ACCEPT
+bj.loads depth 128 -> ACCEPT
+json.loads depth 129 -> ACCEPT
+bj.loads depth 129 -> JsonBoundError: JSON nesting exceeds 128 levels at char 128
+json.loads depth 200 -> ACCEPT
+bj.loads depth 200 -> JsonBoundError: JSON nesting exceeds 128 levels at char 128
+json.loads depth 250 -> ACCEPT
+bj.loads depth 250 -> JsonBoundError: JSON nesting exceeds 128 levels at char 128
+json.loads depth 300 -> RecursionError: Stack overflow (used 44 kB) while decoding a JSON array from a unicode
+bj.loads depth 300 -> JsonBoundError: JSON nesting exceeds 128 levels at char 128
+canonical list depth 40 -> ACCEPT
+canonical list depth 52 -> ACCEPT
+canonical list depth 64 -> RecursionError: Stack overflow (used 44 kB) in __instancecheck__
+canonical list depth 128 -> RecursionError: Stack overflow (used 44 kB) in __instancecheck__

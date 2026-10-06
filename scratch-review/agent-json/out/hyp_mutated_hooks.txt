@@ -1,0 +1,3 @@
+receipt: /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/trees/f8b1ddc/src/receipt/__init__.py
+PASS mutated_hooks 3000
+{('value', 'value'): 1012, ('error', 'error'): 1519, ('value', 'bound'): 252, ('other:ReleaseChainError', 'other:ReleaseChainError'): 217}

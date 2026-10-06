@@ -1,0 +1,18 @@
+== f8b1ddc
+receipt.snapshot from /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/agent-chain/trees/f8b1ddc/src/receipt/snapshot.py
+gpgsig continuations N=800,000: CPU 0.079s -> parsed
+gpgsig continuations N=1,600,000: CPU 0.191s (2.42x prev) -> parsed
+gpgsig continuations N=3,200,000: CPU 0.305s (1.60x prev) -> parsed
+x-extra continuations N=800,000: CPU 0.149s -> parsed
+x-extra continuations N=1,600,000: CPU 0.231s (1.55x prev) -> parsed
+x-extra continuations N=3,200,000: CPU 0.322s (1.39x prev) -> parsed
+author continuations N=800,000: CPU 0.074s -> parsed
+== 9c47a3d
+receipt.snapshot from /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/agent-chain/trees/9c47a3d/src/receipt/snapshot.py
+gpgsig continuations N=800,000: CPU 0.075s -> parsed
+gpgsig continuations N=1,600,000: CPU 0.170s (2.25x prev) -> parsed
+gpgsig continuations N=3,200,000: CPU 0.323s (1.90x prev) -> parsed
+x-extra continuations N=800,000: CPU 0.076s -> parsed
+x-extra continuations N=1,600,000: CPU 0.157s (2.08x prev) -> parsed
+x-extra continuations N=3,200,000: CPU 0.314s (1.99x prev) -> parsed
+author continuations N=800,000: CPU 0.080s -> parsed

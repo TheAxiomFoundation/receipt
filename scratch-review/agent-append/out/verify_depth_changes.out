@@ -1,0 +1,5 @@
+NOT DEEP check_rows:27026 unparseable:RecursionError recursion -> line 1 is not valid JSON: JSON nesting exceeds 128 levels at char 159
+NOT DEEP check_rows:27027 unparseable:RecursionError recursion -> line 3 is not valid JSON: JSON nesting exceeds 128 levels at char 159
+NOT DEEP check_rows:27028 unparseable:RecursionError recursion -> line 1 is not valid JSON: JSON nesting exceeds 128 levels at char 128
+NOT DEEP check_rows:27029 unparseable:RecursionError recursion -> line 3 is not valid JSON: JSON nesting exceeds 128 levels at char 128
+depth-bound changes: 2022; with json.loads depth <= 128: 4; head 'exhausted' messages: 0

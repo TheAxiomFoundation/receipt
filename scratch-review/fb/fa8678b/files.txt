@@ -1,0 +1,2 @@
+tests/test_tsa.py
+tests/test_tsa_properties.py

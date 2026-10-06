@@ -1,0 +1,22 @@
+receipt: /Users/maxghenis/TheAxiomFoundation/_worktrees/receipt-crash-refusal-review/scratch-review/trees/9c47a3d/src/receipt/__init__.py int_max_str_digits: 4300
+load_json obj_int4300: ACCEPT dict keys=x
+load_json obj_int4301: ValueError: Exceeds the limit (4300 digits) for integer string conversion: value has 4301 digits; use sys.set_int_max_str_digits() to increase the limit
+load_json obj_int5000: ValueError: Exceeds the limit (4300 digits) for integer string conversion: value has 5000 digits; use sys.set_int_max_str_digits() to increase the limit
+load_json obj_negint5000: ValueError: Exceeds the limit (4300 digits) for integer string conversion: value has 5000 digits; use sys.set_int_max_str_digits() to increase the limit
+load_json obj_int700: ACCEPT dict keys=x
+load_json obj_int640: ACCEPT dict keys=x
+load_json obj_neg0: ACCEPT dict keys=x
+load_json obj_float5000: ACCEPT dict keys=x
+load_json obj_1e400: ACCEPT dict keys=x
+load_json obj_int5000_then_syntax_error: ValueError: Exceeds the limit (4300 digits) for integer string conversion: value has 5000 digits; use sys.set_int_max_str_digits() to increase the limit
+load_json obj_int700_then_syntax_error: TsaError: cannot read JSON <W>/obj_int700_then_syntax_error.json: Illegal trailing comma before end of object: line 1 column 707 (char 706)
+load_json arr_int5000: ValueError: Exceeds the limit (4300 digits) for integer string conversion: value has 5000 digits; use sys.set_int_max_str_digits() to increase the limit
+load_json arr_int700: TsaError: record must be a JSON object: <W>/arr_int700.json
+load_manifest releaseIndex5000: ValueError: Exceeds the limit (4300 digits) for integer string conversion: value has 5000 digits; use sys.set_int_max_str_digits() to increase the limit
+load_manifest releaseIndex700: ReleaseChainError: releaseIndex 999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999
+load_manifest releaseIndex4300: ReleaseChainError: releaseIndex 999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999
+load_manifest schemaVersion5000: ValueError: Exceeds the limit (4300 digits) for integer string conversion: value has 5000 digits; use sys.set_int_max_str_digits() to increase the limit
+verify_witness control: VERIFIED (available)
+verify_witness big5000: ValueError: Exceeds the limit (4300 digits) for integer string conversion: value has 5000 digits; use sys.set_int_max_str_digits() to increase the limit
+verify_witness big700: VERIFIED (available)
+verify_witness big5000_then_syntax_error: ValueError: Exceeds the limit (4300 digits) for integer string conversion: value has 5000 digits; use sys.set_int_max_str_digits() to increase the limit
