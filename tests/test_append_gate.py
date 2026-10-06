@@ -2865,6 +2865,97 @@ def test_a_gate_only_proposal_cannot_rewrite_a_ledger_its_spec_left_unclassified
     )
 
 
+@pytest.mark.parametrize(
+    "change, relative",
+    [
+        pytest.param("rewrite-row", CHAIN_SPEC.state_relative, id="rewrite-row"),
+        pytest.param("corrupt-prefix", CHAIN_SPEC.prefix_relative, id="corrupt-prefix"),
+        pytest.param("change-mode", CHAIN_SPEC.state_relative, id="ledger-mode"),
+        pytest.param("change-mode", CHAIN_SPEC.prefix_relative, id="prefix-mode"),
+    ],
+)
+def test_gate_classification_never_permits_a_ledger_state_change(
+    tmp_path: pathlib.Path, change: str, relative: pathlib.PurePosixPath
+) -> None:
+    """Invariant: a gate-classified path never changes ledger state.
+
+    Gate-only verification skips the append, prefix and state-mode checks,
+    so classification must not allow any of those changes before its return.
+    """
+
+    spec = replace(
+        GATE_SPEC,
+        data_surface=frozenset({"releases/manifests/**"}),
+        gate_surface=GATE_SPEC.gate_surface | {"ledger/**"},
+    )
+    candidate = base_repository(tmp_path)
+    if change == "rewrite-row":
+        rows = [observation_row(number) for number in range(1, BASE_ROW_COUNT + 1)]
+        rows[1] = observation_row(2, value=12345.0)
+        write_ledger(candidate.root, rows)
+    elif change == "corrupt-prefix":
+        (candidate.root / relative).write_text("not JSON\n", encoding="utf-8")
+    else:
+        (candidate.root / relative).chmod(0o755)
+    add_gate_file(candidate)
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate, spec=spec)
+    assert str(refusal.value) == (
+        f"gate-only proposal changes ledger state path(s): ['{relative.as_posix()}']"
+    )
+
+
+@pytest.mark.parametrize("state_kind", ["ledger", "prefix"])
+def test_gate_classification_never_permits_a_state_ancestor_change(
+    tmp_path: pathlib.Path, state_kind: str
+) -> None:
+    """A gate-classified ancestor is state too, even with regular leaves.
+
+    The base has a blob where one state ancestor belongs; the candidate
+    restores that directory with regular state files. A gate-only verdict
+    cannot claim unchanged state merely because those paths match GATE.
+    """
+
+    candidate = base_repository(tmp_path)
+    chain = replace(
+        CHAIN_SPEC,
+        state_relative=pathlib.PurePosixPath("state/observations/rows.jsonl"),
+        prefix_relative=pathlib.PurePosixPath("metadata/prefix/frozen.json"),
+    )
+    for old, new in (
+        (CHAIN_SPEC.state_relative, chain.state_relative),
+        (CHAIN_SPEC.prefix_relative, chain.prefix_relative),
+    ):
+        target = candidate.root / new
+        target.parent.mkdir(parents=True)
+        (candidate.root / old).rename(target)
+    (candidate.root / "ledger").rmdir()
+    commit_candidate(candidate, "separate nested state paths")
+    relative = chain.state_relative if state_kind == "ledger" else chain.prefix_relative
+    ancestor = relative.parts[0]
+    ancestor_path = candidate.root / ancestor
+    saved = tmp_path / "saved-state-directory"
+    ancestor_path.rename(saved)
+    ancestor_path.write_text("base state ancestor is a blob\n", encoding="utf-8")
+    candidate = replace(candidate, base=commit_candidate(candidate, "blob state ancestor"))
+    ancestor_path.unlink()
+    saved.rename(ancestor_path)
+    add_gate_file(candidate)
+    spec = replace(
+        GATE_SPEC,
+        chain=chain,
+        data_surface=frozenset({"releases/manifests/**"}),
+        gate_surface=GATE_SPEC.gate_surface
+        | {"state", "state/**", "metadata", "metadata/**"},
+    )
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate, spec=spec)
+    assert str(refusal.value) == (
+        "gate-only proposal changes ledger state path(s): "
+        f"{sorted([ancestor, relative.as_posix()])}"
+    )
+
+
 def test_a_row_id_cannot_forge_a_line_in_a_refusal(tmp_path: pathlib.Path) -> None:
     """0.6.2 review, L6 finding 12: refusal texts quoted row ids verbatim.
 

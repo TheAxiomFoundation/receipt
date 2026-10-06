@@ -28,7 +28,7 @@ from test_m3_context_cleanup import pipeline
 from test_verify import JOURNAL_BYTES, PREFIX_BYTES, ANCHOR_DIGEST
 
 
-def fake_reader(commit, tree, calls):
+def fake_reader(commit, tree, calls, *, close_error=None):
     class FakeMaterialization:
         def __init__(self, path):
             self.path = path
@@ -43,6 +43,7 @@ def fake_reader(commit, tree, calls):
     class Fake:
         def __init__(self):
             self.commit, self.tree, self.object_format = commit, tree, "sha1"
+            self.close_errors = ()
         @classmethod
         def select(cls, root, revision="HEAD", **kwargs):
             calls.append(["select", revision, kwargs])
@@ -52,6 +53,9 @@ def fake_reader(commit, tree, calls):
             return self
         def __exit__(self, *args):
             calls.append("exit")
+            if close_error is not None:
+                self.close_errors = (close_error,)
+                raise close_error
         def assert_ancestor(self, other):
             calls.append("ancestry")
             return other.commit
@@ -269,3 +273,41 @@ def test_public_substitution_boundaries(repo, monkeypatch, case):
     from m3_substitution_expected import OBSERVED
     probe, *args = CASES[case]
     compare(probe, repo, monkeypatch, *args, expected=OBSERVED[case])
+
+
+def test_substituted_reader_records_close_failure_and_invalidates_custody(repo, monkeypatch):
+    from m3_legacy import modules, source_tree
+
+    answers, codes = {}, []
+    for old in (True, False):
+        with source_tree(old=old), monkeypatch.context() as patch:
+            m = modules()
+            codes.append(m.verify.run_verification.__code__)
+            loaded, commit = pipeline(m, repo, patch)
+            calls, owners = [], []
+            close_error = m.snapshot.SnapshotError("m3 fake close failure")
+            Fake = fake_reader(commit, repo.git("rev-parse", f"{commit}^{{tree}}").decode(),
+                               calls, close_error=close_error)
+            class Observed(Fake):
+                def __init__(self):
+                    super().__init__()
+                    owners.append(self)
+            patch.setattr(m.verify, "TreeSnapshot", Observed)
+            def binding_error(*args, **kwargs):
+                raise m.corpus.CorpusError("m3 fake binding body failure")
+            patch.setattr(m.verify, "verify_corpus_binding", binding_error)
+            answer = m.verify.run_verification(repo.root, loaded, commit=commit)
+            assert len(owners) == 1 and owners[0].close_errors == (close_error,)
+            assert calls[-1] == "exit"
+            answers[old] = answer
+    assert codes[0] is not codes[1]
+    # Keep the authenticated legacy outcome explicit: the close failure was
+    # reported as binding failure, while the earlier custody claim survived.
+    assert [(item.name, item.ok, item.failure) for item in answers[True].passes] == [
+        ("custody", True, None), ("binding", False, "m3 fake close failure"),
+        ("declaration", False, "not reached")]
+    assert answers[True].chain is not None and answers[True].corpus is None
+    # e911 consumes the same recorded close failure and invalidates the claim.
+    assert [(item.name, item.ok, item.failure) for item in answers[False].passes] == [
+        ("custody", False, "m3 fake close failure"), ("binding", False, "not reached")]
+    assert answers[False].chain is answers[False].corpus is None

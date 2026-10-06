@@ -77,12 +77,25 @@ def policy(m, subject):
 def reached(m):
     """Count actual code objects, not wrappers or similarly named live globals."""
     selected = {}
+    close_errors_code = None
     for name in ("TreeSnapshot", "_BatchReader", "_WorkPool", "TreeListing",
                  "_DigestIterator", "Materialization"):
         cls = getattr(m.snapshot, name, None)
         if cls is None:
             continue
         for method, descriptor in vars(cls).items():
+            if name == "TreeSnapshot" and method == "close_errors":
+                # e911 exposes the already collected close failures to the
+                # composition. Assert this getter's exact state separately;
+                # the measured ownership census predates this observation.
+                close_errors_code = descriptor.fget.__code__
+                continue
+            if method == "_reaudit_repository_configuration":
+                # #83 extracted the former close-only audit and also runs it
+                # before entered readers and object-store children. D1 asserts
+                # its exact added argv/environment/count; retain the frozen
+                # census for the ownership work that M3 compares.
+                continue
             if method == "__replace__":
                 # Synthesized by dataclasses on Python 3.13 and later only; it is
                 # not a receipt body, and counting it made the freeze depend on
@@ -112,10 +125,32 @@ def reached(m):
             if hasattr(body, "__code__"):
                 selected[body.__code__] = module.__name__.split(".")[-1] + "." + name
     counts = Counter()
+    close_errors_reads = []
     hash_new = m.snapshot.hashlib.new
     hash_code = getattr(hash_new, "__code__", None)
     old = sys.getprofile()
+    audit_code = getattr(getattr(m.snapshot.TreeSnapshot,
+                                "_reaudit_repository_configuration", None), "__code__", None)
     def profile(frame, event, arg):
+        if frame.f_code is close_errors_code:
+            if event == "return":
+                subject = frame.f_locals["self"]
+                assert arg is subject._state.close_errors and isinstance(arg, tuple)
+                assert subject._state.closed
+                close_errors_reads.append(subject)
+            return
+        if (event == "call" and selected.get(frame.f_code)
+                in {"snapshot._git_environment", "snapshot._git_run"}):
+            caller = frame.f_back
+            while caller is not None:
+                if caller.f_code is audit_code:
+                    if (caller.f_back is not None and caller.f_back.f_code.co_name
+                            in {"__enter__", "verify_object_store"}):
+                        # Follow the D1 environment-capture wrapper too. Only
+                        # pre-child transport is additional; close still counts.
+                        return
+                    break
+                caller = caller.f_back
         if event == "call" and frame.f_code in selected:
             counts[selected[frame.f_code]] += 1
         if ((event == "call" and frame.f_code is hash_code
@@ -127,11 +162,12 @@ def reached(m):
     sys.setprofile(profile)
     try:
         yield counts
+        assert len(close_errors_reads) == len({id(subject) for subject in close_errors_reads})
     finally:
         sys.setprofile(old)
 
 
-def compare(probe, repo, monkeypatch, *args, expected=None):
+def compare(probe, repo, monkeypatch, *args, expected=None, expected_live=None):
     """Compare both independently reached implementations and a captured value."""
     results, codes = [], []
     for old in (True, False):
@@ -142,6 +178,14 @@ def compare(probe, repo, monkeypatch, *args, expected=None):
                 result = probe(m, repo, patch, *args)
             results.append(plain({"trace": result, "bodies": dict(sorted(counts.items()))}))
     assert codes[0] is not codes[1], "legacy/live selector bodies must be distinct"
+    if expected_live is not None:
+        assert expected is not None, "a deliberate correction must retain the frozen expected result"
+        for label, observed, recorded in (("legacy", results[0], expected),
+                                          ("live", results[1], expected_live)):
+            if observed != recorded:
+                raise AssertionError(label + " trace differs from the recorded one: "
+                                     + json.dumps(_leaf_differences(observed, recorded), sort_keys=True))
+        return results[1]
     assert results[0] == results[1], (results[0], results[1])
     if expected is not None and results[1] != expected:
         # Print the differing leaves, not the whole structures: CI logs truncate
