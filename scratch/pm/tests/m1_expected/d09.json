@@ -1,0 +1,41 @@
+{
+  "disagreement/caller_anchors_symlink": {
+    "tree": {
+      "exception": "receipt.snapshot.SnapshotError",
+      "message": "base tree entry has non-regular mode 120000: separate-anchors/unused-symlink"
+    },
+    "caller": {
+      "value": {
+        "releases": 1,
+        "anchor_set_sha256": null,
+        "anchor_file_sha256s": []
+      }
+    }
+  },
+  "disagreement/caller_anchors_alias": {
+    "tree": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "tree directory 'separate-anchors' contains names that merge under ASCII case folding: 'EXTRA' and 'extra'"
+    },
+    "caller": {
+      "value": {
+        "releases": 1,
+        "anchor_set_sha256": null,
+        "anchor_file_sha256s": []
+      }
+    }
+  },
+  "disagreement/caller_anchors_unfoldable": {
+    "tree": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "tree entry name is not valid UTF-8 for folding"
+    },
+    "caller": {
+      "value": {
+        "releases": 1,
+        "anchor_set_sha256": null,
+        "anchor_file_sha256s": []
+      }
+    }
+  }
+}

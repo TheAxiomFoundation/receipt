@@ -1,0 +1,140 @@
+{
+  "names/repertoire": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "name repertoire must be 'portable' or 'posix-bytes': 'Portable'"
+  },
+  "names/portable": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "fixture is not a portable name (ASCII letters, digits, '.', '_' and '-', not ending in '.', not a Win32 device name): 'bad?'"
+  },
+  "names/portable_path": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "fixture is not a portable name (ASCII letters, digits, '.', '_' and '-', not ending in '.', not a Win32 device name): 'good/bad?'"
+  },
+  "names/portable_accept": {
+    "value": ".axiom/A_2-z.txt"
+  },
+  "names/text_bytes": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name cannot be represented as Git tree-name bytes: '\\ud800'"
+  },
+  "names/bytes_type": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name must be bytes: 'a'"
+  },
+  "names/bytes_empty": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name is empty"
+  },
+  "names/bytes_dot": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name is a dot component: b'.'"
+  },
+  "names/bytes_dotdot": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name is a dot component: b'..'"
+  },
+  "names/bytes_nul": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name contains NUL: b'a\\x00b'"
+  },
+  "names/bytes_slash": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name contains '/': b'a/b'"
+  },
+  "names/decode_portable": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name is not valid UTF-8 under name repertoire 'portable': b'bad\\xff'"
+  },
+  "names/decode_export": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name is not valid UTF-8 under name repertoire 'posix-bytes': b'bad\\xff'"
+  },
+  "names/decode_lossless": {
+    "value": "bad\udcff"
+  },
+  "names/text_type": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name must be text: b'a'"
+  },
+  "names/text_roundtrip": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name does not round-trip through Git tree-name bytes: '\\udcc3\\udca9'"
+  },
+  "names/fold_bytes": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name is not valid UTF-8 for folding"
+  },
+  "names/fold_text": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name is not valid UTF-8 for folding"
+  },
+  "names/fold_type": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name must be text: 3"
+  },
+  "names/fold_ascii_only": {
+    "value": "az-\u00c4\u00df"
+  },
+  "names/siblings_type": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree entry name must be bytes or text: 3"
+  },
+  "names/siblings_duplicate": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree directory contains a duplicate entry name: 'a'"
+  },
+  "names/siblings_fold": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "tree directory contains names that merge under ASCII case folding: 'A' and 'a'"
+  },
+  "names/siblings_unicode": {
+    "value": null
+  },
+  "names/short_extensions": {
+    "value": [
+      "SIG",
+      "JSO",
+      "YML",
+      "GZ",
+      "B_C",
+      null,
+      null
+    ]
+  },
+  "names/short_suffixes": {
+    "value": [
+      true,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "filename/type": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "anchor filenames must be str or os.PathLike when the anchor-set digest is computed; got int"
+  },
+  "filename/decode": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "anchor filename could not be decoded to a pathname: BrokenPath"
+  },
+  "filename/surrogate": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "anchor filename spells an astral character as an explicit surrogate pair, which JSON parsing would rewrite; configure the character directly: '\\ud800\\udc00.pem'"
+  },
+  "filename/astral": {
+    "value": "\ud800\udc00.pem"
+  },
+  "filename/short_source": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "short-name source must be text: 123"
+  },
+  "filename/suffix_iterable": {
+    "exception": "receipt._names.NamePolicyError",
+    "message": "pinned suffixes must be iterable text"
+  },
+  "filename/suffix_ignored": {
+    "value": true
+  }
+}

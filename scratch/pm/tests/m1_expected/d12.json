@@ -1,0 +1,43 @@
+{
+  "disagreement/repeat_67108864": [
+    {
+      "result": {
+        "value": null
+      },
+      "path_bytes": 27,
+      "attribute_bytes": 22,
+      "attribute_rules": 1,
+      "attribute_match_work": 28
+    },
+    {
+      "result": {
+        "value": null
+      },
+      "path_bytes": 40,
+      "attribute_bytes": 22,
+      "attribute_rules": 1,
+      "attribute_match_work": 56
+    }
+  ],
+  "disagreement/repeat_40": [
+    {
+      "result": {
+        "value": null
+      },
+      "path_bytes": 27,
+      "attribute_bytes": 22,
+      "attribute_rules": 1,
+      "attribute_match_work": 28
+    },
+    {
+      "result": {
+        "exception": "receipt.snapshot.SnapshotError",
+        "message": "attribute matching exceeds the work budget of 40 steps"
+      },
+      "path_bytes": 40,
+      "attribute_bytes": 22,
+      "attribute_rules": 1,
+      "attribute_match_work": 40
+    }
+  ]
+}

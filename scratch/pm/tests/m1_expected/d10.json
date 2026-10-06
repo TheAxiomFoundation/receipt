@@ -1,0 +1,41 @@
+{
+  "disagreement/name_and_mode": {
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "tree entry 'releases/bad?.txt' is not a portable name (ASCII letters, digits, '.', '_' and '-', not ending in '.', not a Win32 device name): 'bad?.txt'"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    },
+    "chain_names": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "tree entry 'releases/bad?.txt' is not a portable name (ASCII letters, digits, '.', '_' and '-', not ending in '.', not a Win32 device name): 'bad?.txt'"
+    },
+    "materialize": {
+      "exception": "receipt.snapshot.SnapshotError",
+      "message": "base tree entry has non-regular mode 120000: releases/a-link"
+    },
+    "binding": {
+      "exception": "receipt.corpus.CorpusError",
+      "message": "tree entry 'releases/bad?.txt' is not a portable name (ASCII letters, digits, '.', '_' and '-', not ending in '.', not a Win32 device name): 'bad?.txt'"
+    },
+    "base_chain": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "tree entry 'releases/bad?.txt' is not a portable name (ASCII letters, digits, '.', '_' and '-', not ending in '.', not a Win32 device name): 'bad?.txt'"
+    },
+    "append_preflight": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "tree entry 'releases/bad?.txt' is not a portable name (ASCII letters, digits, '.', '_' and '-', not ending in '.', not a Win32 device name): 'bad?.txt'"
+    }
+  }
+}

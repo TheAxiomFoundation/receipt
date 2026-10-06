@@ -1,0 +1,253 @@
+{
+  "disagreement/directory_fold": {
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "tree directory 'releases' contains names that merge under ASCII case folding: 'Pair.txt' and 'pair.txt'"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    },
+    "chain_names": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "tree directory 'releases' contains names that merge under ASCII case folding: 'Pair.txt' and 'pair.txt'"
+    },
+    "materialize": {
+      "exception": "receipt.snapshot.SnapshotError",
+      "message": "releases contains names that merge under ASCII case folding: 'Pair.txt' and 'pair.txt'"
+    },
+    "binding": {
+      "exception": "receipt.corpus.CorpusError",
+      "message": "directory holds two entries a case-insensitive filesystem would merge: 'releases/Pair.txt' and 'releases/pair.txt'"
+    },
+    "base_chain": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "tree directory 'releases' contains names that merge under ASCII case folding: 'Pair.txt' and 'pair.txt'"
+    },
+    "append_preflight": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "tree directory 'releases' contains names that merge under ASCII case folding: 'Pair.txt' and 'pair.txt'"
+    }
+  },
+  "disagreement/direct_directory_fold": {
+    "value": {
+      "releases": 1,
+      "anchor_set_sha256": null,
+      "anchor_file_sha256s": []
+    }
+  },
+  "disagreement/directory_attributes": {
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "transforming attribute filter applies to protected path releases/anchors/alpha-root.pem"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    },
+    "chain_names": {
+      "value": null
+    },
+    "materialize": {
+      "value": [
+        "receipt/corpus-journal.jsonl",
+        "receipt/immutable-prefix.json",
+        "releases/anchors/alpha-root.pem",
+        "releases/anchors/beta-root.pem",
+        "releases/anchors/producer-ed25519.pub",
+        "releases/manifests/<MANIFEST>.alpha.tsr",
+        "releases/manifests/<MANIFEST>.beta.tsr",
+        "releases/manifests/<MANIFEST>.json",
+        "releases/manifests/<MANIFEST>.producer.sig"
+      ]
+    },
+    "binding": {
+      "value": {
+        "content": [
+          {
+            "path": "rules/benefit/amount.yaml",
+            "sha256": "08e6f34303ef62e74e9b84e142c80bf315851132a0f43fda09a590a78f9fa1f0",
+            "entry_index": 0
+          },
+          {
+            "path": "rules/tax/rate.test.yaml",
+            "sha256": "67fd4cc91da7c4d6870049981fed4d367327a4bb687e73666652796d80b533b8",
+            "entry_index": 1
+          },
+          {
+            "path": "rules/tax/rate.yaml",
+            "sha256": "e218ac6d2f126c76eb6e74203814e06e3fd528afc809576cede2e2b2546bdc49",
+            "entry_index": 2
+          }
+        ],
+        "attested": [
+          {
+            "path": ".axiom/toolchain.toml",
+            "sha256": "75312e9184f8c106c14e7fbb7d258bf50a5467751b16e2d4564166200053b61b",
+            "entry_index": 3
+          }
+        ],
+        "gates": [
+          {
+            "gate_id": "rulespec/compile",
+            "tier": "public",
+            "outcome": "pass",
+            "evidence": {
+              "command": "make validate"
+            },
+            "entry_index": 4
+          },
+          {
+            "gate_id": "oracle/licensed-parity",
+            "tier": "restricted",
+            "outcome": "pass",
+            "evidence": {
+              "restrictedInput": "licensed bundle"
+            },
+            "entry_index": 5
+          },
+          {
+            "gate_id": "ci/repository-checks",
+            "tier": "ci-attested",
+            "outcome": "pass",
+            "evidence": {
+              "workflow": "repository-checks.yml"
+            },
+            "entry_index": 6
+          }
+        ],
+        "removed_paths": [],
+        "name_repertoire": "portable"
+      }
+    },
+    "base_chain": {
+      "exception": "receipt.snapshot.SnapshotError",
+      "message": "transforming attribute filter applies to protected path releases/anchors/alpha-root.pem"
+    },
+    "append_preflight": {
+      "exception": "receipt.snapshot.SnapshotError",
+      "message": "transforming attribute filter applies to protected path releases/anchors/alpha-root.pem"
+    }
+  },
+  "disagreement/direct_directory_attributes": {
+    "value": {
+      "releases": 1,
+      "anchor_set_sha256": null,
+      "anchor_file_sha256s": []
+    }
+  },
+  "disagreement/directory_state": {
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "state file is a symlink: receipt/corpus-journal.jsonl"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    },
+    "chain_names": {
+      "value": null
+    },
+    "materialize": {
+      "exception": "receipt.snapshot.SnapshotError",
+      "message": "base tree entry has non-regular mode 120000: receipt/corpus-journal.jsonl"
+    },
+    "binding": {
+      "value": {
+        "content": [
+          {
+            "path": "rules/benefit/amount.yaml",
+            "sha256": "08e6f34303ef62e74e9b84e142c80bf315851132a0f43fda09a590a78f9fa1f0",
+            "entry_index": 0
+          },
+          {
+            "path": "rules/tax/rate.test.yaml",
+            "sha256": "67fd4cc91da7c4d6870049981fed4d367327a4bb687e73666652796d80b533b8",
+            "entry_index": 1
+          },
+          {
+            "path": "rules/tax/rate.yaml",
+            "sha256": "e218ac6d2f126c76eb6e74203814e06e3fd528afc809576cede2e2b2546bdc49",
+            "entry_index": 2
+          }
+        ],
+        "attested": [
+          {
+            "path": ".axiom/toolchain.toml",
+            "sha256": "75312e9184f8c106c14e7fbb7d258bf50a5467751b16e2d4564166200053b61b",
+            "entry_index": 3
+          }
+        ],
+        "gates": [
+          {
+            "gate_id": "rulespec/compile",
+            "tier": "public",
+            "outcome": "pass",
+            "evidence": {
+              "command": "make validate"
+            },
+            "entry_index": 4
+          },
+          {
+            "gate_id": "oracle/licensed-parity",
+            "tier": "restricted",
+            "outcome": "pass",
+            "evidence": {
+              "restrictedInput": "licensed bundle"
+            },
+            "entry_index": 5
+          },
+          {
+            "gate_id": "ci/repository-checks",
+            "tier": "ci-attested",
+            "outcome": "pass",
+            "evidence": {
+              "workflow": "repository-checks.yml"
+            },
+            "entry_index": 6
+          }
+        ],
+        "removed_paths": [],
+        "name_repertoire": "portable"
+      }
+    },
+    "base_chain": {
+      "exception": "receipt.snapshot.SnapshotError",
+      "message": "base tree entry has non-regular mode 120000: receipt/corpus-journal.jsonl"
+    },
+    "append_preflight": {
+      "value": null
+    }
+  },
+  "disagreement/direct_directory_state": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "required state file is missing or non-regular: <ROOT>/receipt/corpus-journal.jsonl"
+  }
+}

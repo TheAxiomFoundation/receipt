@@ -1,0 +1,248 @@
+{
+  "disagreement/fold_releases": {
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "tree directory 'releases' contains names that merge under ASCII case folding: 'Pair.txt' and 'pair.txt'"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    },
+    "chain_names": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "tree directory 'releases' contains names that merge under ASCII case folding: 'Pair.txt' and 'pair.txt'"
+    },
+    "materialize": {
+      "exception": "receipt.snapshot.SnapshotError",
+      "message": "releases contains names that merge under ASCII case folding: 'Pair.txt' and 'pair.txt'"
+    },
+    "binding": {
+      "exception": "receipt.corpus.CorpusError",
+      "message": "directory holds two entries a case-insensitive filesystem would merge: 'releases/Pair.txt' and 'releases/pair.txt'"
+    },
+    "base_chain": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "tree directory 'releases' contains names that merge under ASCII case folding: 'Pair.txt' and 'pair.txt'"
+    },
+    "append_preflight": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "tree directory 'releases' contains names that merge under ASCII case folding: 'Pair.txt' and 'pair.txt'"
+    }
+  },
+  "disagreement/fold_rules": {
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          true,
+          null
+        ],
+        [
+          "binding",
+          false,
+          "directory holds two entries a case-insensitive filesystem would merge: 'rules/Pair.txt' and 'rules/pair.txt'"
+        ],
+        [
+          "declaration",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    },
+    "chain_names": {
+      "value": null
+    },
+    "materialize": {
+      "value": [
+        "receipt/corpus-journal.jsonl",
+        "receipt/immutable-prefix.json",
+        "releases/anchors/alpha-root.pem",
+        "releases/anchors/beta-root.pem",
+        "releases/anchors/producer-ed25519.pub",
+        "releases/manifests/<MANIFEST>.alpha.tsr",
+        "releases/manifests/<MANIFEST>.beta.tsr",
+        "releases/manifests/<MANIFEST>.json",
+        "releases/manifests/<MANIFEST>.producer.sig"
+      ]
+    },
+    "binding": {
+      "exception": "receipt.corpus.CorpusError",
+      "message": "directory holds two entries a case-insensitive filesystem would merge: 'rules/Pair.txt' and 'rules/pair.txt'"
+    },
+    "base_chain": {
+      "value": {
+        "releases": 1,
+        "manifest": "<MANIFEST>.json",
+        "anchor_set_sha256": null,
+        "anchor_file_sha256s": []
+      }
+    },
+    "append_preflight": {
+      "value": null
+    }
+  },
+  "disagreement/fold_unused": {
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          true,
+          null
+        ],
+        [
+          "binding",
+          false,
+          "directory holds two entries a case-insensitive filesystem would merge: 'unused/Pair.txt' and 'unused/pair.txt'"
+        ],
+        [
+          "declaration",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    },
+    "chain_names": {
+      "value": null
+    },
+    "materialize": {
+      "value": [
+        "receipt/corpus-journal.jsonl",
+        "receipt/immutable-prefix.json",
+        "releases/anchors/alpha-root.pem",
+        "releases/anchors/beta-root.pem",
+        "releases/anchors/producer-ed25519.pub",
+        "releases/manifests/<MANIFEST>.alpha.tsr",
+        "releases/manifests/<MANIFEST>.beta.tsr",
+        "releases/manifests/<MANIFEST>.json",
+        "releases/manifests/<MANIFEST>.producer.sig"
+      ]
+    },
+    "binding": {
+      "exception": "receipt.corpus.CorpusError",
+      "message": "directory holds two entries a case-insensitive filesystem would merge: 'unused/Pair.txt' and 'unused/pair.txt'"
+    },
+    "base_chain": {
+      "value": {
+        "releases": 1,
+        "manifest": "<MANIFEST>.json",
+        "anchor_set_sha256": null,
+        "anchor_file_sha256s": []
+      }
+    },
+    "append_preflight": {
+      "value": null
+    }
+  },
+  "disagreement/fold_root": {
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "tree directory '.' contains names that merge under ASCII case folding: 'AA.txt' and 'aa.txt'"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    },
+    "chain_names": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "tree directory '.' contains names that merge under ASCII case folding: 'AA.txt' and 'aa.txt'"
+    },
+    "materialize": {
+      "value": [
+        "receipt/corpus-journal.jsonl",
+        "receipt/immutable-prefix.json",
+        "releases/anchors/alpha-root.pem",
+        "releases/anchors/beta-root.pem",
+        "releases/anchors/producer-ed25519.pub",
+        "releases/manifests/<MANIFEST>.alpha.tsr",
+        "releases/manifests/<MANIFEST>.beta.tsr",
+        "releases/manifests/<MANIFEST>.json",
+        "releases/manifests/<MANIFEST>.producer.sig"
+      ]
+    },
+    "binding": {
+      "exception": "receipt.corpus.CorpusError",
+      "message": "directory holds two entries a case-insensitive filesystem would merge: 'AA.txt' and 'aa.txt'"
+    },
+    "base_chain": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "tree directory '.' contains names that merge under ASCII case folding: 'AA.txt' and 'aa.txt'"
+    },
+    "append_preflight": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "tree directory '.' contains names that merge under ASCII case folding: 'AA.txt' and 'aa.txt'"
+    }
+  },
+  "disagreement/empty_sibling": {
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "tree directory 'releases' contains names that merge under ASCII case folding: 'EXTRA' and 'extra'"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    },
+    "chain_names": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "tree directory 'releases' contains names that merge under ASCII case folding: 'EXTRA' and 'extra'"
+    },
+    "materialize": {
+      "value": [
+        "receipt/corpus-journal.jsonl",
+        "receipt/immutable-prefix.json",
+        "releases/anchors/alpha-root.pem",
+        "releases/anchors/beta-root.pem",
+        "releases/anchors/producer-ed25519.pub",
+        "releases/extra",
+        "releases/manifests/<MANIFEST>.alpha.tsr",
+        "releases/manifests/<MANIFEST>.beta.tsr",
+        "releases/manifests/<MANIFEST>.json",
+        "releases/manifests/<MANIFEST>.producer.sig"
+      ]
+    },
+    "binding": {
+      "exception": "receipt.corpus.CorpusError",
+      "message": "directory holds two entries a case-insensitive filesystem would merge: 'releases/EXTRA' and 'releases/extra'"
+    },
+    "base_chain": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "tree directory 'releases' contains names that merge under ASCII case folding: 'EXTRA' and 'extra'"
+    },
+    "append_preflight": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "tree directory 'releases' contains names that merge under ASCII case folding: 'EXTRA' and 'extra'"
+    }
+  }
+}

@@ -1,0 +1,202 @@
+{
+  "disagreement/pinned_alias": {
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "index carries an alias of a protected path: Releases/other.txt (for releases at releases)"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    },
+    "chain_names": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "index carries an alias of a protected path: Releases/other.txt (for releases at releases)"
+    },
+    "materialize": {
+      "value": [
+        "receipt/corpus-journal.jsonl",
+        "receipt/immutable-prefix.json",
+        "releases/anchors/alpha-root.pem",
+        "releases/anchors/beta-root.pem",
+        "releases/anchors/producer-ed25519.pub",
+        "releases/manifests/<MANIFEST>.alpha.tsr",
+        "releases/manifests/<MANIFEST>.beta.tsr",
+        "releases/manifests/<MANIFEST>.json",
+        "releases/manifests/<MANIFEST>.producer.sig"
+      ]
+    },
+    "binding": {
+      "exception": "receipt.corpus.CorpusError",
+      "message": "directory holds two entries a case-insensitive filesystem would merge: 'Releases' and 'releases'"
+    },
+    "base_chain": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "index carries an alias of a protected path: Releases/other.txt (for releases at releases)"
+    },
+    "append_preflight": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "index carries an alias of a protected path: Releases/other.txt (for releases at releases)"
+    }
+  },
+  "disagreement/empty_pinned_alias": {
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "index carries an alias of a protected path: Releases (for releases at releases)"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    },
+    "chain_names": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "index carries an alias of a protected path: Releases (for releases at releases)"
+    },
+    "materialize": {
+      "value": [
+        "receipt/corpus-journal.jsonl",
+        "receipt/immutable-prefix.json",
+        "releases/anchors/alpha-root.pem",
+        "releases/anchors/beta-root.pem",
+        "releases/anchors/producer-ed25519.pub",
+        "releases/manifests/<MANIFEST>.alpha.tsr",
+        "releases/manifests/<MANIFEST>.beta.tsr",
+        "releases/manifests/<MANIFEST>.json",
+        "releases/manifests/<MANIFEST>.producer.sig"
+      ]
+    },
+    "binding": {
+      "exception": "receipt.corpus.CorpusError",
+      "message": "directory holds two entries a case-insensitive filesystem would merge: 'Releases' and 'releases'"
+    },
+    "base_chain": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "index carries an alias of a protected path: Releases (for releases at releases)"
+    },
+    "append_preflight": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "index carries an alias of a protected path: Releases (for releases at releases)"
+    }
+  },
+  "disagreement/state_alias": {
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          false,
+          "index carries an alias of a protected path: receipt/Corpus-journal.jsonl (for receipt/corpus-journal.jsonl at receipt/corpus-journal.jsonl)"
+        ],
+        [
+          "binding",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    },
+    "chain_names": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "index carries an alias of a protected path: receipt/Corpus-journal.jsonl (for receipt/corpus-journal.jsonl at receipt/corpus-journal.jsonl)"
+    },
+    "materialize": {
+      "value": [
+        "receipt/corpus-journal.jsonl",
+        "receipt/immutable-prefix.json",
+        "releases/anchors/alpha-root.pem",
+        "releases/anchors/beta-root.pem",
+        "releases/anchors/producer-ed25519.pub",
+        "releases/manifests/<MANIFEST>.alpha.tsr",
+        "releases/manifests/<MANIFEST>.beta.tsr",
+        "releases/manifests/<MANIFEST>.json",
+        "releases/manifests/<MANIFEST>.producer.sig"
+      ]
+    },
+    "binding": {
+      "exception": "receipt.corpus.CorpusError",
+      "message": "directory holds two entries a case-insensitive filesystem would merge: 'receipt/Corpus-journal.jsonl' and 'receipt/corpus-journal.jsonl'"
+    },
+    "base_chain": {
+      "exception": "receipt.release_chain.ReleaseChainError",
+      "message": "index carries an alias of a protected path: receipt/Corpus-journal.jsonl (for receipt/corpus-journal.jsonl at receipt/corpus-journal.jsonl)"
+    },
+    "append_preflight": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "index carries an alias of a protected path: receipt/Corpus-journal.jsonl (for receipt/corpus-journal.jsonl at receipt/corpus-journal.jsonl)"
+    }
+  },
+  "disagreement/content_root_alias": {
+    "cli": {
+      "exit": 1,
+      "verdict": "FAIL",
+      "phases": [
+        [
+          "custody",
+          true,
+          null
+        ],
+        [
+          "binding",
+          false,
+          "tree entry 'Rules' aliases the pinned content root component 'rules' on a case- or normalization-insensitive filesystem"
+        ],
+        [
+          "declaration",
+          false,
+          "not reached"
+        ]
+      ],
+      "stderr": ""
+    },
+    "chain_names": {
+      "value": null
+    },
+    "materialize": {
+      "value": [
+        "receipt/corpus-journal.jsonl",
+        "receipt/immutable-prefix.json",
+        "releases/anchors/alpha-root.pem",
+        "releases/anchors/beta-root.pem",
+        "releases/anchors/producer-ed25519.pub",
+        "releases/manifests/<MANIFEST>.alpha.tsr",
+        "releases/manifests/<MANIFEST>.beta.tsr",
+        "releases/manifests/<MANIFEST>.json",
+        "releases/manifests/<MANIFEST>.producer.sig"
+      ]
+    },
+    "binding": {
+      "exception": "receipt.corpus.CorpusError",
+      "message": "tree entry 'Rules' aliases the pinned content root component 'rules' on a case- or normalization-insensitive filesystem"
+    },
+    "base_chain": {
+      "value": {
+        "releases": 1,
+        "manifest": "<MANIFEST>.json",
+        "anchor_set_sha256": null,
+        "anchor_file_sha256s": []
+      }
+    },
+    "append_preflight": {
+      "exception": "receipt.append_gate.AppendError",
+      "message": "index carries an alias of a protected path: Rules/unbound.txt (for rules at rules)"
+    }
+  }
+}

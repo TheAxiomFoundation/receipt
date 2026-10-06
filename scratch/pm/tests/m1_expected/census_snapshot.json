@@ -1,0 +1,634 @@
+{
+  "paths/entry/type": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path must be str or bytes: 7"
+  },
+  "paths/entries/type": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path must be str or bytes: 7"
+  },
+  "paths/attributes/type": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path must be str or bytes: 7"
+  },
+  "paths/materialize/type": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization prefix must be str, bytes, or PurePosixPath: 7"
+  },
+  "paths/entry/surrogate": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path cannot be encoded: '\\ud800'"
+  },
+  "paths/entries/surrogate": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path cannot be encoded: '\\ud800'"
+  },
+  "paths/attributes/surrogate": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path cannot be encoded: '\\ud800'"
+  },
+  "paths/materialize/surrogate": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path cannot be encoded: '\\ud800'"
+  },
+  "paths/entry/empty": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path must be a relative non-empty path: ''"
+  },
+  "paths/entries/empty": {
+    "value": {}
+  },
+  "paths/attributes/empty": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path must be a relative non-empty path: ''"
+  },
+  "paths/materialize/empty": {
+    "value": []
+  },
+  "paths/entry/absolute": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path must be a relative non-empty path: '/a'"
+  },
+  "paths/entries/absolute": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path must be a relative non-empty path: '/a'"
+  },
+  "paths/attributes/absolute": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path must be a relative non-empty path: '/a'"
+  },
+  "paths/materialize/absolute": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path must be a relative non-empty path: '/a'"
+  },
+  "paths/entry/trailing": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path must be a relative non-empty path: 'a/'"
+  },
+  "paths/entries/trailing": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path must be a relative non-empty path: 'a/'"
+  },
+  "paths/attributes/trailing": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path must be a relative non-empty path: 'a/'"
+  },
+  "paths/materialize/trailing": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path must be a relative non-empty path: 'a/'"
+  },
+  "paths/entry/empty_part": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component is empty"
+  },
+  "paths/entries/empty_part": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component is empty"
+  },
+  "paths/attributes/empty_part": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component is empty"
+  },
+  "paths/materialize/empty_part": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component is empty"
+  },
+  "paths/entry/dot": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component is a dot component: b'.'"
+  },
+  "paths/entries/dot": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component is a dot component: b'.'"
+  },
+  "paths/attributes/dot": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component is a dot component: b'.'"
+  },
+  "paths/materialize/dot": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component is a dot component: b'.'"
+  },
+  "paths/entry/dotdot": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component is a dot component: b'..'"
+  },
+  "paths/entries/dotdot": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component is a dot component: b'..'"
+  },
+  "paths/attributes/dotdot": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component is a dot component: b'..'"
+  },
+  "paths/materialize/dotdot": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component is a dot component: b'..'"
+  },
+  "paths/entry/nul": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component contains NUL: b'a\\x00b'"
+  },
+  "paths/entries/nul": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component contains NUL: b'a\\x00b'"
+  },
+  "paths/attributes/nul": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component contains NUL: b'a\\x00b'"
+  },
+  "paths/materialize/nul": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path component contains NUL: b'a\\x00b'"
+  },
+  "arguments/attributes_str": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "attribute paths must be an iterable of paths"
+  },
+  "arguments/attributes_bytes": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "attribute paths must be an iterable of paths"
+  },
+  "arguments/attributes_entry": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "attribute paths must be an iterable of paths"
+  },
+  "arguments/attributes_int": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "attribute paths must be an iterable of paths"
+  },
+  "arguments/prefix_str": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization prefixes must be an iterable of paths"
+  },
+  "arguments/prefix_bytes": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization prefixes must be an iterable of paths"
+  },
+  "arguments/prefix_path": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization prefixes must be an iterable of paths"
+  },
+  "arguments/prefix_int": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization prefixes must be iterable"
+  },
+  "arguments/prefix_item": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization prefix must be str, bytes, or PurePosixPath: 1"
+  },
+  "arguments/destination": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization destination must be path-like"
+  },
+  "arguments/repertoire": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "name repertoire must be 'portable' or 'posix-bytes': 'Portable'"
+  },
+  "arguments/attributes_count": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "attribute paths exceed the budget of 1 entries"
+  },
+  "arguments/prefix_count": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization prefixes exceed the budget of 1 entries"
+  },
+  "arguments/digests_count": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "content entries exceed the budget of 1 entries"
+  },
+  "ancestor/100644/entry": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path ancestor is not a directory: parent"
+  },
+  "ancestor/100755/entry": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path ancestor is not a directory: parent"
+  },
+  "ancestor/120000/entry": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "state path has a symlinked component: parent"
+  },
+  "ancestor/160000/entry": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path ancestor is not a directory: parent"
+  },
+  "ancestor/040000/entry": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree entry does not exist: parent/child"
+  },
+  "ancestor/absent/entry": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree entry does not exist: parent/child"
+  },
+  "ancestor/100644/entries": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path ancestor is not a directory: parent"
+  },
+  "ancestor/100755/entries": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path ancestor is not a directory: parent"
+  },
+  "ancestor/120000/entries": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "state path has a symlinked component: parent"
+  },
+  "ancestor/160000/entries": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree path ancestor is not a directory: parent"
+  },
+  "ancestor/040000/entries": {
+    "value": {}
+  },
+  "ancestor/absent/entries": {
+    "value": {}
+  },
+  "ancestor/100644/attributes": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "protected path ancestor is not a directory: parent"
+  },
+  "ancestor/100755/attributes": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "protected path ancestor is not a directory: parent"
+  },
+  "ancestor/120000/attributes": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "protected path ancestor is not a directory: parent"
+  },
+  "ancestor/160000/attributes": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "protected path ancestor is not a directory: parent"
+  },
+  "ancestor/040000/attributes": {
+    "value": null
+  },
+  "ancestor/absent/attributes": {
+    "value": null
+  },
+  "ancestor/100644/materialize": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "protected path ancestor is not a directory: parent"
+  },
+  "ancestor/100755/materialize": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "protected path ancestor is not a directory: parent"
+  },
+  "ancestor/120000/materialize": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "protected path ancestor is not a directory: parent"
+  },
+  "ancestor/160000/materialize": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "protected path ancestor is not a directory: parent"
+  },
+  "ancestor/040000/materialize": {
+    "value": []
+  },
+  "ancestor/absent/materialize": {
+    "value": []
+  },
+  "raw/malformed": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree <TREE> has a malformed entry"
+  },
+  "raw/no_nul": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree <TREE> has a malformed entry"
+  },
+  "raw/mode": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree <TREE> has unsupported raw mode '100600'"
+  },
+  "raw/padded_tree_mode": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree <TREE> has unsupported raw mode '040000'"
+  },
+  "raw/truncated": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree <TREE> has a truncated object name"
+  },
+  "raw/empty": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree <TREE> has an invalid entry name: tree entry name is empty"
+  },
+  "raw/dot": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree <TREE> has an invalid entry name: tree entry name is a dot component: b'.'"
+  },
+  "raw/dotdot": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree <TREE> has an invalid entry name: tree entry name is a dot component: b'..'"
+  },
+  "raw/slash": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree <TREE> has an invalid entry name: tree entry name contains '/': b'a/b'"
+  },
+  "raw/duplicate": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree <TREE> contains duplicate entry name b'a'"
+  },
+  "raw/order": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree <TREE> entries are not in canonical Git order"
+  },
+  "raw/directory_order": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree <TREE> entries are not in canonical Git order"
+  },
+  "payload/100644/blob": {
+    "value": {
+      "bytes": "68656c6c6f"
+    }
+  },
+  "payload/100755/blob": {
+    "value": {
+      "bytes": "68656c6c6f"
+    }
+  },
+  "payload/120000/blob": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree entry has non-regular mode 120000: file"
+  },
+  "payload/160000/blob": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "object <OID> is a commit, not the blob its reference requires"
+  },
+  "payload/040000/blob": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "object <OID> is a tree, not the blob its reference requires"
+  },
+  "payload/100644/digests": {
+    "value": [
+      [
+        "file",
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+      ]
+    ]
+  },
+  "payload/100755/digests": {
+    "value": [
+      [
+        "file",
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+      ]
+    ]
+  },
+  "payload/120000/digests": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree entry has non-regular mode 120000: file"
+  },
+  "payload/160000/digests": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "object <OID> is a commit, not the blob its reference requires"
+  },
+  "payload/040000/digests": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "object <OID> is a tree, not the blob its reference requires"
+  },
+  "payload/100644/materialize": {
+    "value": [
+      "file"
+    ]
+  },
+  "payload/100755/materialize": {
+    "value": [
+      "file"
+    ]
+  },
+  "payload/120000/materialize": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "base tree entry has non-regular mode 120000: file"
+  },
+  "payload/160000/materialize": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "base tree entry has non-regular mode 160000: file"
+  },
+  "payload/040000/materialize": {
+    "value": []
+  },
+  "attribute_parser/non_ascii": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: non-ASCII pattern"
+  },
+  "attribute_parser/quote": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: C-quoted pattern"
+  },
+  "attribute_parser/negative": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: negative pattern"
+  },
+  "attribute_parser/question": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: ?"
+  },
+  "attribute_parser/bracket": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: bracket expression"
+  },
+  "attribute_parser/backslash": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: backslash escape"
+  },
+  "attribute_parser/trailing": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: trailing slash"
+  },
+  "attribute_parser/pattern": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: pattern 'file:'"
+  },
+  "attribute_parser/empty_segment": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: empty pattern segment"
+  },
+  "attribute_parser/globstar": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: misplaced **"
+  },
+  "attribute_parser/control": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: control byte"
+  },
+  "attribute_parser/long": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: line longer than 2048 bytes"
+  },
+  "attribute_parser/no_state": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: line has no attribute state"
+  },
+  "attribute_parser/macro": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: attribute macro definition"
+  },
+  "attribute_parser/non_ascii_state": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: non-ASCII attribute state"
+  },
+  "attribute_parser/state_name": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: attribute name 'builtin_x'"
+  },
+  "attribute_parser/empty_pattern": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes construct at .gitattributes:2: empty pattern"
+  },
+  "attribute_state/filter/set": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "transforming attribute filter applies to protected path file"
+  },
+  "attribute_state/ident/set": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "transforming attribute ident applies to protected path file"
+  },
+  "attribute_state/working-tree-encoding/set": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "transforming attribute working-tree-encoding applies to protected path file"
+  },
+  "attribute_state/text/set": {
+    "value": null
+  },
+  "attribute_state/eol/set": {
+    "value": null
+  },
+  "attribute_state/filter/value": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "transforming attribute filter applies to protected path file"
+  },
+  "attribute_state/ident/value": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "transforming attribute ident applies to protected path file"
+  },
+  "attribute_state/working-tree-encoding/value": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "transforming attribute working-tree-encoding applies to protected path file"
+  },
+  "attribute_state/text/value": {
+    "value": null
+  },
+  "attribute_state/eol/value": {
+    "value": null
+  },
+  "attribute_state/filter/unset": {
+    "value": null
+  },
+  "attribute_state/ident/unset": {
+    "value": null
+  },
+  "attribute_state/working-tree-encoding/unset": {
+    "value": null
+  },
+  "attribute_state/text/unset": {
+    "value": null
+  },
+  "attribute_state/eol/unset": {
+    "value": null
+  },
+  "attribute_state/filter/unspecified": {
+    "value": null
+  },
+  "attribute_state/ident/unspecified": {
+    "value": null
+  },
+  "attribute_state/working-tree-encoding/unspecified": {
+    "value": null
+  },
+  "attribute_state/text/unspecified": {
+    "value": null
+  },
+  "attribute_state/eol/unspecified": {
+    "value": null
+  },
+  "attribute_mode/120000": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes entry at .gitattributes: mode 120000"
+  },
+  "attribute_mode/160000": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes entry at .gitattributes: mode 160000"
+  },
+  "attribute_mode/040000": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "unsupported .gitattributes entry at .gitattributes: mode 040000"
+  },
+  "attribute_quoting": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "tree entry name is not valid UTF-8 for quoting"
+  },
+  "anchor/escape": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "configured anchor filename leaves the anchor directory: '../escape.pem'"
+  },
+  "anchor/missing": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "configured anchor was not materialized: anchors/missing.pem"
+  },
+  "anchor/unavailable": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "configured materialized anchor is unavailable: anchors/producer.pem"
+  },
+  "anchor/nonregular": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "configured materialized anchor is not regular: anchors/producer.pem"
+  },
+  "anchor/changed": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "anchor file 'producer.pem' bytes changed during verification"
+  },
+  "anchor/json_alias": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "two configured anchor filenames are distinct in Python but identical as JSON strings; the verdict cannot report them faithfully"
+  },
+  "anchor/accept": {
+    "value": "a0aa4ddea8e749f9ae01216445e636209269889950bd7a65597a6d7e1aee6420"
+  },
+  "anchor/spec_absent": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "chain_spec does not carry the configured anchor set"
+  },
+  "anchor/spec_relative": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "chain_spec anchor_relative must be a PurePosixPath"
+  },
+  "anchor/spec_anchors": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "chain_spec anchors must be a mapping"
+  },
+  "anchor/spec_filename": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "configured anchor does not carry a filename"
+  },
+  "lifecycle/path": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization must be entered before its path is used"
+  },
+  "lifecycle/entries": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization must be entered before entries are used"
+  },
+  "lifecycle/anchor": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization must be entered before anchor bytes are digested"
+  },
+  "lifecycle/closed": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization is closed"
+  },
+  "lifecycle/entered": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization is already entered"
+  },
+  "lifecycle/absent": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization destination does not exist"
+  },
+  "lifecycle/file": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization destination is not a real directory"
+  },
+  "lifecycle/link": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "materialization destination is not a real directory"
+  }
+}

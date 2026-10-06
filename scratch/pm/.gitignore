@@ -1,0 +1,26 @@
+__pycache__/
+*.pyc
+.venv
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+uv.lock
+.extraction/
+_site/
+
+# Quarto render artifacts (CI renders into _site/paper/web)
+paper/index.html
+paper/index.pdf
+paper/index_files/
+paper/index.tex
+paper/.quarto/
+paper/index.typ
+paper/.gitignore
+# xelatex font staging the axiom format copies beside the source at render
+paper/fonts/
+paper/index.aux
+paper/index.log
+
+# lane progress notes live in the worktree, never in the tree
+PROGRESS.md

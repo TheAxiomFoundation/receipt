@@ -1,0 +1,129 @@
+{
+  "directory/manifest/missing": {
+    "value": null
+  },
+  "directory/manifest/ancestor": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "release manifest path ancestor is not a directory: releases"
+  },
+  "directory/manifest/leaf": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "release manifest path is not a regular directory: <ROOT>/releases/manifests"
+  },
+  "directory/manifest/permission": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "cannot stat release manifest path: releases/manifests (Permission denied)"
+  },
+  "directory/manifest/race_enotdir": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "release manifest path ancestor is not a directory: releases/manifests"
+  },
+  "directory/enumerate/missing": {
+    "value": []
+  },
+  "directory/enumerate/leaf": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "release manifest path is not a regular directory: <ROOT>/releases/manifests"
+  },
+  "directory/enumerate/nonregular": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "release manifest directory contains a non-regular entry: <ROOT>/releases/manifests/extra"
+  },
+  "directory/enumerate/unknown": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "unknown file in closed release manifest directory: junk.txt"
+  },
+  "directory/reader/leaf_link": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "required state file is missing or non-regular: <ROOT>/state/journal"
+  },
+  "directory/reader/ancestor_link": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "state path traverses a symlink at 'state': state/journal"
+  },
+  "directory/reader/missing": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "required state file is missing or non-regular: <ROOT>/state/journal"
+  },
+  "directory/reader/regular": {
+    "value": {
+      "bytes": "68656c6c6f"
+    }
+  },
+  "directory/reader/platform": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "state files cannot be read with secure descent on this platform (os.O_NOFOLLOW is unavailable); receipt requires a POSIX platform"
+  },
+  "directory/reader/replaced": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "required state file was replaced while being read: <ROOT>/state/journal"
+  },
+  "directory/reader/short": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "required state file was replaced while being read: <ROOT>/state/journal"
+  },
+  "directory/reader/long": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "required state file was replaced while being read: <ROOT>/state/journal"
+  },
+  "directory/path/legacy_state": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "state path traverses a symlink at 'receipt': receipt/corpus-journal.jsonl"
+  },
+  "directory/path/release_root": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "releases must be a real directory, not a symlink"
+  },
+  "directory/path/release_ancestor": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "release root path traverses a symlink at 'releases/nested': releases/nested/manifests"
+  },
+  "directory/path/anchor_probe": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "anchor path component is a symlink or reparse point: <ROOT>/releases"
+  },
+  "directory/path/spelling": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "path component releases/manifests is not spelled by its directory: releases/manifests"
+  },
+  "directory/path/unlistable": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "cannot bind the spelling of releases/manifests: its directory cannot be listed: releases/manifests"
+  },
+  "directory/caller/manifest": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "manifest is not a regular file: <ROOT>/missing"
+  },
+  "directory/caller/producer_key": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "missing or non-regular producer public key: <ROOT>/producer-ed25519.pub"
+  },
+  "directory/caller/producer_signature": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "missing or non-regular producer signature: <ROOT>/missing"
+  },
+  "directory/caller/receipt": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "missing or non-regular RFC 3161 receipt: <ROOT>/missing"
+  },
+  "directory/caller/tsa_anchor": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "missing or non-regular TSA anchor: <ROOT>/alpha-root.pem"
+  },
+  "directory/caller/receipt_unreadable": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "cannot read RFC 3161 receipt <ROOT>/token.tsr: PermissionError"
+  },
+  "directory/caller/receipt_replaced": {
+    "exception": "receipt.release_chain.ReleaseChainError",
+    "message": "RFC 3161 receipt was replaced while it was being read: <ROOT>/token.tsr"
+  },
+  "wrapper/base/release": {
+    "exception": "receipt.append_gate.AppendError",
+    "message": "base release chain is invalid: captured base failure"
+  },
+  "wrapper/base/snapshot": {
+    "exception": "receipt.snapshot.SnapshotError",
+    "message": "captured base failure"
+  }
+}
