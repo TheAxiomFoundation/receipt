@@ -696,7 +696,10 @@ def test_batch_response_budget_refuses_a_read_observed_after_its_deadline(
         # The response arrives before the budget is consulted, as it can
         # under load; the zero budget below is spent by then all the same.
         if thread.name == "receipt-git-batch-stdout":
-            original_join(thread)
+            original_join(thread, 60)
+            # A read still running would be refused with the same text for
+            # the old reason; the premise here is that it has finished.
+            assert not thread.is_alive(), "the batch response did not arrive"
         original_join(thread, timeout)
 
     with selected:
