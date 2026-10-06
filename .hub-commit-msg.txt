@@ -1,0 +1,12 @@
+Merge main into #86 and finish the #83 forward-port
+
+Retain main's protected-tree policy, attestation history hardening and 0.7
+changelog. Complete #83's final follow-up for gate state confinement,
+closure invalidation, certificate SAN signer reporting and numeric docs.
+
+Reuse authenticated attribute directory records without extra admission
+work, and adapt compatibility fixtures to the stronger refusals while
+retaining the frozen oracle and every historical work/cleanup assertion.
+Keep all #83 release notes under the single 0.6.3 unreleased section.
+
+Co-Authored-By: GPT-6.1 Sol <noreply@openai.com>
