@@ -7,13 +7,15 @@ material nor reads trust configuration from the environment.
 
 Keyrings follow loud rotation: the keyring is an object committed in consumer
 code, and rotation is a reviewed replacement of that object that moves the
-retired key into ``legacy_keys``. Legacy keys can vouch only where the caller
-explicitly verifies immutable pre-rotation history under ``allow_legacy=True``:
-``verify_threshold`` requires that word at every call site, and
+retired key into ``legacy_keys``. Legacy keys can vouch only under
+``allow_legacy=True``, the caller's statement that the material is immutable
+pre-rotation history; the package cannot tell history from new material.
+``verify_threshold`` requires that word at every call site, while
 ``verify_any_generation`` — for envelopes whose key identifier does not name
-the signing generation — takes it as the default. They are refused loudly for
-new material, a presented retired key_id refusing either call under
-``allow_legacy=False``; malformed key material is always fatal, and only a
+the signing generation — takes it as the default, so there a caller who says
+nothing gets legacy verification (0.6.2 review, L7 finding 12). Legacy keys
+are refused loudly under ``allow_legacy=False``, a presented retired key_id
+refusing either call; malformed key material is always fatal, and only a
 clean signature mismatch under a validated key falls through to an older
 generation. There are no time-based transition windows. Keys outside the
 committed keyring are refused, and unknown fingerprints are surfaced verbatim
@@ -25,6 +27,8 @@ from __future__ import annotations
 import hashlib
 import os
 import pathlib
+import re
+import stat
 import subprocess
 import tempfile
 from collections.abc import Mapping
@@ -51,6 +55,11 @@ else:
 
 
 PRODUCER_SIGNATURE_BYTES = 64
+
+#: DER prefix of an Ed25519 SubjectPublicKeyInfo (RFC 8410): SEQUENCE,
+#: AlgorithmIdentifier id-Ed25519, BIT STRING of 32 key bytes. 44 bytes whole.
+_ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
+_PEM_LABEL = re.compile(rb"-----BEGIN ([^\r\n-]+)-----")
 
 
 class SignError(ValueError):
@@ -104,16 +113,32 @@ def _producer_openssl_binary(
     return completed.stdout
 
 
+def _signature_found(signature: object) -> str:
+    """What a refused signature was, in the retained ``found=`` slot.
+
+    The length for exact ``bytes`` and ``non-bytes`` for anything that is not
+    bytes at all, as ported. A ``bytes`` subclass is refused for its type, so
+    its length alone -- "must be exactly 64 raw bytes; found=64" -- named the
+    wrong reason (0.6.2 review, L7 finding 8).
+    """
+
+    if type(signature) is bytes:
+        return str(len(signature))
+    if isinstance(signature, bytes):
+        return f"{type(signature).__name__} (a bytes subclass)"
+    return "non-bytes"
+
+
 def _validate_signature_inputs(payload: bytes, signature: bytes, label: str) -> None:
     """Retain the upstream verifier's exact input checks and branch order."""
 
     if type(payload) is not bytes:
         raise SignError("producer-signed manifest payload must be bytes")
     if type(signature) is not bytes or len(signature) != PRODUCER_SIGNATURE_BYTES:
-        actual = len(signature) if isinstance(signature, bytes) else "non-bytes"
         raise SignError(
             f"producer signature for {label} must be exactly "
-            f"{PRODUCER_SIGNATURE_BYTES} raw bytes; found={actual}"
+            f"{PRODUCER_SIGNATURE_BYTES} raw bytes; "
+            f"found={_signature_found(signature)}"
         )
 
 
@@ -127,6 +152,19 @@ def _verify_producer_signature_with_openssl(
     spki_sha256: str | None,
     label: str,
 ) -> None:
+    # The fallback held to what the cryptography path accepts (0.6.2 review,
+    # L7 finding 5). ``pkey -pubin`` decodes whatever OpenSSL can read -- a
+    # bare DER SPKI, a PKCS#8 *private* key, a non-Ed25519 key -- and
+    # ``pkeyutl -verify -rawin`` then verifies with whatever it decoded,
+    # ECDSA included, so a P-224 key with a 64-byte DER signature verified
+    # where ``load_pem_public_key`` and the Ed25519 type check refuse. The
+    # first PEM block must be a public key, the input must be PEM, and the
+    # decoded SPKI must be Ed25519's, before anything is verified.
+    first_label = _PEM_LABEL.search(public_key_pem)
+    if first_label is not None and first_label.group(1) != b"PUBLIC KEY":
+        raise SignError(
+            f"cannot decode producer Ed25519 public key: {public_key_filename}"
+        )
     with tempfile.TemporaryDirectory(prefix="thesis-release-producer-") as name:
         temporary = pathlib.Path(name)
         empty_ca_dir = temporary / "empty-ca"
@@ -150,6 +188,8 @@ def _verify_producer_signature_with_openssl(
             [
                 "pkey",
                 "-pubin",
+                "-inform",
+                "PEM",
                 "-in",
                 str(public_key_path),
                 "-outform",
@@ -158,6 +198,12 @@ def _verify_producer_signature_with_openssl(
             environment=environment,
             label=f"public-key decoding for {label}",
         )
+        if len(spki_der) != len(_ED25519_SPKI_PREFIX) + 32 or not spki_der.startswith(
+            _ED25519_SPKI_PREFIX
+        ):
+            raise SignError(
+                f"producer public key is not Ed25519: {public_key_filename}"
+            )
         if spki_sha256 is not None:
             computed_spki_sha256 = hashlib.sha256(spki_der).hexdigest()
             if computed_spki_sha256 != spki_sha256:
@@ -166,20 +212,34 @@ def _verify_producer_signature_with_openssl(
                     f"{computed_spki_sha256}"
                 )
 
+        if not payload:
+            # ``pkeyutl -rawin`` cannot allocate a zero-byte one-shot buffer,
+            # and ``dgst -verify`` verified an empty message with OpenSSL 3.6
+            # but refused a valid one on the CI runners' OpenSSL, so no command
+            # this fallback can rely on verifies the empty message. It
+            # was refused as "signature verification failed", blaming the
+            # signature for the tool (0.6.2 review, L7 finding 6). It is still
+            # refused, on every OpenSSL, with the reason that is true; the
+            # cryptography path verifies it.
+            raise SignError(
+                f"producer Ed25519 signature over an empty message for {label} "
+                "cannot be verified without the cryptography package"
+            )
+        command = [
+            "pkeyutl",
+            "-verify",
+            "-pubin",
+            "-inkey",
+            str(public_key_path),
+            "-rawin",
+            "-in",
+            str(manifest_path),
+            "-sigfile",
+            str(signature_path),
+        ]
         try:
             _producer_openssl_binary(
-                [
-                    "pkeyutl",
-                    "-verify",
-                    "-pubin",
-                    "-inkey",
-                    str(public_key_path),
-                    "-rawin",
-                    "-in",
-                    str(manifest_path),
-                    "-sigfile",
-                    str(signature_path),
-                ],
+                command,
                 environment=environment,
                 label=f"Ed25519 signature verification for {label}",
             )
@@ -192,14 +252,58 @@ def _verify_producer_signature_with_openssl(
 def read_producer_public_key(
     anchor_dir: pathlib.Path, spec: ProducerKeySpec
 ) -> bytes:
-    """Read the configured producer key after the upstream regular-file checks."""
+    """Read the configured producer key from inside ``anchor_dir``.
 
-    public_key_path = anchor_dir / spec.public_key_filename
-    if public_key_path.is_symlink() or not public_key_path.is_file():
-        raise SignError(
-            f"missing or non-regular producer public key: {public_key_path}"
-        )
-    return public_key_path.read_bytes()
+    The filename is a relative path of ordinary components, walked from
+    ``anchor_dir`` one directory descriptor at a time without following a
+    link, and the leaf is opened once with ``O_NOFOLLOW`` and must be a
+    regular file. The upstream checks this helper kept looked at the final
+    component only, so it followed a symlinked parent, ``..`` and an
+    absolute filename out of ``anchor_dir``, and let ``PermissionError``
+    escape (0.6.2 review, L7 finding 9). Every refusal is a SignError.
+    """
+
+    filename = spec.public_key_filename
+    public_key_path = anchor_dir / filename
+    missing = f"missing or non-regular producer public key: {public_key_path}"
+    if type(filename) is not str or "\0" in filename:
+        raise SignError(missing)
+    # Split the spelling itself: PurePosixPath drops "." and folds "//".
+    parts = tuple(filename.split("/"))
+    if any(part in {"", ".", ".."} for part in parts) or not getattr(
+        os, "O_NOFOLLOW", 0
+    ):
+        raise SignError(missing)
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        directory = os.open(anchor_dir, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for part in parts[:-1]:
+                child = os.open(part, directory_flags, dir_fd=directory)
+                os.close(directory)
+                directory = child
+            leaf = os.open(
+                parts[-1],
+                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=directory,
+            )
+        finally:
+            os.close(directory)
+    except PermissionError as exc:
+        raise SignError(f"cannot read producer public key: {public_key_path}") from exc
+    except OSError as exc:
+        raise SignError(missing) from exc
+    try:
+        if not stat.S_ISREG(os.fstat(leaf).st_mode):
+            raise SignError(missing)
+        chunks: list[bytes] = []
+        while chunk := os.read(leaf, 1 << 16):
+            chunks.append(chunk)
+    except OSError as exc:
+        raise SignError(f"cannot read producer public key: {public_key_path}") from exc
+    finally:
+        os.close(leaf)
+    return b"".join(chunks)
 
 
 def verify_signature_bytes(
@@ -352,8 +456,33 @@ class KeySpec:
     scheme: str
 
     def __post_init__(self) -> None:
-        if self.scheme not in ("spki-sha256", "raw-sha256"):
+        if type(self.scheme) is not str or self.scheme not in (
+            "spki-sha256",
+            "raw-sha256",
+        ):
             raise SignError(f"unsupported key fingerprint scheme: {self.scheme!r}")
+        # Both schemes are SHA-256 hex digests, the form spki_sha256 and
+        # raw_public_key_sha256 return. Only the scheme was checked, so an
+        # uppercase, prefixed, bytes or newline-terminated pin constructed and
+        # then refused every key as a "mismatch" printing the same digest; an
+        # unhashable key_id escaped as TypeError; and a str-subclass pin whose
+        # __ne__ always answered False accepted any key (0.6.2 review, L7
+        # finding 7).
+        if type(self.key_id) is not str:
+            raise SignError(
+                f"key_id must be a str; found={type(self.key_id).__name__}"
+            )
+        if (
+            type(self.fingerprint) is not str
+            or len(self.fingerprint) != 64
+            or any(
+                character not in "0123456789abcdef" for character in self.fingerprint
+            )
+        ):
+            raise SignError(
+                f"key fingerprint for {self.key_id!r} must be 64 lowercase hex "
+                f"characters: {self.fingerprint!r}"
+            )
 
 
 @dataclass(frozen=True)
@@ -456,6 +585,18 @@ def _normalize_pinned_public_keys(
     return normalized_public_keys
 
 
+def _require_str_key_ids(presented: Mapping[str, bytes], what: str) -> None:
+    """Refuse a presented key_id that is not a str before any set is sorted.
+
+    Ids of mixed types reached ``sorted`` and escaped as TypeError (0.6.2
+    review, L7 finding 7).
+    """
+
+    for key_id in presented:
+        if type(key_id) is not str:
+            raise SignError(f"presented {what} key_id must be a str: {key_id!r}")
+
+
 def verify_threshold(
     payload: bytes,
     signatures: Mapping[str, bytes],
@@ -481,6 +622,8 @@ def verify_threshold(
     if type(allow_legacy) is not bool:
         raise SignError("allow_legacy must be a bool")
 
+    _require_str_key_ids(signatures, "signature")
+    _require_str_key_ids(public_keys, "public key")
     legacy_ids = {key.key_id for key in keyring.legacy_keys}
     specs = {
         key.key_id: key for key in (*keyring.keys, *keyring.legacy_keys)
@@ -581,12 +724,13 @@ def verify_any_generation(
     if type(allow_legacy) is not bool:
         raise SignError("allow_legacy must be a bool")
     if type(signature) is not bytes or len(signature) != PRODUCER_SIGNATURE_BYTES:
-        actual = len(signature) if isinstance(signature, bytes) else "non-bytes"
         raise SignError(
             f"signature for {label} must be exactly "
-            f"{PRODUCER_SIGNATURE_BYTES} raw bytes; found={actual}"
+            f"{PRODUCER_SIGNATURE_BYTES} raw bytes; "
+            f"found={_signature_found(signature)}"
         )
 
+    _require_str_key_ids(public_keys, "public key")
     known = {key.key_id: key for key in (*keyring.keys, *keyring.legacy_keys)}
     unknown_key_ids = sorted(set(public_keys) - set(known))
     if unknown_key_ids:

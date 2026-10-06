@@ -1,0 +1,16 @@
+Merge main and finish the receipt #84 forward-port
+
+Preserve main's protected-tree policy and bring in #84's final review
+commits and inherited #83 corrections. Restore the final-LF checksum for
+an empty prefix, keep named refusals and exact fractional genTimes, and
+construct the deep JSON fixture without recursive encoding.
+
+Keep one 0.6.3 CHANGELOG section and adapt the authenticated comparison
+fixtures to the reviewed policy, re-audit, and closure changes. Preserve
+the frozen source and observations and pin every allowed live difference.
+
+Validate targeted files serially on Python 3.11, 3.12, and 3.13. The local
+fixture Git timeout option lives only in .hub-scratch; production budgets
+and refusal assertions are unchanged by continuation validation.
+
+Co-Authored-By: GPT-6.1 Sol <noreply@openai.com>

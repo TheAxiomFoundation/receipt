@@ -1,11 +1,11 @@
 """``receipt._bounded_json``: ``json.loads`` with bounds stated by the input.
 
-The claims are that it decodes exactly what ``json.loads`` decodes, refuses
+The claims are that it decodes what ``json.loads`` decodes, refuses
 malformed text with exactly ``json.loads``'s error, and otherwise refuses
-only text nested deeper than ``MAX_DEPTH`` or holding an integer literal
-longer than ``MAX_INTEGER_DIGITS``, with ``JsonBoundError`` and never an
-interpreter exception, whatever the call stack or the process's own
-int-string limit.
+with ``JsonBoundError`` rather than an interpreter exception: always for text
+nested deeper than ``MAX_DEPTH`` or holding an integer literal longer than
+``MAX_INTEGER_DIGITS``, and also for shallower text when the call stack or
+the process's own int-string limit runs out first.
 """
 
 from __future__ import annotations

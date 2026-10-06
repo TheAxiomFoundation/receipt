@@ -13,6 +13,7 @@ import subprocess
 import zlib
 
 import pytest
+from hypothesis import HealthCheck, given, settings, strategies as st
 
 import receipt.snapshot as snapshot_module
 from receipt.snapshot import (
@@ -579,10 +580,40 @@ def test_repository_history_sentinels_precede_sha256_refusal(
 def test_select_refuses_an_existing_nonrepository(tmp_path: pathlib.Path) -> None:
     root = tmp_path / "not-a-repository"
     root.mkdir()
+    # Stop Git discovering an ancestor repository when pytest's temporary
+    # directory is inside a checkout. This remains an existing nonrepository.
+    (root / ".git").write_text("not a git directory\n")
 
     with pytest.raises(SnapshotError) as caught:
         TreeSnapshot.select(root)
 
+    assert str(caught.value) == (
+        f"candidate repository is missing or not a git repository: {root}"
+    )
+
+
+@settings(
+    max_examples=20,
+    deadline=None,
+    derandomize=True,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+@given(
+    name=st.text(alphabet="abcdefghijklmnopqrstuvwxyz0123456789", max_size=8),
+    suffix=st.binary(max_size=32),
+)
+def test_invalid_gitfile_keeps_a_child_a_nonrepository(
+    git_repo: pathlib.Path, name: str, suffix: bytes
+) -> None:
+    """A malformed Git discovery boundary refuses by the nonrepository
+    message, whatever its portable child name or remaining bytes, even
+    beneath a genuine repository."""
+
+    root = git_repo / ("nonrepo-" + name)
+    root.mkdir(exist_ok=True)
+    (root / ".git").write_bytes(b"not a git directory\n" + suffix)
+    with pytest.raises(SnapshotError) as caught:
+        TreeSnapshot.select(root)
     assert str(caught.value) == (
         f"candidate repository is missing or not a git repository: {root}"
     )
@@ -1020,6 +1051,9 @@ def test_full_verify_objects_uses_exact_commands_heads_and_environment(
         ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
         ("object", "rev-parse", "--verify", "--end-of-options", "<rev>^{commit}"),
         ("object", "cat-file", "--batch-command"),
+        # Configuration is re-audited before every child an entered snapshot
+        # starts (0.6.2 review, L3 finding 7).
+        ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
         ("object", "cat-file", "--batch-command"),
         ("setup", "config", "-f", "<global>", "safe.directory", "<root>"),
         ("discovery", "version"),
@@ -1034,8 +1068,11 @@ def test_full_verify_objects_uses_exact_commands_heads_and_environment(
         ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
         ("object", "rev-parse", "--verify", "--end-of-options", "<rev>^{commit}"),
         ("object", "cat-file", "--batch-command"),
+        ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
         ("object", "cat-file", "--batch-command"),
+        ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
         ("object", "count-objects", "-v"),
+        ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
         (
             "object",
             "-c",

@@ -54,6 +54,14 @@ Deliberately outside the CLI mutation contract:
   errors uncaught, the adapter catches the original ``ProvenanceError``
   instead of inventing a forbidden traceback normalization.
 
+Deliberate divergences, where the port refuses or ignores what the pinned
+upstream accepts (review of 0.6.2): shallow and grafted repositories refuse,
+replace refs are not honored, and inherited ``GIT_*`` variables are dropped.
+Each is a way the upstream sweep accepted an unattested protected-tree commit.
+The shallow clone, the GitHub Actions checkout default, is recorded against
+the oracle below as a divergence rather than normalized away; the rest are
+pinned in ``tests/test_attest.py``.
+
 The authenticated tree resolves from ``RECEIPT_BRIER_TREE``, then the local
 ``.extraction/`` materialization, then a fresh public clone at the pin.  The
 entry script and both transitive imports it executes are SHA-authenticated in
@@ -1048,3 +1056,62 @@ def test_swapped_runtime_import_fails_authentication(
     path.write_bytes(path.read_bytes() + b"\n# tampered\n")
     with pytest.raises(RuntimeError, match=re.escape(path.name)):
         _load_reference(fake)
+
+
+def test_the_port_refuses_a_shallow_clone_the_pinned_upstream_accepts(
+    brier_tree: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """A recorded divergence: the upstream fails open, the port refuses.
+
+    In a depth-1 clone whose tip is an unattested records commit, git treats
+    the tip as a root commit, so the upstream names it the enforcement epoch,
+    finds no records commit after it, and accepts without asking ``gh``.
+    """
+
+    full = tmp_path / "full"
+    _epoch, commit = _repository_with_record(
+        full, brier_tree, timestamp=OLD_RECORD_TIME
+    )
+    stub = _install_gh_stub(
+        tmp_path,
+        monkeypatch,
+        {commit: [{"returncode": 1, "stderr": f"stub refusal for {commit}"}]},
+    )
+    shallow = tmp_path / "shallow"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--depth", "1", f"file://{full}", str(shallow)],
+        check=True,
+        capture_output=True,
+    )
+    _git(shallow, "remote", "set-url", "origin", BRIER_REPO_URL)
+
+    monkeypatch.setenv("RECEIPT_ATTEST_STUB_RUN", "baseline")
+    baseline = run_baseline(shallow)
+    capfd.readouterr()
+    monkeypatch.setenv("RECEIPT_ATTEST_STUB_RUN", "candidate")
+    candidate = run_candidate(shallow)
+    _assert_candidate_silent(capfd)
+
+    assert baseline == RunOutcome(
+        0, f"records provenance OK: no records commits in {commit}..HEAD", ""
+    )
+    assert candidate == RunOutcome(1, "", "shallow repositories are unsupported")
+    assert _normalized_stub_calls(stub, "baseline") == []
+    assert _normalized_stub_calls(stub, "candidate") == []
+
+    # The full repository is still one verdict: both refuse the commit.
+    monkeypatch.setenv("RECEIPT_ATTEST_STUB_RUN", "baseline")
+    baseline = run_baseline(full)
+    capfd.readouterr()
+    monkeypatch.setenv("RECEIPT_ATTEST_STUB_RUN", "candidate")
+    candidate = run_candidate(full)
+    _assert_candidate_silent(capfd)
+    _assert_refused_identically(
+        "shallow_control",
+        baseline,
+        candidate,
+        f"{commit}: no valid attestation for its records push subject",
+    )
