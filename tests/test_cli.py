@@ -18,6 +18,7 @@ import codecs
 import contextlib
 import hashlib
 import io
+import itertools
 import json
 import os
 import pathlib
@@ -142,6 +143,339 @@ def test_explicit_nested_root_refuses_as_not_the_repository_top_level(
         "root is not the top level of its repository"
         in capsys.readouterr().err
     )
+
+
+# --- the default root is the repository the spec was named in ---------------
+
+
+def _clone_with_committed_link(
+    built: pathlib.Path, tmp_path: pathlib.Path, *, link: str, target: str
+) -> tuple[pathlib.Path, pathlib.Path]:
+    """Clone, recursively, a producer repository that commits ``link`` as a
+    symlink to ``target`` inside a submodule.
+
+    The producer repository is the signed corpus with a rule edited after
+    signing, so verified as itself it refuses. Its submodule at
+    ``vendor/good`` is the signed corpus unedited, which verifies. Returns
+    the auditor's clone and the producer's unedited corpus.
+    """
+
+    good = tmp_path / "good"
+    shutil.copytree(built, good, symlinks=True)
+    outer = tmp_path / "outer"
+    shutil.copytree(built, outer, symlinks=True)
+    (outer / "rules/tax/rate.yaml").write_text("name: rate\nvalue: 0.99\n")
+    if link == "verification":
+        shutil.rmtree(outer / "verification")
+    _git(
+        outer,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "--quiet",
+        "add",
+        str(good),
+        "vendor/good",
+    )
+    (outer / link).symlink_to(target, target_is_directory=True)
+    commit_candidate(outer, "edit a rule; link into the signed submodule")
+    clone = tmp_path / "clone"
+    _git(
+        tmp_path,
+        "-c",
+        "protocol.file.allow=always",
+        "clone",
+        "--quiet",
+        "--recurse-submodules",
+        str(outer),
+        str(clone),
+    )
+    assert (clone / link).is_symlink()
+    return clone, good
+
+
+@pytest.mark.parametrize(
+    ("link", "target", "spec"),
+    [
+        # The spec's own directory is the link.
+        ("verification", "vendor/good/verification", "verification/spec.py"),
+        # The link names the submodule's top level, so a lexical walk alone
+        # would stop at the link and still verify the submodule.
+        ("audit", "vendor/good", "audit/verification/spec.py"),
+    ],
+)
+def test_default_root_refuses_a_spec_named_through_a_committed_symlink(
+    built: pathlib.Path,
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    link: str,
+    target: str,
+    spec: str,
+) -> None:
+    """Review of 0.6.2 (L5 finding 1): the default root resolved the spec
+    path first, so a directory committed as a symlink into a submodule moved
+    the walk into the submodule, and the command verified the submodule's
+    commit and tree, exiting 0, while the clone's edited rule went unchecked.
+    """
+
+    clone, _ = _clone_with_committed_link(
+        built, tmp_path, link=link, target=target
+    )
+    spec_path = clone / spec
+
+    assert main(["verify", "--spec", str(spec_path), "--json"]) == EXIT_USAGE
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
+    assert payload["stage"] == "root"
+    assert payload["failure"] == (
+        "the spec's path crosses a symlink at or below its repository top "
+        "level, so the repository to verify is ambiguous; supply --root: "
+        f"{clone / link}"
+    )
+
+    # The text verdict refuses in the same words.
+    assert main(["verify", "--spec", str(spec_path)]) == EXIT_USAGE
+    assert "crosses a symlink" in capsys.readouterr().err
+
+    # --root keeps its meaning: the clone named is the clone verified, and
+    # its edited rule refuses.
+    assert (
+        main(["verify", "--spec", str(spec_path), "--root", str(clone), "--json"])
+        == EXIT_FAIL
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["root"] == str(clone.resolve())
+    assert payload["verdict"] == "FAIL"
+
+    # The submodule is a corpus that verifies when it is the one named.
+    submodule_spec = clone / "vendor/good/verification/spec.py"
+    assert main(["verify", "--spec", str(submodule_spec), "--json"]) == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["root"] == str((clone / "vendor/good").resolve())
+
+
+def test_default_root_refusal_survives_spec_and_anchor_pins(
+    built: pathlib.Path,
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The pins cannot catch the substitution: the submodule carries the
+    pinned spec and the pinned anchors. The walk has to."""
+
+    clone, good = _clone_with_committed_link(
+        built,
+        tmp_path,
+        link="verification",
+        target="vendor/good/verification",
+    )
+    spec_path = clone / "verification/spec.py"
+    materialized = tmp_path / "pinned"
+    materialized.mkdir()
+    pins = (
+        "--expect-spec-sha256",
+        hashlib.sha256(
+            (good / "verification/spec.py").read_bytes()
+        ).hexdigest(),
+        "--expect-anchor-set",
+        anchor_set_from_materialized_tree(good, materialized),
+    )
+
+    assert (
+        main(["verify", "--spec", str(spec_path), *pins, "--json"])
+        == EXIT_USAGE
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["stage"] == "root"
+    assert "crosses a symlink" in payload["failure"]
+
+
+def test_default_root_ignores_links_above_the_repository_top_level(
+    repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Links above the top level are the auditor's own filesystem."""
+
+    ambient = tmp_path / "ambient"
+    ambient.symlink_to(tmp_path, target_is_directory=True)
+    spec_path = ambient / repo.name / "verification/spec.py"
+
+    assert main(["verify", "--spec", str(spec_path), "--json"]) == EXIT_OK
+    assert json.loads(capsys.readouterr().out)["root"] == str(repo.resolve())
+
+    # A relative spec path walks from the working directory.
+    monkeypatch.chdir(repo)
+    assert main(["verify", "--spec", "verification/spec.py", "--json"]) == EXIT_OK
+    assert json.loads(capsys.readouterr().out)["root"] == str(repo.resolve())
+
+
+def test_default_root_refuses_a_top_level_named_through_a_symlink(
+    repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A link that is the top level cannot be told apart, from the path
+    alone, from a link committed in an enclosing checkout, so it refuses;
+    naming the root restores the run."""
+
+    checkout = tmp_path / "checkout"
+    checkout.symlink_to(repo, target_is_directory=True)
+    spec_path = checkout / "verification/spec.py"
+
+    assert main(["verify", "--spec", str(spec_path), "--json"]) == EXIT_USAGE
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["stage"] == "root"
+    assert payload["failure"].endswith(f"supply --root: {checkout}")
+
+    assert (
+        main(["verify", "--spec", str(spec_path), "--root", str(checkout), "--json"])
+        == EXIT_OK
+    )
+    assert json.loads(capsys.readouterr().out)["root"] == str(repo.resolve())
+
+
+def test_default_root_refuses_a_dotdot_that_resolves_past_a_link(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Normalizing ``link/..`` lexically and resolving it physically name two
+    different files; the walk refuses rather than pick the one it did not
+    load. Without a link before the ``..``, the path is accepted."""
+
+    from receipt.cli import _DefaultRootError, _default_root
+
+    clone = tmp_path / "clone"
+    for directory in (".git", "verification", "vendor/good/.git", "vendor/verification"):
+        (clone / directory).mkdir(parents=True)
+    (clone / "verification/spec.py").write_text("SPEC = None\n")
+    (clone / "vendor/verification/spec.py").write_text("SPEC = None\n")
+    (clone / "x").symlink_to("vendor/good", target_is_directory=True)
+    (clone / "plain").mkdir()
+
+    spec_path = clone / "x" / ".." / "verification" / "spec.py"
+    with pytest.raises(_DefaultRootError) as caught:
+        _default_root(spec_path)
+    assert str(caught.value) == (
+        "the spec's path resolves to a file other than the one it names below "
+        f"its repository top level; supply --root: {spec_path}"
+    )
+    assert _default_root(clone / "plain" / ".." / "verification" / "spec.py") == clone
+
+
+def _default_root_061(spec_path: pathlib.Path) -> pathlib.Path:
+    """The 0.6.1 walk, transcribed: it resolved the spec path first."""
+
+    current = spec_path.resolve().parent
+    for candidate in (current, *current.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return current
+
+
+def test_default_root_names_the_spec_s_physical_repository_exhaustively(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Every layout of three directories between a base and the spec.
+
+    Each of ``top``, ``top/a`` and ``top/a/b`` (the spec's directory) is a
+    real directory or a symlink to a directory elsewhere, and holds ``.git``
+    or not; the link targets sit inside a directory that holds ``.git`` or
+    not; the base holds ``.git`` or not and is named directly or through a
+    symlink: 4³ × 2 × 2 × 2 = 512 layouts. For every one, with the reference
+    computed from ``os.path`` alone:
+
+    1. Refusal is exact: the walk refuses iff a symlink lies between the
+       spec's directory and the nearest directory above it holding ``.git``,
+       that directory included.
+    2. Soundness: a returned top level, resolved and joined with the spec's
+       path below it as named, is the spec's resolved path, so the tree
+       verified is the one the named spec lies in.
+    3. Where nothing refuses, the top level resolves to the 0.6.1 walk's.
+    4. Wherever the 0.6.1 walk's top level is not the resolution of the
+       nearest ``.git`` directory above the spec as named, the walk refuses.
+    """
+
+    from receipt.cli import _DefaultRootError, _default_root
+
+    names = ("top", "a", "b")
+    substituted = 0
+    for index, choice in enumerate(
+        itertools.product(
+            itertools.product(("real", "link"), (False, True)),
+            repeat=3,
+        )
+    ):
+        for base_git, pool_git, ambient in itertools.product(
+            (False, True), repeat=3
+        ):
+            world = tmp_path / f"w{index}-{int(base_git)}{int(pool_git)}{int(ambient)}"
+            base = world / "base"
+            base.mkdir(parents=True)
+            if base_git:
+                (base / ".git").mkdir()
+            pool = world / "pool"
+            pool.mkdir()
+            if pool_git:
+                (pool / ".git").mkdir()
+            physical = base
+            for level, ((kind, has_git), name) in enumerate(zip(choice, names)):
+                if kind == "real":
+                    directory = physical / name
+                    directory.mkdir()
+                else:
+                    directory = pool / f"t{level}"
+                    directory.mkdir()
+                    (physical / name).symlink_to(directory, target_is_directory=True)
+                if has_git:
+                    (directory / ".git").mkdir()
+                physical = directory
+            (physical / "spec.py").write_text("SPEC = None\n")
+            named_base = base
+            if ambient:
+                named_base = world / "ambient"
+                named_base.symlink_to(base, target_is_directory=True)
+            spec_path = named_base / "top" / "a" / "b" / "spec.py"
+
+            walk: list[str] = []
+            nearest: str | None = None
+            directory_text = os.path.dirname(str(spec_path))
+            while True:
+                walk.append(directory_text)
+                if os.path.exists(os.path.join(directory_text, ".git")):
+                    nearest = directory_text
+                    break
+                parent = os.path.dirname(directory_text)
+                if parent == directory_text:
+                    break
+                directory_text = parent
+            refuses = nearest is not None and any(
+                os.path.islink(entry) for entry in walk
+            )
+            old = _default_root_061(spec_path)
+            if nearest is not None and str(old) != os.path.realpath(nearest):
+                substituted += 1
+                assert refuses, (index, base_git, pool_git, ambient)
+
+            if refuses:
+                with pytest.raises(_DefaultRootError):
+                    _default_root(spec_path)
+                continue
+            root = _default_root(spec_path)
+            if nearest is None:
+                assert root == spec_path.parent
+                continue
+            assert str(root) == nearest
+            assert os.path.realpath(spec_path) == os.path.join(
+                os.path.realpath(root), os.path.relpath(spec_path, root)
+            )
+            assert pathlib.Path(os.path.realpath(root)) == old
+    # The domain reaches the substitution the walk exists to refuse: the 0.6.1
+    # walk named another repository than the named spec's in 140 layouts. A
+    # temporary directory inside a work tree adds layouts that find its
+    # ``.git``, so the count is pinned only where no ancestor holds one.
+    assert substituted > 0
+    if not any((ancestor / ".git").exists() for ancestor in tmp_path.parents):
+        assert substituted == 140
 
 
 def test_json_pass_writes_to_a_redirected_stringio(
@@ -572,6 +906,9 @@ def test_the_verdict_states_what_it_did_not_establish(
         "checkout\n"
         "  equal the verified tree.\n"
         "  It does NOT establish that the spec's code was trusted.\n"
+        "  The spec is unpinned (no --expect-spec-sha256): its code ran in this\n"
+        "  process and could have changed this verdict, so the verdict is only as\n"
+        "  good as the spec the producer committed.\n"
         "  It does NOT establish that the anchor set is one the auditor "
         "trusts.\n"
         "  Check freshness and uniqueness by comparing head\n"
@@ -615,6 +952,9 @@ def test_json_output_marks_gates_as_not_re_run(
         "that the files in any checkout equal the verified tree",
         "that the anchor set is one the auditor trusts",
         "that the spec's code was trusted",
+        "that this verdict is independent of the spec: an unpinned spec is "
+        "producer code that ran in this process, so the verdict is only as "
+        "good as the spec the producer committed",
     ]
     assert payload["scope"]["established"] == [
         "custody under the anchor set "
@@ -737,6 +1077,7 @@ def test_matching_spec_and_anchor_pins_publish_full_custody(
     assert "Custody is under the anchor set" not in text
     assert "anchor set is one the auditor trusts" not in text
     assert "spec's code was trusted" not in text
+    assert "The spec is unpinned" not in text
 
     assert run(repo, *pins, "--json") == EXIT_OK
     payload = json.loads(capsys.readouterr().out)
@@ -747,6 +1088,9 @@ def test_matching_spec_and_anchor_pins_publish_full_custody(
     )
     assert "that the spec's code was trusted" not in (
         payload["scope"]["notEstablished"]
+    )
+    assert not any(
+        "unpinned spec" in item for item in payload["scope"]["notEstablished"]
     )
 
 
@@ -4843,3 +5187,326 @@ def test_a_refusal_still_lets_the_operator_interrupt_through(
         main(["verify", "--spec", spec, "--root", str(not_a_tree)])
     with pytest.raises(KeyboardInterrupt):
         main(["verify", "--spec", spec, "--root", str(not_a_tree), "--json"])
+
+
+def test_the_readme_says_an_unpinned_spec_bounds_the_verdict() -> None:
+    """L5 F2 (0.6.2 review): an unpinned spec is producer code in this process.
+
+    Probe G of that review had an unpinned spec wrap ``run_verification`` and
+    print PASS with exit 0 over a tampered clone. The README described a PASS
+    as establishing custody and binding without saying that the spec, unless
+    pinned, chooses the verdict. Both sections that describe the verdict now
+    say it is only as good as the spec the producer committed, and neither
+    promises more.
+    """
+
+    readme = (pathlib.Path(__file__).resolve().parents[1] / "README.md").read_text(
+        encoding="utf-8"
+    )
+    using = readme.split("## Using it", 1)[1].split("\n## ", 1)[0]
+    speaks = readme.split("## What this verdict speaks for", 1)[1].split(
+        "\n## ", 1
+    )[0]
+    flat_using = " ".join(using.split())
+    flat_speaks = " ".join(speaks.split())
+    assert "is only as good as the spec the producer committed" in flat_using
+    assert "It can change what the command prints and the exit status" in flat_using
+    assert "only as good as the spec the producer committed" in flat_speaks
+    assert flat_speaks.startswith(
+        "Under a spec pinned with `--expect-spec-sha256`, a PASS establishes custody"
+    )
+    assert "A PASS establishes custody" not in flat_speaks
+
+
+def test_the_help_text_says_what_an_unpinned_spec_means(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit):
+        main(["verify", "--help"])
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert (
+        "without it the spec is producer code and the verdict is only as good "
+        "as the spec the producer committed"
+    ) in help_text
+
+
+def test_an_unpinned_spec_that_forges_pass_still_carries_the_caveat(
+    repo: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The residual the unpinned-spec lines describe, run end to end.
+
+    L5 F2 (0.6.2 review, probe G): a committed spec that wraps
+    ``run_verification`` prints PASS and exits 0 over a clone whose rule file
+    was edited after witnessing. The command cannot stop code it executes, so
+    the PASS stands; what the verdict owes the reader is the plain statement
+    that it is only as good as the spec the producer committed. The spec pin
+    is the remedy, and under it the forged spec no longer loads.
+    """
+
+    import receipt.cli as cli_module
+
+    # The forging spec rebinds this module attribute; restore it afterwards.
+    monkeypatch.setattr(cli_module, "run_verification", cli_module.run_verification)
+    (repo / "rules/tax/rate.yaml").write_text("name: rate\nvalue: 0.99\n")
+    spec_path = repo / "verification/spec.py"
+    pinned_digest = hashlib.sha256(spec_path.read_bytes()).hexdigest()
+    spec_path.write_text(
+        spec_path.read_text()
+        + "\nimport dataclasses\n"
+        "import receipt.cli as _cli\n"
+        "import receipt.verify as _v\n"
+        "_real = _cli.run_verification\n"
+        "def _forged(root, spec, **kw):\n"
+        "    r = _real(root, spec, **kw)\n"
+        "    return dataclasses.replace(r, passes=tuple(\n"
+        "        _v.PassResult(n, True, 'ok')\n"
+        "        for n in ('custody', 'binding', 'declaration')))\n"
+        "_cli.run_verification = _forged\n"
+    )
+    commit_candidate(repo, "edit a rule and forge the verdict in the spec")
+
+    assert run(repo) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "VERDICT: PASS" in out
+    assert (
+        "  The spec is unpinned (no --expect-spec-sha256): its code ran in this\n"
+        "  process and could have changed this verdict, so the verdict is only as\n"
+        "  good as the spec the producer committed.\n"
+    ) in out
+
+    assert run(repo, "--expect-spec-sha256", pinned_digest) == EXIT_USAGE
+    assert "is not the expected spec" in capsys.readouterr().err
+
+
+# --- 0.6.2 review, L5 finding 4: formatting a caught exception must not raise
+
+
+_NESTED_STR_EXIT = """
+class _Inner(SystemExit):
+    def __str__(self):
+        raise SystemExit(0)
+
+
+class _Outer(Exception):
+    def __str__(self):
+        raise _Inner(1)
+
+
+raise _Outer()
+"""
+
+
+@pytest.mark.parametrize("as_json", [True, False])
+def test_a_spec_whose_exception_cannot_be_printed_still_refuses(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str], as_json: bool
+) -> None:
+    """The boundary's own ``str(exc)`` was spec code.
+
+    A spec raising an exception whose ``__str__`` raised a ``SystemExit``
+    subclass, whose own ``__str__`` raised ``SystemExit(0)``, left ``main``
+    with status 0 and no output at all: the handler that formats the refusal
+    re-opened the exit the ``BaseException`` boundary exists to stop.
+    """
+
+    path = tmp_path / "spec.py"
+    path.write_text(
+        SPEC_TEMPLATE.format(name="unprintable", spki="a" * 64) + _NESTED_STR_EXIT
+    )
+    argv = ["verify", "--spec", str(path), "--root", str(tmp_path)]
+    assert main([*argv, "--json"] if as_json else argv) == EXIT_USAGE
+    captured = capsys.readouterr()
+    if as_json:
+        payload = json.loads(captured.out)
+        assert payload["verdict"] == "FAIL"
+        assert payload["stage"] == "spec"
+        assert "_Outer (its message could not be rendered)" in payload["failure"]
+    else:
+        assert captured.err.rstrip("\n").endswith("receipt verify: FAIL")
+        assert "_Outer (its message could not be rendered)" in captured.err
+
+
+def test_described_exception_never_raises() -> None:
+    """Every read the formatter makes is guarded, the class name included."""
+
+    from receipt.verify import _described_exception, _exception_detail
+
+    class _ExitingName(type):
+        @property
+        def __name__(cls) -> str:  # type: ignore[override]
+            raise SystemExit(0)
+
+    class _Nameless(Exception, metaclass=_ExitingName):
+        pass
+
+    class _StrSubclass(str):
+        def __format__(self, spec: str) -> str:
+            raise SystemExit(0)
+
+    class _ReturnsSubclass(Exception):
+        def __str__(self) -> str:
+            return _StrSubclass("forged")
+
+    assert _described_exception(_Nameless("x")) == "exception: x"
+    assert (
+        _described_exception(_ReturnsSubclass())
+        == "_ReturnsSubclass (its message could not be rendered)"
+    )
+    assert (
+        _exception_detail(_ReturnsSubclass())
+        == "_ReturnsSubclass (its message could not be rendered)"
+    )
+    assert _exception_detail(ValueError("plain")) == "plain"
+    assert _exception_detail(SystemExit(0)) == "SystemExit: 0"
+
+
+# --- 0.6.2 review, L5 finding 5: a spec runs the way its file runs as a module
+
+
+@pytest.mark.parametrize(
+    "prelude",
+    [
+        pytest.param(
+            "import dataclasses\n"
+            "@dataclasses.dataclass(frozen=True)\n"
+            "class Pins:\n"
+            "    name: str = 'x'\n",
+            id="plain-dataclass",
+        ),
+        pytest.param(
+            "from __future__ import annotations\n"
+            "import dataclasses\n"
+            "@dataclasses.dataclass(frozen=True)\n"
+            "class Pins:\n"
+            "    name: str = 'x'\n",
+            id="future-annotations-dataclass",
+        ),
+        pytest.param(
+            "import pickle\nclass P: pass\npickle.dumps(P())\n",
+            id="pickle-own-class",
+        ),
+    ],
+)
+def test_a_spec_that_is_valid_as_a_module_loads(
+    tmp_path: pathlib.Path, prelude: str
+) -> None:
+    """Valid Python was refused for the loader's own execution environment.
+
+    ``load_spec`` executed the spec outside ``sys.modules``, where
+    ``dataclasses`` and ``pickle`` look a class's module up, so a spec
+    defining a dataclass was refused as "spec module raised on load" with
+    ``'NoneType' object has no attribute '__dict__'``.
+    """
+
+    path = tmp_path / "spec.py"
+    template = SPEC_TEMPLATE.format(name="module-shaped", spki="a" * 64)
+    if prelude.startswith("from __future__"):
+        path.write_text(prelude + template)
+    else:
+        path.write_text(template + "\n" + prelude)
+    loaded = load_spec(path)
+    assert loaded.verification.name == "module-shaped"
+    assert "_receipt_consumer_spec" not in sys.modules
+
+
+def test_a_spec_does_not_inherit_the_loaders_future_flags(
+    tmp_path: pathlib.Path,
+) -> None:
+    """``compile()`` without ``dont_inherit`` applied verify.py's own
+    ``from __future__ import annotations`` to the spec, so annotations the
+    same file evaluates as a module arrived as strings."""
+
+    path = tmp_path / "spec.py"
+    path.write_text(
+        SPEC_TEMPLATE.format(name="annotated", spki="a" * 64)
+        + "\nclass Probe:\n    a: int\n"
+        + "ANNOTATION = Probe.__annotations__['a']\n"
+    )
+    import receipt.verify as verify_module
+
+    # Read what the executed module saw through the loader's own namespace.
+    seen: dict[str, object] = {}
+    real_exec = exec
+
+    def capturing_exec(code: object, namespace: dict[str, object]) -> None:
+        real_exec(code, namespace)  # noqa: S102 - the test's own spec
+        seen.update(namespace)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(verify_module, "exec", capturing_exec, raising=False)
+        load_spec(path)
+    assert seen["ANNOTATION"] is int
+
+
+def test_loading_a_spec_restores_an_existing_module_of_the_same_name(
+    tmp_path: pathlib.Path,
+) -> None:
+    import types
+
+    sentinel = types.ModuleType("_receipt_consumer_spec")
+    path = tmp_path / "spec.py"
+    path.write_text(SPEC_TEMPLATE.format(name="restoring", spki="a" * 64))
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setitem(sys.modules, "_receipt_consumer_spec", sentinel)
+        load_spec(path)
+        assert sys.modules["_receipt_consumer_spec"] is sentinel
+        path.write_text("raise RuntimeError('boom')\n")
+        with pytest.raises(VerifySpecError, match="boom"):
+            load_spec(path)
+        assert sys.modules["_receipt_consumer_spec"] is sentinel
+
+
+# --- 0.6.2 review, L4 finding 4: a close-time re-audit invalidates history too
+
+
+def test_a_close_time_repository_change_invalidates_the_history_pass(
+    built: pathlib.Path,
+    committed_repo: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The history pass read the snapshots the close-time re-audit refused.
+
+    A writer appending to ``.git/config`` after the declaration pass made the
+    snapshots' ``__exit__`` re-audit refuse. The FAIL verdict dropped custody,
+    binding and declaration but kept history, so ``passesCompleted`` and
+    ``scope.established`` still carried the history claim on a run whose
+    every tree-derived read had just been invalidated.
+    """
+
+    import receipt.verify as verify_module
+
+    base_oid = head_oid(committed_repo)
+    corrected = dict(CONTENT)
+    corrected["rules/tax/rate.yaml"] = "name: rate\nvalue: 0.20\n"
+    candidate_oid = append_release(
+        committed_repo, built.parent / "tsa-workspace", content=corrected
+    )
+    assert candidate_oid is not None
+    argv = ("--base-ref", base_oid, "--expect-commit", candidate_oid, "--json")
+    assert run(committed_repo, *argv) == EXIT_OK
+    assert "history" in json.loads(capsys.readouterr().out)["passesCompleted"]
+
+    real = verify_module.verify_declarations
+
+    def declarations_then_a_concurrent_config_write(
+        *args: object, **kwargs: object
+    ) -> object:
+        outcome = real(*args, **kwargs)
+        with open(committed_repo / ".git" / "config", "a") as handle:
+            handle.write("[receiptprobe]\n\tconcurrent = 1\n")
+        return outcome
+
+    monkeypatch.setattr(
+        verify_module, "verify_declarations", declarations_then_a_concurrent_config_write
+    )
+    assert run(committed_repo, *argv) == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
+    assert payload["passesCompleted"] == []
+    assert payload["scope"]["established"] == []
+    assert [item["name"] for item in payload["passes"]] == ["custody", "binding"]
+    failure = next(item for item in payload["passes"] if not item["ok"])
+    assert failure["name"] == "custody"
+    assert "configuration changed during verification" in failure["failure"]

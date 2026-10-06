@@ -7,9 +7,10 @@ is the compatibility boundary: pairing admits six totals, without adopting a
 process, config baseline, entry capability, policy outcome or failure domain.
 
 Decision record for the next migration steps:
-- D1 is a pending capture-once correction. D1-False records the actual sequence
+- D1 is a pending capture-once correction. Frozen D1-False records the sequence
   ["select", "select", "enter", "close"]; D1-True additionally records the store
-  capture and every Git child. Neither trace is a capture-once guarantee.
+  capture and every Git child. Reviewed #83 configuration audits add captures
+  before child startup. Neither trace is a capture-once guarantee.
 - A7 is a separate pending availability correction. The 288 D7 cases retain the
   independent warm/cold refusal split, including both read orders and selection
   warmth. No successful payload is substituted for a cold-owner refusal.
@@ -81,14 +82,34 @@ def d2(m, repo, patch, restore):
     repo.git("config", "m3.probe", "changed")
     try:
         b = select(m, repo)
-        a.__enter__()
+        entry_refusal = None
+        try:
+            a.__enter__()
+        except m.snapshot.SnapshotError as exc:
+            # #83 refuses a changed configuration before starting A's child.
+            # The frozen implementation still reaches its original closes.
+            assert str(exc) == "repository configuration changed during verification"
+            assert not a._state.entered
+            assert a.batch_pid is None
+            assert a.temporary_directory is None
+            entry_refusal = {
+                "exception": f"{type(exc).__module__}.{type(exc).__qualname__}",
+                "message": str(exc),
+                "notes": list(getattr(exc, "__notes__", ())),
+            }
         b.__enter__()
         different = a._state.config_records != b._state.config_records
         if restore:
             repo.git("config", "--unset", "m3.probe")
         trace = Trace(a, b)
+        if entry_refusal is not None:
+            trace.events.append(["A entry refused", entry_refusal, work(a, b)])
         trace.call("B close", lambda: b.__exit__(None, None, None))
         trace.call("A close", lambda: a.__exit__(None, None, None))
+        if entry_refusal is not None:
+            assert a._state.closed and b._state.closed
+            assert a.batch_pid is b.batch_pid is None
+            assert a.temporary_directory is b.temporary_directory is None
         return {"different_records": different, "events": trace.events,
                 "closed": [a._state.closed, b._state.closed],
                 "resources": [a.batch_pid, b.batch_pid, a.temporary_directory, b.temporary_directory]}

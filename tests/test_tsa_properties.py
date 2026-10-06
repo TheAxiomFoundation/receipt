@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from hypothesis import HealthCheck, given, settings, strategies as st
 
 from receipt import tsa
@@ -298,3 +299,58 @@ def test_validate_token_time_acceptance_is_monotone(
 
     if accepted(now, future, lead):
         assert accepted(now + timedelta(seconds=d_now), future + d_future, lead + d_lead)
+
+
+@PROPERTY
+@given(st.sampled_from(["now", "gen_time"]), st.datetimes())
+def test_validate_token_time_refuses_every_naive_instant(field: str, value: datetime) -> None:
+    """Neither the verification time nor the authority's time may depend
+    on the process's local timezone or escape as a datetime TypeError."""
+
+    valid = datetime(2026, 9, 27, 12, tzinfo=UTC)
+    arguments = {"now": valid, "gen_time": valid}
+    arguments[field] = value
+    label = "verification time" if field == "now" else "RFC 3161 genTime"
+    with pytest.raises(tsa.TsaError) as caught:
+        tsa.validate_token_time(
+            {"recordedAt": valid.isoformat()},
+            **arguments,
+            max_future_seconds=10**40,
+            max_token_lead_seconds=10**40,
+        )
+    assert str(caught.value) == f"{label} must be a timezone-aware datetime: {value!r}"
+
+
+@PROPERTY
+@given(
+    st.sampled_from(["now", "gen_time"]),
+    st.booleans(),
+    st.integers(min_value=1, max_value=23 * 60 + 59),
+    st.integers(min_value=0, max_value=999999),
+)
+def test_validate_token_time_refuses_every_instant_outside_utc_range(
+    field: str, lower: bool, offset_minutes: int, microsecond: int
+) -> None:
+    """Aware wall-clock datetimes whose UTC instants fall beyond years
+    1-9999 get the base's named refusal before any difference is measured."""
+
+    if lower:
+        value = datetime(1, 1, 1, microsecond=microsecond).replace(
+            tzinfo=timezone(timedelta(minutes=offset_minutes))
+        )
+    else:
+        value = datetime(9999, 12, 31, 23, 59, 59, microsecond).replace(
+            tzinfo=timezone(-timedelta(minutes=offset_minutes))
+        )
+    valid = datetime(2026, 9, 27, 12, tzinfo=UTC)
+    arguments = {"now": valid, "gen_time": valid}
+    arguments[field] = value
+    label = "verification time" if field == "now" else "RFC 3161 genTime"
+    with pytest.raises(tsa.TsaError) as caught:
+        tsa.validate_token_time(
+            {"recordedAt": valid.isoformat()},
+            **arguments,
+            max_future_seconds=10**40,
+            max_token_lead_seconds=10**40,
+        )
+    assert str(caught.value) == f"{label} is outside the representable UTC range: {value!r}"
