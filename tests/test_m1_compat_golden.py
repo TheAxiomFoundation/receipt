@@ -341,7 +341,9 @@ def test_filename_admission_goldens(case):
         "suffix_iterable": lambda: names.short_name_carries_pinned_suffix("a.ymlx", 123),
         "suffix_ignored": lambda: names.short_name_carries_pinned_suffix("a.ymlx", (123, ".yml")),
     }
-    # record: census snapshot.py 3367-3387; _names.py 122-123, 152-162
+    # record: census snapshot.py 3367-3387; _names.py 122-123, 152-162.
+    # #83 intentionally strengthens suffix_ignored: malformed pinned suffixes
+    # now refuse even when another suffix could match.
     assert_golden("filename/" + case, outcome(calls[case]))
 
 

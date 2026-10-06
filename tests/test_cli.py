@@ -18,6 +18,7 @@ import codecs
 import contextlib
 import hashlib
 import io
+import itertools
 import json
 import os
 import pathlib
@@ -142,6 +143,339 @@ def test_explicit_nested_root_refuses_as_not_the_repository_top_level(
         "root is not the top level of its repository"
         in capsys.readouterr().err
     )
+
+
+# --- the default root is the repository the spec was named in ---------------
+
+
+def _clone_with_committed_link(
+    built: pathlib.Path, tmp_path: pathlib.Path, *, link: str, target: str
+) -> tuple[pathlib.Path, pathlib.Path]:
+    """Clone, recursively, a producer repository that commits ``link`` as a
+    symlink to ``target`` inside a submodule.
+
+    The producer repository is the signed corpus with a rule edited after
+    signing, so verified as itself it refuses. Its submodule at
+    ``vendor/good`` is the signed corpus unedited, which verifies. Returns
+    the auditor's clone and the producer's unedited corpus.
+    """
+
+    good = tmp_path / "good"
+    shutil.copytree(built, good, symlinks=True)
+    outer = tmp_path / "outer"
+    shutil.copytree(built, outer, symlinks=True)
+    (outer / "rules/tax/rate.yaml").write_text("name: rate\nvalue: 0.99\n")
+    if link == "verification":
+        shutil.rmtree(outer / "verification")
+    _git(
+        outer,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "--quiet",
+        "add",
+        str(good),
+        "vendor/good",
+    )
+    (outer / link).symlink_to(target, target_is_directory=True)
+    commit_candidate(outer, "edit a rule; link into the signed submodule")
+    clone = tmp_path / "clone"
+    _git(
+        tmp_path,
+        "-c",
+        "protocol.file.allow=always",
+        "clone",
+        "--quiet",
+        "--recurse-submodules",
+        str(outer),
+        str(clone),
+    )
+    assert (clone / link).is_symlink()
+    return clone, good
+
+
+@pytest.mark.parametrize(
+    ("link", "target", "spec"),
+    [
+        # The spec's own directory is the link.
+        ("verification", "vendor/good/verification", "verification/spec.py"),
+        # The link names the submodule's top level, so a lexical walk alone
+        # would stop at the link and still verify the submodule.
+        ("audit", "vendor/good", "audit/verification/spec.py"),
+    ],
+)
+def test_default_root_refuses_a_spec_named_through_a_committed_symlink(
+    built: pathlib.Path,
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    link: str,
+    target: str,
+    spec: str,
+) -> None:
+    """Review of 0.6.2 (L5 finding 1): the default root resolved the spec
+    path first, so a directory committed as a symlink into a submodule moved
+    the walk into the submodule, and the command verified the submodule's
+    commit and tree, exiting 0, while the clone's edited rule went unchecked.
+    """
+
+    clone, _ = _clone_with_committed_link(
+        built, tmp_path, link=link, target=target
+    )
+    spec_path = clone / spec
+
+    assert main(["verify", "--spec", str(spec_path), "--json"]) == EXIT_USAGE
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
+    assert payload["stage"] == "root"
+    assert payload["failure"] == (
+        "the spec's path crosses a symlink at or below its repository top "
+        "level, so the repository to verify is ambiguous; supply --root: "
+        f"{clone / link}"
+    )
+
+    # The text verdict refuses in the same words.
+    assert main(["verify", "--spec", str(spec_path)]) == EXIT_USAGE
+    assert "crosses a symlink" in capsys.readouterr().err
+
+    # --root keeps its meaning: the clone named is the clone verified, and
+    # its edited rule refuses.
+    assert (
+        main(["verify", "--spec", str(spec_path), "--root", str(clone), "--json"])
+        == EXIT_FAIL
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["root"] == str(clone.resolve())
+    assert payload["verdict"] == "FAIL"
+
+    # The submodule is a corpus that verifies when it is the one named.
+    submodule_spec = clone / "vendor/good/verification/spec.py"
+    assert main(["verify", "--spec", str(submodule_spec), "--json"]) == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["root"] == str((clone / "vendor/good").resolve())
+
+
+def test_default_root_refusal_survives_spec_and_anchor_pins(
+    built: pathlib.Path,
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The pins cannot catch the substitution: the submodule carries the
+    pinned spec and the pinned anchors. The walk has to."""
+
+    clone, good = _clone_with_committed_link(
+        built,
+        tmp_path,
+        link="verification",
+        target="vendor/good/verification",
+    )
+    spec_path = clone / "verification/spec.py"
+    materialized = tmp_path / "pinned"
+    materialized.mkdir()
+    pins = (
+        "--expect-spec-sha256",
+        hashlib.sha256(
+            (good / "verification/spec.py").read_bytes()
+        ).hexdigest(),
+        "--expect-anchor-set",
+        anchor_set_from_materialized_tree(good, materialized),
+    )
+
+    assert (
+        main(["verify", "--spec", str(spec_path), *pins, "--json"])
+        == EXIT_USAGE
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["stage"] == "root"
+    assert "crosses a symlink" in payload["failure"]
+
+
+def test_default_root_ignores_links_above_the_repository_top_level(
+    repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Links above the top level are the auditor's own filesystem."""
+
+    ambient = tmp_path / "ambient"
+    ambient.symlink_to(tmp_path, target_is_directory=True)
+    spec_path = ambient / repo.name / "verification/spec.py"
+
+    assert main(["verify", "--spec", str(spec_path), "--json"]) == EXIT_OK
+    assert json.loads(capsys.readouterr().out)["root"] == str(repo.resolve())
+
+    # A relative spec path walks from the working directory.
+    monkeypatch.chdir(repo)
+    assert main(["verify", "--spec", "verification/spec.py", "--json"]) == EXIT_OK
+    assert json.loads(capsys.readouterr().out)["root"] == str(repo.resolve())
+
+
+def test_default_root_refuses_a_top_level_named_through_a_symlink(
+    repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A link that is the top level cannot be told apart, from the path
+    alone, from a link committed in an enclosing checkout, so it refuses;
+    naming the root restores the run."""
+
+    checkout = tmp_path / "checkout"
+    checkout.symlink_to(repo, target_is_directory=True)
+    spec_path = checkout / "verification/spec.py"
+
+    assert main(["verify", "--spec", str(spec_path), "--json"]) == EXIT_USAGE
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["stage"] == "root"
+    assert payload["failure"].endswith(f"supply --root: {checkout}")
+
+    assert (
+        main(["verify", "--spec", str(spec_path), "--root", str(checkout), "--json"])
+        == EXIT_OK
+    )
+    assert json.loads(capsys.readouterr().out)["root"] == str(repo.resolve())
+
+
+def test_default_root_refuses_a_dotdot_that_resolves_past_a_link(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Normalizing ``link/..`` lexically and resolving it physically name two
+    different files; the walk refuses rather than pick the one it did not
+    load. Without a link before the ``..``, the path is accepted."""
+
+    from receipt.cli import _DefaultRootError, _default_root
+
+    clone = tmp_path / "clone"
+    for directory in (".git", "verification", "vendor/good/.git", "vendor/verification"):
+        (clone / directory).mkdir(parents=True)
+    (clone / "verification/spec.py").write_text("SPEC = None\n")
+    (clone / "vendor/verification/spec.py").write_text("SPEC = None\n")
+    (clone / "x").symlink_to("vendor/good", target_is_directory=True)
+    (clone / "plain").mkdir()
+
+    spec_path = clone / "x" / ".." / "verification" / "spec.py"
+    with pytest.raises(_DefaultRootError) as caught:
+        _default_root(spec_path)
+    assert str(caught.value) == (
+        "the spec's path resolves to a file other than the one it names below "
+        f"its repository top level; supply --root: {spec_path}"
+    )
+    assert _default_root(clone / "plain" / ".." / "verification" / "spec.py") == clone
+
+
+def _default_root_061(spec_path: pathlib.Path) -> pathlib.Path:
+    """The 0.6.1 walk, transcribed: it resolved the spec path first."""
+
+    current = spec_path.resolve().parent
+    for candidate in (current, *current.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return current
+
+
+def test_default_root_names_the_spec_s_physical_repository_exhaustively(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Every layout of three directories between a base and the spec.
+
+    Each of ``top``, ``top/a`` and ``top/a/b`` (the spec's directory) is a
+    real directory or a symlink to a directory elsewhere, and holds ``.git``
+    or not; the link targets sit inside a directory that holds ``.git`` or
+    not; the base holds ``.git`` or not and is named directly or through a
+    symlink: 4³ × 2 × 2 × 2 = 512 layouts. For every one, with the reference
+    computed from ``os.path`` alone:
+
+    1. Refusal is exact: the walk refuses iff a symlink lies between the
+       spec's directory and the nearest directory above it holding ``.git``,
+       that directory included.
+    2. Soundness: a returned top level, resolved and joined with the spec's
+       path below it as named, is the spec's resolved path, so the tree
+       verified is the one the named spec lies in.
+    3. Where nothing refuses, the top level resolves to the 0.6.1 walk's.
+    4. Wherever the 0.6.1 walk's top level is not the resolution of the
+       nearest ``.git`` directory above the spec as named, the walk refuses.
+    """
+
+    from receipt.cli import _DefaultRootError, _default_root
+
+    names = ("top", "a", "b")
+    substituted = 0
+    for index, choice in enumerate(
+        itertools.product(
+            itertools.product(("real", "link"), (False, True)),
+            repeat=3,
+        )
+    ):
+        for base_git, pool_git, ambient in itertools.product(
+            (False, True), repeat=3
+        ):
+            world = tmp_path / f"w{index}-{int(base_git)}{int(pool_git)}{int(ambient)}"
+            base = world / "base"
+            base.mkdir(parents=True)
+            if base_git:
+                (base / ".git").mkdir()
+            pool = world / "pool"
+            pool.mkdir()
+            if pool_git:
+                (pool / ".git").mkdir()
+            physical = base
+            for level, ((kind, has_git), name) in enumerate(zip(choice, names)):
+                if kind == "real":
+                    directory = physical / name
+                    directory.mkdir()
+                else:
+                    directory = pool / f"t{level}"
+                    directory.mkdir()
+                    (physical / name).symlink_to(directory, target_is_directory=True)
+                if has_git:
+                    (directory / ".git").mkdir()
+                physical = directory
+            (physical / "spec.py").write_text("SPEC = None\n")
+            named_base = base
+            if ambient:
+                named_base = world / "ambient"
+                named_base.symlink_to(base, target_is_directory=True)
+            spec_path = named_base / "top" / "a" / "b" / "spec.py"
+
+            walk: list[str] = []
+            nearest: str | None = None
+            directory_text = os.path.dirname(str(spec_path))
+            while True:
+                walk.append(directory_text)
+                if os.path.exists(os.path.join(directory_text, ".git")):
+                    nearest = directory_text
+                    break
+                parent = os.path.dirname(directory_text)
+                if parent == directory_text:
+                    break
+                directory_text = parent
+            refuses = nearest is not None and any(
+                os.path.islink(entry) for entry in walk
+            )
+            old = _default_root_061(spec_path)
+            if nearest is not None and str(old) != os.path.realpath(nearest):
+                substituted += 1
+                assert refuses, (index, base_git, pool_git, ambient)
+
+            if refuses:
+                with pytest.raises(_DefaultRootError):
+                    _default_root(spec_path)
+                continue
+            root = _default_root(spec_path)
+            if nearest is None:
+                assert root == spec_path.parent
+                continue
+            assert str(root) == nearest
+            assert os.path.realpath(spec_path) == os.path.join(
+                os.path.realpath(root), os.path.relpath(spec_path, root)
+            )
+            assert pathlib.Path(os.path.realpath(root)) == old
+    # The domain reaches the substitution the walk exists to refuse: the 0.6.1
+    # walk named another repository than the named spec's in 140 layouts. A
+    # temporary directory inside a work tree adds layouts that find its
+    # ``.git``, so the count is pinned only where no ancestor holds one.
+    assert substituted > 0
+    if not any((ancestor / ".git").exists() for ancestor in tmp_path.parents):
+        assert substituted == 140
 
 
 def test_json_pass_writes_to_a_redirected_stringio(

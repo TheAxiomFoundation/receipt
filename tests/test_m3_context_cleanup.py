@@ -1,5 +1,6 @@
 """D17: ordered primary/notes and physical cleanup with completed evidence."""
 from datetime import datetime, timezone
+from copy import deepcopy
 import hashlib
 from pathlib import Path
 from types import SimpleNamespace
@@ -175,5 +176,23 @@ CASES = {
 def test_cleanup_and_pass_publication(repo, monkeypatch, case):
     from m3_cleanup_expected import OBSERVED
     probe, *args = CASES[case]
-    observed = compare(probe, repo, monkeypatch, *args, expected=OBSERVED[case])
+    expected_live = None
+    if probe is composed_close and args[0] and args[-1] != "interrupt":
+        # e911 deliberately invalidates every affected claim after failed
+        # closure, including when a pass error was already unwinding. Keep
+        # the old exact result authenticated, and assert the stronger live
+        # result while preserving all cleanup/work/notes/body observations.
+        errors = {"child": "m3 child close failure",
+                  "sentinel": "m3 sentinel audit failure",
+                  "configuration": "m3 configuration audit failure",
+                  "directory": "OSError: m3 directory cleanup failure"}
+        expected_live = deepcopy(OBSERVED[case])
+        expected_live["trace"]["result"] = {"value": {
+            "class": "receipt.verify.VerifyResult", "ok": False,
+            "passes": [{"name": "custody", "ok": False, "detail": "",
+                        "failure": "; ".join(errors[name] for name in args[0])},
+                       {"name": "binding", "ok": False, "detail": "", "failure": "not reached"}],
+            "chain": False, "corpus": False}}
+    observed = compare(probe, repo, monkeypatch, *args, expected=OBSERVED[case],
+                       expected_live=expected_live)
     assert all(all(item) for item in observed["trace"]["cleanup"]["physical"])

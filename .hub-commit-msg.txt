@@ -1,0 +1,12 @@
+Bring receipt #86 up to date with main and complete #83
+
+Resolve main's changelog and attestation-test conflicts while retaining
+its default-root and commit-graph protections. Port #83's missing state
+confinement, closure invalidation, SAN reporting and canonical-range fixes.
+Preserve attribute admission work and explicitly account for new re-audits
+in the frozen compatibility harnesses without relaxing refusals.
+
+Hub integration: record second parent 6e883426d6f6fd662acbd86d3f22035cfc6c86cd
+for the main merge; the linked worktree metadata was left untouched.
+
+Co-Authored-By: GPT-6.1 Sol <noreply@openai.com>

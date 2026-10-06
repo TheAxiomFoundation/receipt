@@ -1804,6 +1804,34 @@ def test_a_configuration_change_after_selection_refuses_before_the_batch_child(
         selected.__enter__()
 
 
+@pytest.mark.parametrize("body_fails", [False, True])
+def test_close_errors_are_observable_even_while_a_body_error_unwinds(
+    git_repo: pathlib.Path, body_fails: bool
+) -> None:
+    commit = _one_file_commit(git_repo)
+    selected = TreeSnapshot.select(git_repo, commit)
+    failure = RuntimeError("body failed") if body_fails else None
+    with pytest.raises(
+        RuntimeError if body_fails else SnapshotError,
+        match="body failed" if body_fails else "configuration changed",
+    ) as caught:
+        with selected:
+            with open(git_repo / ".git" / "config", "a") as handle:
+                handle.write("[receiptprobe]\n\tconcurrent = 1\n")
+            if failure is not None:
+                raise failure
+
+    assert selected.close_errors
+    assert all(isinstance(error, SnapshotError) for error in selected.close_errors)
+    assert any(
+        "configuration changed during verification" in str(error)
+        for error in selected.close_errors
+    )
+    if failure is not None:
+        assert caught.value is failure
+        assert any("Snapshot close also failed" in note for note in failure.__notes__)
+
+
 def test_a_configuration_change_refuses_before_fsck_runs_under_it(
     git_repo: pathlib.Path,
 ) -> None:

@@ -1,9 +1,13 @@
 """Package-level invariants: honest status and verbatim provenance."""
 
 import hashlib
+import json
 import pathlib
 
+import pytest
+
 import receipt
+from receipt.canonical import canonical_bytes
 
 # canonical.py is a byte-identical copy of the pinned source file; this hash
 # is scripts/canonical_json.py at PolicyEngine/ledger commit 0798427850
@@ -51,3 +55,24 @@ def test_readme_states_what_the_canonical_promise_covers() -> None:
     assert "no explicit surrogate pair" in line
     assert "byte-identical copy of the pinned upstream serializer" in line
     assert "`RecursionError`" in line
+
+
+@pytest.mark.parametrize(
+    "source", ["1e400", "-1e400", "1" + "0" * 400],
+    ids=["positive-float-overflow", "negative-float-overflow", "integer-overflow"],
+)
+def test_readme_qualifies_decoded_numbers_outside_canonical_range(source: str) -> None:
+    """Decoding JSON does not guarantee its number can be serialized."""
+
+    value = json.loads(source)
+    assert type(value) in (int, float)
+    with pytest.raises(ValueError, match="non-finite number|exceeds Number range"):
+        canonical_bytes(value)
+    readme = (pathlib.Path(__file__).resolve().parents[1] / "README.md").read_text(
+        encoding="utf-8"
+    )
+    promise = next(
+        line for line in readme.splitlines() if line.startswith("- `receipt.canonical`")
+    )
+    assert "finite floats" in promise
+    assert "integers that convert to finite ECMAScript Numbers" in promise
