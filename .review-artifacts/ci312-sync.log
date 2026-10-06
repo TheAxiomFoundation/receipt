@@ -1,0 +1,14 @@
+Using CPython 3.12.14 interpreter at: /opt/homebrew/opt/python@3.12/bin/python3.12
+Creating virtual environment at: .review-artifacts/ci312
+Resolved 10 packages in 1ms
+Prepared 1 package in 1.95s
+Installed 9 packages in 1.16s
+ + cffi==2.1.1
+ + cryptography==50.0.2
+ + iniconfig==2.3.0
+ + packaging==26.3
+ + pluggy==1.6.0
+ + pycparser==3.0
+ + pygments==2.21.0
+ + pytest==9.1.1
+ + receipt==0.6.2 (from file:///Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2)

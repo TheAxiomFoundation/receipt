@@ -1,0 +1,16 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_________ test_default_root_refuses_a_dotdot_that_resolves_past_a_link _________
+tests/test_cli.py:356: in test_default_root_refuses_a_dotdot_that_resolves_past_a_link
+    with pytest.raises(_DefaultRootError) as caught:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE _DefaultRootError
+_____ test_default_root_names_the_spec_s_physical_repository_exhaustively ______
+tests/test_cli.py:460: in test_default_root_names_the_spec_s_physical_repository_exhaustively
+    with pytest.raises(_DefaultRootError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE _DefaultRootError
+=========================== short test summary info ============================
+FAILED tests/test_cli.py::test_default_root_refuses_a_dotdot_that_resolves_past_a_link
+FAILED tests/test_cli.py::test_default_root_names_the_spec_s_physical_repository_exhaustively
+2 failed in 23.32s

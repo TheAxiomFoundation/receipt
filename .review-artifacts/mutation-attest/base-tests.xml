@@ -1,0 +1,461 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="14" skipped="0" tests="16" time="460.748" timestamp="2026-10-03T23:04:07.957555-04:00" hostname="MacBook-Pro-1111.local"><testcase classname="tests.test_attest" name="test_enforcement_epoch_command_and_refusals" time="0.371"><failure message="AssertionError: assert [(PosixPath('...', '--', ...)] == [(PosixPath('...', '--', ...)]&#10;  &#10;  At index 0 diff: (PosixPath('/repo'), 'log', '--full-history', '--diff-filter=A', '--format=%H', '--', 'scripts/verify_records_attestations.py') != (PosixPath('/repo'), 'rev-parse', '--is-shallow-repository')&#10;  Use -v to get more diff">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x2e0fde97450&gt;
+
+    def test_enforcement_epoch_command_and_refusals(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -&gt; None:
+        root = pathlib.Path("/repo")
+        spec = _spec()
+        seen: list[tuple[object, ...]] = []
+        outputs = iter(["", f"{'b' * 40}\n{'c' * 40}", "d" * 40])
+        monkeypatch.setattr(
+            attest_module, "git_output", _fake_git_output(outputs, seen)
+        )
+        with pytest.raises(ProvenanceError) as caught:
+            enforcement_epoch(root, spec=spec)
+        assert str(caught.value) == (
+            "enforcement epoch must be exactly one introducing commit for "
+            "scripts/verify_records_attestations.py; found 0"
+        )
+        with pytest.raises(ProvenanceError) as caught:
+            enforcement_epoch(root, spec=spec)
+        assert str(caught.value).endswith("; found 2")
+        assert enforcement_epoch(root, spec=spec) == "d" * 40
+&gt;       assert seen[:3] == [
+            (root, *HISTORY_PROBES[0]),
+            (root, *HISTORY_PROBES[1]),
+            (
+                root,
+                "log",
+                "--full-history",
+                "--diff-filter=A",
+                "--format=%H",
+                "--",
+                "scripts/verify_records_attestations.py",
+            ),
+        ]
+E       AssertionError: assert [(PosixPath('...', '--', ...)] == [(PosixPath('...', '--', ...)]
+E         
+E         At index 0 diff: (PosixPath('/repo'), 'log', '--full-history', '--diff-filter=A', '--format=%H', '--', 'scripts/verify_records_attestations.py') != (PosixPath('/repo'), 'rev-parse', '--is-shallow-repository')
+E         Use -v to get more diff
+
+../../tests/test_attest.py:277: AssertionError</failure></testcase><testcase classname="tests.test_attest" name="test_records_commits_uses_full_history_and_consumer_prefix" time="0.001"><failure message="AssertionError: assert [(PosixPath('...', '--', ...)] == [(PosixPath('... 'A..B', ...)]&#10;  &#10;  At index 0 diff: (PosixPath('/repo'), 'log', '--full-history', '--format=%H', 'A..B', '--', 'records/') != (PosixPath('/repo'), 'rev-parse', '--is-shallow-repository')&#10;  Right contains one more item: (PosixPath('/repo'), 'log', '--full-history', '--format=%H', '--end-of-options', 'A..B', ...)&#10;  Use -v to get more diff">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x2e0fde9b910&gt;
+
+    def test_records_commits_uses_full_history_and_consumer_prefix(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -&gt; None:
+        root = pathlib.Path("/repo")
+        seen: list[tuple[object, ...]] = []
+        outputs = iter([f"{'b' * 40}\n{'c' * 40}", ""])
+        monkeypatch.setattr(
+            attest_module, "git_output", _fake_git_output(outputs, seen)
+        )
+        assert records_commits(root, "A..B", spec=_spec()) == ["b" * 40, "c" * 40]
+        assert records_commits(root, "B..C", spec=_spec()) == []
+&gt;       assert seen[:3] == [
+            (root, *HISTORY_PROBES[0]),
+            (root, *HISTORY_PROBES[1]),
+            (
+                root,
+                "log",
+                "--full-history",
+                "--format=%H",
+                "--end-of-options",
+                "A..B",
+                "--",
+                "records/",
+            ),
+        ]
+E       AssertionError: assert [(PosixPath('...', '--', ...)] == [(PosixPath('... 'A..B', ...)]
+E         
+E         At index 0 diff: (PosixPath('/repo'), 'log', '--full-history', '--format=%H', 'A..B', '--', 'records/') != (PosixPath('/repo'), 'rev-parse', '--is-shallow-repository')
+E         Right contains one more item: (PosixPath('/repo'), 'log', '--full-history', '--format=%H', '--end-of-options', 'A..B', ...)
+E         Use -v to get more diff
+
+../../tests/test_attest.py:303: AssertionError</failure></testcase><testcase classname="tests.test_attest" name="test_commit_scope_branch_outcomes[0-False]" time="0.003"><failure message="AssertionError: assert [] == [(PosixPath('...info/grafts')]&#10;  &#10;  Right contains 2 more items, first extra item: (PosixPath('/repo'), 'rev-parse', '--is-shallow-repository')&#10;  Use -v to get more diff">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x2e0fde944d0&gt;
+returncode = 0, expected = False
+
+    @pytest.mark.parametrize(
+        ("returncode", "expected"),
+        [(0, False), (1, True)],
+    )
+    def test_commit_scope_branch_outcomes(
+        monkeypatch: pytest.MonkeyPatch,
+        returncode: int,
+        expected: bool,
+    ) -&gt; None:
+        root = pathlib.Path("/repo")
+        seen: list[tuple[list[str], dict[str, object]]] = []
+        probed: list[tuple[object, ...]] = []
+    
+        def fake_run(args: list[str], **kwargs: object) -&gt; subprocess.CompletedProcess:
+            seen.append((args, kwargs))
+            return subprocess.CompletedProcess(args, returncode, b"", b"")
+    
+        monkeypatch.setattr(
+            attest_module, "git_output", _fake_git_output(iter(()), probed)
+        )
+        monkeypatch.setattr(attest_module.subprocess, "run", fake_run)
+        monkeypatch.setenv("GIT_DIR", "/elsewhere/.git")
+        assert commit_in_scope(root, "b" * 40, "c" * 40) is expected
+&gt;       assert probed == [(root, *HISTORY_PROBES[0]), (root, *HISTORY_PROBES[1])]
+E       AssertionError: assert [] == [(PosixPath('...info/grafts')]
+E         
+E         Right contains 2 more items, first extra item: (PosixPath('/repo'), 'rev-parse', '--is-shallow-repository')
+E         Use -v to get more diff
+
+../../tests/test_attest.py:482: AssertionError</failure></testcase><testcase classname="tests.test_attest" name="test_commit_scope_branch_outcomes[1-True]" time="0.001"><failure message="AssertionError: assert [] == [(PosixPath('...info/grafts')]&#10;  &#10;  Right contains 2 more items, first extra item: (PosixPath('/repo'), 'rev-parse', '--is-shallow-repository')&#10;  Use -v to get more diff">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x2e0fde96a50&gt;
+returncode = 1, expected = True
+
+    @pytest.mark.parametrize(
+        ("returncode", "expected"),
+        [(0, False), (1, True)],
+    )
+    def test_commit_scope_branch_outcomes(
+        monkeypatch: pytest.MonkeyPatch,
+        returncode: int,
+        expected: bool,
+    ) -&gt; None:
+        root = pathlib.Path("/repo")
+        seen: list[tuple[list[str], dict[str, object]]] = []
+        probed: list[tuple[object, ...]] = []
+    
+        def fake_run(args: list[str], **kwargs: object) -&gt; subprocess.CompletedProcess:
+            seen.append((args, kwargs))
+            return subprocess.CompletedProcess(args, returncode, b"", b"")
+    
+        monkeypatch.setattr(
+            attest_module, "git_output", _fake_git_output(iter(()), probed)
+        )
+        monkeypatch.setattr(attest_module.subprocess, "run", fake_run)
+        monkeypatch.setenv("GIT_DIR", "/elsewhere/.git")
+        assert commit_in_scope(root, "b" * 40, "c" * 40) is expected
+&gt;       assert probed == [(root, *HISTORY_PROBES[0]), (root, *HISTORY_PROBES[1])]
+E       AssertionError: assert [] == [(PosixPath('...info/grafts')]
+E         
+E         Right contains 2 more items, first extra item: (PosixPath('/repo'), 'rev-parse', '--is-shallow-repository')
+E         Use -v to get more diff
+
+../../tests/test_attest.py:482: AssertionError</failure></testcase><testcase classname="tests.test_attest" name="test_commit_scope_merge_base_error_is_verbatim" time="0.000" /><testcase classname="tests.test_attest" name="test_a_full_history_sweep_reaches_the_unattested_commit" time="21.098" /><testcase classname="tests.test_attest" name="test_a_shallow_clone_refuses_before_it_is_swept[1]" time="27.978"><failure message="Failed: DID NOT RAISE ProvenanceError">tmp_path = PosixPath('/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/mutation-attest/tmp-base/test_a_shallow_clone_refuses_b0')
+depth = 1
+
+    @pytest.mark.parametrize("depth", [1, 2])
+    def test_a_shallow_clone_refuses_before_it_is_swept(
+        tmp_path: pathlib.Path, depth: int
+    ) -&gt; None:
+        """A depth-1 clone made its tip the enforcement epoch, exempted it, and
+        swept an empty range: the unattested commit was accepted unseen."""
+    
+        ids = _fixture_history(tmp_path / "full")
+        shallow = tmp_path / "shallow"
+        _fixture_git(
+            tmp_path,
+            "clone",
+            "--quiet",
+            "--depth",
+            str(depth),
+            f"file://{tmp_path / 'full'}",
+            str(shallow),
+        )
+        assert (shallow / ".git" / "shallow").exists()
+        for call in (
+            lambda: enforcement_epoch(shallow, spec=_spec()),
+            lambda: records_commits(shallow, f"{ids['attested']}..HEAD", spec=_spec()),
+            lambda: commit_in_scope(shallow, ids["unattested"], ids["attested"]),
+        ):
+&gt;           with pytest.raises(ProvenanceError) as caught:
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           Failed: DID NOT RAISE ProvenanceError
+
+../../tests/test_attest.py:804: Failed</failure></testcase><testcase classname="tests.test_attest" name="test_a_shallow_clone_refuses_before_it_is_swept[2]" time="41.324"><failure message="Failed: DID NOT RAISE ProvenanceError">tmp_path = PosixPath('/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/mutation-attest/tmp-base/test_a_shallow_clone_refuses_b1')
+depth = 2
+
+    @pytest.mark.parametrize("depth", [1, 2])
+    def test_a_shallow_clone_refuses_before_it_is_swept(
+        tmp_path: pathlib.Path, depth: int
+    ) -&gt; None:
+        """A depth-1 clone made its tip the enforcement epoch, exempted it, and
+        swept an empty range: the unattested commit was accepted unseen."""
+    
+        ids = _fixture_history(tmp_path / "full")
+        shallow = tmp_path / "shallow"
+        _fixture_git(
+            tmp_path,
+            "clone",
+            "--quiet",
+            "--depth",
+            str(depth),
+            f"file://{tmp_path / 'full'}",
+            str(shallow),
+        )
+        assert (shallow / ".git" / "shallow").exists()
+        for call in (
+            lambda: enforcement_epoch(shallow, spec=_spec()),
+            lambda: records_commits(shallow, f"{ids['attested']}..HEAD", spec=_spec()),
+            lambda: commit_in_scope(shallow, ids["unattested"], ids["attested"]),
+        ):
+&gt;           with pytest.raises(ProvenanceError) as caught:
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           Failed: DID NOT RAISE ProvenanceError
+
+../../tests/test_attest.py:804: Failed</failure></testcase><testcase classname="tests.test_attest" name="test_a_graft_file_refuses_before_it_is_swept" time="34.683"><failure message="Failed: DID NOT RAISE ProvenanceError">tmp_path = PosixPath('/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/mutation-attest/tmp-base/test_a_graft_file_refuses_befo0')
+
+    def test_a_graft_file_refuses_before_it_is_swept(tmp_path: pathlib.Path) -&gt; None:
+        """A graft rewrites parents even with replace objects off."""
+    
+        root = tmp_path / "full"
+        ids = _fixture_history(root)
+        (root / ".git" / "info").mkdir(exist_ok=True)
+        (root / ".git" / "info" / "grafts").write_text(f"{ids['unattested']}\n")
+        for call in (
+            lambda: enforcement_epoch(root, spec=_spec()),
+            lambda: records_commits(root, f"{ids['epoch']}..HEAD", spec=_spec()),
+            lambda: commit_in_scope(root, ids["unattested"], ids["epoch"]),
+        ):
+&gt;           with pytest.raises(ProvenanceError) as caught:
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           Failed: DID NOT RAISE ProvenanceError
+
+../../tests/test_attest.py:821: Failed</failure></testcase><testcase classname="tests.test_attest" name="test_a_replace_ref_does_not_hide_a_commit" time="33.136"><failure message="AssertionError: assert ['ba282e7e4a9...0b2192fbc026'] == ['0e2c0c712ae...0b2192fbc026']&#10;  &#10;  At index 0 diff: 'ba282e7e4a912e2b7bfbd323e6a70b2192fbc026' != '0e2c0c712ae9746fd64ba761026eef7226631e16'&#10;  Right contains one more item: 'ba282e7e4a912e2b7bfbd323e6a70b2192fbc026'&#10;  Use -v to get more diff">tmp_path = PosixPath('/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/mutation-attest/tmp-base/test_a_replace_ref_does_not_hi0')
+
+    def test_a_replace_ref_does_not_hide_a_commit(tmp_path: pathlib.Path) -&gt; None:
+        root = tmp_path / "full"
+        ids = _fixture_history(root)
+        _replace_unattested(root, ids, f"refs/replace/{ids['unattested']}")
+&gt;       assert _in_scope(root) == [ids["unattested"], ids["attested"]]
+E       AssertionError: assert ['ba282e7e4a9...0b2192fbc026'] == ['0e2c0c712ae...0b2192fbc026']
+E         
+E         At index 0 diff: 'ba282e7e4a912e2b7bfbd323e6a70b2192fbc026' != '0e2c0c712ae9746fd64ba761026eef7226631e16'
+E         Right contains one more item: 'ba282e7e4a912e2b7bfbd323e6a70b2192fbc026'
+E         Use -v to get more diff
+
+../../tests/test_attest.py:841: AssertionError</failure></testcase><testcase classname="tests.test_attest" name="test_a_commit_graph_entry_does_not_hide_a_commit" time="28.534"><failure message="AssertionError: assert ['fc566e8bfe9...ede07c6aabd1'] == ['fc566e8bfe9...0525c6d4392f']&#10;  &#10;  Right contains one more item: 'ad7375fccf3c8312378751da2f8c0525c6d4392f'&#10;  Use -v to get more diff">tmp_path = PosixPath('/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/mutation-attest/tmp-base/test_a_commit_graph_entry_does0')
+
+    def test_a_commit_graph_entry_does_not_hide_a_commit(tmp_path: pathlib.Path) -&gt; None:
+        """The commit-graph file is a cache git trusts: an entry giving a records
+        commit below the tip its parent's tree made the walk pass over it."""
+    
+        root = tmp_path / "repo"
+        root.mkdir()
+        _fixture_git(root, "init", "--quiet", "--initial-branch=main", "--object-format=sha1")
+        _fixture_git(root, "remote", "add", "origin", "https://github.com/MaxGhenis/brier.git")
+        _fixture_commit(root, "README.md", "base", 1_900_000_000)
+        epoch = _fixture_commit(
+            root, "scripts/verify_records_attestations.py", "checker", 1_900_000_100
+        )
+        unattested = _fixture_commit(root, "records/u.json", "unattested", 1_900_000_200)
+        attested = _fixture_commit(root, "records/a.json", "attested", 1_900_000_300)
+        _fixture_git(root, "commit-graph", "write", "--reachable")
+        graph = root / ".git" / "objects" / "info" / "commit-graph"
+        data = bytearray(graph.read_bytes())
+        assert data[:4] == b"CGPH"
+        chunks = {
+            bytes(data[8 + 12 * i : 12 + 12 * i]): int.from_bytes(
+                data[12 + 12 * i : 20 + 12 * i], "big"
+            )
+            for i in range(data[6] + 1)
+        }
+        lookup, records = chunks[b"OIDL"], chunks[b"CDAT"]
+        oids = [
+            data[lookup + 20 * i : lookup + 20 * (i + 1)].hex()
+            for i in range((records - lookup) // 20)
+        ]
+        entry = records + oids.index(unattested) * 36
+        data[entry : entry + 20] = bytes.fromhex(
+            _fixture_git(root, "rev-parse", f"{epoch}^{{tree}}")
+        )
+        graph.chmod(0o644)
+        graph.write_bytes(bytes(data))
+        # The graph now hides the commit from git's own walk.
+        assert _fixture_git(
+            root, "log", "--full-history", "--format=%H", f"{epoch}..HEAD", "--", "records/"
+        ).split() == [attested]
+    
+&gt;       assert _in_scope(root) == [attested, unattested]
+E       AssertionError: assert ['fc566e8bfe9...ede07c6aabd1'] == ['fc566e8bfe9...0525c6d4392f']
+E         
+E         Right contains one more item: 'ad7375fccf3c8312378751da2f8c0525c6d4392f'
+E         Use -v to get more diff
+
+../../tests/test_attest.py:884: AssertionError</failure></testcase><testcase classname="tests.test_attest" name="test_an_inherited_git_variable_does_not_move_the_sweep[GIT_DIR]" time="52.619"><failure message="AssertionError: assert 'Someone/else' == 'MaxGhenis/brier'&#10;  &#10;  - MaxGhenis/brier&#10;  + Someone/else">tmp_path = PosixPath('/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/mutation-attest/tmp-base/test_an_inherited_git_variable0')
+monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x2e0fc729710&gt;
+variable = 'GIT_DIR'
+
+    @pytest.mark.parametrize("variable", ["GIT_DIR", "GIT_GRAFT_FILE", "GIT_REPLACE_REF_BASE"])
+    def test_an_inherited_git_variable_does_not_move_the_sweep(
+        tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, variable: str
+    ) -&gt; None:
+        """Every inherited GIT_* variable is dropped: the sweep and the slug are
+        about the repository ``root`` names."""
+    
+        root = tmp_path / "full"
+        ids = _fixture_history(root)
+        if variable == "GIT_DIR":
+            other = tmp_path / "other"
+            _fixture_history(other, origin="Someone/else")
+            _fixture_git(other, "reset", "--quiet", "--hard", "HEAD~2")
+            value = str(other / ".git")
+        elif variable == "GIT_GRAFT_FILE":
+            grafts = tmp_path / "grafts"
+            grafts.write_text(f"{ids['unattested']}\n")
+            value = str(grafts)
+        else:
+            _replace_unattested(root, ids, f"refs/elsewhere/{ids['unattested']}")
+            value = "refs/elsewhere/"
+        monkeypatch.setenv(variable, value)
+    
+&gt;       assert repository_slug(root) == "MaxGhenis/brier"
+E       AssertionError: assert 'Someone/else' == 'MaxGhenis/brier'
+E         
+E         - MaxGhenis/brier
+E         + Someone/else
+
+../../tests/test_attest.py:910: AssertionError</failure></testcase><testcase classname="tests.test_attest" name="test_an_inherited_git_variable_does_not_move_the_sweep[GIT_GRAFT_FILE]" time="28.829"><failure message="AssertionError: assert '0e2c0c712ae9...eef7226631e16' == 'abc95743c276...fc4137ad453d3'&#10;  &#10;  - abc95743c276cad06c199bf3456fc4137ad453d3&#10;  + 0e2c0c712ae9746fd64ba761026eef7226631e16">tmp_path = PosixPath('/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/mutation-attest/tmp-base/test_an_inherited_git_variable1')
+monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x2e0fc72b610&gt;
+variable = 'GIT_GRAFT_FILE'
+
+    @pytest.mark.parametrize("variable", ["GIT_DIR", "GIT_GRAFT_FILE", "GIT_REPLACE_REF_BASE"])
+    def test_an_inherited_git_variable_does_not_move_the_sweep(
+        tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, variable: str
+    ) -&gt; None:
+        """Every inherited GIT_* variable is dropped: the sweep and the slug are
+        about the repository ``root`` names."""
+    
+        root = tmp_path / "full"
+        ids = _fixture_history(root)
+        if variable == "GIT_DIR":
+            other = tmp_path / "other"
+            _fixture_history(other, origin="Someone/else")
+            _fixture_git(other, "reset", "--quiet", "--hard", "HEAD~2")
+            value = str(other / ".git")
+        elif variable == "GIT_GRAFT_FILE":
+            grafts = tmp_path / "grafts"
+            grafts.write_text(f"{ids['unattested']}\n")
+            value = str(grafts)
+        else:
+            _replace_unattested(root, ids, f"refs/elsewhere/{ids['unattested']}")
+            value = "refs/elsewhere/"
+        monkeypatch.setenv(variable, value)
+    
+        assert repository_slug(root) == "MaxGhenis/brier"
+&gt;       assert enforcement_epoch(root, spec=_spec()) == ids["epoch"]
+E       AssertionError: assert '0e2c0c712ae9...eef7226631e16' == 'abc95743c276...fc4137ad453d3'
+E         
+E         - abc95743c276cad06c199bf3456fc4137ad453d3
+E         + 0e2c0c712ae9746fd64ba761026eef7226631e16
+
+../../tests/test_attest.py:911: AssertionError</failure></testcase><testcase classname="tests.test_attest" name="test_an_inherited_git_variable_does_not_move_the_sweep[GIT_REPLACE_REF_BASE]" time="33.159"><failure message="AssertionError: assert ['ba282e7e4a9...0b2192fbc026'] == ['0e2c0c712ae...0b2192fbc026']&#10;  &#10;  At index 0 diff: 'ba282e7e4a912e2b7bfbd323e6a70b2192fbc026' != '0e2c0c712ae9746fd64ba761026eef7226631e16'&#10;  Right contains one more item: 'ba282e7e4a912e2b7bfbd323e6a70b2192fbc026'&#10;  Use -v to get more diff">tmp_path = PosixPath('/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/mutation-attest/tmp-base/test_an_inherited_git_variable2')
+monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x2e0fc72bd10&gt;
+variable = 'GIT_REPLACE_REF_BASE'
+
+    @pytest.mark.parametrize("variable", ["GIT_DIR", "GIT_GRAFT_FILE", "GIT_REPLACE_REF_BASE"])
+    def test_an_inherited_git_variable_does_not_move_the_sweep(
+        tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, variable: str
+    ) -&gt; None:
+        """Every inherited GIT_* variable is dropped: the sweep and the slug are
+        about the repository ``root`` names."""
+    
+        root = tmp_path / "full"
+        ids = _fixture_history(root)
+        if variable == "GIT_DIR":
+            other = tmp_path / "other"
+            _fixture_history(other, origin="Someone/else")
+            _fixture_git(other, "reset", "--quiet", "--hard", "HEAD~2")
+            value = str(other / ".git")
+        elif variable == "GIT_GRAFT_FILE":
+            grafts = tmp_path / "grafts"
+            grafts.write_text(f"{ids['unattested']}\n")
+            value = str(grafts)
+        else:
+            _replace_unattested(root, ids, f"refs/elsewhere/{ids['unattested']}")
+            value = "refs/elsewhere/"
+        monkeypatch.setenv(variable, value)
+    
+        assert repository_slug(root) == "MaxGhenis/brier"
+        assert enforcement_epoch(root, spec=_spec()) == ids["epoch"]
+&gt;       assert _in_scope(root) == [ids["unattested"], ids["attested"]]
+E       AssertionError: assert ['ba282e7e4a9...0b2192fbc026'] == ['0e2c0c712ae...0b2192fbc026']
+E         
+E         At index 0 diff: 'ba282e7e4a912e2b7bfbd323e6a70b2192fbc026' != '0e2c0c712ae9746fd64ba761026eef7226631e16'
+E         Right contains one more item: 'ba282e7e4a912e2b7bfbd323e6a70b2192fbc026'
+E         Use -v to get more diff
+
+../../tests/test_attest.py:912: AssertionError</failure></testcase><testcase classname="tests.test_attest" name="test_option_shaped_arguments_are_read_as_revisions" time="31.981"><failure message="Failed: DID NOT RAISE CalledProcessError">tmp_path = PosixPath('/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/mutation-attest/tmp-base/test_option_shaped_arguments_a0')
+
+    def test_option_shaped_arguments_are_read_as_revisions(tmp_path: pathlib.Path) -&gt; None:
+        """``--author=nobody..`` used to reach git as an option and empty the
+        sweep; after ``--end-of-options`` git refuses it as a revision."""
+    
+        root = tmp_path / "full"
+        ids = _fixture_history(root)
+&gt;       with pytest.raises(subprocess.CalledProcessError) as caught:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE CalledProcessError
+
+../../tests/test_attest.py:921: Failed</failure></testcase><testcase classname="tests.test_attest" name="test_the_sweep_is_invariant_under_ambient_git_state_exhaustively" time="90.701"><failure message="AssertionError: assert '0e2c0c712ae9...eef7226631e16' == 'abc95743c276...fc4137ad453d3'&#10;  &#10;  - abc95743c276cad06c199bf3456fc4137ad453d3&#10;  + 0e2c0c712ae9746fd64ba761026eef7226631e16">tmp_path = PosixPath('/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/mutation-attest/tmp-base/test_the_sweep_is_invariant_un0')
+monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x2e0fc72bf10&gt;
+
+    def test_the_sweep_is_invariant_under_ambient_git_state_exhaustively(
+        tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -&gt; None:
+        """For two histories (linear, and an unattested commit on a merged side
+        branch), every subset of four inherited variables that can each move a
+        git read (``GIT_DIR``, ``GIT_OBJECT_DIRECTORY``, ``GIT_GRAFT_FILE``,
+        ``GIT_REPLACE_REF_BASE``), and a ``refs/replace/`` ref present or absent:
+        2 × 16 × 2 = 64 sweeps. In every one the epoch is the commit that added
+        the checker, and the commits in scope are exactly the reference's
+        records commits after it, the unattested one included."""
+    
+        histories: dict[str, tuple[pathlib.Path, dict[str, str]]] = {}
+        linear = tmp_path / "linear"
+        histories["linear"] = (linear, _fixture_history(linear))
+        merged = tmp_path / "merged"
+        ids = _fixture_history(merged)
+        _fixture_git(merged, "checkout", "--quiet", "-b", "side", ids["epoch"])
+        ids["side"] = _fixture_commit(merged, "records/side.json", "side", 1_900_000_400)
+        _fixture_git(merged, "checkout", "--quiet", "main")
+        _fixture_git(merged, "merge", "--quiet", "--no-ff", "-m", "merge side", "side", timestamp=1_900_000_500)
+        histories["merged"] = (merged, ids)
+    
+        other = tmp_path / "other"
+        _fixture_history(other, origin="Someone/else")
+        _fixture_git(other, "reset", "--quiet", "--hard", "HEAD~2")
+        grafts = tmp_path / "grafts"
+        values = {
+            "GIT_DIR": str(other / ".git"),
+            "GIT_OBJECT_DIRECTORY": str(other / ".git" / "objects"),
+            "GIT_GRAFT_FILE": str(grafts),
+            "GIT_REPLACE_REF_BASE": "refs/elsewhere/",
+        }
+        sweeps = 0
+        for name, (root, history) in histories.items():
+            hidden = history["side"] if name == "merged" else history["unattested"]
+            grafts.write_text(f"{history['unattested']}\n")
+            expected = _reference_records(root, f"{history['epoch']}..HEAD")
+            assert hidden in expected
+            for replaced in (False, True):
+                if replaced:
+                    for ref in (f"refs/replace/{hidden}", f"refs/elsewhere/{hidden}"):
+                        parent = _fixture_git(root, "rev-parse", f"{hidden}^")
+                        substitute = _fixture_git(
+                            root,
+                            "commit-tree",
+                            _fixture_git(root, "rev-parse", f"{parent}^{{tree}}"),
+                            "-p",
+                            parent,
+                            "-m",
+                            "substitute",
+                        )
+                        _fixture_git(root, "update-ref", ref, substitute)
+                for chosen in itertools.product((False, True), repeat=len(values)):
+                    with monkeypatch.context() as patch:
+                        for (variable, value), on in zip(values.items(), chosen):
+                            if on:
+                                patch.setenv(variable, value)
+                        assert repository_slug(root) == "MaxGhenis/brier"
+&gt;                       assert enforcement_epoch(root, spec=_spec()) == history["epoch"]
+E                       AssertionError: assert '0e2c0c712ae9...eef7226631e16' == 'abc95743c276...fc4137ad453d3'
+E                         
+E                         - abc95743c276cad06c199bf3456fc4137ad453d3
+E                         + 0e2c0c712ae9746fd64ba761026eef7226631e16
+
+../../tests/test_attest.py:1013: AssertionError</failure></testcase></testsuite></testsuites>

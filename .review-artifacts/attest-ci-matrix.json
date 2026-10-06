@@ -1,0 +1,44 @@
+{
+  "head": "1b6cbd08e41a50d04215f64528fa6ffa09014152",
+  "cwd": "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2",
+  "versions": {
+    "3.11": {
+      "python": "Python 3.11.15",
+      "module": "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/src/receipt/attest.py",
+      "counts": {
+        "tests": 92,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "elapsed_seconds": "169.366",
+      "commands": {
+        "sync": "env UV_CACHE_DIR=\"$PWD/.review-artifacts/uv-cache\" UV_PROJECT_ENVIRONMENT=\"$PWD/.review-artifacts/ci311\" uv sync --python /Users/maxghenis/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11 --extra dev > .review-artifacts/ci311-sync.log 2>&1",
+        "test": "env UV_CACHE_DIR=\"$PWD/.review-artifacts/uv-cache\" UV_PROJECT_ENVIRONMENT=\"$PWD/.review-artifacts/ci311\" RECEIPT_BRIER_TREE=\"$PWD/.review-artifacts/mutation-attest/oracle-brier\" uv run --python /Users/maxghenis/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11 pytest -q tests/test_attest.py tests/test_attest_equivalence.py --basetemp=\"$PWD/.review-artifacts/ci311-test-temp\" --junitxml=\"$PWD/.review-artifacts/ci311-attest.xml\" > .review-artifacts/ci311-attest.log 2>&1"
+      },
+      "sync_exit": 0,
+      "test_exit": 0,
+      "xml": "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci311-attest.xml",
+      "log": "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci311-attest.log"
+    },
+    "3.12": {
+      "python": "Python 3.12.14",
+      "module": "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/src/receipt/attest.py",
+      "counts": {
+        "tests": 92,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "elapsed_seconds": "170.512",
+      "commands": {
+        "sync": "env UV_CACHE_DIR=\"$PWD/.review-artifacts/uv-cache\" UV_PROJECT_ENVIRONMENT=\"$PWD/.review-artifacts/ci312\" uv sync --python /opt/homebrew/bin/python3.12 --extra dev > .review-artifacts/ci312-sync.log 2>&1",
+        "test": "env UV_CACHE_DIR=\"$PWD/.review-artifacts/uv-cache\" UV_PROJECT_ENVIRONMENT=\"$PWD/.review-artifacts/ci312\" RECEIPT_BRIER_TREE=\"$PWD/.review-artifacts/mutation-attest/oracle-brier\" uv run --python /opt/homebrew/bin/python3.12 pytest -q tests/test_attest.py tests/test_attest_equivalence.py --basetemp=\"$PWD/.review-artifacts/ci312-test-temp\" --junitxml=\"$PWD/.review-artifacts/ci312-attest.xml\" > .review-artifacts/ci312-attest.log 2>&1"
+      },
+      "sync_exit": 0,
+      "test_exit": 0,
+      "xml": "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci312-attest.xml",
+      "log": "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci312-attest.log"
+    }
+  }
+}

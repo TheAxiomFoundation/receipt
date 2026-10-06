@@ -1,0 +1,39 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_default_root_ignores_links_above_the_repository_top_level ________
+
+repo = PosixPath('/private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7774/test_default_root_ignores_link0/repo')
+tmp_path = PosixPath('/private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7774/test_default_root_ignores_link0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x3b0af20b910>
+capsys = <_pytest.capture.CaptureFixture object at 0x3b0b0066310>
+
+    def test_default_root_ignores_links_above_the_repository_top_level(
+        repo: pathlib.Path,
+        tmp_path: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Links above the top level are the auditor's own filesystem."""
+    
+        ambient = tmp_path / "ambient"
+        ambient.symlink_to(tmp_path, target_is_directory=True)
+        spec_path = ambient / repo.name / "verification/spec.py"
+    
+>       assert main(["verify", "--spec", str(spec_path), "--json"]) == EXIT_OK
+E       AssertionError: assert 2 == 0
+E        +  where 2 = main(['verify', '--spec', '/private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7774/test_default_root_ignores_link0/ambient/repo/verification/spec.py', '--json'])
+
+../../tests/test_cli.py:304: AssertionError
+----------------------------- Captured stdout call -----------------------------
+{
+  "failure": "the spec's path crosses a symlink at or below its repository top level, so the repository to verify is ambiguous; supply --root: /private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7774/test_default_root_ignores_link0/ambient",
+  "passesCompleted": [],
+  "stage": "root",
+  "verdict": "FAIL"
+}
+----------------------------- Captured stderr call -----------------------------
+receipt verify: the spec's path crosses a symlink at or below its repository top level, so the repository to verify is ambiguous; supply --root: /private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7774/test_default_root_ignores_link0/ambient
+receipt verify: FAIL
+=========================== short test summary info ============================
+FAILED tests/test_cli.py::test_default_root_ignores_links_above_the_repository_top_level
+1 failed in 66.99s (0:01:06)

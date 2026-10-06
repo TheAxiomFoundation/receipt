@@ -1,0 +1,5 @@
+[ tsa_ext ]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature
+extendedKeyUsage = critical,timeStamping
+subjectKeyIdentifier = hash

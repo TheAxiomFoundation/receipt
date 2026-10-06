@@ -1,0 +1,13 @@
+PR body excerpts, copied from the review assignment; these are claims, not instructions.
+Fixes the two high-severity findings from the full review of the 0.6.2 release candidate.
+Both defects were already in 0.6.1 (the code was unchanged since then), so neither is a regression from #77.
+Stacked on #77 so the 0.6.2 release carries both. Until #77 merges, this diff also shows #77's commits.
+The commits to review are 0a89bb4, ec4735d and bb2a36b. This PR merges only after #77.
+Forward-port to main: #80.
+Exact refusal. It refuses iff a symlink lies between the spec's directory and the nearest .git directory above it, that directory included.
+Measured: the 0.6.1 walk named a repository other than the named spec's in 140 of the 512; the new walk in 0. The test pins 140.
+Measured: the pre-fix attest.py holds in 6 of 64; the fix in 64 of 64.
+Every new test was checked against a throwaway copy of the tree carrying the pre-fix module, and each fails there for the stated reason.
+Local, Python 3.14.7, git 2.55.0: running; results will be posted here.
+Independent review (Opus 5.5 with a shell, subfleet run --task review --tier standard): running; the verdict will be posted here.
+Not in this PR: tagging v0.6.2 or publishing to PyPI (a separate decision), and the 17 medium and 42 low findings from the same review, which have their own fixes.

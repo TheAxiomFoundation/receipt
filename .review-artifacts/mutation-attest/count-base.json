@@ -1,0 +1,983 @@
+{
+  "passed": 6,
+  "failed": 58,
+  "total": 64,
+  "cases": [
+    {
+      "history": "linear",
+      "replaced": false,
+      "chosen": [
+        false,
+        false,
+        false,
+        false
+      ],
+      "pass": true,
+      "checks": [
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": false,
+      "chosen": [
+        false,
+        false,
+        false,
+        true
+      ],
+      "pass": true,
+      "checks": [
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": false,
+      "chosen": [
+        false,
+        false,
+        true,
+        false
+      ],
+      "pass": false,
+      "checks": [
+        true,
+        false,
+        false
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": false,
+      "chosen": [
+        false,
+        false,
+        true,
+        true
+      ],
+      "pass": false,
+      "checks": [
+        true,
+        false,
+        false
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": false,
+      "chosen": [
+        false,
+        true,
+        false,
+        false
+      ],
+      "pass": true,
+      "checks": [
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": false,
+      "chosen": [
+        false,
+        true,
+        false,
+        true
+      ],
+      "pass": true,
+      "checks": [
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": false,
+      "chosen": [
+        false,
+        true,
+        true,
+        false
+      ],
+      "pass": false,
+      "checks": [
+        true,
+        false,
+        false
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": false,
+      "chosen": [
+        false,
+        true,
+        true,
+        true
+      ],
+      "pass": false,
+      "checks": [
+        true,
+        false,
+        false
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": false,
+      "chosen": [
+        true,
+        false,
+        false,
+        false
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": false,
+      "chosen": [
+        true,
+        false,
+        false,
+        true
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": false,
+      "chosen": [
+        true,
+        false,
+        true,
+        false
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": false,
+      "chosen": [
+        true,
+        false,
+        true,
+        true
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": false,
+      "chosen": [
+        true,
+        true,
+        false,
+        false
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": false,
+      "chosen": [
+        true,
+        true,
+        false,
+        true
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": false,
+      "chosen": [
+        true,
+        true,
+        true,
+        false
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": false,
+      "chosen": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": true,
+      "chosen": [
+        false,
+        false,
+        false,
+        false
+      ],
+      "pass": false,
+      "checks": [
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": true,
+      "chosen": [
+        false,
+        false,
+        false,
+        true
+      ],
+      "pass": false,
+      "checks": [
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": true,
+      "chosen": [
+        false,
+        false,
+        true,
+        false
+      ],
+      "pass": false,
+      "checks": [
+        true,
+        false,
+        false
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": true,
+      "chosen": [
+        false,
+        false,
+        true,
+        true
+      ],
+      "pass": false,
+      "checks": [
+        true,
+        false,
+        false
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": true,
+      "chosen": [
+        false,
+        true,
+        false,
+        false
+      ],
+      "pass": false,
+      "exception": "CalledProcessError",
+      "message": "Command '['git', 'log', '--full-history', '--diff-filter=A', '--format=%H', '--', 'scripts/verify_records_attestations.py']' returned non-zero exit status 128."
+    },
+    {
+      "history": "linear",
+      "replaced": true,
+      "chosen": [
+        false,
+        true,
+        false,
+        true
+      ],
+      "pass": false,
+      "exception": "CalledProcessError",
+      "message": "Command '['git', 'log', '--full-history', '--diff-filter=A', '--format=%H', '--', 'scripts/verify_records_attestations.py']' returned non-zero exit status 128."
+    },
+    {
+      "history": "linear",
+      "replaced": true,
+      "chosen": [
+        false,
+        true,
+        true,
+        false
+      ],
+      "pass": false,
+      "exception": "CalledProcessError",
+      "message": "Command '['git', 'log', '--full-history', '--diff-filter=A', '--format=%H', '--', 'scripts/verify_records_attestations.py']' returned non-zero exit status 128."
+    },
+    {
+      "history": "linear",
+      "replaced": true,
+      "chosen": [
+        false,
+        true,
+        true,
+        true
+      ],
+      "pass": false,
+      "exception": "CalledProcessError",
+      "message": "Command '['git', 'log', '--full-history', '--diff-filter=A', '--format=%H', '--', 'scripts/verify_records_attestations.py']' returned non-zero exit status 128."
+    },
+    {
+      "history": "linear",
+      "replaced": true,
+      "chosen": [
+        true,
+        false,
+        false,
+        false
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": true,
+      "chosen": [
+        true,
+        false,
+        false,
+        true
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": true,
+      "chosen": [
+        true,
+        false,
+        true,
+        false
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": true,
+      "chosen": [
+        true,
+        false,
+        true,
+        true
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": true,
+      "chosen": [
+        true,
+        true,
+        false,
+        false
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": true,
+      "chosen": [
+        true,
+        true,
+        false,
+        true
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": true,
+      "chosen": [
+        true,
+        true,
+        true,
+        false
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "linear",
+      "replaced": true,
+      "chosen": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "merged",
+      "replaced": false,
+      "chosen": [
+        false,
+        false,
+        false,
+        false
+      ],
+      "pass": true,
+      "checks": [
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "history": "merged",
+      "replaced": false,
+      "chosen": [
+        false,
+        false,
+        false,
+        true
+      ],
+      "pass": true,
+      "checks": [
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "history": "merged",
+      "replaced": false,
+      "chosen": [
+        false,
+        false,
+        true,
+        false
+      ],
+      "pass": false,
+      "exception": "ProvenanceError",
+      "message": "enforcement epoch must be exactly one introducing commit for scripts/verify_records_attestations.py; found 2"
+    },
+    {
+      "history": "merged",
+      "replaced": false,
+      "chosen": [
+        false,
+        false,
+        true,
+        true
+      ],
+      "pass": false,
+      "exception": "ProvenanceError",
+      "message": "enforcement epoch must be exactly one introducing commit for scripts/verify_records_attestations.py; found 2"
+    },
+    {
+      "history": "merged",
+      "replaced": false,
+      "chosen": [
+        false,
+        true,
+        false,
+        false
+      ],
+      "pass": false,
+      "exception": "CalledProcessError",
+      "message": "Command '['git', 'log', '--full-history', '--diff-filter=A', '--format=%H', '--', 'scripts/verify_records_attestations.py']' returned non-zero exit status 128."
+    },
+    {
+      "history": "merged",
+      "replaced": false,
+      "chosen": [
+        false,
+        true,
+        false,
+        true
+      ],
+      "pass": false,
+      "exception": "CalledProcessError",
+      "message": "Command '['git', 'log', '--full-history', '--diff-filter=A', '--format=%H', '--', 'scripts/verify_records_attestations.py']' returned non-zero exit status 128."
+    },
+    {
+      "history": "merged",
+      "replaced": false,
+      "chosen": [
+        false,
+        true,
+        true,
+        false
+      ],
+      "pass": false,
+      "exception": "CalledProcessError",
+      "message": "Command '['git', 'log', '--full-history', '--diff-filter=A', '--format=%H', '--', 'scripts/verify_records_attestations.py']' returned non-zero exit status 128."
+    },
+    {
+      "history": "merged",
+      "replaced": false,
+      "chosen": [
+        false,
+        true,
+        true,
+        true
+      ],
+      "pass": false,
+      "exception": "CalledProcessError",
+      "message": "Command '['git', 'log', '--full-history', '--diff-filter=A', '--format=%H', '--', 'scripts/verify_records_attestations.py']' returned non-zero exit status 128."
+    },
+    {
+      "history": "merged",
+      "replaced": false,
+      "chosen": [
+        true,
+        false,
+        false,
+        false
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "merged",
+      "replaced": false,
+      "chosen": [
+        true,
+        false,
+        false,
+        true
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "merged",
+      "replaced": false,
+      "chosen": [
+        true,
+        false,
+        true,
+        false
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "merged",
+      "replaced": false,
+      "chosen": [
+        true,
+        false,
+        true,
+        true
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "merged",
+      "replaced": false,
+      "chosen": [
+        true,
+        true,
+        false,
+        false
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "merged",
+      "replaced": false,
+      "chosen": [
+        true,
+        true,
+        false,
+        true
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "merged",
+      "replaced": false,
+      "chosen": [
+        true,
+        true,
+        true,
+        false
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "merged",
+      "replaced": false,
+      "chosen": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "merged",
+      "replaced": true,
+      "chosen": [
+        false,
+        false,
+        false,
+        false
+      ],
+      "pass": false,
+      "checks": [
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "merged",
+      "replaced": true,
+      "chosen": [
+        false,
+        false,
+        false,
+        true
+      ],
+      "pass": false,
+      "checks": [
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "merged",
+      "replaced": true,
+      "chosen": [
+        false,
+        false,
+        true,
+        false
+      ],
+      "pass": false,
+      "exception": "ProvenanceError",
+      "message": "enforcement epoch must be exactly one introducing commit for scripts/verify_records_attestations.py; found 2"
+    },
+    {
+      "history": "merged",
+      "replaced": true,
+      "chosen": [
+        false,
+        false,
+        true,
+        true
+      ],
+      "pass": false,
+      "exception": "ProvenanceError",
+      "message": "enforcement epoch must be exactly one introducing commit for scripts/verify_records_attestations.py; found 2"
+    },
+    {
+      "history": "merged",
+      "replaced": true,
+      "chosen": [
+        false,
+        true,
+        false,
+        false
+      ],
+      "pass": false,
+      "exception": "CalledProcessError",
+      "message": "Command '['git', 'log', '--full-history', '--diff-filter=A', '--format=%H', '--', 'scripts/verify_records_attestations.py']' returned non-zero exit status 128."
+    },
+    {
+      "history": "merged",
+      "replaced": true,
+      "chosen": [
+        false,
+        true,
+        false,
+        true
+      ],
+      "pass": false,
+      "exception": "CalledProcessError",
+      "message": "Command '['git', 'log', '--full-history', '--diff-filter=A', '--format=%H', '--', 'scripts/verify_records_attestations.py']' returned non-zero exit status 128."
+    },
+    {
+      "history": "merged",
+      "replaced": true,
+      "chosen": [
+        false,
+        true,
+        true,
+        false
+      ],
+      "pass": false,
+      "exception": "CalledProcessError",
+      "message": "Command '['git', 'log', '--full-history', '--diff-filter=A', '--format=%H', '--', 'scripts/verify_records_attestations.py']' returned non-zero exit status 128."
+    },
+    {
+      "history": "merged",
+      "replaced": true,
+      "chosen": [
+        false,
+        true,
+        true,
+        true
+      ],
+      "pass": false,
+      "exception": "CalledProcessError",
+      "message": "Command '['git', 'log', '--full-history', '--diff-filter=A', '--format=%H', '--', 'scripts/verify_records_attestations.py']' returned non-zero exit status 128."
+    },
+    {
+      "history": "merged",
+      "replaced": true,
+      "chosen": [
+        true,
+        false,
+        false,
+        false
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "merged",
+      "replaced": true,
+      "chosen": [
+        true,
+        false,
+        false,
+        true
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "merged",
+      "replaced": true,
+      "chosen": [
+        true,
+        false,
+        true,
+        false
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "merged",
+      "replaced": true,
+      "chosen": [
+        true,
+        false,
+        true,
+        true
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "merged",
+      "replaced": true,
+      "chosen": [
+        true,
+        true,
+        false,
+        false
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "merged",
+      "replaced": true,
+      "chosen": [
+        true,
+        true,
+        false,
+        true
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "merged",
+      "replaced": true,
+      "chosen": [
+        true,
+        true,
+        true,
+        false
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "history": "merged",
+      "replaced": true,
+      "chosen": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "pass": false,
+      "checks": [
+        false,
+        true,
+        false
+      ]
+    }
+  ]
+}

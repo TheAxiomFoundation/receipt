@@ -1,0 +1,14 @@
+Using CPython 3.11.15 interpreter at: /Users/maxghenis/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11
+Creating virtual environment at: .review-artifacts/ci311
+Resolved 10 packages in 9ms
+Prepared 1 package in 1.18s
+Installed 9 packages in 3.27s
+ + cffi==2.1.1
+ + cryptography==50.0.2
+ + iniconfig==2.3.0
+ + packaging==26.3
+ + pluggy==1.6.0
+ + pycparser==3.0
+ + pygments==2.21.0
+ + pytest==9.1.1
+ + receipt==0.6.2 (from file:///Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2)

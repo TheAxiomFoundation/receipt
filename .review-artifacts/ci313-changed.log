@@ -1,0 +1,313 @@
+...........................Traceback (most recent call last):
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/main.py", line 330, in wrap_session
+    session.exitstatus = doit(config, session) or 0
+                         ~~~~^^^^^^^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/main.py", line 384, in _main
+    config.hook.pytest_runtestloop(session=session)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_callers.py", line 167, in _multicall
+    raise exception
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/logging.py", line 816, in pytest_runtestloop
+    return (yield)  # Run all the tests.
+            ^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/terminal.py", line 708, in pytest_runtestloop
+    result = yield
+             ^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/main.py", line 408, in pytest_runtestloop
+    item.config.hook.pytest_runtest_protocol(item=item, nextitem=nextitem)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_callers.py", line 167, in _multicall
+    raise exception
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/warnings.py", line 90, in pytest_runtest_protocol
+    return (yield)
+            ^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/assertion/__init__.py", line 205, in pytest_runtest_protocol
+    return (yield)
+            ^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/unittest.py", line 612, in pytest_runtest_protocol
+    return (yield)
+            ^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/faulthandler.py", line 102, in pytest_runtest_protocol
+    return (yield)
+            ^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/runner.py", line 118, in pytest_runtest_protocol
+    runtestprotocol(item, nextitem=nextitem)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/runner.py", line 132, in runtestprotocol
+    rep = call_and_report(item, "setup", log)
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/runner.py", line 249, in call_and_report
+    call = CallInfo.from_call(
+        lambda: runtest_hook(item=item, **kwds),
+        when=when,
+        reraise=get_reraise_exceptions(item.config),
+    )
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/runner.py", line 361, in from_call
+    result: TResult | None = func()
+                             ~~~~^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/runner.py", line 250, in <lambda>
+    lambda: runtest_hook(item=item, **kwds),
+            ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_callers.py", line 167, in _multicall
+    raise exception
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/logging.py", line 858, in pytest_runtest_setup
+    yield
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/capture.py", line 895, in pytest_runtest_setup
+    return (yield)
+            ^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/runner.py", line 170, in pytest_runtest_setup
+    item.session._setupstate.setup(item)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/runner.py", line 536, in setup
+    col.setup()
+    ~~~~~~~~~^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/python.py", line 1710, in setup
+    self._request._fillfixtures()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/fixtures.py", line 806, in _fillfixtures
+    item.funcargs[argname] = self.getfixturevalue(argname)
+                             ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/fixtures.py", line 630, in getfixturevalue
+    fixturedef = self._get_active_fixturedef(argname)
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/fixtures.py", line 726, in _get_active_fixturedef
+    fixturedef.execute(request=subrequest)
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/fixtures.py", line 1232, in execute
+    result: FixtureValue = ihook.pytest_fixture_setup(
+                           ~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        fixturedef=self, request=request
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_callers.py", line 167, in _multicall
+    raise exception
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/setuponly.py", line 36, in pytest_fixture_setup
+    return (yield)
+            ^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/fixtures.py", line 1328, in pytest_fixture_setup
+    result = call_fixture_func(fixturefunc, request, kwargs)
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/fixtures.py", line 1005, in call_fixture_func
+    fixture_result = fixturefunc(**kwargs)
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/tests/test_cli.py", line 53, in repo
+    shutil.copytree(built, destination, symlinks=True)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.15/Frameworks/Python.framework/Versions/3.13/lib/python3.13/shutil.py", line 593, in copytree
+    return _copytree(entries=entries, src=src, dst=dst, symlinks=symlinks,
+                     ignore=ignore, copy_function=copy_function,
+                     ignore_dangling_symlinks=ignore_dangling_symlinks,
+                     dirs_exist_ok=dirs_exist_ok)
+  File "/opt/homebrew/Cellar/python@3.13/3.13.15/Frameworks/Python.framework/Versions/3.13/lib/python3.13/shutil.py", line 529, in _copytree
+    copytree(srcobj, dstname, symlinks, ignore, copy_function,
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+             ignore_dangling_symlinks, dirs_exist_ok)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.15/Frameworks/Python.framework/Versions/3.13/lib/python3.13/shutil.py", line 593, in copytree
+    return _copytree(entries=entries, src=src, dst=dst, symlinks=symlinks,
+                     ignore=ignore, copy_function=copy_function,
+                     ignore_dangling_symlinks=ignore_dangling_symlinks,
+                     dirs_exist_ok=dirs_exist_ok)
+  File "/opt/homebrew/Cellar/python@3.13/3.13.15/Frameworks/Python.framework/Versions/3.13/lib/python3.13/shutil.py", line 529, in _copytree
+    copytree(srcobj, dstname, symlinks, ignore, copy_function,
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+             ignore_dangling_symlinks, dirs_exist_ok)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.15/Frameworks/Python.framework/Versions/3.13/lib/python3.13/shutil.py", line 593, in copytree
+    return _copytree(entries=entries, src=src, dst=dst, symlinks=symlinks,
+                     ignore=ignore, copy_function=copy_function,
+                     ignore_dangling_symlinks=ignore_dangling_symlinks,
+                     dirs_exist_ok=dirs_exist_ok)
+  File "/opt/homebrew/Cellar/python@3.13/3.13.15/Frameworks/Python.framework/Versions/3.13/lib/python3.13/shutil.py", line 529, in _copytree
+    copytree(srcobj, dstname, symlinks, ignore, copy_function,
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+             ignore_dangling_symlinks, dirs_exist_ok)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.15/Frameworks/Python.framework/Versions/3.13/lib/python3.13/shutil.py", line 592, in copytree
+    entries = list(itr)
+KeyboardInterrupt
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/main.py", line 344, in wrap_session
+    config.hook.pytest_keyboard_interrupt(excinfo=excinfo)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_callers.py", line 167, in _multicall
+    raise exception
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/terminal.py", line 1012, in pytest_keyboard_interrupt
+    self._keyboardinterrupt_memo = excinfo.getrepr(funcargs=True)
+                                   ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/_code/code.py", line 774, in getrepr
+    return fmt.repr_excinfo(self)
+           ~~~~~~~~~~~~~~~~^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/_code/code.py", line 1224, in repr_excinfo
+    reprtraceback = self.repr_traceback(excinfo_)
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/_code/code.py", line 1150, in repr_traceback
+    self.repr_traceback_entry(entry, excinfo if last == entry else None)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/_code/code.py", line 1080, in repr_traceback_entry
+    source = self._getentrysource(entry)
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/_code/code.py", line 916, in _getentrysource
+    source = entry.getsource(self.astcache)
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/_code/code.py", line 292, in getsource
+    source = self.frame.code.fullsource
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/_code/code.py", line 105, in fullsource
+    full, _ = findsource(self.raw)
+              ~~~~~~~~~~^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/_code/source.py", line 127, in findsource
+    sourcelines, lineno = inspect.findsource(obj)
+                          ~~~~~~~~~~~~~~~~~~^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.15/Frameworks/Python.framework/Versions/3.13/lib/python3.13/inspect.py", line 1081, in findsource
+    module = getmodule(object, file)
+  File "/opt/homebrew/Cellar/python@3.13/3.13.15/Frameworks/Python.framework/Versions/3.13/lib/python3.13/inspect.py", line 1028, in getmodule
+    for modname, module in sys.modules.copy().items():
+                           ~~~~~~~~~~~~~~~~^^
+KeyboardInterrupt
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/bin/pytest", line 10, in <module>
+    sys.exit(_console_main())
+             ~~~~~~~~~~~~~^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/config/__init__.py", line 253, in _console_main
+    code = _main(prog=_get_prog_name(sys.argv))
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/config/__init__.py", line 229, in _main
+    ret: ExitCode | int = config.hook.pytest_cmdline_main(config=config)
+                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_callers.py", line 167, in _multicall
+    raise exception
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/main.py", line 377, in pytest_cmdline_main
+    return wrap_session(config, _main)
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/main.py", line 365, in wrap_session
+    config.hook.pytest_sessionfinish(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        session=session, exitstatus=session.exitstatus
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_callers.py", line 167, in _multicall
+    raise exception
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/logging.py", line 888, in pytest_sessionfinish
+    return (yield)
+            ^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/terminal.py", line 961, in pytest_sessionfinish
+    result = yield
+             ^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/warnings.py", line 119, in pytest_sessionfinish
+    return (yield)
+            ^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/runner.py", line 112, in pytest_sessionfinish
+    session._setupstate.teardown_exact(None)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/runner.py", line 579, in teardown_exact
+    raise exceptions[0]
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/runner.py", line 568, in teardown_exact
+    fin()
+    ~~~^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/fixtures.py", line 1166, in finish
+    raise exceptions[0]
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/fixtures.py", line 1156, in finish
+    fin()
+    ~~~^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/fixtures.py", line 1014, in _teardown_yield_fixture
+    next(it)
+    ~~~~^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/tmpdir.py", line 305, in tmp_path
+    result_dict = request.node.stash[tmppath_result_key]
+                  ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/ci313/lib/python3.13/site-packages/_pytest/stash.py", line 84, in __getitem__
+    return cast(T, self._storage[key])
+                   ~~~~~~~~~~~~~^^^^^
+KeyError: <_pytest.stash.StashKey object at 0x1082bfda0>

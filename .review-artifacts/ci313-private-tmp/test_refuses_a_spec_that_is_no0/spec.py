@@ -1,0 +1,1 @@
+SPEC = {'chain': 'trust me'}

@@ -1,0 +1,1103 @@
+"""Differential harness for brier's RFC 3161 witness verifier.
+
+Baseline = ``MaxGhenis/brier``'s unmodified
+``scripts/verify_record_chain.py`` at commit
+``4b9e7be22debc8349e76b8bdfe5a0fe18ed31a3f``.  Candidate = a thin
+harness-local chain walk composed with :mod:`receipt.tsa` and
+:mod:`receipt.sign`.  The brier values below are the consumer-committed spec;
+the package contains none of them.
+
+Comparison contract, stated exactly:
+
+- exit status must match (0 accept, 1 refuse);
+- on refusal, the baseline CLI's stderr must equal the candidate exception
+  message byte for byte after two stated normalizations, and baseline stdout
+  must be empty: surrounding whitespace is stripped from both captured
+  messages, and OpenSSL 3's volatile 8--16 hexadecimal error-queue identifier
+  before ``:error:`` is masked at the start of embedded error lines;
+- on acceptance, the baseline stdout summary must equal the summary composed
+  from the candidate return value byte for byte, and baseline stderr is empty;
+- the package port is a silent library: stdout and stderr remain empty around
+  candidate calls (asserted with ``capfd``); subprocesses capture their own
+  streams.
+
+The clean tree has 53 snapshots, 52 available witnesses, and 91 real tokens.
+It also has armed producer signing: the final snapshot's production signature
+is verified here through :mod:`receipt.sign`, not through copied oracle code.
+Every mutation returns an empirically observed refusal marker, and the battery
+is ordered by the verifier's check order.
+
+Deliberately outside the mutation contract:
+
+- witness objects are open-world in the oracle; an unknown top-level field is
+  accepted, so there is no refusal branch to bind;
+- the baseline's unavailable path, v1 and the v2 witness level alike, tests
+  ``reason`` for truth and nothing else, so it accepts a non-string reason
+  and any token-looking field beside it; the port refuses both at every
+  level, which is what the v2 per-anchor outcome contract has always
+  required.  The genesis witness (the tree's only unavailable one, and v1)
+  carries neither, so every case below still agrees byte for byte; a
+  mutation introducing one would assert only that the port is deliberately
+  stricter, which belongs in ``tests/test_tsa.py`` and not in a
+  differential contract;
+- the baseline verifies exactly one token for a v1 witness whatever the
+  bundle configures; the port refuses a v1 witness over a bundle that
+  configures more than one anchor.  The pinned v1 bundle configures one, so
+  no case here can reach the refusal, and a future tree that adds an anchor
+  to ``tsa-anchors-v1.json`` will fail this harness by design;
+- the baseline identity-checks only the anchor a witness selects; the port
+  requires a code identity for every anchor a bundle configures, at load.
+  Every pinned bundle anchor has one, and a mutation that adds an anchor
+  changes the bundle bytes and trips the commitment mismatch first, so the
+  battery executes the check on every case and can fire it on none;
+- the baseline compares an anchor's root SPKI and allowed signers with its
+  code identity only when a witness selects that anchor; the port compares
+  every anchor's declared values with its identity at bundle load, and
+  validates every anchor's root material there too, carrying the ported
+  material refusals inside a new load-time message.  Every pinned bundle
+  agrees with its identities and its roots verify, so no case here reaches
+  either;
+- the baseline pins a root PEM by its hash, its certificate hash and its
+  SPKI -- the last two describing the file's first certificate only -- and
+  then hands the whole file to ``openssl ts -verify -CAfile``, which trusts
+  every certificate in it; the port refuses a pinned root PEM unless
+  ``openssl storeutl -noout -certs`` counts exactly one certificate in it.
+  ``storeutl`` counts one in each pinned root
+  (``records/trust/freetsa-root-2016.pem`` and
+  ``records/trust/digicert-trusted-root-g4.pem``), so the refusal -- which
+  precedes the ported PEM-hash refusal, and the further refusal for a root
+  whose certificates ``storeutl`` cannot count at all -- fires on no case
+  here;
+- the baseline opens a pinned root five times to validate it and twice more
+  as a ``-CAfile``; the port reads it once and judges and trusts a private
+  byte-for-byte copy of those bytes, so the count, the hashes, the
+  certificate identity and the two ``-CAfile`` verifications are all about
+  one instant of one file.  Nothing is re-encoded (a re-encoding through
+  ``openssl x509`` was tried and withdrawn: it dropped X509_AUX settings),
+  and each pinned root's one certificate is the certificate its own
+  ``certificateSha256`` already pins (``a6379e7c...`` and ``552f7bdc...``),
+  so the copy carries the same trust anchor the baseline passed, byte for
+  byte, and no case's outcome moves.  Only the ``-CAfile`` argument's spelling
+  changes, and no compared message quotes it: every mutation here that reaches
+  OpenSSL either succeeds or is caught by the deterministic token-hash refusal
+  first, and none mutates a root PEM.  The port also walks the root's path
+  from the records root down and refuses a symlinked component (sixth gate
+  round one); both pinned roots sit directly in ``records/trust`` and neither
+  ``trust`` nor either file is a link, so no case here reaches it;
+- the baseline opens the record under witness four times -- to hash it for the
+  digest claim, to read the trust-bundle updates it carries, to read its
+  creation claims, and once more through ``openssl ts -verify -data`` -- and
+  the port reads it once and hands ``-data`` a private byte-for-byte copy of
+  those bytes.  OpenSSL computes the same imprint over the same content, so no
+  case's outcome moves; only the ``-data`` argument's spelling changes, and by
+  the paragraph above no compared message quotes an OpenSSL command line.  The
+  port also refuses a record that is not a readable regular file, where the
+  baseline let the hash raise ``OSError``, and refuses one whose path reaches
+  it through a symlinked component below the records root (sixth gate round
+  one); the chain walk enumerates the records it goes on to verify, and the
+  53 record paths in this tree pass through no link, so no case here presents
+  either.  The parse of
+  those bytes goes through the same ``TextIOWrapper`` ``Path.read_text``
+  builds -- same locale encoding, same universal-newline translation -- so
+  ``load_json``'s two refusals render byte for byte as the baseline renders
+  them, offsets included;
+- the baseline hashes a claimed ``TimeStampResp`` through one open of its
+  pathname and then lets ``openssl ts -reply`` and ``openssl ts -verify`` open
+  it twice more; the port reads it once and gives both of them a private
+  byte-for-byte copy.  The bytes are the same bytes, so every case's outcome
+  is unchanged; only the ``-in`` argument's spelling changes, and again no
+  compared message quotes an OpenSSL command line -- the flip and truncation
+  mutations retain the committed hash on purpose and bind the deterministic
+  token-hash refusal before OpenSSL is reached.  Its path is walked component
+  by component too, and the 91 declared token paths reach their files through
+  no link either -- across all three walked kinds this tree presents 161
+  distinct components below the records root and not one of them is a symlink
+  (sixth gate round one);
+- the baseline opens all three of those files by name and waits on the open;
+  the port opens each with ``O_NONBLOCK`` where the platform has the flag and
+  clears it again once ``fstat`` has judged the descriptor, so a file replaced
+  by a FIFO between a path-level check and the open is refused rather than
+  waited on indefinitely (peer review, fifth gate round one).  The flag
+  changes nothing about reading a regular file, and every file the harness
+  reads is one, so no case here moves;
+- the port also sets ``O_BINARY`` on those three opens and on the write of the
+  pinned root's private copy, where the platform has the flag (peer review,
+  fifth gate round two).  POSIX does not, so it is zero wherever this harness
+  runs and no case here can move on it; on Windows it is what keeps a ``\r\n``
+  or a ``0x1A`` in a record, a response or a root PEM from being translated
+  between the disk and the digest;
+- the component walk in front of those same three reads answered about
+  pathnames and the read then opened the whole path again, which recreated the
+  race the walk closed; the port now holds the records root open and opens
+  each checked interior component relative to the descriptor above it with
+  ``O_DIRECTORY | O_NOFOLLOW``, the leaf relative to the last of them, closing
+  every descriptor in a ``finally`` (sixth gate round two).  A component
+  exchanged for a link between the check and the descent keeps the walk's own
+  traversal words; one exchanged for a regular file is named by a message of
+  its own, ``{subject} component is not a directory at {component}: {path}``.
+  Nothing rewrites this tree under a running verification, so every descent
+  here reaches the object the walk checked and neither message fires.  The
+  records root itself is the boundary the caller named and may be a link, so
+  its own descriptor is the one open here without ``O_NOFOLLOW``, and the walk
+  ends at the root under the caller's spelling as well as under its resolution
+  (first Opus round); the harness resolves the records root before it starts,
+  and no case here spells one path through two sides of a link.  The bound
+  the walk is asked about is enforced rather than assumed in the same round: a
+  record path a consumer spells with a ``..`` that leaves the tree, or one the
+  walk never meets the root on at all, is refused with ``witnessed record path
+  is not below the records root`` in front of every open, the walk being
+  lexical and ``lstat`` blind to a component that is the root under another
+  name.  Every record path here comes from ``snapshot_paths``'s glob under the
+  resolved records root, or through ``physical_path``, which refuses ``..``
+  itself, so all 53 of them are below the root and no case reaches the
+  refusal;
+- the baseline reads the trust-bundle updates a record carries out of a
+  fresh open of that record whenever the chain walk hands them in; the port
+  derives them from the one read it hashed and verified, and requires a
+  supplied list to be *exactly* that derived set.  The rule was one-way when
+  it arrived -- every derived update had to appear in the supplied list, and
+  the list could hold more (peer review, fifth gate round two) -- and both
+  directions are checked now: an entry the call did not derive is refused by
+  name rather than evaluated, because a superset is precisely what made a
+  stale extra indistinguishable from an honest one (sixth gate round two).
+  ``verify_candidate`` below supplies ``[*pending, *current_updates]``, the
+  accumulated pending updates of earlier records plus this record's own,
+  parsed from the same payload the walk verified.  What makes that equal the
+  derived set at every step is not that it is a superset -- a superset is now
+  what is refused -- but that the walk clears ``pending`` at every available
+  witness, and the one record in this tree carrying a ``trustBundleUpdates``
+  entry has an available witness: ``pending`` is therefore empty at every one
+  of the 53 calls and the supplied list is this record's own updates and
+  nothing else.  A tree whose update arrived on a record with an *unavailable*
+  witness would reach the refusal here, by design, and the shape for it is the
+  step API below.  The derivation itself now
+  runs on every call rather than only when no list is supplied, so the ported
+  ``trustBundleUpdates`` refusals could in principle fire inside
+  ``verify_witness`` where they did not before; the walk runs
+  ``trust_bundle_updates`` on the same payload before the call, so any such
+  refusal still arrives from there first, in the same words.  The port also
+  offers a second public entry point, ``verify_witness_step``, which takes the
+  pending updates of *earlier* records as ``prior_pending_updates``, combines
+  them with the snapshot's own itself, and returns the snapshot-derived list
+  beside the evidence, so that no entry in the transition is one the
+  verification did not either derive or attribute to an earlier record (fifth
+  gate round three, made public in the sixth gate's round two).
+  ``verify_candidate`` keeps the supplied-list shape,
+  because that shape is the upstream's and this file mirrors the upstream; on
+  this tree the two evaluate the same transition, since the walk parses
+  ``current_updates`` from the payload it verified and the port derives the
+  same references from its own read of the same file, and what separates them
+  is only a record rewritten under the walk, which no case here does;
+- the port reads the three JSON inputs the verification depends on -- the
+  trust bundle, the witness sidecar, and the chain genesis -- through one
+  non-blocking ``fstat``-judged descriptor apiece rather than through
+  ``load_json``'s check-then-blocking-open, so all six files it both checks
+  and acts on are read the same way -- one descriptor, ``O_NONBLOCK``,
+  ``O_NOFOLLOW`` and ``O_BINARY`` where the platform has them, and the regular-
+  file rule decided by the ``fstat`` of that descriptor (fifth gate round
+  three).
+  ``load_json``'s own two parse refusals are produced over those bytes and
+  render byte for byte, as the record's already do; what changes is
+  ``load_json``'s ``OSError`` branch, which becomes the caller's own
+  path-level words, and a symlink at the final component, which
+  ``O_NOFOLLOW`` refuses where ``read_text`` followed it.  Genesis had no
+  path-level check at all and gains one in the same form.  All 56 of those
+  files in the pinned tree -- the genesis file, both trust bundles and all 53
+  sidecars -- are regular files and none is a symlink, and no mutation here
+  replaces one with anything else, so no case reaches any of it.  The bundle
+  asks three further questions of its file -- whether the bytes are the
+  canonical encoding of the payload, their SHA-256, and their size -- and the
+  port now answers all three from the one read rather than from a
+  ``read_bytes``, a ``sha256_file`` and a ``stat`` of the path (sixth gate
+  round one).  The values are the same values for a file nothing rewrites
+  between them, which is every case here, so no comparison moves; what moves
+  is that a bundle replaced mid-load can no longer make the anchors and their
+  commitments describe two different instants.  The component walk does not
+  cover these three: each refuses a link at its own final component, the
+  sidecars' other components are the records' and are ``lstat``-ed during the
+  records' own reads rather than at the sidecars' opens, and
+  genesis sits directly under the records root, which leaves ``records/trust``
+  -- not a link here -- read through no walk, and a bundle's bytes are pinned
+  entire in any case;
+- the baseline compares a bundle's anchors with the code identities in one
+  direction only, so an identity scoped to a bundle whose anchors do not
+  include it is ignored; the port requires the two sets to be equal at load.
+  The pinned ``tsa-anchors-v1`` configures ``freetsa-root-2016`` and the spec
+  above pins exactly that identity for it, and ``tsa-anchors-v2`` configures
+  ``freetsa-root-2016`` and ``digicert-trusted-root-g4`` and the spec pins
+  exactly those two, so no case here reaches the refusal;
+- the baseline runs against whatever ``openssl`` is on the path; the port
+  refuses one that is not OpenSSL 3.0 or newer, once per process and before
+  any bundle is read, because it counts a pinned root's certificates with
+  ``storeutl`` and verifies an available token with ``-no-CAstore``: LibreSSL
+  has neither at any version, and an OpenSSL before 3.0 has not the option.
+  Both sides of every comparison here run under the same interpreter and the
+  same ``openssl``, and a machine that fails the check runs neither, so no
+  case here can differ on it;
+- the baseline lets two anchors of one bundle allow the same signer; the port
+  refuses that bundle at load, because one authority under two anchor ids is
+  satisfied twice by one response.  ``tsa-anchors-v1`` configures one anchor,
+  and ``tsa-anchors-v2``'s two anchors declare disjoint allowed signers
+  (``fa02bd55...`` for ``freetsa-root-2016``, ``7abda95e...`` for
+  ``digicert-trusted-root-g4``), so no case here reaches the refusal;
+- the baseline de-duplicates a v2 witness's anchor outcomes by anchor id and
+  leaves the response free; the port additionally requires every verified
+  response to be distinct across the witness's primary and supplemental
+  outcomes together, by four rules: the physical path an outcome points at,
+  keyed on a portable fold of it (NFC then ``casefold``, component by
+  component), refused before that outcome's response is read; the file digest
+  it declares, refused ahead of the ported refusals inside the token verifier;
+  the object that outcome's read opened, as ``(st_dev, st_ino)`` off the
+  descriptor the bytes came out of, refused at the read; and the ``TSTInfo``
+  an authority signed paired with the certificate that signed it, refused
+  where that verifier returns.  Each reaches what the one
+  before it cannot.  Two outcomes naming
+  one path may declare two digests, and each outcome reads the path itself,
+  so a writer serving a different response to each read satisfies both from a
+  repository that held neither state twice (peer review, fifth gate round
+  one).  Two outcomes may spell one directory entry two ways -- one case, one
+  normalisation -- which such a writer turns into the same evidence by
+  *replacing* the entry between the two reads, so that the object behind the
+  name is two as well and every identity behind the name is blind; the fold
+  is what makes the first rule about the entry and not about the spelling,
+  and it deliberately refuses two genuinely distinct files whose names fold
+  together on the filesystems that keep them apart, because a witness whose
+  meaning depends on which filesystem an auditor cloned onto is not one an
+  auditor can act on (fifth gate round three).  Two outcomes may also name one
+  file under two paths that do not fold together -- a symlinked parent
+  directory or a second hard link -- which no comparison of names separates,
+  and which the same writer turns into the same evidence (fifth gate round
+  two).  Those two shapes compose, and composed they defeat all four rules:
+  a direct path and an alias of the token's *directory* fold apart, and with
+  the entry replaced between the reads the object rule sees two inodes, the
+  digest rule two true digests and the timestamp rule two genuine issuances.
+  So the port walks every component of a token path from the records root
+  down and refuses a link at any of them, upstream of all four (sixth gate
+  round one); the object rule is kept because a second hard link needs no
+  link anywhere.  And the ``PKIStatusInfo`` wrapper around a token is
+  unsigned, as are
+  a ``SignedData``'s ``certificates``, ``crls`` and ``unsignedAttrs``, so one
+  issuance has many valid encodings with different file digests.  The signer
+  is half of that last identity because a ``TSTInfo`` need not name its
+  authority -- RFC 3161 makes its serial unique within one TSA only, and its
+  nonce and ``tsa`` name optional -- so two pinned authorities can sign
+  identical ``TSTInfo``s legitimately, and counting the signed bytes alone
+  refused the second of two valid outcomes (same round).  The 53 pinned
+  witnesses declare 91 tokens between them, at most two per witness, at 91
+  distinct physical paths with 91 distinct fold keys, naming 91 distinct
+  ``(st_dev, st_ino)`` objects with 91 distinct file digests and 91 distinct
+  signed ``TSTInfo``s -- distinct before the signer qualifies them, so
+  distinct after -- and no witness names one path twice or spells one path
+  two ways, so none of the four refusals fires on any case here;
+- the baseline takes an anchor ID alone for the active identity when deciding
+  which anchors of a pending bundle need a supplemental outcome, so a pending
+  anchor reusing an active ID under a different root is skipped, while one
+  renaming an active authority is not; the port keys the active set by ID and
+  declared root SPKI together, which makes the first a candidate and so
+  brings it under the ported supplemental-outcome refusal, and skips a
+  pending anchor whose allowed signers are exactly one active anchor's,
+  which is the active authority under a new name and has nothing to
+  prove by stamping again (peer review, fifth gate round one).  A pending
+  anchor allowing an active signer beside a new one is refused instead of
+  skipped, being neither a rename nor a new authority (fifth gate round two);
+  so is one carrying part of an active authority and not the whole of it --
+  a piece of one active class's signers, or the signers of two classes
+  together -- which the flattened set of active signers could not tell from a
+  rename, since flattening is exactly what loses whose key is whose (fifth
+  gate round three).  The classes are the connected components of the active
+  anchors, joined wherever two carry one ``(ID, root SPKI)`` or share a
+  signing key, because an activated rename made two anchors one authority and
+  a rotation under either name extended that one authority's keys: grouping
+  per anchor instead left an authority that had been renamed and then rotated
+  holding a key under each of its names, so a further rename carrying the
+  whole of it equalled neither and was refused, and that transition could not
+  be witnessed at all (sixth gate round one).  The grouping only ever turns a
+  refusal into a skip -- a component is connected through shared keys, so
+  where every touched anchor's own set equalled the pending signers the class
+  does too.  The refusal of two pending bundles introducing one authority
+  under two anchors, which this list stated in the present tense for a round
+  after it was gone, is withdrawn: it is the port's only withdrawal.  Pending
+  history was a rolling set of current candidates, so a skipped rename or
+  rotation contributed no edge and reversing an anchor array could change the
+  verdict; one persistent component graph is built instead, from every active
+  and pending anchor the verification sees, and each pending-only class
+  contributes exactly one candidate -- its newest occurrence -- however many
+  names it has been filed under.  What stopped one new authority being counted
+  twice was the count and not the refusal (round two).  The comparison a
+  rename is measured against is the class's *live era* -- the union over its
+  active occurrences in its newest active era -- and not the union over its
+  whole history, which refused an honest rename written after an activated
+  rotation; and the rule is asked only of an anchor whose owned keys resolve
+  to a class that holds an active anchor, since a pending-only class has one
+  candidate whichever of its names is elected (first Opus round).
+  ``tsa-anchors-v2`` reuses ``freetsa-root-2016`` under the same root SPKI as
+  ``tsa-anchors-v1`` (``52c54ba3...``) and the same allowed signer
+  (``fa02bd55...``), so the ``(ID, root SPKI)`` half skips it before the
+  signers are looked at, and introduces
+  ``digicert-trusted-root-g4`` under a new ID, a new root and a signer
+  (``7abda95e...``) no active anchor allows, so neither half skips it and its
+  signer set touches no active authority's.  The pinned chain carries one
+  pending bundle at a time -- exactly one of its 53 records carries a
+  ``trustBundleUpdates`` entry at all -- so no two pending anchors of one
+  class are ever walked together here, and neither succession nor the alias
+  rule can fire.
+  The candidate set at the pinned transition is therefore identical under
+  every keying this branch has had, and no refusal here changes;
+- three further refusals guard the same pending-anchor machinery, and none of
+  them is reachable in this tree.  A pending bundle may present at most one
+  anchor per historical class: two aliases can rotate to disjoint current
+  signers and pass the bundle-local shared-signer rule while still naming one
+  authority twice, so the completed graph is asked of every pending batch and
+  refuses two anchors resolving to one class, naming both slots and the class
+  (sixth gate round two).  An anchor whose ``(ID, root SPKI)`` the history
+  already holds is a rotation and is asked for no supplemental outcome, but it
+  is asked whose keys it may hold: adopting a second class's signer is refused
+  in a verdict naming its own authority and every class whose key it took
+  (round three).  And a pending anchor's verdict is raised at the bundle it
+  belongs to, after that bundle's own class question and before the next
+  bundle is walked, so a later bundle honestly carrying both authorities an
+  earlier one merged is not convicted of the earlier one's merge (round
+  three).  ``tsa-anchors-v2`` presents two anchors of two distinct classes,
+  neither of which the history already holds, so no case here reaches any of
+  the three;
+- the port refuses a bundle anchor whose ``allowedSigners`` holds an entry
+  that is not an object carrying a 64-character lowercase hexadecimal
+  ``spkiSha256``, asked of each entry in the bundle's own order and before any
+  set is built, and names the entry's index (sixth gate round two).  The
+  comparison just above it hashed those values into a set first, so an
+  unhashable one raised ``TypeError`` out of the set rather than a refusal.
+  Every ``allowedSigners`` entry in both pinned bundles is such an object, and
+  a mutation that changes one changes the bundle bytes and trips the
+  commitment mismatch first, so no case here reaches it;
+- the port refuses an anchored TSA read on a platform whose ``os.open`` lacks
+  ``dir_fd`` support, with the package's POSIX-platform sentence, rather than
+  falling back to a whole-path open that would restore the race the descent
+  closes (sixth gate round two).  CPython offers descriptor-relative
+  ``os.open`` on every POSIX platform this harness runs on, and both sides of
+  every comparison here run under the same interpreter, so no case can differ
+  on it;
+- the baseline ignores bundle-claim fields on an unavailable v1 witness;
+  the port resolves and counts a named bundle.  The genesis witness names
+  none;
+- the baseline decodes a policy OID's first subidentifier from one octet;
+  the port decodes it in full.  Every pinned policy OID's first
+  subidentifier fits one octet, so both decode the same here;
+- a true ``genTime``-after-wall-clock mutation is no longer reachable through
+  the CLI because every pinned signed token is now in the past and the CLI has
+  no ``--now`` input.  Editing only the declared time reaches the later claim
+  mismatch, not signed-time skew.  ``tests/test_tsa.py`` pins both time-helper
+  refusal messages directly;
+- the tree has no cryptographically valid token from a different signer.  The
+  reachable identity mutation binds the declared signer-certificate mismatch
+  after successful crypto, not the deeper unpinned-signer branch;
+- rehashing corrupted tokens reaches OpenSSL diagnostics containing random
+  temporary paths, outside the stated normalization.  Flip/truncation cases
+  intentionally retain the committed hash and bind the deterministic token
+  hash refusal; clean agreement exercises all valid OpenSSL paths.
+
+The authenticated tree resolves from ``RECEIPT_BRIER_TREE``, then the local
+``.extraction/`` materialization, then a fresh public clone at the pin.  The
+entry script and both imports it executes are SHA-authenticated in every path.
+Mutation trees hardlink the large records surface and replace changed inodes;
+they never write through a link into the read-only oracle tree.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
+
+import pytest
+
+from receipt.canonical import canonical_bytes
+from receipt.sign import SignError, spki_sha256, verify_signature_bytes
+from receipt.tsa import (
+    TrustBundleSpec,
+    TsaError,
+    TsaIdentitySpec,
+    TsaSpec,
+    WitnessEvidence,
+    activate_trust_bundles,
+    bootstrap_trust_bundles,
+    load_json,
+    logical_path,
+    physical_path,
+    sha256_file,
+    trust_bundle_updates,
+    verify_witness,
+)
+
+BRIER_PIN = "4b9e7be22debc8349e76b8bdfe5a0fe18ed31a3f"
+BRIER_REPO_URL = "https://github.com/MaxGhenis/brier.git"
+
+BASELINE_AUTHENTICATED_FILES = {
+    "scripts/verify_record_chain.py": (
+        "8c61843042706d4e5ad0c417a759237141d3f04c8580b5adcdf8a7b873cc5d74"
+    ),
+    "scripts/canonical_json.py": (
+        "562bf267b7686bce8cb71f3c13f34825c21cd4ef0aba1c0c46aff16962a6cadd"
+    ),
+    "scripts/producer_signing_pins.py": (
+        "a9e3b4daabe85b2ecb6b040f458791155165be4b72406e43cc64d7ee641b7fc7"
+    ),
+}
+
+# Consumer-committed transcription of the authenticated brier verifier and
+# its byte-pinned trust bundles.  Anchor skew is explicit here; the package has
+# no 300-second fallback or other repository trust default.
+BRIER_TSA_SPEC = TsaSpec(
+    trust_bundles=(
+        TrustBundleSpec(
+            bundle_id="tsa-anchors-v1",
+            path="records/trust/tsa-anchors-v1.json",
+            sha256=(
+                "737bc9a149726f375edaebcd39b34116d90a5d29e9a043bcb0437998928e5791"
+            ),
+            size=1049,
+            canonical_json_sha256=(
+                "9930588eb27ba631446416cf0d2bdac80785e73cf1d32e1d2ed70b0bb49f3d39"
+            ),
+        ),
+        TrustBundleSpec(
+            bundle_id="tsa-anchors-v2",
+            path="records/trust/tsa-anchors-v2.json",
+            sha256=(
+                "b8ece84adcc354f413f10f1b3999ac99679196b9391d76a9967369047b7d7716"
+            ),
+            size=1916,
+            canonical_json_sha256=(
+                "036737fdd779f5add77b79262d9967e4bac450ff3ab7132eb929dbf893a4c396"
+            ),
+        ),
+    ),
+    tsa_identities=(
+        TsaIdentitySpec(
+            bundle_id="tsa-anchors-v1",
+            anchor_id="freetsa-root-2016",
+            root_spki_sha256=(
+                "52c54ba340885605314daa1857c8763b94087d05c636092938d4e2d1818e99b5"
+            ),
+            signer_spki_sha256=frozenset(
+                {
+                    "fa02bd555e3e483d62b4e70be6218692068d2b0b0a7525db58dcbf2901cdb072"
+                }
+            ),
+            max_future_seconds=0,
+            max_token_lead_seconds=300,
+        ),
+        TsaIdentitySpec(
+            bundle_id="tsa-anchors-v2",
+            anchor_id="freetsa-root-2016",
+            root_spki_sha256=(
+                "52c54ba340885605314daa1857c8763b94087d05c636092938d4e2d1818e99b5"
+            ),
+            signer_spki_sha256=frozenset(
+                {
+                    "fa02bd555e3e483d62b4e70be6218692068d2b0b0a7525db58dcbf2901cdb072"
+                }
+            ),
+            max_future_seconds=0,
+            max_token_lead_seconds=300,
+        ),
+        TsaIdentitySpec(
+            bundle_id="tsa-anchors-v2",
+            anchor_id="digicert-trusted-root-g4",
+            root_spki_sha256=(
+                "59df317bfa9f4f0ab7ca514d7772296aa2c765b87664d08b96e57399e364729c"
+            ),
+            signer_spki_sha256=frozenset(
+                {
+                    "7abda95ed7301ac94bded350babc319903d0b4f16c4e7e39346dba5f9e992b72"
+                }
+            ),
+            max_future_seconds=0,
+            max_token_lead_seconds=300,
+        ),
+    ),
+    legacy_witness_bundle_id="tsa-anchors-v1",
+)
+
+SNAPSHOT_RE = re.compile(r"digest-[A-Za-z0-9][A-Za-z0-9._-]*\.json$")
+SIGNATURE_DOMAIN = b"thesis-record-snapshot/v1\0"
+SIGNATURE_SUFFIX = ".producer.sig"
+PUBLIC_KEY_RELPATH = "records/trust/producer-ed25519.pem"
+PRODUCER_SPKI_SHA256 = (
+    "b96f4556ebe77bf97a1b7421a131ff49bec68b450bb92591cdf4b135c8d21e30"
+)
+ACTIVATION_SNAPSHOT = "records/2026-07-21/digest-29850168611-1.json"
+
+GENESIS = pathlib.Path("2026-07-09/digest-f4f3-genesis.json")
+PRE_TRANSITION = pathlib.Path("2026-07-10/digest-29109573200-1.json")
+TRANSITION = pathlib.Path("2026-07-10/digest-29110005611-1.json")
+POST_TRANSITION = pathlib.Path("2026-07-10/digest-29110188998-1.json")
+V1_BUNDLE = pathlib.Path("trust/tsa-anchors-v1.json")
+V2_BUNDLE = pathlib.Path("trust/tsa-anchors-v2.json")
+
+
+@dataclass(frozen=True)
+class CandidateVerification:
+    ordered: tuple[pathlib.Path, ...]
+    witnesses: dict[pathlib.Path, WitnessEvidence]
+    active_trust_bundles: dict[str, dict[str, Any]]
+    pending_trust_bundle_updates: tuple[dict[str, Any], ...]
+
+
+def _authenticated_baseline_tree(tree: pathlib.Path) -> pathlib.Path:
+    """Authenticate the entry point and every Python source it executes."""
+
+    for relative, expected in BASELINE_AUTHENTICATED_FILES.items():
+        path = tree / relative
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if digest != expected:
+            raise RuntimeError(
+                "baseline oracle is not the pinned verifier: "
+                f"{path} has SHA-256 {digest}, expected {expected} "
+                "(receipts/brier-pin-source-hashes.txt). A stale or altered "
+                "baseline must not silently vouch for the port."
+            )
+    return tree
+
+
+@pytest.fixture(scope="session")
+def brier_tree(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
+    override = os.environ.get("RECEIPT_BRIER_TREE")
+    if override:
+        tree = pathlib.Path(override)
+        if not tree.is_dir():
+            raise RuntimeError(f"RECEIPT_BRIER_TREE is not a directory: {tree}")
+        return _authenticated_baseline_tree(tree)
+    local = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / ".extraction"
+        / f"brier-{BRIER_PIN[:7]}"
+    )
+    if local.is_dir():
+        return _authenticated_baseline_tree(local)
+    clone = tmp_path_factory.mktemp("brier-pin") / "brier"
+    subprocess.run(
+        ["git", "clone", "--quiet", BRIER_REPO_URL, str(clone)],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(clone), "checkout", "--quiet", BRIER_PIN],
+        check=True,
+    )
+    return _authenticated_baseline_tree(clone)
+
+
+def run_baseline(
+    tree: pathlib.Path, records: pathlib.Path
+) -> tuple[int, str, str]:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(tree / "scripts" / "verify_record_chain.py"),
+            str(records),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return completed.returncode, completed.stdout.strip(), completed.stderr.strip()
+
+
+def snapshot_paths(records: pathlib.Path) -> list[pathlib.Path]:
+    return sorted(
+        path
+        for path in records.glob("????-??-??/digest-*.json")
+        if SNAPSHOT_RE.fullmatch(path.name)
+        and not path.name.endswith(".witness.json")
+    )
+
+
+def _ordered_chain(records: pathlib.Path) -> tuple[list[pathlib.Path], dict[pathlib.Path, dict[str, Any]]]:
+    genesis = load_json(records / "CHAIN_GENESIS.json")
+    snapshots = snapshot_paths(records)
+    first_logical = genesis.get("firstSnapshot")
+    if not isinstance(first_logical, str) or not first_logical:
+        raise TsaError("genesis firstSnapshot must name one snapshot")
+    first = physical_path(records, first_logical)
+    if first not in snapshots:
+        raise TsaError(f"genesis snapshot is missing or malformed: {first_logical}")
+    snapshot_set = set(snapshots)
+    successors: dict[pathlib.Path, list[pathlib.Path]] = {
+        path: [] for path in snapshots
+    }
+    payloads: dict[pathlib.Path, dict[str, Any]] = {}
+    for path in snapshots:
+        payload = load_json(path)
+        payloads[path] = payload
+        chain = payload.get("chain")
+        if path == first:
+            if chain is not None:
+                raise TsaError(f"genesis snapshot must not have a chain block: {path}")
+            continue
+        if not isinstance(chain, dict):
+            raise TsaError(f"missing chain block after genesis: {path}")
+        previous_logical = chain.get("prevDigestPath")
+        if not isinstance(previous_logical, str):
+            raise TsaError(f"missing chain.prevDigestPath in {path}")
+        previous = physical_path(records, previous_logical)
+        if previous not in snapshot_set:
+            raise TsaError(f"missing predecessor for {path}: {previous_logical}")
+        expected_sha = sha256_file(previous)
+        if chain.get("prevDigestSha256") != expected_sha:
+            raise TsaError(
+                f"predecessor hash mismatch in {path}: expected {expected_sha}, "
+                f"got {chain.get('prevDigestSha256')}"
+            )
+        successors[previous].append(path)
+    ordered = [first]
+    visited = {first}
+    cursor = first
+    while successors[cursor]:
+        children = successors[cursor]
+        if len(children) != 1:
+            raise TsaError(
+                f"fork after {logical_path(records, cursor)}: "
+                + ", ".join(logical_path(records, child) for child in children)
+            )
+        cursor = children[0]
+        if cursor in visited:
+            raise TsaError(f"cycle at {logical_path(records, cursor)}")
+        visited.add(cursor)
+        ordered.append(cursor)
+    if visited != snapshot_set:
+        raise TsaError(
+            "orphaned snapshot(s) not reachable from genesis: "
+            + ", ".join(
+                logical_path(records, path)
+                for path in sorted(snapshot_set - visited)
+            )
+        )
+    return ordered, payloads
+
+
+def _verify_production_signature(
+    records: pathlib.Path, ordered: list[pathlib.Path]
+) -> None:
+    """Harness-local composition of the authenticated producer-signing pins."""
+
+    activation = physical_path(records, ACTIVATION_SNAPSHOT)
+    if activation not in ordered:
+        raise TsaError(
+            "producer signing activation snapshot is absent from the reachable "
+            f"chain: {ACTIVATION_SNAPSHOT}"
+        )
+    activation_index = ordered.index(activation)
+    discovered = sorted(records.rglob(f"*{SIGNATURE_SUFFIX}"))
+    discovered_set = set(discovered)
+    for snapshot in ordered[: activation_index + 1]:
+        signature = snapshot.with_suffix(SIGNATURE_SUFFIX)
+        if signature in discovered_set:
+            raise TsaError(
+                "producer signature is forbidden at or before activation: "
+                f"{logical_path(records, signature)}"
+            )
+    signed_snapshots = ordered[activation_index + 1 :]
+    expected = {snapshot.with_suffix(SIGNATURE_SUFFIX) for snapshot in signed_snapshots}
+    orphaned = sorted(discovered_set - expected)
+    if orphaned:
+        raise TsaError(
+            "orphan producer signature is not a post-activation snapshot sibling: "
+            f"{logical_path(records, orphaned[0])}"
+        )
+    public_key = physical_path(records, PUBLIC_KEY_RELPATH)
+    public_key_pem = public_key.read_bytes()
+    computed_spki = spki_sha256(public_key_pem)
+    if computed_spki != PRODUCER_SPKI_SHA256:
+        raise TsaError(
+            "producer public-key SPKI is not code-pinned for "
+            f"{PUBLIC_KEY_RELPATH}: {computed_spki}"
+        )
+    for snapshot in signed_snapshots:
+        signature = snapshot.with_suffix(SIGNATURE_SUFFIX)
+        signature_logical = logical_path(records, signature)
+        verify_signature_bytes(
+            SIGNATURE_DOMAIN + snapshot.read_bytes(),
+            signature.read_bytes(),
+            public_key_pem,
+            public_key_filename=PUBLIC_KEY_RELPATH,
+            spki_sha256=PRODUCER_SPKI_SHA256,
+            label=signature_logical,
+        )
+
+
+def verify_candidate(records: pathlib.Path) -> CandidateVerification:
+    records = records.resolve()
+    ordered, payloads = _ordered_chain(records)
+    _verify_production_signature(records, ordered)
+    genesis = load_json(records / "CHAIN_GENESIS.json")
+    active = bootstrap_trust_bundles(
+        records,
+        genesis,
+        spec=BRIER_TSA_SPEC,
+        required=True,
+    )
+    pending: list[dict[str, Any]] = []
+    witnesses: dict[pathlib.Path, WitnessEvidence] = {}
+    for path in ordered:
+        current_updates = trust_bundle_updates(
+            records, payloads[path], spec=BRIER_TSA_SPEC
+        )
+        evidence = verify_witness(
+            path,
+            spec=BRIER_TSA_SPEC,
+            records=records,
+            trusted_bundles=active,
+            transition_bundle_updates=[*pending, *current_updates],
+        )
+        witnesses[path] = evidence
+        pending.extend(current_updates)
+        if evidence.status == "available":
+            activate_trust_bundles(active, pending)
+            pending.clear()
+    return CandidateVerification(
+        ordered=tuple(ordered),
+        witnesses=witnesses,
+        active_trust_bundles={
+            path: dict(reference) for path, reference in active.items()
+        },
+        pending_trust_bundle_updates=tuple(dict(value) for value in pending),
+    )
+
+
+def _candidate_summary(
+    records: pathlib.Path, verification: CandidateVerification
+) -> str:
+    available = [
+        (path, evidence)
+        for path, evidence in verification.witnesses.items()
+        if evidence.status == "available"
+    ]
+    lines: list[str] = []
+    for path, evidence in available:
+        anchors = ",".join(token.anchor_id for token in evidence.tokens)
+        policies = ",".join(token.policy_oid for token in evidence.tokens)
+        lines.append(
+            "witness OK: "
+            f"{logical_path(records.resolve(), path)} genTime={evidence.gen_time} "
+            f"policies={policies} anchors={anchors}"
+        )
+    active_bundle_ids = sorted(
+        str(reference["bundleId"])
+        for reference in verification.active_trust_bundles.values()
+    )
+    pending_bundle_ids = sorted(
+        str(reference["bundleId"])
+        for reference in verification.pending_trust_bundle_updates
+    )
+    lines.append(
+        f"chain OK: {len(verification.ordered)} snapshot(s), "
+        f"availableWitnesses={len(available)}, "
+        f"activeTrustBundles={active_bundle_ids}, "
+        f"pendingTrustBundles={pending_bundle_ids}, "
+        f"head={verification.ordered[-1]}"
+    )
+    return "\n".join(lines)
+
+
+def run_candidate(records: pathlib.Path) -> tuple[int, str]:
+    try:
+        verification = verify_candidate(records)
+    except (OSError, SignError, TsaError) as exc:
+        return 1, f"CHAIN BROKEN: {exc}"
+    return 0, _candidate_summary(records, verification)
+
+
+def _normalize_openssl_ids(message: str) -> str:
+    return re.sub(
+        r"(?m)^[0-9A-Fa-f]{8,16}(?=:error:)",
+        "<openssl-err-id>",
+        message.strip(),
+    )
+
+
+def _assert_candidate_silent(capfd: pytest.CaptureFixture[str]) -> None:
+    captured = capfd.readouterr()
+    assert (captured.out, captured.err) == ("", ""), (
+        "the port must not write to stdout/stderr; captured "
+        f"out={captured.out!r} err={captured.err!r}"
+    )
+
+
+def _link_or_copy(source: str, destination: str) -> str:
+    try:
+        os.link(source, destination)
+        return destination
+    except OSError:
+        return shutil.copy2(source, destination)
+
+
+def mutable_records_copy(
+    tree: pathlib.Path, destination: pathlib.Path
+) -> pathlib.Path:
+    records = destination / "records"
+    shutil.copytree(tree / "records", records, copy_function=_link_or_copy)
+    return records
+
+
+def _replace_bytes(path: pathlib.Path, payload: bytes) -> None:
+    """Replace a hardlinked destination inode without touching the oracle."""
+
+    replacement = path.with_name(f".{path.name}.mutation")
+    replacement.write_bytes(payload)
+    os.replace(replacement, path)
+
+
+def _replace_json(path: pathlib.Path, payload: dict[str, Any]) -> None:
+    _replace_bytes(path, canonical_bytes(payload) + b"\n")
+
+
+def _flip_byte(path: pathlib.Path) -> None:
+    payload = bytearray(path.read_bytes())
+    payload[len(payload) // 2] ^= 0x01
+    _replace_bytes(path, bytes(payload))
+
+
+def _truncate(path: pathlib.Path) -> None:
+    _replace_bytes(path, path.read_bytes()[:-1])
+
+
+def _snapshot(records: pathlib.Path, relative: pathlib.Path) -> pathlib.Path:
+    return records / relative
+
+
+def _witness(records: pathlib.Path, relative: pathlib.Path) -> pathlib.Path:
+    return _snapshot(records, relative).with_suffix(".witness.json")
+
+
+def _mutate_witness(
+    records: pathlib.Path,
+    relative: pathlib.Path,
+    mutation: Callable[[dict[str, Any]], None],
+) -> None:
+    path = _witness(records, relative)
+    payload = json.loads(path.read_text())
+    mutation(payload)
+    _replace_json(path, payload)
+
+
+def flip_v1_bundle(records: pathlib.Path) -> str:
+    _flip_byte(records / V1_BUNDLE)
+    return "TSA trust bundle commitment mismatch for records/trust/tsa-anchors-v1.json"
+
+
+def delete_genesis_witness(records: pathlib.Path) -> str:
+    _witness(records, GENESIS).unlink()
+    return "missing explicit witness marker for "
+
+
+def drop_required_digest(records: pathlib.Path) -> str:
+    _mutate_witness(records, GENESIS, lambda payload: payload.pop("digestSha256"))
+    return "witness digest mismatch for "
+
+
+def flip_v2_bundle(records: pathlib.Path) -> str:
+    _flip_byte(records / V2_BUNDLE)
+    return "TSA trust bundle commitment mismatch for records/trust/tsa-anchors-v2.json"
+
+
+def pending_bundle_used_as_active(records: pathlib.Path) -> str:
+    def mutate(payload: dict[str, Any]) -> None:
+        v2 = BRIER_TSA_SPEC.bundle_reference("records/trust/tsa-anchors-v2.json")
+        assert v2 is not None
+        payload["trustBundleId"] = v2["bundleId"]
+        payload["trustBundlePath"] = v2["path"]
+        payload["trustBundleSha256"] = v2["sha256"]
+
+    _mutate_witness(records, TRANSITION, mutate)
+    return "multi-token witness does not use the newest active TSA trust bundle"
+
+
+def wrong_type_anchor_outcomes(records: pathlib.Path) -> str:
+    _mutate_witness(
+        records,
+        TRANSITION,
+        lambda payload: payload.__setitem__("anchorOutcomes", {}),
+    )
+    return "multi-token witness anchorOutcomes must be a list"
+
+
+def token_evidence_inside_unavailable(records: pathlib.Path) -> str:
+    def mutate(payload: dict[str, Any]) -> None:
+        outcome = payload["anchorOutcomes"][0]
+        outcome["status"] = "unavailable"
+        outcome["reason"] = "differential mutation"
+
+    _mutate_witness(records, TRANSITION, mutate)
+    return (
+        "TSA anchor freetsa-root-2016 unavailable outcome contains token evidence: "
+        "['tokenPath', 'tokenSha256', 'tsaGenTime', "
+        "'tsaImprintAlgorithmOid', 'tsaPolicyOid', "
+        "'tsaSignerCertificateSha256', 'tsaSignerSpkiSha256']"
+    )
+
+
+def _transition_token_path(records: pathlib.Path, supplemental: bool) -> pathlib.Path:
+    payload = json.loads(_witness(records, TRANSITION).read_text())
+    outcome = (
+        payload["supplementalOutcomes"][0]
+        if supplemental
+        else payload["anchorOutcomes"][0]
+    )
+    return physical_path(records, outcome["tokenPath"])
+
+
+def flip_freetsa_token(records: pathlib.Path) -> str:
+    _flip_byte(_transition_token_path(records, supplemental=False))
+    return "witness token hash mismatch for "
+
+
+def truncate_freetsa_token(records: pathlib.Path) -> str:
+    _truncate(_transition_token_path(records, supplemental=False))
+    return "witness token hash mismatch for "
+
+
+def flip_digicert_token(records: pathlib.Path) -> str:
+    _flip_byte(_transition_token_path(records, supplemental=True))
+    return "witness token hash mismatch for "
+
+
+def truncate_digicert_token(records: pathlib.Path) -> str:
+    _truncate(_transition_token_path(records, supplemental=True))
+    return "witness token hash mismatch for "
+
+
+def contradict_record_creation_claim(records: pathlib.Path) -> str:
+    earlier = json.loads(_witness(records, PRE_TRANSITION).read_text())
+
+    def mutate(payload: dict[str, Any]) -> None:
+        outcome = payload["anchorOutcomes"][0]
+        outcome["tokenPath"] = earlier["tokenPath"]
+        outcome["tokenSha256"] = earlier["tokenSha256"]
+
+    _mutate_witness(records, TRANSITION, mutate)
+    return (
+        "RFC 3161 genTime 2026-07-10T17:03:56Z impossibly precedes "
+        "recordedAt=2026-07-10T17:10:11Z"
+    )
+
+
+def signer_certificate_identity_mismatch(records: pathlib.Path) -> str:
+    def mutate(payload: dict[str, Any]) -> None:
+        payload["anchorOutcomes"][0]["tsaSignerCertificateSha256"] = "0" * 64
+
+    _mutate_witness(records, TRANSITION, mutate)
+    return (
+        "witness tsaSignerCertificateSha256 mismatch for "
+    )
+
+
+def supplemental_outside_transition(records: pathlib.Path) -> str:
+    transition = json.loads(_witness(records, TRANSITION).read_text())
+
+    def mutate(payload: dict[str, Any]) -> None:
+        payload["supplementalOutcomes"] = transition["supplementalOutcomes"]
+
+    _mutate_witness(records, POST_TRANSITION, mutate)
+    return (
+        "supplemental TSA outcome is not introduced by a pending trust transition: "
+        "('records/trust/tsa-anchors-v2.json', 'digicert-trusted-root-g4')"
+    )
+
+
+MUTATIONS: tuple[tuple[str, Callable[[pathlib.Path], str]], ...] = (
+    ("flip_v1_bundle", flip_v1_bundle),
+    ("delete_genesis_witness", delete_genesis_witness),
+    ("drop_required_digest", drop_required_digest),
+    ("flip_v2_bundle", flip_v2_bundle),
+    ("pending_bundle_used_as_active", pending_bundle_used_as_active),
+    ("wrong_type_anchor_outcomes", wrong_type_anchor_outcomes),
+    ("token_evidence_inside_unavailable", token_evidence_inside_unavailable),
+    ("flip_freetsa_token", flip_freetsa_token),
+    ("truncate_freetsa_token", truncate_freetsa_token),
+    ("flip_digicert_token", flip_digicert_token),
+    ("truncate_digicert_token", truncate_digicert_token),
+    ("contradict_record_creation_claim", contradict_record_creation_claim),
+    ("signer_certificate_identity_mismatch", signer_certificate_identity_mismatch),
+    ("supplemental_outside_transition", supplemental_outside_transition),
+)
+
+
+def test_clean_tree_verdicts_match(
+    brier_tree: pathlib.Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    records = brier_tree / "records"
+    baseline_code, baseline_out, baseline_err = run_baseline(brier_tree, records)
+    assert baseline_code == 0, f"baseline failed on the pinned tree: {baseline_err}"
+    assert baseline_err == ""
+    capfd.readouterr()
+    # This call verifies the final snapshot's real production Ed25519 signature
+    # through receipt.sign as well as all production witness tokens through tsa.
+    candidate_code, candidate_message = run_candidate(records)
+    _assert_candidate_silent(capfd)
+    assert candidate_code == 0, candidate_message
+    assert candidate_message == baseline_out
+    assert "chain OK: 53 snapshot(s), availableWitnesses=52" in candidate_message
+
+
+@pytest.mark.parametrize(
+    "dependency",
+    ("scripts/canonical_json.py", "scripts/producer_signing_pins.py"),
+)
+def test_swapped_runtime_import_fails_authentication(
+    brier_tree: pathlib.Path,
+    tmp_path: pathlib.Path,
+    dependency: str,
+) -> None:
+    fake = tmp_path / "tree"
+    (fake / "scripts").mkdir(parents=True)
+    for relative in BASELINE_AUTHENTICATED_FILES:
+        shutil.copyfile(brier_tree / relative, fake / relative)
+    path = fake / dependency
+    path.write_bytes(path.read_bytes() + b"\n# tampered\n")
+    with pytest.raises(RuntimeError, match=re.escape(path.name)):
+        _authenticated_baseline_tree(fake)
+
+
+@pytest.mark.parametrize(
+    ("name", "mutation"),
+    MUTATIONS,
+    ids=[name for name, _mutation in MUTATIONS],
+)
+def test_witness_mutation_refused_identically(
+    brier_tree: pathlib.Path,
+    tmp_path: pathlib.Path,
+    capfd: pytest.CaptureFixture[str],
+    name: str,
+    mutation: Callable[[pathlib.Path], str],
+) -> None:
+    records = mutable_records_copy(brier_tree, tmp_path)
+    marker = mutation(records)
+    baseline_code, baseline_out, baseline_err = run_baseline(brier_tree, records)
+    capfd.readouterr()
+    candidate_code, candidate_message = run_candidate(records)
+    _assert_candidate_silent(capfd)
+
+    assert baseline_code == 1, f"baseline ACCEPTED mutation {name}"
+    assert baseline_out == "", (
+        f"baseline printed to stdout while refusing {name}: {baseline_out!r}"
+    )
+    assert candidate_code == 1, f"candidate ACCEPTED mutation {name}"
+    normalized_baseline = _normalize_openssl_ids(baseline_err)
+    normalized_candidate = _normalize_openssl_ids(candidate_message)
+    assert normalized_candidate == normalized_baseline, (
+        f"divergent refusal for {name}:\n"
+        f"  baseline: {baseline_err}\n"
+        f"  candidate: {candidate_message}"
+    )
+    assert marker in normalized_candidate, (
+        f"mutation {name} no longer binds its observed branch:\n"
+        f"  expected: {marker}\n"
+        f"  refusal: {candidate_message}"
+    )

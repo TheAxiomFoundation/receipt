@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="2" skipped="0" tests="2" time="24.734" timestamp="2026-10-03T23:15:16.398223-04:00" hostname="MacBook-Pro-1111.local"><testcase classname="tests.test_attest" name="test_a_full_history_sweep_reaches_the_unattested_commit" time="15.606"><failure message="AssertionError: assert [] == ['0e2c0c712ae...0b2192fbc026']&#10;  &#10;  Right contains 2 more items, first extra item: '0e2c0c712ae9746fd64ba761026eef7226631e16'&#10;  Use -v to get more diff">tmp_path = PosixPath('/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/mutation-attest-controls/tmp-controls/test_a_full_history_sweep_reac0')
+
+    def test_a_full_history_sweep_reaches_the_unattested_commit(
+        tmp_path: pathlib.Path,
+    ) -&gt; None:
+        ids = _fixture_history(tmp_path / "full")
+        assert enforcement_epoch(tmp_path / "full", spec=_spec()) == ids["epoch"]
+&gt;       assert _in_scope(tmp_path / "full") == [ids["unattested"], ids["attested"]]
+E       AssertionError: assert [] == ['0e2c0c712ae...0b2192fbc026']
+E         
+E         Right contains 2 more items, first extra item: '0e2c0c712ae9746fd64ba761026eef7226631e16'
+E         Use -v to get more diff
+
+../../tests/test_attest.py:777: AssertionError</failure></testcase><testcase classname="tests.test_attest" name="test_commit_scope_merge_base_error_is_verbatim" time="0.038"><failure message="AssertionError: assert 'MUTANT merge...l: bad object' == 'merge-base -...l: bad object'&#10;  &#10;  - merge-base --is-ancestor failed for bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb: fatal: bad object&#10;  + MUTANT merge-base --is-ancestor failed for bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb: fatal: bad object&#10;  ? +++++++">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x4743feaaf10&gt;
+
+    def test_commit_scope_merge_base_error_is_verbatim(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -&gt; None:
+        completed = subprocess.CompletedProcess(
+            ["git"], 128, stdout=b"", stderr=b"fatal: bad object\n"
+        )
+        monkeypatch.setattr(
+            attest_module, "git_output", _fake_git_output(iter(()), [])
+        )
+        monkeypatch.setattr(
+            attest_module.subprocess,
+            "run",
+            lambda *args, **kwargs: completed,
+        )
+        with pytest.raises(ProvenanceError) as caught:
+            commit_in_scope(pathlib.Path("/repo"), "b" * 40, "c" * 40)
+&gt;       assert str(caught.value) == (
+            f"merge-base --is-ancestor failed for {'b' * 40}: fatal: bad object"
+        )
+E       AssertionError: assert 'MUTANT merge...l: bad object' == 'merge-base -...l: bad object'
+E         
+E         - merge-base --is-ancestor failed for bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb: fatal: bad object
+E         + MUTANT merge-base --is-ancestor failed for bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb: fatal: bad object
+E         ? +++++++
+
+../../tests/test_attest.py:528: AssertionError</failure></testcase></testsuite></testsuites>

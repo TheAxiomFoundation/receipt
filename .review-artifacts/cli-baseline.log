@@ -1,0 +1,665 @@
+FFF.FFF                                                                  [100%]
+=================================== FAILURES ===================================
+_ test_default_root_refuses_a_spec_named_through_a_committed_symlink[verification-vendor/good/verification-verification/spec.py] _
+
+built = PosixPath('/private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7754/corpus-origin0/repo')
+tmp_path = PosixPath('/private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7754/test_default_root_refuses_a_sp0')
+capsys = <_pytest.capture.CaptureFixture object at 0x206fa370610>
+link = 'verification', target = 'vendor/good/verification'
+spec = 'verification/spec.py'
+
+    @pytest.mark.parametrize(
+        ("link", "target", "spec"),
+        [
+            # The spec's own directory is the link.
+            ("verification", "vendor/good/verification", "verification/spec.py"),
+            # The link names the submodule's top level, so a lexical walk alone
+            # would stop at the link and still verify the submodule.
+            ("audit", "vendor/good", "audit/verification/spec.py"),
+        ],
+    )
+    def test_default_root_refuses_a_spec_named_through_a_committed_symlink(
+        built: pathlib.Path,
+        tmp_path: pathlib.Path,
+        capsys: pytest.CaptureFixture[str],
+        link: str,
+        target: str,
+        spec: str,
+    ) -> None:
+        """Review of 0.6.2 (L5 finding 1): the default root resolved the spec
+        path first, so a directory committed as a symlink into a submodule moved
+        the walk into the submodule, and the command verified the submodule's
+        commit and tree, exiting 0, while the clone's edited rule went unchecked.
+        """
+    
+        clone, _ = _clone_with_committed_link(
+            built, tmp_path, link=link, target=target
+        )
+        spec_path = clone / spec
+    
+>       assert main(["verify", "--spec", str(spec_path), "--json"]) == EXIT_USAGE
+E       AssertionError: assert 0 == 2
+E        +  where 0 = main(['verify', '--spec', '/private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7754/test_default_root_refuses_a_sp0/clone/verification/spec.py', '--json'])
+
+../../tests/test_cli.py:226: AssertionError
+----------------------------- Captured stdout call -----------------------------
+{
+  "base": null,
+  "binding": {
+    "attestedFiles": 1,
+    "contentFiles": 3,
+    "removedPaths": []
+  },
+  "chain": {
+    "anchorFiles": {
+      "alpha-root.pem": "14e89ac891a862e7183d1bcaef5d4b6d2a1ce0f7060589a356fe6884dcfcb7e0",
+      "beta-root.pem": "f02aaaf55634d74ac5ab502664c3e1fd4cb1d5bb4b1aca95e6254fe617479740",
+      "producer-ed25519.pub": "82d195da318b2c5d8104d1aa3f0798a3abeccddc2d406147189f7e266024ce40"
+    },
+    "anchorSetSha256": "975f99c720660bee010f091a7cf115bfa46d91bc466518c96f7701f8495092e6",
+    "head": "0000-678d7ee1bbe85d55.json",
+    "headSha256": "678d7ee1bbe85d5526e65001bc4dc354ab376da0f2b1d804298db2baebf4b397",
+    "producerSpkiSha256": "c2324fcd77e9afac9a56e90d40634d127b1e72481b3662e695f4a68985763e4c",
+    "releases": 1,
+    "witnesses": {
+      "alpha": "2026-10-04T03:05:03Z",
+      "beta": "2026-10-04T03:05:06Z"
+    }
+  },
+  "commit": "228bb076d3f3ee600cb240451cb127189789eab7",
+  "gateDeclarations": {
+    "byTier": {
+      "ci-attested": [
+        {
+          "evidence": {
+            "workflow": "repository-checks.yml"
+          },
+          "gateId": "ci/repository-checks",
+          "outcome": "pass"
+        }
+      ],
+      "public": [
+        {
+          "evidence": {
+            "command": "make validate"
+          },
+          "gateId": "rulespec/compile",
+          "outcome": "pass"
+        }
+      ],
+      "restricted": [
+        {
+          "evidence": {
+            "restrictedInput": "licensed bundle"
+          },
+          "gateId": "oracle/licensed-parity",
+          "outcome": "pass"
+        }
+      ]
+    },
+    "reRunByThisCommand": false,
+    "tierMeaning": {
+      "ci-attested": "not reproducible; only the CI run's identity vouches",
+      "public": "you can re-run these yourself from public inputs",
+      "restricted": "reproducible only with restricted pinned inputs this command cannot obtain"
+    }
+  },
+  "nameRepertoire": "portable",
+  "objectFormat": "sha1",
+  "objectStore": null,
+  "passes": [
+    {
+      "detail": "1 release(s), HEAD 0000-678d7ee1bbe85d55.json; head 678d7ee1bbe85d5526e65001bc4dc354ab376da0f2b1d804298db2baebf4b397; producer SPKI c2324fcd77e9afac\u2026; anchor set 975f99c720660bee010f091a7cf115bfa46d91bc466518c96f7701f8495092e6; witnesses alpha 2026-10-04T03:05:03Z \u00b7 beta 2026-10-04T03:05:06Z",
+      "failure": null,
+      "name": "custody",
+      "ok": true
+    },
+    {
+      "detail": "3 content file(s) and 1 attested file(s) match the witnessed journal exactly, closed-world",
+      "failure": null,
+      "name": "binding",
+      "ok": true
+    },
+    {
+      "detail": "3 gate declaration(s) well formed and complete against the loaded spec (1 public, 1 restricted, 1 ci-attested); none re-run here",
+      "failure": null,
+      "name": "declaration",
+      "ok": true
+    }
+  ],
+  "passesCompleted": [
+    "custody",
+    "binding",
+    "declaration"
+  ],
+  "receiptVersion": "0.6.2",
+  "root": "/private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7754/test_default_root_refuses_a_sp0/clone/vendor/good",
+  "scope": {
+    "established": [
+      "custody under the anchor set 975f99c720660bee010f091a7cf115bfa46d91bc466518c96f7701f8495092e6 the verified tree carries",
+      "binding of the witnessed journal to tree 7f5ed3ca3cd3"
+    ],
+    "notEstablished": [
+      "that any declared gate actually passed",
+      "that the encoded rules are a correct reading of the law",
+      "that this clone holds the producer's newest release (--base-ref only bounds staleness against a head the auditor recorded; newest needs an out-of-band comparison)",
+      "that this is the only history the producer maintains (equivocation is undetectable from a single clone; compare head digests out of band)",
+      "that the files in any checkout equal the verified tree",
+      "that the anchor set is one the auditor trusts",
+      "that the spec's code was trusted"
+    ]
+  },
+  "spec": {
+    "name": "receipt test corpus",
+    "path": "/private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7754/test_default_root_refuses_a_sp0/clone/vendor/good/verification/spec.py",
+    "pinned": false,
+    "sha256": "26a540524a37ab0a2bfadd5a7e6534aeeb2a0eb7317b92e93c7fe2827ee8e285"
+  },
+  "tree": "7f5ed3ca3cd35510b4ae56da59dafe43e3cdcd33",
+  "verdict": "PASS"
+}
+_ test_default_root_refuses_a_spec_named_through_a_committed_symlink[audit-vendor/good-audit/verification/spec.py] _
+
+built = PosixPath('/private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7754/corpus-origin0/repo')
+tmp_path = PosixPath('/private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7754/test_default_root_refuses_a_sp1')
+capsys = <_pytest.capture.CaptureFixture object at 0x206f9a8e4d0>
+link = 'audit', target = 'vendor/good', spec = 'audit/verification/spec.py'
+
+    @pytest.mark.parametrize(
+        ("link", "target", "spec"),
+        [
+            # The spec's own directory is the link.
+            ("verification", "vendor/good/verification", "verification/spec.py"),
+            # The link names the submodule's top level, so a lexical walk alone
+            # would stop at the link and still verify the submodule.
+            ("audit", "vendor/good", "audit/verification/spec.py"),
+        ],
+    )
+    def test_default_root_refuses_a_spec_named_through_a_committed_symlink(
+        built: pathlib.Path,
+        tmp_path: pathlib.Path,
+        capsys: pytest.CaptureFixture[str],
+        link: str,
+        target: str,
+        spec: str,
+    ) -> None:
+        """Review of 0.6.2 (L5 finding 1): the default root resolved the spec
+        path first, so a directory committed as a symlink into a submodule moved
+        the walk into the submodule, and the command verified the submodule's
+        commit and tree, exiting 0, while the clone's edited rule went unchecked.
+        """
+    
+        clone, _ = _clone_with_committed_link(
+            built, tmp_path, link=link, target=target
+        )
+        spec_path = clone / spec
+    
+>       assert main(["verify", "--spec", str(spec_path), "--json"]) == EXIT_USAGE
+E       AssertionError: assert 0 == 2
+E        +  where 0 = main(['verify', '--spec', '/private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7754/test_default_root_refuses_a_sp1/clone/audit/verification/spec.py', '--json'])
+
+../../tests/test_cli.py:226: AssertionError
+----------------------------- Captured stdout call -----------------------------
+{
+  "base": null,
+  "binding": {
+    "attestedFiles": 1,
+    "contentFiles": 3,
+    "removedPaths": []
+  },
+  "chain": {
+    "anchorFiles": {
+      "alpha-root.pem": "14e89ac891a862e7183d1bcaef5d4b6d2a1ce0f7060589a356fe6884dcfcb7e0",
+      "beta-root.pem": "f02aaaf55634d74ac5ab502664c3e1fd4cb1d5bb4b1aca95e6254fe617479740",
+      "producer-ed25519.pub": "82d195da318b2c5d8104d1aa3f0798a3abeccddc2d406147189f7e266024ce40"
+    },
+    "anchorSetSha256": "975f99c720660bee010f091a7cf115bfa46d91bc466518c96f7701f8495092e6",
+    "head": "0000-678d7ee1bbe85d55.json",
+    "headSha256": "678d7ee1bbe85d5526e65001bc4dc354ab376da0f2b1d804298db2baebf4b397",
+    "producerSpkiSha256": "c2324fcd77e9afac9a56e90d40634d127b1e72481b3662e695f4a68985763e4c",
+    "releases": 1,
+    "witnesses": {
+      "alpha": "2026-10-04T03:05:03Z",
+      "beta": "2026-10-04T03:05:06Z"
+    }
+  },
+  "commit": "228bb076d3f3ee600cb240451cb127189789eab7",
+  "gateDeclarations": {
+    "byTier": {
+      "ci-attested": [
+        {
+          "evidence": {
+            "workflow": "repository-checks.yml"
+          },
+          "gateId": "ci/repository-checks",
+          "outcome": "pass"
+        }
+      ],
+      "public": [
+        {
+          "evidence": {
+            "command": "make validate"
+          },
+          "gateId": "rulespec/compile",
+          "outcome": "pass"
+        }
+      ],
+      "restricted": [
+        {
+          "evidence": {
+            "restrictedInput": "licensed bundle"
+          },
+          "gateId": "oracle/licensed-parity",
+          "outcome": "pass"
+        }
+      ]
+    },
+    "reRunByThisCommand": false,
+    "tierMeaning": {
+      "ci-attested": "not reproducible; only the CI run's identity vouches",
+      "public": "you can re-run these yourself from public inputs",
+      "restricted": "reproducible only with restricted pinned inputs this command cannot obtain"
+    }
+  },
+  "nameRepertoire": "portable",
+  "objectFormat": "sha1",
+  "objectStore": null,
+  "passes": [
+    {
+      "detail": "1 release(s), HEAD 0000-678d7ee1bbe85d55.json; head 678d7ee1bbe85d5526e65001bc4dc354ab376da0f2b1d804298db2baebf4b397; producer SPKI c2324fcd77e9afac\u2026; anchor set 975f99c720660bee010f091a7cf115bfa46d91bc466518c96f7701f8495092e6; witnesses alpha 2026-10-04T03:05:03Z \u00b7 beta 2026-10-04T03:05:06Z",
+      "failure": null,
+      "name": "custody",
+      "ok": true
+    },
+    {
+      "detail": "3 content file(s) and 1 attested file(s) match the witnessed journal exactly, closed-world",
+      "failure": null,
+      "name": "binding",
+      "ok": true
+    },
+    {
+      "detail": "3 gate declaration(s) well formed and complete against the loaded spec (1 public, 1 restricted, 1 ci-attested); none re-run here",
+      "failure": null,
+      "name": "declaration",
+      "ok": true
+    }
+  ],
+  "passesCompleted": [
+    "custody",
+    "binding",
+    "declaration"
+  ],
+  "receiptVersion": "0.6.2",
+  "root": "/private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7754/test_default_root_refuses_a_sp1/clone/vendor/good",
+  "scope": {
+    "established": [
+      "custody under the anchor set 975f99c720660bee010f091a7cf115bfa46d91bc466518c96f7701f8495092e6 the verified tree carries",
+      "binding of the witnessed journal to tree 7f5ed3ca3cd3"
+    ],
+    "notEstablished": [
+      "that any declared gate actually passed",
+      "that the encoded rules are a correct reading of the law",
+      "that this clone holds the producer's newest release (--base-ref only bounds staleness against a head the auditor recorded; newest needs an out-of-band comparison)",
+      "that this is the only history the producer maintains (equivocation is undetectable from a single clone; compare head digests out of band)",
+      "that the files in any checkout equal the verified tree",
+      "that the anchor set is one the auditor trusts",
+      "that the spec's code was trusted"
+    ]
+  },
+  "spec": {
+    "name": "receipt test corpus",
+    "path": "/private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7754/test_default_root_refuses_a_sp1/clone/vendor/good/verification/spec.py",
+    "pinned": false,
+    "sha256": "26a540524a37ab0a2bfadd5a7e6534aeeb2a0eb7317b92e93c7fe2827ee8e285"
+  },
+  "tree": "7f5ed3ca3cd35510b4ae56da59dafe43e3cdcd33",
+  "verdict": "PASS"
+}
+___________ test_default_root_refusal_survives_spec_and_anchor_pins ____________
+
+built = PosixPath('/private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7754/corpus-origin0/repo')
+tmp_path = PosixPath('/private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7754/test_default_root_refusal_surv0')
+capsys = <_pytest.capture.CaptureFixture object at 0x206f9a8ca90>
+
+    def test_default_root_refusal_survives_spec_and_anchor_pins(
+        built: pathlib.Path,
+        tmp_path: pathlib.Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The pins cannot catch the substitution: the submodule carries the
+        pinned spec and the pinned anchors. The walk has to."""
+    
+        clone, good = _clone_with_committed_link(
+            built,
+            tmp_path,
+            link="verification",
+            target="vendor/good/verification",
+        )
+        spec_path = clone / "verification/spec.py"
+        materialized = tmp_path / "pinned"
+        materialized.mkdir()
+        pins = (
+            "--expect-spec-sha256",
+            hashlib.sha256(
+                (good / "verification/spec.py").read_bytes()
+            ).hexdigest(),
+            "--expect-anchor-set",
+            anchor_set_from_materialized_tree(good, materialized),
+        )
+    
+>       assert (
+            main(["verify", "--spec", str(spec_path), *pins, "--json"])
+            == EXIT_USAGE
+        )
+E       AssertionError: assert 0 == 2
+E        +  where 0 = main(['verify', '--spec', '/private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7754/test_de...'--expect-spec-sha256', '26a540524a37ab0a2bfadd5a7e6534aeeb2a0eb7317b92e93c7fe2827ee8e285', '--expect-anchor-set', ...])
+
+../../tests/test_cli.py:283: AssertionError
+----------------------------- Captured stdout call -----------------------------
+{
+  "base": null,
+  "binding": {
+    "attestedFiles": 1,
+    "contentFiles": 3,
+    "removedPaths": []
+  },
+  "chain": {
+    "anchorFiles": {
+      "alpha-root.pem": "14e89ac891a862e7183d1bcaef5d4b6d2a1ce0f7060589a356fe6884dcfcb7e0",
+      "beta-root.pem": "f02aaaf55634d74ac5ab502664c3e1fd4cb1d5bb4b1aca95e6254fe617479740",
+      "producer-ed25519.pub": "82d195da318b2c5d8104d1aa3f0798a3abeccddc2d406147189f7e266024ce40"
+    },
+    "anchorSetSha256": "975f99c720660bee010f091a7cf115bfa46d91bc466518c96f7701f8495092e6",
+    "head": "0000-678d7ee1bbe85d55.json",
+    "headSha256": "678d7ee1bbe85d5526e65001bc4dc354ab376da0f2b1d804298db2baebf4b397",
+    "producerSpkiSha256": "c2324fcd77e9afac9a56e90d40634d127b1e72481b3662e695f4a68985763e4c",
+    "releases": 1,
+    "witnesses": {
+      "alpha": "2026-10-04T03:05:03Z",
+      "beta": "2026-10-04T03:05:06Z"
+    }
+  },
+  "commit": "228bb076d3f3ee600cb240451cb127189789eab7",
+  "gateDeclarations": {
+    "byTier": {
+      "ci-attested": [
+        {
+          "evidence": {
+            "workflow": "repository-checks.yml"
+          },
+          "gateId": "ci/repository-checks",
+          "outcome": "pass"
+        }
+      ],
+      "public": [
+        {
+          "evidence": {
+            "command": "make validate"
+          },
+          "gateId": "rulespec/compile",
+          "outcome": "pass"
+        }
+      ],
+      "restricted": [
+        {
+          "evidence": {
+            "restrictedInput": "licensed bundle"
+          },
+          "gateId": "oracle/licensed-parity",
+          "outcome": "pass"
+        }
+      ]
+    },
+    "reRunByThisCommand": false,
+    "tierMeaning": {
+      "ci-attested": "not reproducible; only the CI run's identity vouches",
+      "public": "you can re-run these yourself from public inputs",
+      "restricted": "reproducible only with restricted pinned inputs this command cannot obtain"
+    }
+  },
+  "nameRepertoire": "portable",
+  "objectFormat": "sha1",
+  "objectStore": null,
+  "passes": [
+    {
+      "detail": "1 release(s), HEAD 0000-678d7ee1bbe85d55.json; head 678d7ee1bbe85d5526e65001bc4dc354ab376da0f2b1d804298db2baebf4b397; producer SPKI c2324fcd77e9afac\u2026; anchor set 975f99c720660bee010f091a7cf115bfa46d91bc466518c96f7701f8495092e6; witnesses alpha 2026-10-04T03:05:03Z \u00b7 beta 2026-10-04T03:05:06Z",
+      "failure": null,
+      "name": "custody",
+      "ok": true
+    },
+    {
+      "detail": "3 content file(s) and 1 attested file(s) match the witnessed journal exactly, closed-world",
+      "failure": null,
+      "name": "binding",
+      "ok": true
+    },
+    {
+      "detail": "3 gate declaration(s) well formed and complete against the loaded spec (1 public, 1 restricted, 1 ci-attested); none re-run here",
+      "failure": null,
+      "name": "declaration",
+      "ok": true
+    }
+  ],
+  "passesCompleted": [
+    "custody",
+    "binding",
+    "declaration"
+  ],
+  "receiptVersion": "0.6.2",
+  "root": "/private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7754/test_default_root_refusal_surv0/clone/vendor/good",
+  "scope": {
+    "established": [
+      "custody of the release chain",
+      "binding of the witnessed journal to tree 7f5ed3ca3cd3"
+    ],
+    "notEstablished": [
+      "that any declared gate actually passed",
+      "that the encoded rules are a correct reading of the law",
+      "that this clone holds the producer's newest release (--base-ref only bounds staleness against a head the auditor recorded; newest needs an out-of-band comparison)",
+      "that this is the only history the producer maintains (equivocation is undetectable from a single clone; compare head digests out of band)",
+      "that the files in any checkout equal the verified tree"
+    ]
+  },
+  "spec": {
+    "name": "receipt test corpus",
+    "path": "/private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7754/test_default_root_refusal_surv0/clone/vendor/good/verification/spec.py",
+    "pinned": true,
+    "sha256": "26a540524a37ab0a2bfadd5a7e6534aeeb2a0eb7317b92e93c7fe2827ee8e285"
+  },
+  "tree": "7f5ed3ca3cd35510b4ae56da59dafe43e3cdcd33",
+  "verdict": "PASS"
+}
+________ test_default_root_refuses_a_top_level_named_through_a_symlink _________
+
+repo = PosixPath('/private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7754/test_default_root_refuses_a_to0/repo')
+tmp_path = PosixPath('/private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7754/test_default_root_refuses_a_to0')
+capsys = <_pytest.capture.CaptureFixture object at 0x206f9a8b550>
+
+    def test_default_root_refuses_a_top_level_named_through_a_symlink(
+        repo: pathlib.Path,
+        tmp_path: pathlib.Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A link that is the top level cannot be told apart, from the path
+        alone, from a link committed in an enclosing checkout, so it refuses;
+        naming the root restores the run."""
+    
+        checkout = tmp_path / "checkout"
+        checkout.symlink_to(repo, target_is_directory=True)
+        spec_path = checkout / "verification/spec.py"
+    
+>       assert main(["verify", "--spec", str(spec_path), "--json"]) == EXIT_USAGE
+E       AssertionError: assert 0 == 2
+E        +  where 0 = main(['verify', '--spec', '/private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7754/test_default_root_refuses_a_to0/checkout/verification/spec.py', '--json'])
+
+../../tests/test_cli.py:326: AssertionError
+----------------------------- Captured stdout call -----------------------------
+{
+  "base": null,
+  "binding": {
+    "attestedFiles": 1,
+    "contentFiles": 3,
+    "removedPaths": []
+  },
+  "chain": {
+    "anchorFiles": {
+      "alpha-root.pem": "14e89ac891a862e7183d1bcaef5d4b6d2a1ce0f7060589a356fe6884dcfcb7e0",
+      "beta-root.pem": "f02aaaf55634d74ac5ab502664c3e1fd4cb1d5bb4b1aca95e6254fe617479740",
+      "producer-ed25519.pub": "82d195da318b2c5d8104d1aa3f0798a3abeccddc2d406147189f7e266024ce40"
+    },
+    "anchorSetSha256": "975f99c720660bee010f091a7cf115bfa46d91bc466518c96f7701f8495092e6",
+    "head": "0000-678d7ee1bbe85d55.json",
+    "headSha256": "678d7ee1bbe85d5526e65001bc4dc354ab376da0f2b1d804298db2baebf4b397",
+    "producerSpkiSha256": "c2324fcd77e9afac9a56e90d40634d127b1e72481b3662e695f4a68985763e4c",
+    "releases": 1,
+    "witnesses": {
+      "alpha": "2026-10-04T03:05:03Z",
+      "beta": "2026-10-04T03:05:06Z"
+    }
+  },
+  "commit": "228bb076d3f3ee600cb240451cb127189789eab7",
+  "gateDeclarations": {
+    "byTier": {
+      "ci-attested": [
+        {
+          "evidence": {
+            "workflow": "repository-checks.yml"
+          },
+          "gateId": "ci/repository-checks",
+          "outcome": "pass"
+        }
+      ],
+      "public": [
+        {
+          "evidence": {
+            "command": "make validate"
+          },
+          "gateId": "rulespec/compile",
+          "outcome": "pass"
+        }
+      ],
+      "restricted": [
+        {
+          "evidence": {
+            "restrictedInput": "licensed bundle"
+          },
+          "gateId": "oracle/licensed-parity",
+          "outcome": "pass"
+        }
+      ]
+    },
+    "reRunByThisCommand": false,
+    "tierMeaning": {
+      "ci-attested": "not reproducible; only the CI run's identity vouches",
+      "public": "you can re-run these yourself from public inputs",
+      "restricted": "reproducible only with restricted pinned inputs this command cannot obtain"
+    }
+  },
+  "nameRepertoire": "portable",
+  "objectFormat": "sha1",
+  "objectStore": null,
+  "passes": [
+    {
+      "detail": "1 release(s), HEAD 0000-678d7ee1bbe85d55.json; head 678d7ee1bbe85d5526e65001bc4dc354ab376da0f2b1d804298db2baebf4b397; producer SPKI c2324fcd77e9afac\u2026; anchor set 975f99c720660bee010f091a7cf115bfa46d91bc466518c96f7701f8495092e6; witnesses alpha 2026-10-04T03:05:03Z \u00b7 beta 2026-10-04T03:05:06Z",
+      "failure": null,
+      "name": "custody",
+      "ok": true
+    },
+    {
+      "detail": "3 content file(s) and 1 attested file(s) match the witnessed journal exactly, closed-world",
+      "failure": null,
+      "name": "binding",
+      "ok": true
+    },
+    {
+      "detail": "3 gate declaration(s) well formed and complete against the loaded spec (1 public, 1 restricted, 1 ci-attested); none re-run here",
+      "failure": null,
+      "name": "declaration",
+      "ok": true
+    }
+  ],
+  "passesCompleted": [
+    "custody",
+    "binding",
+    "declaration"
+  ],
+  "receiptVersion": "0.6.2",
+  "root": "/private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7754/test_default_root_refuses_a_to0/repo",
+  "scope": {
+    "established": [
+      "custody under the anchor set 975f99c720660bee010f091a7cf115bfa46d91bc466518c96f7701f8495092e6 the verified tree carries",
+      "binding of the witnessed journal to tree 7f5ed3ca3cd3"
+    ],
+    "notEstablished": [
+      "that any declared gate actually passed",
+      "that the encoded rules are a correct reading of the law",
+      "that this clone holds the producer's newest release (--base-ref only bounds staleness against a head the auditor recorded; newest needs an out-of-band comparison)",
+      "that this is the only history the producer maintains (equivocation is undetectable from a single clone; compare head digests out of band)",
+      "that the files in any checkout equal the verified tree",
+      "that the anchor set is one the auditor trusts",
+      "that the spec's code was trusted"
+    ]
+  },
+  "spec": {
+    "name": "receipt test corpus",
+    "path": "/private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7754/test_default_root_refuses_a_to0/repo/verification/spec.py",
+    "pinned": false,
+    "sha256": "26a540524a37ab0a2bfadd5a7e6534aeeb2a0eb7317b92e93c7fe2827ee8e285"
+  },
+  "tree": "7f5ed3ca3cd35510b4ae56da59dafe43e3cdcd33",
+  "verdict": "PASS"
+}
+_________ test_default_root_refuses_a_dotdot_that_resolves_past_a_link _________
+
+tmp_path = PosixPath('/private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7754/test_default_root_refuses_a_do0')
+
+    def test_default_root_refuses_a_dotdot_that_resolves_past_a_link(
+        tmp_path: pathlib.Path,
+    ) -> None:
+        """Normalizing ``link/..`` lexically and resolving it physically name two
+        different files; the walk refuses rather than pick the one it did not
+        load. Without a link before the ``..``, the path is accepted."""
+    
+>       from receipt.cli import _DefaultRootError, _default_root
+E       ImportError: cannot import name '_DefaultRootError' from 'receipt.cli' (/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/mutation-cli/src/receipt/cli.py)
+
+../../tests/test_cli.py:345: ImportError
+_____ test_default_root_names_the_spec_s_physical_repository_exhaustively ______
+
+tmp_path = PosixPath('/private/var/folders/9l/_wztzgbx7mgc7l1r0416cy7m0000gn/T/pytest-of-maxghenis/pytest-7754/test_default_root_names_the_sp0')
+
+    def test_default_root_names_the_spec_s_physical_repository_exhaustively(
+        tmp_path: pathlib.Path,
+    ) -> None:
+        """Every layout of three directories between a base and the spec.
+    
+        Each of ``top``, ``top/a`` and ``top/a/b`` (the spec's directory) is a
+        real directory or a symlink to a directory elsewhere, and holds ``.git``
+        or not; the link targets sit inside a directory that holds ``.git`` or
+        not; the base holds ``.git`` or not and is named directly or through a
+        symlink: 4³ × 2 × 2 × 2 = 512 layouts. For every one, with the reference
+        computed from ``os.path`` alone:
+    
+        1. Refusal is exact: the walk refuses iff a symlink lies between the
+           spec's directory and the nearest directory above it holding ``.git``,
+           that directory included.
+        2. Soundness: a returned top level, resolved and joined with the spec's
+           path below it as named, is the spec's resolved path, so the tree
+           verified is the one the named spec lies in.
+        3. Where nothing refuses, the top level resolves to the 0.6.1 walk's.
+        4. Wherever the 0.6.1 walk's top level is not the resolution of the
+           nearest ``.git`` directory above the spec as named, the walk refuses.
+        """
+    
+>       from receipt.cli import _DefaultRootError, _default_root
+E       ImportError: cannot import name '_DefaultRootError' from 'receipt.cli' (/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/mutation-cli/src/receipt/cli.py)
+
+../../tests/test_cli.py:398: ImportError
+=========================== short test summary info ============================
+FAILED tests/test_cli.py::test_default_root_refuses_a_spec_named_through_a_committed_symlink[verification-vendor/good/verification-verification/spec.py]
+FAILED tests/test_cli.py::test_default_root_refuses_a_spec_named_through_a_committed_symlink[audit-vendor/good-audit/verification/spec.py]
+FAILED tests/test_cli.py::test_default_root_refusal_survives_spec_and_anchor_pins
+FAILED tests/test_cli.py::test_default_root_refuses_a_top_level_named_through_a_symlink
+FAILED tests/test_cli.py::test_default_root_refuses_a_dotdot_that_resolves_past_a_link
+FAILED tests/test_cli.py::test_default_root_names_the_spec_s_physical_repository_exhaustively
+6 failed, 1 passed in 1285.16s (0:21:25)

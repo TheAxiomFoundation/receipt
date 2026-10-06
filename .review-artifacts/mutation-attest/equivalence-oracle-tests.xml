@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="1" time="43.842" timestamp="2026-10-03T23:21:50.747364-04:00" hostname="MacBook-Pro-1111.local"><testcase classname="tests.test_attest_equivalence" name="test_the_port_refuses_a_shallow_clone_the_pinned_upstream_accepts" time="29.758"><failure message="AssertionError: assert RunOutcome(co...'', sleeps=()) == RunOutcome(co...d', sleeps=())&#10;  &#10;  Omitting 1 identical items, use -vv to show&#10;  Differing attributes:&#10;  ['code', 'stdout', 'stderr']&#10;  &#10;  Drill down into differing attribute code:&#10;    code: 0 != 1...&#10;  &#10;  ...Full output truncated (8 lines hidden), use '-vv' to show">brier_tree = PosixPath('/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/mutation-attest/oracle-brier')
+tmp_path = PosixPath('/Users/maxghenis/TheAxiomFoundation/_worktrees/hub-review-receipt-79-r2/.review-artifacts/mutation-attest/tmp-equivalence-oracle/test_the_port_refuses_a_shallo0')
+monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x58795d4b2d0&gt;
+capfd = &lt;_pytest.capture.CaptureFixture object at 0x58796303c10&gt;
+
+    def test_the_port_refuses_a_shallow_clone_the_pinned_upstream_accepts(
+        brier_tree: pathlib.Path,
+        tmp_path: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capfd: pytest.CaptureFixture[str],
+    ) -&gt; None:
+        """A recorded divergence: the upstream fails open, the port refuses.
+    
+        In a depth-1 clone whose tip is an unattested records commit, git treats
+        the tip as a root commit, so the upstream names it the enforcement epoch,
+        finds no records commit after it, and accepts without asking ``gh``.
+        """
+    
+        full = tmp_path / "full"
+        _epoch, commit = _repository_with_record(
+            full, brier_tree, timestamp=OLD_RECORD_TIME
+        )
+        stub = _install_gh_stub(
+            tmp_path,
+            monkeypatch,
+            {commit: [{"returncode": 1, "stderr": f"stub refusal for {commit}"}]},
+        )
+        shallow = tmp_path / "shallow"
+        subprocess.run(
+            ["git", "clone", "--quiet", "--depth", "1", f"file://{full}", str(shallow)],
+            check=True,
+            capture_output=True,
+        )
+        _git(shallow, "remote", "set-url", "origin", BRIER_REPO_URL)
+    
+        monkeypatch.setenv("RECEIPT_ATTEST_STUB_RUN", "baseline")
+        baseline = run_baseline(shallow)
+        capfd.readouterr()
+        monkeypatch.setenv("RECEIPT_ATTEST_STUB_RUN", "candidate")
+        candidate = run_candidate(shallow)
+        _assert_candidate_silent(capfd)
+    
+        assert baseline == RunOutcome(
+            0, f"records provenance OK: no records commits in {commit}..HEAD", ""
+        )
+&gt;       assert candidate == RunOutcome(1, "", "shallow repositories are unsupported")
+E       AssertionError: assert RunOutcome(co...'', sleeps=()) == RunOutcome(co...d', sleeps=())
+E         
+E         Omitting 1 identical items, use -vv to show
+E         Differing attributes:
+E         ['code', 'stdout', 'stderr']
+E         
+E         Drill down into differing attribute code:
+E           code: 0 != 1...
+E         
+E         ...Full output truncated (8 lines hidden), use '-vv' to show
+
+../../tests/test_attest_equivalence.py:1101: AssertionError</failure></testcase></testsuite></testsuites>

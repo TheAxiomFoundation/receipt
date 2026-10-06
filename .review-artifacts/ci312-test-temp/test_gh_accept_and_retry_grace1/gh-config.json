@@ -1,0 +1,1 @@
+{"adf9384a3af75cc4827d8c0ab93a6d928d2b1ec4": [{"returncode": 1, "stderr": "stub indexing delay"}, {"returncode": 0, "stdout": "[{\"verificationResult\": {\"signature\": {\"certificate\": {\"subjectAlternativeName\": \"https://github.com/MaxGhenis/brier/.github/workflows/roll-docket.yml@refs/heads/main\"}}}}]"}]}
