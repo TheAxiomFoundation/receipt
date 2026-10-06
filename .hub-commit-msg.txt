@@ -1,0 +1,11 @@
+Fix named-anchor selection and document refusal precedence
+
+Normalize named anchor paths, reject malformed directory values, and use
+explicit None selection on append and release routes so a falsy path cannot
+silently select trusted-root anchors with production pins disabled.
+
+Preserve established compiler, corpus binding, CRLF, release-root history,
+and signing input refusals where safe. Disclose and pin the intentional
+encoding, external-history, enforced-pin, and outer-keyring precedence changes.
+
+Co-Authored-By: GPT-6.1 Sol <noreply@openai.com>
