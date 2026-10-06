@@ -365,7 +365,11 @@ def _exits_before_the_budget_is_checked(
 
         def wait(self, timeout: float | None = None) -> int:
             if timeout is not None:
-                super().wait()
+                try:
+                    super().wait(timeout=60)
+                except subprocess.TimeoutExpired:
+                    # Not a budget refusal: the premise of the test failed.
+                    raise AssertionError("the child did not exit") from None
             return super().wait(timeout=timeout)
 
     return ExitsBeforeTheBudgetIsChecked
