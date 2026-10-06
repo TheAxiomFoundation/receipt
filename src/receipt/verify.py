@@ -39,6 +39,7 @@ from __future__ import annotations
 import codecs
 import hashlib
 import io
+import marshal
 import pathlib
 import sys
 import tempfile
@@ -480,7 +481,10 @@ def load_spec(
             )
         except (UnicodeDecodeError, SyntaxError, ValueError):
             text_code = None
-        if text_code != code:
+        # Code-object equality compares constants by value, so NaN != NaN
+        # falsely rejects identical programs. Marshal preserves float bits
+        # and nested code objects for both compilations in this interpreter.
+        if text_code is None or marshal.dumps(text_code) != marshal.dumps(code):
             code = None
         else:
             exec(text_code, module.__dict__)  # noqa: S102 - the audited repo's own pins
