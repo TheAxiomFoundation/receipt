@@ -2731,6 +2731,223 @@ def test_enforce_production_pins_false_is_the_explicit_fixture_opt_out(
     )
 
 
+@pytest.mark.parametrize("route", ["base", "push"])
+@pytest.mark.parametrize(
+    "anchor_kind", ["path", "falsy-path", "false", "empty", "zero", "bytes", "object"]
+)
+def test_named_anchors_never_fall_back_to_the_trusted_code_root(
+    tmp_path: pathlib.Path,
+    witnesses: Witnesses,
+    route: str,
+    anchor_kind: str,
+) -> None:
+    """A named directory supplies its own key even when its Path is falsy.
+
+    The trusted root holds the signing key; the named directory holds a
+    different key. An override must therefore refuse on both gate routes.
+    Non-path overrides must give an argument refusal rather than choosing
+    the trusted root with its pins switched off.
+    """
+
+    candidate, anchors, stem = genesis_proposal(tmp_path, witnesses)
+    trusted = tmp_path / "trusted"
+    shutil.copytree(anchors, trusted / CHAIN_SPEC.anchor_relative)
+    _private, different_public = generate_signing_keypair()
+    (anchors / CHAIN_SPEC.producer_public_key_filename).write_bytes(different_public)
+
+    class FalsyPath(type(pathlib.Path())):
+        def __bool__(self) -> bool:
+            return False
+
+    named = {
+        "path": anchors,
+        "falsy-path": FalsyPath(anchors),
+        "false": False,
+        "empty": "",
+        "zero": 0,
+        "bytes": bytes(anchors),
+        "object": object(),
+    }[anchor_kind]
+    with pytest.raises(AppendError) as caught:
+        verify_append_gate(
+            candidate.root,
+            spec=GATE_SPEC,
+            base_ref=candidate.base if route == "base" else None,
+            commit=commit_candidate(candidate),
+            trusted_code_root=trusted,
+            release_anchor_dir=named,  # type: ignore[arg-type]
+            enforce_production_pins=False,
+        )
+    expected = (
+        f"producer Ed25519 signature verification failed for {stem}.producer.sig"
+        if anchor_kind in {"path", "falsy-path"}
+        else "release_anchor_dir must be a non-empty filesystem path"
+    )
+    assert str(caught.value) == expected
+
+
+def test_malformed_named_anchors_refuse_before_append_subject_selection() -> None:
+    """Every malformed override refuses before any candidate can be selected."""
+
+    from hypothesis import given, settings, strategies as st
+
+    @settings(max_examples=30, deadline=None, derandomize=True)
+    @given(
+        named=st.one_of(
+            st.booleans(), st.integers(), st.floats(), st.binary(max_size=20),
+            st.lists(st.integers(), max_size=3), st.just(""),
+            st.text(max_size=20).map(lambda value: "\0" + value),
+        ),
+    )
+    def exercise(named: object) -> None:
+        with pytest.raises(AppendError) as caught:
+            verify_append_gate_verdict(
+                pathlib.Path("missing-named-anchor-subject"),
+                spec=GATE_SPEC,
+                release_anchor_dir=named,  # type: ignore[arg-type]
+                enforce_production_pins=False,
+            )
+        assert str(caught.value) == (
+            "release_anchor_dir must be a non-empty filesystem path"
+        )
+
+    exercise()
+
+
+@pytest.mark.parametrize("route", ["base", "push"])
+def test_a_witnessed_crlf_row_keeps_the_release_chain_refusal(
+    tmp_path: pathlib.Path, witnesses: Witnesses, route: str
+) -> None:
+    candidate = base_repository(tmp_path)
+    ledger = candidate.root / CHAIN_SPEC.state_relative
+    ledger.write_bytes(
+        ledger.read_bytes()
+        + jsonl_line(observation_row(BASE_ROW_COUNT + 1)).encode("utf-8")
+        + b"\r\n"
+    )
+    ledger_bytes, prefix_bytes = state_bytes_of(candidate)
+    anchors = tmp_path / "anchors"
+    write_release_chain(
+        candidate.root / CHAIN_SPEC.manifest_relative,
+        anchors,
+        witnesses=witnesses,
+        ledger_bytes=ledger_bytes,
+        prefix_bytes=prefix_bytes,
+    )
+
+    with pytest.raises(AppendError) as caught:
+        verify_append_gate(
+            candidate.root,
+            spec=GATE_SPEC,
+            base_ref=candidate.base if route == "base" else None,
+            commit=commit_candidate(candidate),
+            release_anchor_dir=anchors,
+            enforce_production_pins=False,
+        )
+    assert str(caught.value) == (
+        f"{CHAIN_SPEC.state_path} row {BASE_ROW_COUNT + 1} uses CRLF, not exact LF"
+    )
+
+
+@pytest.mark.parametrize("route", ["base", "push"])
+def test_named_anchor_producer_pin_precedes_an_invalid_signature(
+    tmp_path: pathlib.Path, witnesses: Witnesses, route: str
+) -> None:
+    """New named-directory pins take precedence over later signature errors."""
+
+    candidate, anchors, stem = genesis_proposal(tmp_path, witnesses)
+    signature = candidate.root / CHAIN_SPEC.manifest_relative / f"{stem}.producer.sig"
+    signature.write_bytes(bytes(64))
+    with pytest.raises(AppendError) as caught:
+        verify_append_gate(
+            candidate.root,
+            spec=GATE_SPEC,
+            base_ref=candidate.base if route == "base" else None,
+            commit=commit_candidate(candidate),
+            release_anchor_dir=anchors,
+        )
+    assert str(caught.value) == (
+        f"producer public-key SPKI is not code-pinned: {spki_sha256(witnesses.public_pem)}"
+    )
+
+
+@pytest.mark.parametrize("route", ["base", "push"])
+@pytest.mark.parametrize("pin", ["pem", "policy", "signer", "signer-spki"])
+def test_named_anchor_tsa_pins_precede_later_chain_refusals(
+    tmp_path: pathlib.Path, witnesses: Witnesses, route: str, pin: str
+) -> None:
+    """Each pin failure precedes its paired downstream error.
+
+    PEM pins precede receipt inspection, policy pins precede receipt trust
+    verification, and responder pins precede state framing. Those paired
+    errors were the first refusals when a named directory implicitly
+    switched the production pins off.
+    """
+
+    candidate, anchors, stem = genesis_proposal(tmp_path, witnesses)
+    manifests = candidate.root / CHAIN_SPEC.manifest_relative
+    if pin in {"signer", "signer-spki"}:
+        ledger = candidate.root / CHAIN_SPEC.state_relative
+        ledger.write_bytes(
+            ledger.read_bytes()
+            + jsonl_line(observation_row(BASE_ROW_COUNT + 1)).encode("utf-8")
+            + b"\r\n"
+        )
+        for path in manifests.iterdir():
+            path.unlink()
+        ledger_bytes, prefix_bytes = state_bytes_of(candidate)
+        stem = write_release_chain(
+            manifests,
+            anchors,
+            witnesses=witnesses,
+            ledger_bytes=ledger_bytes,
+            prefix_bytes=prefix_bytes,
+        )
+    elif pin == "pem":
+        (manifests / f"{stem}.alpha.tsr").write_bytes(b"invalid RFC 3161 receipt")
+    else:
+        witnesses.alpha.stamp("0" * 64, manifests / f"{stem}.alpha.tsr")
+
+    spec = _pinned_gate_spec(witnesses, signer=True, pem=True, producer=True)
+    tsa_specs = dict(spec.chain.anchors)
+    wrong_alpha_pin = {
+        "pem": {"pem_sha256": "c" * 64},
+        "policy": {"policy_oid": "1.2.3.4.5"},
+        "signer": {
+            "signer_certificate_sha256": "d" * 64,
+            "signer_spki_sha256": "e" * 64,
+        },
+        "signer-spki": {"signer_spki_sha256": "e" * 64},
+    }[pin]
+    tsa_specs["alpha"] = replace(tsa_specs["alpha"], **wrong_alpha_pin)
+    spec = replace(spec, chain=replace(spec.chain, anchors=tsa_specs))
+
+    with pytest.raises(AppendError) as caught:
+        verify_append_gate(
+            candidate.root,
+            spec=spec,
+            base_ref=candidate.base if route == "base" else None,
+            commit=commit_candidate(candidate),
+            release_anchor_dir=anchors,
+        )
+    expected = {
+        "pem": (
+            "production TSA anchor bytes are not code-pinned for alpha: "
+            f"{hashlib.sha256(witnesses.alpha.root_pem.read_bytes()).hexdigest()}"
+        ),
+        "policy": f"RFC 3161 policy is not pinned for alpha: {witnesses.alpha.policy_oid!r}",
+        "signer": (
+            f"RFC 3161 signer certificate is not pinned for {stem}.alpha.tsr: "
+            f"{witnesses.alpha.signer_certificate_sha256}"
+        ),
+        "signer-spki": (
+            f"RFC 3161 signer SPKI is not pinned for {stem}.alpha.tsr: "
+            f"{witnesses.alpha.signer_spki_sha256}"
+        ),
+    }
+    assert str(caught.value) == expected[pin]
+
+
 @pytest.mark.parametrize(
     ("anchor_dir", "switch", "message"),
     [

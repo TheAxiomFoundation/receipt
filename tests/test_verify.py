@@ -525,6 +525,7 @@ def test_utf8_spec_compilation_preserves_normal_module_semantics(
     [
         b"# coding: bogus\n" + SPEC_SOURCE,
         b"x = '\xff'\n" + SPEC_SOURCE,
+        b"# coding: latin-1\nif \n",
     ],
 )
 def test_load_spec_keeps_unknown_codec_and_invalid_utf8_refusal_details(
@@ -550,6 +551,26 @@ def _assert_load_spec_keeps_compiler_refusal(
     cause = loader_caught.value.__cause__
     assert type(cause) is type(compiler_caught.value)
     assert cause.args == compiler_caught.value.args
+
+
+@settings(
+    max_examples=30,
+    deadline=None,
+    derandomize=True,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+@given(
+    codec=st.sampled_from(["latin-1", "cp1252", "ascii", "iso8859-1"]),
+    comment=st.text(alphabet="abcdefghijklmnopqrstuvwxyz ", max_size=20),
+    broken=st.sampled_from(["if ", "def missing(", "x = (", "class "]),
+)
+def test_non_utf8_syntax_refusals_preserve_the_compilers_diagnostic(
+    tmp_path: pathlib.Path, codec: str, comment: str, broken: str,
+) -> None:
+    """Every syntax-invalid declared encoding keeps the compiler's first error."""
+
+    source = f"# coding: {codec}\n# {comment}\n{broken}\n".encode("ascii")
+    _assert_load_spec_keeps_compiler_refusal(tmp_path, source)
 
 
 @pytest.mark.parametrize(
@@ -584,6 +605,37 @@ def test_load_spec_preserves_compiler_refusals_for_invalid_utf8(
         b"# coding: utf-8\n# " + prefix.encode() + b"\n" + bytes([invalid_byte]) + b"\n"
     )
     _assert_load_spec_keeps_compiler_refusal(tmp_path, source)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [b"raise ValueError('old refusal')\n", b"pass\n", b"SPEC = object()\n"],
+    ids=["execution-error", "missing-SPEC", "wrong-SPEC-type"],
+)
+@pytest.mark.parametrize("pinned", [False, True])
+def test_non_utf8_encoding_refuses_before_execution_and_spec_validation(
+    tmp_path: pathlib.Path, body: bytes, pinned: bool
+) -> None:
+    """Encoding replaces later loader refusals without executing the module."""
+
+    marker = tmp_path / "spec-executed"
+    source = (
+        b"# coding: latin-1\n"
+        + f"open({str(marker)!r}, 'w').close()\n".encode()
+        + body
+    )
+    path = _spec_file(tmp_path, source)
+    with pytest.raises(VerifySpecError) as caught:
+        load_spec(
+            path,
+            expect_sha256=hashlib.sha256(source).hexdigest() if pinned else None,
+        )
+
+    assert str(caught.value) == (
+        "spec declares source encoding iso8859-1; a spec must be UTF-8 so it "
+        f"executes as the text a reviewer reads: {path.resolve()}"
+    )
+    assert not marker.exists()
 
 
 JOURNAL_BYTES = b'{"one":"row"}\n'

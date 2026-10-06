@@ -489,8 +489,8 @@ class KeyringSpec:
 
     ``keys`` are the current generation: they sign and verify new material,
     and ``threshold`` is defined over them — an exact ``int`` between 1 and
-    the number of current keys, checked at construction so no other value
-    can reach a comparison. ``legacy_keys`` are retired keys kept only so
+    the number of current keys, checked at construction and verification.
+    ``legacy_keys`` are retired keys kept only so
     immutable pre-rotation history stays verifiable; they never satisfy
     anything unless the caller explicitly allows them.
     """
@@ -502,6 +502,9 @@ class KeyringSpec:
     def __post_init__(self) -> None:
         if not self.keys:
             raise SignError("keyring must contain at least one key")
+        # Keep the existing scalar-threshold refusals ahead of the new
+        # generation checks. The count check needs the frozen current keys.
+        _check_keyring_threshold(self.threshold)
         # Freeze both generations: a list the caller keeps could otherwise
         # change after these checks ran, and the frozen dataclass would
         # protect nothing.
@@ -520,14 +523,32 @@ class KeyringSpec:
                     f"found={type(value).__name__}"
                 ) from exc
             object.__setattr__(self, name, frozen)
+            if name == "keys":
+                if not frozen:
+                    raise SignError("keyring must contain at least one key")
+                _check_keyring_threshold(self.threshold, len(frozen))
         _check_keyring(self)
 
 
+def _check_keyring_threshold(threshold: object, key_count: int | None = None) -> None:
+    if type(threshold) is not int:
+        raise SignError(
+            "keyring threshold must be an integer between 1 and the "
+            f"number of current keys; found={threshold!r}"
+        )
+    if threshold < 1:
+        raise SignError(f"keyring threshold must be at least 1; found={threshold}")
+    if key_count is not None and threshold > key_count:
+        raise SignError(f"keyring threshold {threshold} exceeds key count {key_count}")
+
+
 def _check_keyring(keyring: KeyringSpec) -> None:
-    """The keyring invariants, run at construction and at every verification.
+    """The outer-ring invariants, at construction and every verification.
 
     Construction is not the only way to reach a verifier: ``object.__setattr__``
     reaches past a frozen dataclass, so the verifiers run these checks again.
+    This checks the generations, count, entry types and uniqueness; it does
+    not rerun each constituent KeySpec's field validation.
     """
 
     if not keyring.keys:
@@ -539,21 +560,10 @@ def _check_keyring(keyring: KeyringSpec) -> None:
                 f"keyring {name} must be a tuple of KeySpec; "
                 f"found={type(value).__name__}"
             )
-    if type(keyring.threshold) is not int:
-        raise SignError(
-            "keyring threshold must be an integer between 1 and the "
-            f"number of current keys; found={keyring.threshold!r}"
-        )
-    if keyring.threshold < 1:
-        raise SignError(
-            f"keyring threshold must be at least 1; found={keyring.threshold}"
-        )
-    if keyring.threshold > len(keyring.keys):
-        raise SignError(
-            f"keyring threshold {keyring.threshold} exceeds key count "
-            f"{len(keyring.keys)}"
-        )
+    _check_keyring_threshold(keyring.threshold, len(keyring.keys))
     for key in (*keyring.keys, *keyring.legacy_keys):
+        # A subclass can run code while its fields are read and replace the
+        # outer ring after its count was checked. Refuse it before any read.
         if type(key) is not KeySpec:
             raise SignError(
                 f"keyring entries must be KeySpec, not {type(key).__name__}"
@@ -668,9 +678,12 @@ def verify_threshold(
     material says ``False`` and refuses any keyring-legacy key loudly;
     verification of immutable pre-rotation history says ``True`` and legacy
     keys count toward the threshold (reported in ``legacy_satisfied``).
+
+    Independent input checks retain their precedence. Outer-ring validation
+    then precedes all checks that consult the ring, including key policy,
+    material normalization and the final threshold verdict.
     """
 
-    keyring = _require_keyring(keyring)
     if type(payload) is not bytes:
         raise SignError("signature payload must be bytes")
     if type(domain) is not bytes:
@@ -680,6 +693,7 @@ def verify_threshold(
 
     _require_str_key_ids(signatures, "signature")
     _require_str_key_ids(public_keys, "public key")
+    keyring = _require_keyring(keyring)
     legacy_ids = {key.key_id for key in keyring.legacy_keys}
     specs = {
         key.key_id: key for key in (*keyring.keys, *keyring.legacy_keys)
@@ -766,6 +780,10 @@ def verify_any_generation(
     retired key is tried, a presented retired key_id is refused loudly the
     way ``verify_threshold`` refuses one, and key material is then required
     for the current generation only.
+
+    Outer-ring validation runs first, before the threshold-1, envelope and
+    key-material checks. An invalid outer ring therefore replaces their
+    downstream refusal with its own named refusal.
     """
 
     keyring = _require_keyring(keyring)

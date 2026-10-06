@@ -932,6 +932,192 @@ def test_a_symlink_outside_every_content_root_still_verifies(
     assert {entry.path for entry in verification.content} == set(CONTENT)
 
 
+@pytest.mark.parametrize("name_repertoire", ["portable", "posix-bytes"])
+@pytest.mark.parametrize(
+    ("path", "states", "expected"),
+    [
+        (
+            "rules/legacy",
+            ("present",),
+            "bound file is not a regular file: rules/legacy",
+        ),
+        (
+            "rules/legacy/child.txt",
+            ("present",),
+            "bound file is missing or not a regular file: rules/legacy/child.txt",
+        ),
+        (
+            "rules/legacy",
+            ("present", "removed"),
+            "removed path is still present in the tree: rules/legacy",
+        ),
+        (
+            "rules/Legacy",
+            ("present", "removed"),
+            "removed path is still present in the tree under a spelling that "
+            "aliases it on a case- or normalization-insensitive filesystem: "
+            "rules/Legacy ('rules/legacy')",
+        ),
+    ],
+)
+def test_suffixless_symlink_preserves_attestation_and_tombstone_refusals(
+    tmp_path: pathlib.Path,
+    name_repertoire: str,
+    path: str,
+    states: tuple[str, ...],
+    expected: str,
+) -> None:
+    """A new closed-world refusal must not replace existing binding failures."""
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+    for state in states:
+        rows.append(
+            {
+                "schemaVersion": JOURNAL_SCHEMA,
+                "entryIndex": len(rows),
+                "kind": "attested",
+                "path": path,
+                "sha256": sha256_text(CONTENT["rules/tax/rate.yaml"]),
+                "state": state,
+            }
+        )
+    _commit_worktree(tmp_path)
+    oid = _commit_index_updates(
+        tmp_path, [("120000", _hash_blob(tmp_path, b"tax"), b"rules/legacy")]
+    )
+
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(
+            tmp_path,
+            oid,
+            render_journal(rows),
+            spec=corpus_spec(name_repertoire=name_repertoire),
+        )
+    assert str(caught.value) == expected
+
+
+@pytest.mark.parametrize("name_repertoire", ["portable", "posix-bytes"])
+@pytest.mark.parametrize(
+    "old_failure",
+    [
+        "later-root",
+        "unlisted",
+        "absent",
+        "required-attestation",
+        "content-digest",
+        "attested-digest",
+    ],
+)
+def test_suffixless_symlink_preserves_later_binding_refusals(
+    tmp_path: pathlib.Path, name_repertoire: str, old_failure: str
+) -> None:
+    """All old binding checks still run before the added suffixless-link screen."""
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+    overrides: dict[str, object] = {"name_repertoire": name_repertoire}
+    if old_failure == "later-root":
+        overrides["content_roots"] = (
+            pathlib.PurePosixPath("rules"),
+            pathlib.PurePosixPath("missing"),
+        )
+        expected = "pinned content root is absent from the tree: missing"
+    elif old_failure == "unlisted":
+        (tmp_path / "rules/unbound.yaml").write_text("unbound\n")
+        expected = (
+            "1 content file(s) in the tree are not bound by the witnessed "
+            "journal, starting with 'rules/unbound.yaml'"
+        )
+    elif old_failure == "absent":
+        (tmp_path / "rules/tax/rate.yaml").unlink()
+        expected = (
+            "1 content file(s) bound by the journal are missing from the tree, "
+            "starting with 'rules/tax/rate.yaml'"
+        )
+    elif old_failure == "required-attestation":
+        rows = reindex([row for row in rows if row.get("kind") != "attested"])
+        expected = (
+            "the witnessed journal does not attest a path the pinned spec "
+            "requires: '.axiom/toolchain.toml'"
+        )
+    else:
+        kind = "content" if old_failure == "content-digest" else "attested"
+        path = (
+            "rules/tax/rate.yaml" if kind == "content" else ".axiom/toolchain.toml"
+        )
+        for row in rows:
+            if row.get("path") == path:
+                row["sha256"] = "0" * 64
+        body = CONTENT[path] if kind == "content" else ATTESTED[path]
+        expected = (
+            f"{kind} file '{path}' does not match its witnessed digest: tree has "
+            f"{sha256_text(body)}, journal binds {'0' * 64}"
+        )
+    _commit_worktree(tmp_path)
+    oid = _commit_index_updates(
+        tmp_path, [("120000", _hash_blob(tmp_path, b"tax"), b"rules/legacy")]
+    )
+
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(
+            tmp_path, oid, render_journal(rows), spec=corpus_spec(**overrides)
+        )
+    assert str(caught.value) == expected
+
+
+@pytest.fixture(scope="module")
+def suffixless_link_precedence_tree(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[pathlib.Path, str]:
+    """All examples verify the same immutable tree rather than rebuilding it."""
+
+    root = tmp_path_factory.mktemp("corpus-precedence")
+    write_tree(root)
+    _commit_worktree(root)
+    oid = _commit_index_updates(
+        root, [("120000", _hash_blob(root, b"tax"), b"rules/legacy")]
+    )
+    return root, oid
+
+
+def test_binding_digest_refusals_precede_suffixless_links_for_every_wrong_digest(
+    suffixless_link_precedence_tree: tuple[pathlib.Path, str],
+) -> None:
+    """Any incorrect content or attestation digest keeps its established refusal."""
+
+    from hypothesis import given, settings, strategies as st
+
+    @settings(max_examples=24, deadline=None, derandomize=True)
+    @given(
+        kind=st.sampled_from(["content", "attested"]),
+        name_repertoire=st.sampled_from(["portable", "posix-bytes"]),
+        mutation=st.integers(min_value=1, max_value=(1 << 256) - 1),
+    )
+    def exercise(kind: str, name_repertoire: str, mutation: int) -> None:
+        root, oid = suffixless_link_precedence_tree
+        path = "rules/tax/rate.yaml" if kind == "content" else ".axiom/toolchain.toml"
+        body = CONTENT[path] if kind == "content" else ATTESTED[path]
+        correct_digest = sha256_text(body)
+        wrong_digest = f"{int(correct_digest, 16) ^ mutation:064x}"
+        rows = journal_rows()
+        for row in rows:
+            if row.get("path") == path:
+                row["sha256"] = wrong_digest
+
+        with pytest.raises(CorpusError) as caught:
+            _verify_commit(
+                root, oid, render_journal(rows),
+                spec=corpus_spec(name_repertoire=name_repertoire),
+            )
+        assert str(caught.value) == (
+            f"{kind} file '{path}' does not match its witnessed digest: tree has "
+            f"{correct_digest}, journal binds {wrong_digest}"
+        )
+
+    exercise()
+
+
 def test_refuses_control_characters_in_gate_evidence(tmp_path: pathlib.Path) -> None:
     """Regression: evidence strings are rendered to a terminal, so a producer
     could embed CR/ESC and redraw the verdict line into a false PASS."""
@@ -1054,6 +1240,34 @@ def test_refuses_a_required_gate_the_journal_omits(tmp_path: pathlib.Path) -> No
     verification = verify_corpus_binding(tmp_path, render_journal(rows), spec=spec)
     with pytest.raises(CorpusError, match="does not declare a gate the pinned spec"):
         verify_declarations(verification, spec=spec)
+
+
+def test_suffixless_symlink_refusal_precedes_a_missing_gate_declaration(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binding closes the content root before the later declaration pass."""
+
+    write_tree(tmp_path)
+    rows = reindex(
+        [row for row in journal_rows() if row.get("gateId") != "rulespec/compile"]
+    )
+    spec = corpus_spec()
+    oid = _commit_worktree(tmp_path)
+    verification = _verify_commit(tmp_path, oid, render_journal(rows), spec=spec)
+    with pytest.raises(CorpusError) as caught:
+        verify_declarations(verification, spec=spec)
+    assert str(caught.value) == (
+        "the witnessed journal does not declare a gate the pinned spec "
+        "requires: 'rulespec/compile'"
+    )
+
+    oid = _commit_index_updates(
+        tmp_path, [("120000", _hash_blob(tmp_path, b"tax"), b"rules/legacy")]
+    )
+    with pytest.raises(CorpusError) as caught:
+        verification = _verify_commit(tmp_path, oid, render_journal(rows), spec=spec)
+        verify_declarations(verification, spec=spec)
+    assert str(caught.value) == "content root contains a symlink: 'rules/legacy'"
 
 
 def test_refuses_a_tier_the_spec_does_not_accept(tmp_path: pathlib.Path) -> None:
