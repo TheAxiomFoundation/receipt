@@ -104,6 +104,101 @@ def test_load_spec_without_expectation_is_unpinned(tmp_path: pathlib.Path) -> No
     assert not hasattr(verify_module, "_loaded_spec")
 
 
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "1e400 - 1e400",
+        "1e400j - 1e400j",
+        "(1e400 - 1e400, (1e400j - 1e400j,))",
+    ],
+    ids=["float", "complex", "nested-tuple"],
+)
+@pytest.mark.parametrize("placement", ["module", "function"])
+@pytest.mark.parametrize("pinned", [False, True])
+def test_load_spec_accepts_folded_nan_constants(
+    tmp_path: pathlib.Path, expression: str, placement: str, pinned: bool
+) -> None:
+    """Identical UTF-8 programs accept even with non-reflexive constants.
+
+    Enumerate float/complex NaNs, tuple constants and nested code objects;
+    none changes the VerificationSpec, whether or not its bytes are pinned.
+    """
+
+    prefix = (
+        f"UNUSED_NAN = {expression}\n"
+        if placement == "module"
+        else f"def unused_nan():\n    return {expression}\n"
+    )
+    source = prefix.encode("ascii") + SPEC_SOURCE
+    digest = hashlib.sha256(source).hexdigest()
+
+    loaded = load_spec(
+        _spec_file(tmp_path, source), expect_sha256=digest if pinned else None
+    )
+
+    assert loaded.verification.name == "loaded-spec-test"
+    assert loaded.sha256 == digest
+    assert loaded.pinned is pinned
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+def test_load_spec_preserves_signed_zero_constants(
+    tmp_path: pathlib.Path, pinned: bool
+) -> None:
+    source = (
+        b"import math\n"
+        b"UNUSED_ZERO = (-0.0, 0.0)\n"
+        b"def unused_zero():\n    return -0.0, 0.0\n"
+        b"assert [math.copysign(1.0, x) for x in UNUSED_ZERO] == [-1.0, 1.0]\n"
+        b"assert [math.copysign(1.0, x) for x in unused_zero()] == [-1.0, 1.0]\n"
+        + SPEC_SOURCE
+    )
+
+    loaded = load_spec(
+        _spec_file(tmp_path, source),
+        expect_sha256=hashlib.sha256(source).hexdigest() if pinned else None,
+    )
+
+    assert loaded.verification.name == "loaded-spec-test"
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_load_spec_refuses_a_signed_zero_program_mismatch(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, nested: bool
+) -> None:
+    """Program identity preserves float bits, including in nested code."""
+
+    marker = tmp_path / "spec-executed"
+    prefix = (
+        b"def unused_zero():\n    return -0.0\n"
+        if nested
+        else b"UNUSED_ZERO = -0.0\n"
+    )
+    source = (
+        prefix + f"open({str(marker)!r}, 'w').close()\n".encode() + SPEC_SOURCE
+    )
+    path = _spec_file(tmp_path, source)
+    original_compile = compile
+
+    def changed_text_compile(
+        source: bytes | str, *args: Any, **kwargs: Any
+    ) -> types.CodeType:
+        if isinstance(source, str):
+            source = source.replace("-0.0", "0.0", 1)
+        return original_compile(source, *args, **kwargs)
+
+    monkeypatch.setattr(verify_module, "compile", changed_text_compile, raising=False)
+
+    with pytest.raises(VerifySpecError) as caught:
+        load_spec(path)
+
+    assert str(caught.value) == (
+        "spec does not compile to the program its UTF-8 text reads as; a source "
+        f"encoding declaration changed it: {path.resolve()}"
+    )
+    assert not marker.exists()
+
+
 @pytest.mark.parametrize("expectation", [object(), "A" * 64, "0" * 63, "g" * 64])
 def test_load_spec_refuses_a_non_digest_expectation_without_comparing_it(
     tmp_path: pathlib.Path, expectation: object
@@ -257,6 +352,43 @@ def test_load_spec_refuses_bytes_that_compile_to_another_program_than_their_text
         "spec does not compile to the program its UTF-8 text reads as; a source "
         f"encoding declaration changed it: {path.resolve()}"
     )
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("bypass_declaration_check", [False, True])
+@pytest.mark.parametrize("pinned", [False, True])
+def test_load_spec_refuses_latin1_that_changes_a_string_literal(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bypass_declaration_check: bool,
+    pinned: bool,
+) -> None:
+    marker = tmp_path / "spec-executed"
+    source = (
+        b"# coding: latin-1\n"
+        + f"open({str(marker)!r}, 'w').close()\n".encode()
+        + SPEC_SOURCE.replace(b"loaded-spec-test", "règles".encode("utf-8"))
+    )
+    path = _spec_file(tmp_path, source)
+    if bypass_declaration_check:
+        monkeypatch.setattr(
+            verify_module, "_declared_source_encoding", lambda source: "utf-8"
+        )
+
+    with pytest.raises(VerifySpecError) as caught:
+        load_spec(
+            path,
+            expect_sha256=hashlib.sha256(source).hexdigest() if pinned else None,
+        )
+
+    expected = (
+        "spec does not compile to the program its UTF-8 text reads as; "
+        "a source encoding declaration changed it: "
+        if bypass_declaration_check
+        else "spec declares source encoding iso8859-1; a spec must be UTF-8 so "
+        "it executes as the text a reviewer reads: "
+    )
+    assert str(caught.value) == expected + str(path.resolve())
     assert not marker.exists()
 
 
