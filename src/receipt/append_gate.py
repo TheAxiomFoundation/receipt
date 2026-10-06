@@ -235,7 +235,7 @@ def check_surface_separation(
 
 
 def check_gate_only_confinement(
-    unclassified: set[str], candidate: _CandidateTree
+    changed: set[str], candidate: _CandidateTree
 ) -> set[str]:
     """Confine a gate-only proposal to the surfaces its verdict speaks for.
 
@@ -245,36 +245,35 @@ def check_gate_only_confinement(
     covered the changed set, so a proposal that added a gate file AND
     rewrote an unclassified file under the release root — say
     ``releases/README.md`` — was accepted with none of those checks run.
-    An unclassified change on the release surface
+    A changed ledger, prefix manifest or state ancestor is refused across
+    every classification. An unclassified change on the release surface
     is refused here; the rest are returned for the
     caller to name in its success text, so an unclassified change riding a
     gate-only proposal is never silent.
 
-    The surface is ``_is_protected``'s, which is the release root, everything
+    For the release check, the surface is ``_is_protected``'s: the root, everything
     under it, and every proper ancestor of it. The last is what a nested root
     needs: with ``data/releases`` configured, a proposal replacing ``data``
     changes whether the release root exists as a tree. An unclassified change
     everywhere else is still reported
     rather than refused, because everywhere else is ground this verdict makes
     no claim about; on the release surface the verdict claims exactly this
-    confinement. The two surfaces the spec names cannot appear here at all —
-    a path matching either is classified, not unclassified — so the set this
-    refuses is the release root, its subtree, and its ancestors, which is what
-    the sentence names.
+    confinement. The two surfaces the spec names cannot appear in the
+    unclassified set — a path matching either is classified — so the release
+    check refuses the root, its subtree and its ancestors.
     """
 
-    # The ledger and its frozen-prefix manifest are what every skipped check
-    # is about, whatever the spec's DATA_SURFACE says. With a data surface
-    # that missed them, a gate-only proposal rewrote an existing ledger row
-    # and was accepted, the row reported only as "unclassified" (0.6.2
-    # review, L6 finding 11). So they, and the directories above them, are
-    # refused as unclassified changes here too.
-    on_the_state_files = sorted(
-        path for path in unclassified if path in _state_paths(candidate)
-    )
+    _, _, unclassified = _classify_surfaces(changed, candidate)
+    # Invariant: a gate-classified path never changes ledger state. The
+    # ledger, its frozen-prefix manifest and their ancestors are what the
+    # skipped checks are about, regardless of DATA/GATE classification.
+    # Checking only unclassified paths let a gate surface containing the
+    # state paths admit row rewrites, prefix corruption and mode changes.
+    on_the_state_files = sorted(changed & _state_paths(candidate))
     if on_the_state_files:
+        qualifier = "unclassified " if set(on_the_state_files) <= unclassified else ""
         raise AppendError(
-            "gate-only proposal changes unclassified ledger state path(s): "
+            f"gate-only proposal changes {qualifier}ledger state path(s): "
             f"{on_the_state_files}"
         )
     on_the_release_surface = sorted(
@@ -1306,12 +1305,14 @@ def _verify_selected_tree(
     attributes = candidate._policy.evaluate_attributes(attribute_plan)
     attributes.require(attribute_plan.use, render=attribute_error)
     if base is not None:
-        _data_changes, gate_changes, unclassified = check_surface_separation(
+        data_changes, gate_changes, unclassified = check_surface_separation(
             base,
             candidate,
         )
         if gate_changes:
-            reported = check_gate_only_confinement(unclassified, candidate)
+            reported = check_gate_only_confinement(
+                data_changes | gate_changes | unclassified, candidate
+            )
             unclassified_suffix = (
                 f"; unclassified changes={sorted(reported)}" if reported else ""
             )

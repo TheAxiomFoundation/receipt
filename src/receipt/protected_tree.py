@@ -1339,15 +1339,19 @@ def _folded_attribute_names(
     cached = cache.get(key)
     if cached is not None:
         return cached
-    if directory:
-        raw = subject._raw_entry_at(directory)
+    # The exact reading has already admitted this source path, authenticating
+    # every reached directory. Inspect those immutable records without charging
+    # a second logical walk: folded source discovery is a pure fact about the
+    # same source, not another caller-supplied path admission.
+    tree_oid = subject.tree
+    for component in directory:
+        records = subject._state.tree_cache[tree_oid]
+        raw = next((record for record in records if record.name == component), None)
         if raw is None or raw.mode != b"40000":
             cache[key] = ()
             return ()
         tree_oid = raw.oid
-    else:
-        tree_oid = subject.tree
-    records = subject._tree_object(tree_oid)
+    records = subject._state.tree_cache[tree_oid]
     names = tuple(
         record.name for record in records if record.name.lower() == b".gitattributes"
     )
@@ -1796,11 +1800,7 @@ class TreePolicy:
                             attribute_parts = (*parts[:depth], names[0])
                     # Keep this hook even on outcome reuse: the source loader
                     # owns its snapshot-local cache, authentication and charges.
-                    rules = (
-                        self.snapshot._attribute_rules(attribute_parts)
-                        if not fold or names
-                        else ()
-                    )
+                    rules = self.snapshot._attribute_rules(attribute_parts)
                     source = snapshot._tree_path_decode(b"/".join(attribute_parts))
                     if not fold:
                         sources.append(source)
