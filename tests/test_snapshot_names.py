@@ -394,3 +394,95 @@ def test_raw_tree_parser_applies_component_refusals_before_indexing(name: bytes)
     payload = b"100644 " + name + b"\0" + (b"\x01" * 20)
     with pytest.raises(SnapshotError, match="invalid entry name"):
         _parse_raw_tree("02" * 20, payload, object_format="sha1")
+
+
+# --- 0.6.2 review, L7 finding 10: pinned suffixes are exact text or refused
+
+
+@pytest.mark.parametrize(
+    "suffixes",
+    [".sig", b".sig", (b".sig",), (".json", 1)],
+    ids=["bare-str", "bare-bytes", "bytes-pin", "int-pin"],
+)
+def test_short_name_suffix_screen_refuses_pins_that_are_not_text(
+    suffixes: object,
+) -> None:
+    """A bare ``str`` was a collection of one-character pins and a non-str
+    pin was dropped, so the screen answered "no alias carries a pinned
+    suffix" -- its passing direction -- where the module's rule is to refuse
+    values other than exact ``str``."""
+
+    from receipt._names import NamePolicyError, short_name_carries_pinned_suffix
+
+    with pytest.raises(NamePolicyError):
+        short_name_carries_pinned_suffix("ABCDEFGHI.sig", suffixes)  # type: ignore[arg-type]
+
+
+def test_short_name_suffix_screen_refuses_a_str_subclass_pin() -> None:
+    from receipt._names import NamePolicyError, short_name_carries_pinned_suffix
+
+    class Pin(str):
+        pass
+
+    with pytest.raises(NamePolicyError, match="pinned suffix must be text"):
+        short_name_carries_pinned_suffix("ABCDEFGHI.sig", (Pin(".sig"),))
+    # The control: exact text pins still answer.
+    assert short_name_carries_pinned_suffix("ABCDEFGHI.sig", (".sig",)) is True
+
+
+# --- 0.6.2 review, L7 finding 11: a portable component fits one host name
+
+
+def test_a_portable_component_is_at_most_255_bytes() -> None:
+    """APFS, ext4 and NTFS cap one name at 255; a 256-byte ASCII name passed
+    every portable screen, ``materializing=True`` included."""
+
+    from receipt._names import (
+        NamePolicyError,
+        assert_portable_name,
+        decode_component,
+    )
+
+    assert assert_portable_name("a" * 255, "x") == "a" * 255
+    assert decode_component(b"a" * 255, repertoire="portable") == "a" * 255
+    with pytest.raises(NamePolicyError, match="longer than 255 bytes"):
+        assert_portable_name("ok/" + "a" * 256, "x")
+    for materializing in (False, True):
+        with pytest.raises(NamePolicyError, match="longer than 255 bytes"):
+            decode_component(
+                b"a" * 256, repertoire="portable", materializing=materializing
+            )
+    # posix-bytes reads are object-only and keep no length bound.
+    assert decode_component(b"a" * 256, repertoire="posix-bytes") == "a" * 256
+
+
+def test_materializing_a_256_byte_name_refuses_before_writing(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The tree bytes are the producer's: the name reached ``open("xb")`` and
+    escaped as ``OSError: File name too long``."""
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
+
+    def git_object(kind: str, data: bytes) -> str:
+        return subprocess.run(
+            ["git", "-C", str(root), "hash-object", "--literally", "-t", kind,
+             "-w", "--stdin"],
+            input=data, capture_output=True, check=True,
+        ).stdout.decode().strip()
+
+    blob = git_object("blob", b"x\n")
+    tree = git_object("tree", b"100644 " + b"a" * 256 + b"\0" + bytes.fromhex(blob))
+    commit = git_object(
+        "commit",
+        f"tree {tree}\nauthor A <a@b> 0 +0000\ncommitter A <a@b> 0 +0000\n\nx\n".encode(),
+    )
+    destination = tmp_path / "dest"
+    destination.mkdir()
+    with TreeSnapshot.select(root, commit) as selected:
+        with pytest.raises(SnapshotError, match="longer than 255 bytes"):
+            with selected.materialize((b"",), destination, repertoire="portable"):
+                pass
+    assert list(destination.iterdir()) == []

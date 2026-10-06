@@ -9,11 +9,19 @@ committed by the consumer.
 Git and ``gh attestation verify`` remain subprocess boundaries.  Every
 subprocess stream is captured, so these helpers are silent library calls; the
 caller decides how to render accepted and refused outcomes.
+
+Every git child answers about the repository ``root`` names, as its objects
+record it: it runs with ``--no-replace-objects`` and
+``core.commitGraph=false`` and with every inherited ``GIT_*`` variable
+dropped (:func:`_git_environment`), the history walks refuse shallow and
+grafted repositories, and revisions are passed after ``--end-of-options``.  Configuration files are read where git finds them by
+default.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -70,7 +78,9 @@ class AttestSpec:
     """Consumer-committed workflow-provenance policy.
 
     Every field is required.  ``allowed_workflows`` is normalized to a
-    ``frozenset`` so the frozen spec does not retain a mutable policy object.
+    ``frozenset`` so the frozen spec does not retain a mutable policy object,
+    and every text field and workflow must be exactly ``str``: a subclass
+    carries methods the pattern would consult later.
     """
 
     repository: str
@@ -80,6 +90,16 @@ class AttestSpec:
     checker_path: pathlib.PurePosixPath
 
     def __post_init__(self) -> None:
+        # Exactly ``str``: a subclass passed every check below and kept its
+        # own methods, and ``re.escape`` consults them when the pattern is
+        # built, so a frozen spec's ``cert_identity_pattern`` could widen
+        # after validation (0.6.2 review, L6 finding 15).
+        for name in ("repository", "allowed_ref", "protected_prefix"):
+            value = getattr(self, name)
+            if isinstance(value, str) and type(value) is not str:
+                raise ValueError(
+                    f"{name} must be a str, not a {type(value).__name__} subclass"
+                )
         _repository_slug(self.repository)
 
         workflows_value: object = self.allowed_workflows
@@ -102,7 +122,7 @@ class AttestSpec:
         for workflow in sorted(workflows, key=repr):
             if (
                 _relative_posix_path(workflow) is None
-                or not isinstance(workflow, str)
+                or type(workflow) is not str
                 or not workflow.startswith(".github/workflows/")
                 or workflow == ".github/workflows/"
                 or "@" in workflow
@@ -163,15 +183,84 @@ def subject_name(commit: str) -> str:
     return f"records-push-{commit}.json"
 
 
+def _git_environment() -> dict[str, str]:
+    """Return the environment for every git child of this module.
+
+    Every inherited name beginning ``GIT_`` is removed.  ``GIT_DIR``,
+    ``GIT_WORK_TREE``, ``GIT_OBJECT_DIRECTORY`` and
+    ``GIT_ALTERNATE_OBJECT_DIRECTORIES`` each answered a query from somewhere
+    other than ``root``, so a sweep could accept by reading another
+    repository's history; ``GIT_GRAFT_FILE``, ``GIT_REPLACE_REF_BASE`` and the
+    ``GIT_CONFIG_*`` channels could reshape the history walked.  Removing the
+    whole prefix also covers names a later git adds.  The release-chain
+    entries refuse the redirecting variables instead, because they also read
+    the tree directly and a drop would leave two subjects; this module reads
+    the repository only through git, so dropping them leaves one.
+    ``GIT_NO_REPLACE_OBJECTS=1`` is then installed, matching the
+    ``--no-replace-objects`` every command carries: a ``refs/replace/`` ref
+    fetched with the repository substituted another commit's tree for the one
+    a branch names, and the sweep walked the substitute.
+    """
+
+    environment = {
+        name: value for name, value in os.environ.items() if not name.startswith("GIT_")
+    }
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    return environment
+
+
+def _git_command(*args: str) -> list[str]:
+    """Return the argv for one git child of this module.
+
+    ``core.commitGraph=false`` makes git read parents and root trees from the
+    commit objects rather than from the commit-graph file, a cache git trusts
+    without checking it against them: a stale or altered graph entry gave a
+    records commit below the tip its parent's tree, and the path-limited walk
+    then passed over it.
+    """
+
+    return ["git", "--no-replace-objects", "-c", "core.commitGraph=false", *args]
+
+
 def git_output(root: pathlib.Path, *args: str) -> str:
-    """Run a captured git query in ``root`` and return stripped text."""
+    """Run a captured git query in ``root`` and return stripped text.
+
+    The query carries :func:`_git_command`'s options and runs under
+    :func:`_git_environment`.
+    """
 
     return subprocess.check_output(
-        ["git", *args], cwd=root, text=True, stderr=subprocess.PIPE
+        _git_command(*args),
+        cwd=root,
+        env=_git_environment(),
+        text=True,
+        stderr=subprocess.PIPE,
     ).strip()
 
 
+def _refuse_rewritten_history(root: pathlib.Path) -> None:
+    """Refuse a repository whose history git would walk only in part.
+
+    In a shallow clone git treats each boundary commit as a root, so the
+    boundary appeared to introduce the checker: :func:`enforcement_epoch`
+    named it, :func:`commit_in_scope` exempted it as its own ancestor, and the
+    default range after it was empty.  A depth-1 clone, the GitHub Actions
+    checkout default, therefore accepted an unattested protected-tree commit
+    at its tip without a refusal.  A graft file rewrites parents the same way,
+    and git honors it with replace objects off.  Both refuse, in the words
+    the tree-snapshot reader uses; the fix for a shallow checkout is the whole
+    history (``fetch-depth: 0``).
+    """
+
+    if git_output(root, "rev-parse", "--is-shallow-repository") != "false":
+        raise ProvenanceError("shallow repositories are unsupported")
+    grafts = git_output(root, "rev-parse", "--git-path", "info/grafts")
+    if os.path.lexists(pathlib.Path(root) / grafts):
+        raise ProvenanceError("repository grafts are unsupported")
+
+
 def enforcement_epoch(root: pathlib.Path, *, spec: AttestSpec) -> str:
+    _refuse_rewritten_history(root)
     commits = git_output(
         root,
         "log",
@@ -195,8 +284,13 @@ def records_commits(
     *,
     spec: AttestSpec,
 ) -> list[str]:
-    """Enumerate protected-tree commits without simplifying merge history."""
+    """Enumerate protected-tree commits without simplifying merge history.
 
+    ``rev_range`` is read as revisions only: a value git would otherwise take
+    as an option, which could empty the sweep, is refused by git instead.
+    """
+
+    _refuse_rewritten_history(root)
     # --full-history: path simplification may otherwise drop a protected-tree
     # commit that arrived on a side branch.
     output = git_output(
@@ -204,6 +298,7 @@ def records_commits(
         "log",
         "--full-history",
         "--format=%H",
+        "--end-of-options",
         rev_range,
         "--",
         spec.protected_prefix,
@@ -217,7 +312,9 @@ def commit_age_seconds(
     *,
     now: float | None = None,
 ) -> int:
-    committed = int(git_output(root, "show", "-s", "--format=%ct", commit))
+    committed = int(
+        git_output(root, "show", "-s", "--format=%ct", "--end-of-options", commit)
+    )
     current = time.time() if now is None else now
     return max(0, int(current) - committed)
 
@@ -233,7 +330,10 @@ def repository_slug(root: pathlib.Path) -> str:
     # Preserve the configured value's whitespace and control bytes for the
     # guard below; only the command's one framing newline may be removed.
     raw_url = subprocess.check_output(
-        ["git", "remote", "get-url", "origin"], cwd=root, stderr=subprocess.PIPE
+        _git_command("remote", "get-url", "origin"),
+        cwd=root,
+        env=_git_environment(),
+        stderr=subprocess.PIPE,
     )
     url = raw_url.removesuffix(b"\n").decode("utf-8", errors="surrogateescape")
     try:
@@ -270,25 +370,45 @@ def repository_slug(root: pathlib.Path) -> str:
         ) from None
 
 
-def extract_certificate_identities(payload: object) -> set[str]:
-    """Return signer URIs from verificationResult.signature.certificate only."""
+def extract_certificate_identities(
+    payload: object, *, signer_only: bool = False
+) -> set[str]:
+    """Return certificate workflow URIs, optionally restricted to its SAN.
+
+    ``gh --cert-identity-regex`` enforces ``subjectAlternativeName``. Other
+    fields, including ``buildConfigURI``, may name a different workflow.
+    The default retains the broad extraction used by existing callers.
+    """
 
     identities: set[str] = set()
     results = payload if isinstance(payload, list) else [payload]
     for result in results:
         if not isinstance(result, dict):
             continue
-        certificate = (
-            (result.get("verificationResult") or {})
-            .get("signature", {})
-            .get("certificate", {})
-            if isinstance(result.get("verificationResult"), dict)
-            else {}
-        )
+        # Every level is checked for shape before it is read: a ``null`` or
+        # string ``signature`` in gh's output raised AttributeError after gh
+        # had accepted (0.6.2 review, L6 finding 14).
+        verification = result.get("verificationResult")
+        if not isinstance(verification, dict):
+            continue
+        signature = verification.get("signature")
+        if not isinstance(signature, dict):
+            continue
+        certificate = signature.get("certificate")
         if not isinstance(certificate, dict):
             continue
-        for value in certificate.values():
+        values = (
+            (certificate.get("subjectAlternativeName"),)
+            if signer_only
+            else certificate.values()
+        )
+        for value in values:
             if isinstance(value, str):
+                if signer_only:
+                    identity = value.removeprefix("https://")
+                    if SIGNER_RE.fullmatch(identity):
+                        identities.add(identity)
+                    continue
                 for match in SIGNER_RE.finditer(value):
                     identities.add(match.group(0))
     return identities
@@ -314,7 +434,13 @@ def verify_commit(
     now: float | None = None,
     sleep: Callable[[float], None] | None = None,
 ) -> str:
-    """Verify one commit's attestation; return the accepted signer identity."""
+    """Verify one commit's attestation; return the signer identity gh enforced.
+
+    Acceptance is gh's exit status alone. The identity returned is for the
+    log line: the certificate's ``subjectAlternativeName`` matching the
+    pattern gh enforced, or ``"<verified>"`` when output names none. An
+    allowlisted caller's ``buildConfigURI`` never substitutes for the signer.
+    """
 
     payload = attestation_subject(spec.repository, commit)
     with tempfile.TemporaryDirectory() as tmp:
@@ -347,13 +473,22 @@ def verify_commit(
             )
             if completed.returncode == 0:
                 # gh already enforced the certificate identity; parse it back
-                # out of the certificate fields for the log line only.
+                # out of the certificate fields for the log line only. Output
+                # too deep for the decoder is unreadable output, like any
+                # other, and not a crash.
                 try:
                     parsed = json.loads(completed.stdout)
-                except json.JSONDecodeError:
+                except (ValueError, RecursionError):
                     parsed = None
-                identities = extract_certificate_identities(parsed)
-                return sorted(identities)[0] if identities else "<verified>"
+                enforced = re.compile(cert_identity_pattern(spec))
+                identities = sorted(
+                    identity
+                    for identity in extract_certificate_identities(
+                        parsed, signer_only=True
+                    )
+                    if enforced.fullmatch(f"https://{identity}")
+                )
+                return identities[0] if identities else "<verified>"
             last_error = (completed.stderr or completed.stdout).strip()
             if attempt < attempts:
                 (time.sleep if sleep is None else sleep)(
@@ -368,9 +503,11 @@ def verify_commit(
 def commit_in_scope(root: pathlib.Path, commit: str, epoch: str) -> bool:
     """Exempt only commits proven ancestors of the enforcement epoch."""
 
+    _refuse_rewritten_history(root)
     probe = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", commit, epoch],
+        _git_command("merge-base", "--is-ancestor", "--end-of-options", commit, epoch),
         cwd=root,
+        env=_git_environment(),
         capture_output=True,
         check=False,
     )

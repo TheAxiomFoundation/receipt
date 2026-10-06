@@ -1322,6 +1322,46 @@ def attribute_error(finding: Finding) -> snapshot.SnapshotError:
         f"transforming attribute {finding.name} applies to protected path {path}")
 
 
+def _folded_attribute_names(
+    subject: snapshot.TreeSnapshot,
+    directory: tuple[bytes, ...],
+    cache: dict[bytes, tuple[bytes, ...]],
+) -> tuple[bytes, ...]:
+    """The entry in ``directory`` a case-insensitive checkout reads as
+    ``.gitattributes``: at most one name, whose ASCII fold is that name.
+
+    Two such entries refuse. A checkout onto a case-insensitive filesystem
+    writes both to one directory entry, and which bytes it keeps is the order
+    Git happens to write them in, not the tree.
+    """
+
+    key = b"/".join(directory)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    if directory:
+        raw = subject._raw_entry_at(directory)
+        if raw is None or raw.mode != b"40000":
+            cache[key] = ()
+            return ()
+        tree_oid = raw.oid
+    else:
+        tree_oid = subject.tree
+    records = subject._tree_object(tree_oid)
+    names = tuple(
+        record.name for record in records if record.name.lower() == b".gitattributes"
+    )
+    if len(names) > 1:
+        where = snapshot._tree_path_decode(key) if key else "the root"
+        spelled = ", ".join(snapshot._tree_path_decode(name) for name in names)
+        raise snapshot.SnapshotError(
+            f"attribute files {spelled} in {where} are one file on a "
+            "case-insensitive checkout"
+        )
+    cache[key] = names
+    return names
+
+
 def refuse_attributes(subject: snapshot.TreeSnapshot, paths: Iterable) -> None:
     """Forward already checked collection arguments without pre-consuming them."""
     ordered, unique = _admit_attribute_paths(subject, paths)
@@ -1731,6 +1771,7 @@ class TreePolicy:
         run.attribute_outcomes.clear()
         store = _attribute_store(self.snapshot)
         fingerprint = plan.fingerprint
+        folded_names: dict[bytes, tuple[bytes, ...]] = {}
         for ordinal, (raw, parts) in enumerate(_admitted.items()):
             path_key = (self.subject, self.policy_version, raw,
                         snapshot._attribute_matches, snapshot._segment_matches,
@@ -1743,9 +1784,23 @@ class TreePolicy:
                 final = {}
                 for depth in range(len(parts)):
                     attribute_parts = (*parts[:depth], b".gitattributes")
+                    if fold:
+                        # The folded reading folds the attributes file's own
+                        # name too: a case-insensitive checkout finds
+                        # ``.GITATTRIBUTES`` when Git asks for
+                        # ``.gitattributes`` (0.6.2 review, L3 finding 3).
+                        names = _folded_attribute_names(
+                            self.snapshot, parts[:depth], folded_names
+                        )
+                        if names:
+                            attribute_parts = (*parts[:depth], names[0])
                     # Keep this hook even on outcome reuse: the source loader
                     # owns its snapshot-local cache, authentication and charges.
-                    rules = self.snapshot._attribute_rules(attribute_parts)
+                    rules = (
+                        self.snapshot._attribute_rules(attribute_parts)
+                        if not fold or names
+                        else ()
+                    )
                     source = snapshot._tree_path_decode(b"/".join(attribute_parts))
                     if not fold:
                         sources.append(source)

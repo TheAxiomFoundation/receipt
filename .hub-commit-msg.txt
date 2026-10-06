@@ -1,0 +1,22 @@
+Merge main and complete receipt #84 forward-port
+
+Keep main's protected-tree implementation and consolidate the 0.6.3
+release notes. Carry #84's final review commits, restore the historical
+zero-row prefix newline checksum, and retain its refusal assertions.
+
+Port the #83 content included by #84's integration merge, preserving
+main's shared attribute policy, ledger-state confinement, closure
+invalidation, and certificate signer identity. Build deeply nested test
+JSON without recursive encoding and restore the release properties.
+
+Pin the exact reviewed frozen-oracle differences for configuration audits,
+folded attribute lookup, and closure invalidation. Keep the authenticated
+legacy observations and strengthen the live closure refusal assertions.
+
+Restore the final SAN and loader fixtures, and pin main's exact additional
+attribute work without reducing its existing refusal or resource assertions.
+
+Keep the frozen filename golden and require the exact current refusal
+for malformed suffix collections, with a valid control.
+
+Co-Authored-By: GPT-6.1 Sol <noreply@openai.com>

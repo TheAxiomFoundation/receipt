@@ -24,7 +24,12 @@ normalization or case-fold model.
 ``content`` rows participate in a closed-world set comparison. ``attested``
 rows are exact paths required by the consumer spec without a content sweep.
 ``removed`` rows retire an effective content or attested binding and assert
-that neither the exact path nor an ASCII-fold-equal spelling survives.
+that neither the exact path nor an ASCII-fold-equal spelling survives. A
+later row naming the exact spelling lifts a tombstone; nothing else does. So
+once a path is removed, no ASCII-fold-equal spelling of it can be present
+while the corpus verifies, and a case-only rename (``rate.yaml`` to
+``Rate.yaml``) cannot be journalled at all: rename to a name that does not
+fold to the old one (0.6.2 review, L4 finding 5).
 ``gate`` rows are declarations, not proof a gate ran; callers use
 :func:`verify_declarations` as the separate completeness pass.
 
@@ -48,10 +53,12 @@ from typing import Any, Literal
 
 from receipt._names import (
     ALIAS_CAPABLE_SUFFIX_RE,
+    PORTABLE_COMPONENT_MAX_BYTES,
     PORTABLE_NAME_RE as PORTABLE_NAME_RE,
     SHORT_NAME_PUNCTUATION as SHORT_NAME_PUNCTUATION,
     WIN32_RESERVED_DEVICE_NAMES as WIN32_RESERVED_DEVICE_NAMES,
     NamePolicyError,
+    PortableNameTooLong,
     ascii_fold_text,
     assert_no_merging_entries as assert_no_merging_tree_names,
     assert_portable_name,
@@ -359,6 +366,17 @@ class CorpusError(ValueError):
     """The journal is malformed, or it does not describe the selected tree."""
 
 
+def _require_str_members(values: frozenset[Any], field_name: str) -> None:
+    """Refuse a spec set holding anything but exact ``str`` members."""
+
+    for value in values:
+        if type(value) is not str:
+            raise CorpusError(
+                f"CorpusSpec {field_name} must contain only strings: "
+                f"found {type(value).__name__}"
+            )
+
+
 @dataclass(frozen=True)
 class CorpusSpec:
     """Corpus-specific binding constants, pinned in the consumer's code.
@@ -439,6 +457,10 @@ class CorpusSpec:
                 )
         if type(self.required_attested_paths) is not frozenset:
             raise CorpusError("CorpusSpec required_attested_paths must be a frozenset")
+        # Element types before any sort or set arithmetic: a frozenset mixing
+        # str and int raised TypeError from ``sorted`` instead of refusing
+        # (0.6.2 review, L4 finding 6).
+        _require_str_members(self.required_attested_paths, "required_attested_paths")
         for path in sorted(self.required_attested_paths):
             _validate_relative_path(
                 path,
@@ -447,6 +469,7 @@ class CorpusSpec:
             )
         if type(self.accepted_gate_tiers) is not frozenset:
             raise CorpusError("CorpusSpec accepted_gate_tiers must be a frozenset")
+        _require_str_members(self.accepted_gate_tiers, "accepted_gate_tiers")
         unknown = sorted(self.accepted_gate_tiers - set(GATE_TIERS))
         if unknown:
             raise CorpusError(
@@ -456,6 +479,7 @@ class CorpusSpec:
             )
         if type(self.required_gates) is not frozenset:
             raise CorpusError("CorpusSpec required_gates must be a frozenset")
+        _require_str_members(self.required_gates, "required_gates")
         for gate_id in sorted(self.required_gates):
             if GATE_ID_RE.fullmatch(gate_id) is None:
                 raise CorpusError(
@@ -753,6 +777,12 @@ def _assert_portable_name(value: str, label: str) -> str:
 
     try:
         return assert_portable_name(value, label)
+    except PortableNameTooLong as exc:
+        raise CorpusError(
+            f"{label} has a component longer than {PORTABLE_COMPONENT_MAX_BYTES} "
+            "bytes, more than a portable host filesystem stores in one name: "
+            f"{_quoted(value)}"
+        ) from exc
     except NamePolicyError as exc:
         raise CorpusError(
             f"{label} is not a portable name (ASCII letters, digits, "
@@ -968,8 +998,20 @@ def _sha256(value: Any, label: str) -> str:
 def _parse_row(line: str, number: int, spec: CorpusSpec) -> dict[str, Any]:
     try:
         parsed = json.loads(line, object_pairs_hook=_object_without_duplicates)
+    except CorpusError:
+        raise
     except json.JSONDecodeError as exc:
         raise CorpusError(f"journal row {number} is not valid JSON: {exc}") from exc
+    except (ValueError, RecursionError) as exc:
+        # json.loads's other refusals are not JSONDecodeError: an integer
+        # literal over the interpreter's digit limit raises ValueError, and
+        # nesting past the decoder's stack raises RecursionError. Both are
+        # journal bytes a producer chose, and both escaped as interpreter
+        # exceptions (0.6.2 review, L4 finding 3).
+        raise CorpusError(
+            f"journal row {number} cannot be decoded within the interpreter's "
+            f"limits: {type(exc).__name__}"
+        ) from exc
     if type(parsed) is not dict:
         raise CorpusError(f"journal row {number} is not a JSON object")
     kind = parsed.get("kind")
@@ -1102,11 +1144,29 @@ def parse_journal(
     tombstoned path that remains in the selected tree. A file that stays in
     the repository stays bound; the only way to stop binding it is to remove it.
 
+    No row kind is required. A journal of gate rows alone is a closed world of
+    zero content files, and it verifies against a tree whose content roots
+    hold no content file. An earlier branch here refused an "empty" journal
+    with "genesis must bind content", but after the trailing-LF check the
+    split always yields a row, so it never ran and that rule was never
+    enforced (0.6.2 review, L4 finding 7); it is gone rather than left to
+    read as a guarantee.
+
     Row capacity is the consumer's committed resource pin, not a process-wide
     corpus limit. It defaults to :data:`MAX_JOURNAL_ROWS` and is validated
     against :data:`MAX_JOURNAL_ROWS_CEILING` when the spec is constructed.
     """
 
+    # The caller's arguments before anything is asked of them: a ``str`` or
+    # ``memoryview`` journal and a missing spec raised TypeError and
+    # AttributeError where the contract is a CorpusError (0.6.2 review, L4
+    # finding 6).
+    if type(journal_bytes) is not bytes:
+        raise CorpusError(
+            f"corpus journal must be bytes, not {type(journal_bytes).__name__}"
+        )
+    if not isinstance(spec, CorpusSpec):
+        raise CorpusError(f"spec must be a CorpusSpec, not {type(spec).__name__}")
     # Before the decode, because the decode is the allocation every later
     # bound is measured against: a journal of arbitrary size became a ``str``
     # of arbitrary size before anything looked at it (peer review, Sol
@@ -1136,8 +1196,6 @@ def parse_journal(
     # on what an allocation the bound exists to stop has already produced
     # (peer review, Sol round 4).
     raw_rows = journal_bytes.split(b"\n")[:-1]
-    if not raw_rows:
-        raise CorpusError("corpus journal is empty; genesis must bind content")
 
     content: dict[str, FileBinding] = {}
     attested: dict[str, FileBinding] = {}
@@ -1598,6 +1656,13 @@ def verify_declarations(
     already enforced during parsing; this is the completeness half.
     """
 
+    if not isinstance(verification, CorpusVerification):
+        raise CorpusError(
+            "verification must be a CorpusVerification, not "
+            f"{type(verification).__name__}"
+        )
+    if not isinstance(spec, CorpusSpec):
+        raise CorpusError(f"spec must be a CorpusSpec, not {type(spec).__name__}")
     declared = {gate.gate_id for gate in verification.gates}
     missing = sorted(spec.required_gates - declared)
     if missing:
