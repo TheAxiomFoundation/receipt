@@ -2039,6 +2039,20 @@ def _combined_anchor_digest(per_file: Mapping[str, str]) -> str:
     return canonical_sha256(dict(per_file))
 
 
+def _normalized_anchor_dir(anchor_dir: Any, *, label: str) -> pathlib.Path | None:
+    """Keep absence distinct from a named path and strip Path subclasses."""
+
+    if anchor_dir is None:
+        return None
+    try:
+        path = os.fspath(anchor_dir)
+        if not isinstance(path, str) or path == "" or "\0" in path:
+            raise ValueError("not a non-empty filesystem path")
+        return pathlib.Path(path)
+    except (TypeError, ValueError) as exc:
+        raise ReleaseChainError(f"{label} must be a non-empty filesystem path") from exc
+
+
 def verify_release_chain(
     root: pathlib.Path,
     *,
@@ -2068,6 +2082,9 @@ def verify_release_chain(
     configured anchor bytes consumed. OpenSSL always receives a private
     byte-for-byte ``-CAfile`` copy.
     Caller-supplied ``state_bytes`` replace the two state-file reads.
+    A named ``anchor_dir`` is normalized to a plain ``pathlib.Path`` and
+    selects that directory independently of its truth value; empty strings
+    and non-path values refuse. Only ``None`` selects the default directory.
     """
 
     if type(clock_skew_seconds) is not int or clock_skew_seconds < 0:
@@ -2087,6 +2104,7 @@ def verify_release_chain(
     except _tsa.TsaError as exc:
         raise ReleaseChainError(str(exc)) from exc
 
+    anchor_dir = _normalized_anchor_dir(anchor_dir, label="anchor_dir")
     root = root.resolve()
     default_anchor_dir = root / spec.anchor_relative
     if anchor_dir is None:
@@ -2105,7 +2123,9 @@ def verify_release_chain(
                 raise ReleaseChainError(
                     f"anchor path component is a symlink or reparse point: {probe}"
                 )
-    selected_anchors = (anchor_dir or default_anchor_dir).resolve()
+    selected_anchors = (
+        default_anchor_dir if anchor_dir is None else anchor_dir
+    ).resolve()
     if enforce_production_pins is None:
         enforce_production_pins = selected_anchors == default_anchor_dir.resolve()
     anchor_observer: dict[str, str] | None = (
@@ -2306,45 +2326,50 @@ def verify_release_history_immutable(
     release_root = spec.release_root_relative.as_posix()
     base_entries = base.entries(release_root).as_dict()
     candidate_entries = candidate.entries(release_root).as_dict()
-    compared_base = dict(base_entries)
-    compared_candidate = dict(candidate_entries)
+    compared_directories = [release_root]
     manifest_parts = spec.manifest_relative.parts
     root_parts = spec.release_root_relative.parts
     if manifest_parts[: len(root_parts)] != root_parts:
-        manifest_directory = spec.manifest_relative.as_posix()
-        compared_base.update(base.entries(manifest_directory).as_dict())
-        compared_candidate.update(candidate.entries(manifest_directory).as_dict())
+        compared_directories.append(spec.manifest_relative.as_posix())
 
     # The old working-directory enumeration refused every candidate link or
     # non-regular entry before comparing base bytes. Preserve that ordering
-    # over the tree's modes, without opening any blob.
-    for relative, entry in sorted(compared_candidate.items()):
-        if entry.mode == "120000":
-            raise ReleaseChainError(f"release path is a symlink: {relative}")
-        if entry.mode not in {"100644", "100755"}:
-            raise ReleaseChainError(f"release path is not regular: {relative}")
+    # over the tree's modes, without opening any blob. Finish the old release
+    # root checks before the new outside-manifest checks, so a refusal the
+    # release root already gave retains its precedence.
+    for directory in compared_directories:
+        if directory == release_root:
+            compared_base, compared_candidate = base_entries, candidate_entries
+        else:
+            compared_base = base.entries(directory).as_dict()
+            compared_candidate = candidate.entries(directory).as_dict()
+        for relative, entry in sorted(compared_candidate.items()):
+            if entry.mode == "120000":
+                raise ReleaseChainError(f"release path is a symlink: {relative}")
+            if entry.mode not in {"100644", "100755"}:
+                raise ReleaseChainError(f"release path is not regular: {relative}")
 
-    for relative, prior in sorted(compared_base.items()):
-        if prior.mode not in {"100644", "100755"}:
-            raise ReleaseChainError(
-                f"base release entry has non-regular git mode {prior.mode}: {relative}"
-            )
-        current = compared_candidate.get(relative)
-        if current is None:
-            raise ReleaseChainError(
-                f"existing release file was deleted relative to "
-                f"{base.commit}: {relative}"
-            )
-        if current.mode != prior.mode:
-            raise ReleaseChainError(
-                f"existing release file mode changed relative to {base.commit}: "
-                f"{relative} ({prior.mode} -> {current.mode})"
-            )
-        if current.object_id != prior.object_id:
-            raise ReleaseChainError(
-                f"existing release file bytes changed relative to "
-                f"{base.commit}: {relative}"
-            )
+        for relative, prior in sorted(compared_base.items()):
+            if prior.mode not in {"100644", "100755"}:
+                raise ReleaseChainError(
+                    f"base release entry has non-regular git mode {prior.mode}: {relative}"
+                )
+            current = compared_candidate.get(relative)
+            if current is None:
+                raise ReleaseChainError(
+                    f"existing release file was deleted relative to "
+                    f"{base.commit}: {relative}"
+                )
+            if current.mode != prior.mode:
+                raise ReleaseChainError(
+                    f"existing release file mode changed relative to {base.commit}: "
+                    f"{relative} ({prior.mode} -> {current.mode})"
+                )
+            if current.object_id != prior.object_id:
+                raise ReleaseChainError(
+                    f"existing release file bytes changed relative to "
+                    f"{base.commit}: {relative}"
+                )
     return (
         base.commit,
         set(candidate_entries) - set(base_entries),

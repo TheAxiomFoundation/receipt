@@ -1686,15 +1686,6 @@ def _content_entries_from_listing(
                         "would carry a pinned suffix: "
                         f"{_quoted(relative)}"
                     )
-                if entry.mode == "120000":
-                    # A link without a pinned suffix is no content row, but a
-                    # checkout resolves it: to a directory, it presents files
-                    # under the root that no row binds, and it keeps a
-                    # tombstoned path readable. The sweep cannot call the
-                    # root closed while one is present.
-                    raise CorpusError(
-                        f"content root contains a symlink: {_quoted(relative)}"
-                    )
                 continue
 
             if entry.mode == "120000":
@@ -1708,6 +1699,31 @@ def _content_entries_from_listing(
                 )
             found[relative] = entry
     return found
+
+
+def _assert_no_suffixless_content_symlinks(
+    entries: Mapping[str, GitEntry], spec: CorpusSpec
+) -> None:
+    """Close the content roots after the established binding checks.
+
+    A link without a pinned suffix is no content row, but a checkout resolves
+    it: a directory link presents unbound files, and a link can keep a
+    tombstoned path readable. Checking the same authenticated listing after
+    the old binding checks preserves their first refusal without allowing
+    such a link to reach a successful binding verdict.
+    """
+
+    for content_root in spec.content_roots:
+        prefix = content_root.as_posix() + "/"
+        for relative in sorted(entries):
+            if (
+                relative.startswith(prefix)
+                and entries[relative].mode == "120000"
+                and not _has_pinned_suffix(relative, spec.content_suffixes)
+            ):
+                raise CorpusError(
+                    f"content root contains a symlink: {_quoted(relative)}"
+                )
 
 
 def _assert_tombstones_absent_from_listing(
@@ -1890,6 +1906,7 @@ def verify_corpus_binding(
         attested,
         attested_entries,
     )
+    _assert_no_suffixless_content_symlinks(entries, spec)
 
     return CorpusVerification(
         content=tuple(content[path] for path in sorted(content)),

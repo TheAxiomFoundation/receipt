@@ -925,6 +925,250 @@ def test_keyring_construction_refuses_entries_it_cannot_freeze(
     assert str(caught.value) == message
 
 
+@pytest.mark.parametrize("generation", ["keys", "legacy_keys"])
+@pytest.mark.parametrize("threshold", [0, False])
+def test_keyring_scalar_threshold_refusal_precedes_generation_freezing(
+    generation: str, threshold: object
+) -> None:
+    """Old scalar-count refusals still win over unusable generations."""
+
+    key = KeySpec("a", "a" * 64, "spki-sha256")
+    keys, legacy = (("ab", ()) if generation == "keys" else ((key,), None))
+    with pytest.raises(SignError) as caught:
+        KeyringSpec(keys, threshold, legacy_keys=legacy)  # type: ignore[arg-type]
+    if type(threshold) is int:
+        expected = "keyring threshold must be at least 1; found=0"
+    else:
+        expected = (
+            "keyring threshold must be an integer between 1 and the number "
+            "of current keys; found=False"
+        )
+    assert str(caught.value) == expected
+
+
+def test_keyring_key_count_refusal_precedes_legacy_generation_freezing() -> None:
+    key = KeySpec("a", "a" * 64, "spki-sha256")
+    with pytest.raises(SignError) as caught:
+        KeyringSpec((key,), 2, legacy_keys=None)  # type: ignore[arg-type]
+    assert str(caught.value) == "keyring threshold 2 exceeds key count 1"
+
+
+def test_keyring_generation_refusal_precedes_count_for_unusable_current_keys() -> None:
+    """A text generation is refused before using its characters as keys."""
+
+    with pytest.raises(SignError) as caught:
+        KeyringSpec("ab", 3)  # type: ignore[arg-type]
+    assert str(caught.value) == "keyring keys must be an iterable of KeySpec; found=str"
+
+
+@pytest.mark.parametrize("duplicate", ["key_id", "fingerprint"])
+def test_keyspec_subclass_refusal_precedes_keyring_duplicate_refusals(
+    duplicate: str,
+) -> None:
+    """A subclass is refused before its fields enter duplicate checks."""
+
+    @dataclass(frozen=True)
+    class NamedKey(KeySpec):
+        pass
+
+    key = KeySpec("a", "a" * 64, "spki-sha256")
+    named = NamedKey(
+        "a" if duplicate == "key_id" else "b",
+        "b" * 64 if duplicate == "key_id" else "a" * 64,
+        "spki-sha256",
+    )
+    with pytest.raises(SignError) as caught:
+        KeyringSpec((key, named), 1)
+    assert str(caught.value) == "keyring entries must be KeySpec, not NamedKey"
+
+
+@pytest.mark.parametrize("verifier", ["threshold", "any_generation"])
+def test_a_keyspec_subclass_is_refused_before_it_can_mutate_the_outer_ring(
+    verifier: str,
+) -> None:
+    """An unvalidated entry cannot change the ring during its own checks."""
+
+    target: list[KeyringSpec] = []
+    reads: list[str] = []
+
+    class MutatingKey(KeySpec):
+        def __getattribute__(self, name: str) -> object:
+            if target and name in {"key_id", "fingerprint"}:
+                reads.append(name)
+                object.__setattr__(target[0], "keys", ())
+                object.__setattr__(target[0], "threshold", 0)
+            return super().__getattribute__(name)
+
+    trusted = KeySpec("a", "a" * 64, "spki-sha256")
+    unvalidated = MutatingKey("a", "a" * 64, "spki-sha256")
+    keyring = KeyringSpec((trusted,), 1)
+    object.__setattr__(keyring, "keys", (unvalidated,))
+    target.append(keyring)
+
+    with pytest.raises(SignError) as caught:
+        if verifier == "threshold":
+            verify_threshold(
+                b"payload", {}, {}, keyring,
+                domain=b"domain", label="r", allow_legacy=False,
+            )
+        else:
+            verify_any_generation(
+                b"payload", bytes(64), {}, keyring,
+                domain=b"domain", label="r", allow_legacy=False,
+            )
+    assert str(caught.value) == "keyring entries must be KeySpec, not MutatingKey"
+    assert reads == []
+    assert keyring.keys[0] is unvalidated
+    assert keyring.threshold == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("payload", "payload", "signature payload must be bytes"),
+        ("domain", "domain", "signature domain must be bytes"),
+        ("allow_legacy", 0, "allow_legacy must be a bool"),
+        ("signatures", {0: bytes(64)}, "presented signature key_id must be a str: 0"),
+        ("public_keys", {0: bytes(32)}, "presented public key key_id must be a str: 0"),
+    ],
+)
+def test_threshold_independent_input_refusal_precedes_keyring_refusal(
+    field: str, value: object, expected: str
+) -> None:
+    @dataclass(frozen=True)
+    class LaxKeyring(KeyringSpec):
+        def __post_init__(self) -> None:
+            pass
+
+    key = KeySpec("a", "a" * 64, "spki-sha256")
+    inputs = dict(
+        payload=b"payload", signatures={}, public_keys={},
+        domain=b"domain", allow_legacy=False,
+    )
+    inputs[field] = value
+    with pytest.raises(SignError) as caught:
+        verify_threshold(**inputs, keyring=LaxKeyring((key,), 1), label="r")
+    assert str(caught.value) == expected
+
+
+@pytest.mark.parametrize("verifier", ["threshold", "any_generation"])
+@pytest.mark.parametrize(
+    "later_refusal",
+    [
+        "unknown_id", "legacy_id", "nonbyte_key", "malformed_key",
+        "non_ed25519_key", "fingerprint_mismatch", "duplicate_material",
+        "cryptography_unavailable", "no_signature", "signature_mismatch",
+    ],
+)
+def test_keyring_type_refusal_precedes_ring_dependent_verification(
+    monkeypatch: pytest.MonkeyPatch, verifier: str, later_refusal: str
+) -> None:
+    """An outer ring is validated before its trust material is consulted."""
+
+    first, second, key_a, key_b = _two_keys()
+
+    @dataclass(frozen=True)
+    class Ring(KeyringSpec):
+        pass
+
+    keys, legacy = (key_a,), ()
+    material = {"a": first[1]}
+    if later_refusal == "unknown_id":
+        material = {"z": first[1]}
+    elif later_refusal == "legacy_id":
+        legacy, material = (key_b,), {"b": second[1]}
+    elif later_refusal == "nonbyte_key":
+        material = {"a": "PEM"}
+    elif later_refusal == "malformed_key":
+        material = {"a": b"invalid"}
+    elif later_refusal == "non_ed25519_key":
+        material = {"a": ec.generate_private_key(ec.SECP256R1()).public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo,
+        )}
+    elif later_refusal == "fingerprint_mismatch":
+        material = {"a": second[1]}
+    elif later_refusal == "duplicate_material":
+        keys = (key_a, KeySpec("c", raw_public_key_sha256(first[1]), "raw-sha256"))
+        material = {"a": first[1], "c": first[1]}
+    elif later_refusal == "cryptography_unavailable":
+        monkeypatch.setattr(sign_module, "CRYPTOGRAPHY_AVAILABLE", False)
+    elif later_refusal == "no_signature":
+        material = {}
+
+    def verify(keyring: KeyringSpec) -> None:
+        if verifier == "threshold":
+            verify_threshold(
+                b"payload", {"a": bytes(64)} if later_refusal == "signature_mismatch" else {},
+                material, keyring,
+                domain=b"domain", label="r", allow_legacy=False,
+            )
+        else:
+            verify_any_generation(
+                b"payload", bytes(64), material, keyring,
+                domain=b"domain", label="r", allow_legacy=False,
+            )
+
+    with pytest.raises(SignError) as caught:
+        verify(Ring(keys, 1, legacy_keys=legacy))
+    assert str(caught.value) == "keyring must be a KeyringSpec, not Ring"
+    # The same envelope with an exact ring really reaches the named later
+    # family, so each combined-invalidity case pins its first refusal.
+    expected = {
+        "unknown_id": "unknown key_id:",
+        "legacy_id": "legacy key_id refused for new material:",
+        "nonbyte_key": "Ed25519 public key must be bytes",
+        "malformed_key": "cannot decode Ed25519 public key",
+        "non_ed25519_key": "public key is not Ed25519",
+        "fingerprint_mismatch": "public key fingerprint mismatch",
+        "duplicate_material": "duplicate key material presented",
+        "cryptography_unavailable": "Ed25519 public-key normalization requires cryptography",
+        "no_signature": (
+            "signature threshold not satisfied" if verifier == "threshold"
+            else "verify_any_generation requires key material for every keyring key"
+        ),
+        "signature_mismatch": (
+            "signature threshold not satisfied" if verifier == "threshold"
+            else "signature does not verify under any keyring generation"
+        ),
+    }[later_refusal]
+    with pytest.raises(SignError) as caught:
+        verify(KeyringSpec(keys, 1, legacy_keys=legacy))
+    assert str(caught.value).startswith(expected)
+
+
+@pytest.mark.parametrize(
+    "later_refusal",
+    ["threshold", "payload", "domain", "allow_legacy", "signature", "public_key_id"],
+)
+def test_any_generation_keyring_refusal_precedes_envelope_checks(
+    later_refusal: str,
+) -> None:
+    @dataclass(frozen=True)
+    class Ring(KeyringSpec):
+        pass
+
+    key_a = KeySpec("a", "a" * 64, "spki-sha256")
+    key_b = KeySpec("b", "b" * 64, "spki-sha256")
+    keyring = Ring((key_a, key_b), 2) if later_refusal == "threshold" else Ring((key_a,), 1)
+    inputs = dict(
+        payload=b"payload", signature=bytes(64), public_keys={},
+        domain=b"domain", allow_legacy=False,
+    )
+    changes = {
+        "payload": ("payload", "payload"),
+        "domain": ("domain", "domain"),
+        "allow_legacy": ("allow_legacy", 0),
+        "signature": ("signature", b"short"),
+        "public_key_id": ("public_keys", {0: bytes(32)}),
+    }
+    if later_refusal in changes:
+        field, value = changes[later_refusal]
+        inputs[field] = value
+    with pytest.raises(SignError) as caught:
+        verify_any_generation(**inputs, keyring=keyring, label="r")
+    assert str(caught.value) == "keyring must be a KeyringSpec, not Ring"
+
+
 THRESHOLD_KEY_IDS = ("key-a", "key-b", "key-c")
 ACCEPTING_SUBSETS = tuple(
     subset

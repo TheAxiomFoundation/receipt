@@ -54,7 +54,7 @@ from receipt.release_chain import (
     verify_release_chain,
     verify_release_history_immutable,
 )
-from receipt.sign import sign_payload
+from receipt.sign import generate_signing_keypair, sign_payload
 from receipt.snapshot import GitEntry as SnapshotGitEntry
 from receipt.snapshot import Materialization, SnapshotError, TreeSnapshot
 from receipt.cli import EXIT_FAIL, main
@@ -234,6 +234,47 @@ def test_by_default_no_digest_is_computed(repo: pathlib.Path) -> None:
     verification = verify_release_chain(repo, spec=spec.chain)
     assert verification.anchor_set_sha256 is None
     assert verification.anchor_file_sha256s == ()
+
+
+@pytest.mark.parametrize(
+    "anchor_kind", ["path", "falsy-path", "false", "empty", "zero", "bytes", "object"]
+)
+def test_a_named_anchor_directory_never_selects_the_default_directory(
+    repo: pathlib.Path, anchor_kind: str
+) -> None:
+    spec = load_spec(repo / "verification/spec.py").verification
+    anchors = repo.parent / "different-anchors"
+    shutil.copytree(repo / ANCHOR_DIR, anchors)
+    _private, different_public = generate_signing_keypair()
+    (anchors / spec.chain.producer_public_key_filename).write_bytes(different_public)
+
+    class FalsyPath(type(pathlib.Path())):
+        def __bool__(self) -> bool:
+            return False
+
+    named = {
+        "path": anchors,
+        "falsy-path": FalsyPath(anchors),
+        "false": False,
+        "empty": "",
+        "zero": 0,
+        "bytes": bytes(anchors),
+        "object": object(),
+    }[anchor_kind]
+    stem = next((repo / spec.chain.manifest_relative).glob("*.json")).stem
+    with pytest.raises(ReleaseChainError) as caught:
+        verify_release_chain(
+            repo,
+            spec=spec.chain,
+            anchor_dir=named,  # type: ignore[arg-type]
+            enforce_production_pins=False,
+        )
+    expected = (
+        f"producer Ed25519 signature verification failed for {stem}.producer.sig"
+        if anchor_kind in {"path", "falsy-path"}
+        else "anchor_dir must be a non-empty filesystem path"
+    )
+    assert str(caught.value) == expected
 
 
 def test_chain_spec_defaults_to_the_portable_name_repertoire(
@@ -427,6 +468,82 @@ def test_release_history_accepts_an_append_to_a_manifest_directory_outside_the_r
     assert resolved == base_oid
     assert new_files == set()
     assert not any(path.startswith("manifests/") for path in base_entries)
+
+
+@pytest.mark.parametrize("outside_error", ["symlink", "changed-bytes"])
+def test_release_root_history_refusals_precede_outside_manifest_refusals(
+    repo: pathlib.Path, outside_error: str
+) -> None:
+    chain = replace(
+        load_spec(repo / "verification/spec.py").verification.chain,
+        manifest_relative=pathlib.PurePosixPath("manifests"),
+    )
+    note = repo / "releases" / "published-note.txt"
+    note.write_text("published\n", encoding="utf-8")
+    manifest = repo / "manifests" / "0000-0000000000000000.json"
+    manifest.parent.mkdir()
+    manifest.write_text("{}\n", encoding="utf-8")
+    base_oid = commit_snapshot(repo, "publish both directories")
+    note.write_text("rewritten\n", encoding="utf-8")
+    if outside_error == "symlink":
+        manifest.unlink()
+        manifest.symlink_to(note)
+    else:
+        manifest.write_text('{"rewritten": true}\n', encoding="utf-8")
+    candidate_oid = commit_snapshot(repo, "rewrite both directories")
+
+    with TreeSnapshot.select(repo, candidate_oid) as candidate:
+        with TreeSnapshot.select(repo, base_oid) as base:
+            with pytest.raises(ReleaseChainError) as caught:
+                verify_release_history_immutable(chain, candidate=candidate, base=base)
+    assert str(caught.value) == (
+        "existing release file bytes changed relative to "
+        f"{base_oid}: releases/published-note.txt"
+    )
+
+
+def test_outside_manifest_history_precedes_a_later_invalid_chain(
+    repo: pathlib.Path,
+) -> None:
+    """New outside-root history checks can replace a later custody refusal."""
+
+    spec_path = repo / "verification/spec.py"
+    spec_path.write_text(
+        spec_path.read_text(encoding="utf-8").replace("releases/manifests", "manifests"),
+        encoding="utf-8",
+    )
+    loaded = load_spec(spec_path)
+    assert loaded.verification.chain.manifest_relative == pathlib.PurePosixPath("manifests")
+    manifests = repo / "manifests"
+    shutil.move(repo / "releases/manifests", manifests)
+    manifest = next(manifests.glob("*.json"))
+    signature = manifests / f"{manifest.stem}.producer.sig"
+    signature.write_bytes(bytes(64))
+    base_oid = commit_snapshot(repo, "outside genesis with an invalid signature")
+    before = result_to_dict(
+        run_verification(repo, loaded, commit=base_oid, expect_commit=base_oid)
+    )
+    custody = next(item for item in before["passes"] if item["name"] == "custody")
+    assert custody["failure"] == (
+        f"producer Ed25519 signature verification failed for {manifest.stem}.producer.sig"
+    )
+
+    signature.write_bytes(b"\x01" + bytes(63))
+    candidate_oid = commit_snapshot(repo, "rewrite an outside producer signature")
+    after = result_to_dict(
+        run_verification(
+            repo,
+            loaded,
+            base_ref=base_oid,
+            commit=candidate_oid,
+            expect_commit=candidate_oid,
+        )
+    )
+    history = next(item for item in after["passes"] if item["name"] == "history")
+    assert history["failure"] == (
+        "release history is not immutable: existing release file bytes changed "
+        f"relative to {base_oid}: manifests/{signature.name}"
+    )
 
 
 def test_base_ref_refuses_a_rewitnessed_genesis_kept_outside_the_release_root(

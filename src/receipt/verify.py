@@ -391,7 +391,9 @@ def load_spec(
     The bytes must also be the UTF-8 text a reviewer reads: a PEP 263
     declaration of any other source encoding is refused, and the program
     executed is the one that text compiles to, so no declaration can turn
-    what reads as a comment into code.
+    what reads as a comment into code. Byte-compilation errors retain their
+    original refusal; an encoding refusal precedes execution errors, a missing
+    SPEC, or a SPEC of the wrong type, without executing the module.
     """
 
     import types
@@ -435,6 +437,16 @@ def load_spec(
     # a declaration is refused, and the program executed must be the one the
     # UTF-8 text compiles to, which also covers a declaration the check above
     # does not find where the compiler does.
+    # Compile without executing first: even a non-UTF-8 declaration can have
+    # a syntax error, whose existing refusal does not require running code.
+    try:
+        code = compile(source, str(spec_path), "exec", dont_inherit=True)
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:  # noqa: BLE001 - the same loader boundary
+        raise VerifySpecError(
+            f"spec module raised on load: {spec_path}: {_exception_detail(exc)}"
+        ) from exc
     declared = _declared_source_encoding(source)
     if declared is not None and declared not in ("utf-8", "utf-8-sig"):
         raise VerifySpecError(
@@ -457,9 +469,7 @@ def load_spec(
     absent = object()
     previous = sys.modules.get(module_name, absent)
     sys.modules[module_name] = module
-    code = None
     try:
-        code = compile(source, str(spec_path), "exec", dont_inherit=True)
         # Compiling the decoded text ignores any declaration. Where the bytes
         # compiled, their UTF-8 reading must compile to the same program.
         try:

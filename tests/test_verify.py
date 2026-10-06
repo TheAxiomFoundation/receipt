@@ -329,6 +329,7 @@ def test_load_spec_accepts_utf8_declarations_and_a_bom(
     [
         b"# coding: bogus\n" + SPEC_SOURCE,
         b"x = '\xff'\n" + SPEC_SOURCE,
+        b"# coding: latin-1\nif \n",
     ],
 )
 def test_load_spec_keeps_the_compilers_own_refusals(
@@ -346,6 +347,37 @@ def test_load_spec_keeps_the_compilers_own_refusals(
     assert str(caught.value) == (
         f"spec module raised on load: {path.resolve()}: {compiler_refusal.value}"
     )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [b"raise ValueError('old refusal')\n", b"pass\n", b"SPEC = object()\n"],
+    ids=["execution-error", "missing-SPEC", "wrong-SPEC-type"],
+)
+@pytest.mark.parametrize("pinned", [False, True])
+def test_non_utf8_encoding_refuses_before_execution_and_spec_validation(
+    tmp_path: pathlib.Path, body: bytes, pinned: bool
+) -> None:
+    """Encoding replaces later loader refusals without executing the module."""
+
+    marker = tmp_path / "spec-executed"
+    source = (
+        b"# coding: latin-1\n"
+        + f"open({str(marker)!r}, 'w').close()\n".encode()
+        + body
+    )
+    path = _spec_file(tmp_path, source)
+    with pytest.raises(VerifySpecError) as caught:
+        load_spec(
+            path,
+            expect_sha256=hashlib.sha256(source).hexdigest() if pinned else None,
+        )
+
+    assert str(caught.value) == (
+        "spec declares source encoding iso8859-1; a spec must be UTF-8 so it "
+        f"executes as the text a reviewer reads: {path.resolve()}"
+    )
+    assert not marker.exists()
 
 
 JOURNAL_BYTES = b'{"one":"row"}\n'
