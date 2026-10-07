@@ -62,8 +62,11 @@ with disjoint signers does not and stays allowed (one check on the anchors
 covers the identities the spec scopes to the bundle as well, whose signer
 sets each anchor's has just been required to equal); a pending bundle anchor
 reusing an active anchor ID under a different code-pinned root, which is a
-new authority and so must carry a supplemental outcome before the transition
-can activate it -- the ported supplemental-outcome refusal, reaching a case
+new authority and so must carry a supplemental outcome -- available, or
+declared unavailable with a reason, which the ported rule accepts exactly as
+the baseline does -- before the transition can activate it (the outcome must
+be present; that the new key answered is shown only when it is available) --
+the ported supplemental-outcome refusal, reaching a case
 the baseline let through because it took the ID alone for the identity,
 while a pending anchor carrying every signer one active authority's
 equivalence class allows today and no signer that class has never held is
@@ -544,6 +547,7 @@ try:  # pragma: no cover - exercised by whichever platform runs the suite
 except ImportError:  # pragma: no cover - Windows has no fcntl, and no O_NONBLOCK
     fcntl = None  # type: ignore[assignment]
 
+from receipt import _bounded_json as bounded_json
 from receipt.canonical import canonical_bytes, canonical_sha256
 
 TRUST_BUNDLE_RE = re.compile(r"records/trust/tsa-anchors-v[1-9][0-9]*\.json")
@@ -903,16 +907,25 @@ def physical_path(records: Path, value: str) -> Path:
 def _path_fold(path: Path) -> tuple[str, ...]:
     """A key two spellings of one filesystem path share.
 
-    NFC folds the decomposed and precomposed spellings of one character
-    together; ``casefold`` folds case together.  A path is folded component
-    by component, so nothing a fold produces can be read as a separator.
+    Unicode's canonical caseless match, ``NFD(casefold(NFD(x)))``, is the
+    key, composed back with NFC: normalisation folds the decomposed and
+    precomposed spellings of one character together, and ``casefold`` folds
+    case together.  The inner NFD is load-bearing.  ``casefold(NFC(x))``,
+    the key until 0.6.2, left eleven BMP pairs APFS resolves to one entry
+    with different keys -- U+0390 against U+0399 U+0308 U+0301 among them --
+    because casefolding a precomposed character can yield a sequence that is
+    not itself normalised (0.6.2 review, L2 finding 6).  The new key joins
+    every pair the old one joined, and those eleven besides.  A path is
+    folded component by component, so nothing a fold produces can be read as
+    a separator.
 
     Two distinct spellings with one key are one directory entry on a case- or
     normalisation-insensitive filesystem -- APFS and NTFS both, and HFS+
     normalises besides -- which is why a rule about "the same path" has to be
-    asked over this and not over the spelling.  ``receipt.corpus`` computes
-    the same fold for the same reason, over its declared corpus paths; this
-    module carries its own rather than importing that one, because
+    asked over this and not over the spelling.  ``receipt.corpus`` asks the
+    same question over its declared corpus paths with its own, narrower
+    ASCII-only fold (its ``_path_fold``); this module carries its own rather
+    than importing that one, because
     :mod:`receipt.tsa` depends on nothing in the package but
     :mod:`receipt.canonical` and a witness verifier has no business needing a
     corpus.
@@ -925,7 +938,8 @@ def _path_fold(path: Path) -> tuple[str, ...]:
     """
 
     return tuple(
-        unicodedata.normalize("NFC", part).casefold() for part in path.parts
+        unicodedata.normalize("NFC", unicodedata.normalize("NFD", part).casefold())
+        for part in path.parts
     )
 
 
@@ -1079,8 +1093,13 @@ def load_json(path: Path) -> dict[str, Any]:
     """
 
     try:
-        value = json.loads(path.read_text())
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        value = bounded_json.loads(path.read_text())
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        bounded_json.JsonBoundError,
+    ) as exc:
         raise TsaError(f"cannot read JSON {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise TsaError(f"record must be a JSON object: {path}")
@@ -1104,11 +1123,23 @@ def _record_payload(data: bytes, path: Path) -> dict[str, Any]:
     ``bytes.decode`` than ``load_json`` gives for the same file (peer review,
     fourth gate round four); imitating a decoder is how the two came apart,
     and using it is how they stay together.
+
+    The parse is ``receipt._bounded_json``'s: ``json.loads`` itself, with a
+    fixed nesting depth and integer width.  Every input this serves -- the
+    record under witness, its sidecar, the chain genesis and a trust bundle --
+    is producer-written, and ``json.loads`` alone let deep nesting out as
+    ``RecursionError`` and a 5,000-digit integer out as a bare ``ValueError``.
+    Both are now the ``cannot read JSON`` refusal, and a file ``json.loads``
+    refused keeps the message it had.
     """
 
     try:
-        value = json.loads(io.TextIOWrapper(io.BytesIO(data)).read())
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        value = bounded_json.loads(io.TextIOWrapper(io.BytesIO(data)).read())
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        bounded_json.JsonBoundError,
+    ) as exc:
         raise TsaError(f"cannot read JSON {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise TsaError(f"record must be a JSON object: {path}")
@@ -1323,6 +1354,12 @@ def _read_der_tlv(data: bytes, offset: int) -> tuple[int, bytes, int]:
     return tag, data[offset:end], end
 
 
+#: The first arc value the decoder refuses: the smallest integer of 4,301
+#: decimal digits, one past what CPython's default
+#: ``sys.get_int_max_str_digits()`` will write out.
+_OID_ARC_CEILING = 10**4300
+
+
 def _decode_oid(data: bytes) -> str:
     if not data:
         raise TsaError("empty policy OID in RFC 3161 token")
@@ -1338,6 +1375,18 @@ def _decode_oid(data: bytes) -> str:
     continuation = False
     for byte in data:
         current = (current << 7) | (byte & 0x7F)
+        # Every arc is written out in decimal below, and the interpreter
+        # refuses to write an integer of more than 4,300 digits: a policy OID
+        # with one 2,100-octet subidentifier escaped as that ValueError,
+        # before any signature was checked.  Refused here, as soon as the
+        # value crosses the bound, so the decode stops early.  The bound is
+        # on the arc written, not the subidentifier read: the first
+        # subidentifier is written as ``first - 80`` once it reaches 80, so it
+        # may itself reach the ceiling plus 79.  Every arc that decoded
+        # before therefore decodes the same.
+        ceiling = _OID_ARC_CEILING + (80 if not subidentifiers else 0)
+        if current >= ceiling:
+            raise TsaError("oversized OID subidentifier in RFC 3161 token")
         continuation = bool(byte & 0x80)
         if not continuation:
             subidentifiers.append(current)
@@ -1352,30 +1401,72 @@ def _decode_oid(data: bytes) -> str:
     else:
         values = [2, first - 80]
     values.extend(subidentifiers[1:])
-    return ".".join(str(value) for value in values)
+    try:
+        return ".".join(str(value) for value in values)
+    except ValueError as exc:
+        # Only a process that lowered its own int-string limit below the
+        # interpreter's default reaches this; the bytes are refused all the same.
+        raise TsaError("oversized OID subidentifier in RFC 3161 token") from exc
 
 
 def _parse_generalized_time(value: str) -> datetime:
     match = re.fullmatch(r"(\d{14})(?:\.(\d+))?Z", value)
     if not match:
         raise TsaError(f"unsupported RFC 3161 genTime: {value!r}")
-    parsed = datetime.strptime(match.group(1), "%Y%m%d%H%M%S").replace(tzinfo=UTC)
+    # These bytes come from the unauthenticated `-nosigs` extraction, so the
+    # calendar is checked here and refused by name: month 13, February 30th,
+    # a leap second or year 0 used to escape as strptime's ValueError before
+    # any signature was checked.  Fixed-width fields, which is also the only
+    # split strptime accepted for fourteen digits.
+    digits = match.group(1)
+    try:
+        parsed = datetime(
+            int(digits[0:4]),
+            int(digits[4:6]),
+            int(digits[6:8]),
+            int(digits[8:10]),
+            int(digits[10:12]),
+            int(digits[12:14]),
+            tzinfo=UTC,
+        )
+    except ValueError as exc:
+        raise TsaError(f"invalid RFC 3161 genTime: {value!r}") from exc
     fraction = match.group(2)
     if fraction:
+        if fraction[6:].strip("0"):
+            # Keeping six digits would move the time earlier than the one the
+            # authority signed, and this time is not only reported: it is
+            # compared with the record's creation claims and with the
+            # witness's declared tsaGenTime.  The release-chain verifier
+            # refuses the same precision for the same reason, so the package's
+            # two verifiers of one authority's tokens agree on which genTimes
+            # they can represent.  Digits beyond the sixth that are all zero
+            # carry no precision.
+            raise TsaError(
+                "RFC 3161 genTime is finer than a microsecond, which this "
+                f"verifier cannot represent exactly: {value!r}"
+            )
         parsed = parsed.replace(microsecond=int((fraction + "000000")[:6]))
     return parsed
 
 
 def _format_utc(value: datetime) -> str:
+    """RFC 3339 in UTC: whole seconds, then any fraction without trailing zeros.
+
+    ``12:00:00Z`` and ``12:00:00.25Z``: the form a witness declares as
+    ``tsaGenTime`` and ``TokenEvidence.gen_time`` reports, so a fractional
+    genTime is the same string wherever it is written or compared.  The
+    fraction used to be trimmed with ``rstrip("0")`` over the whole ISO string,
+    which ate the zeros of ``+00:00`` instead and left ``…25+00:``: every
+    token signed with sub-second precision was then refused by
+    ``verify_witness`` and reported unparseably by ``verify_timestamp_token``.
+    """
+
     value = value.astimezone(UTC)
+    text = value.replace(tzinfo=None).isoformat(timespec="seconds")
     if value.microsecond:
-        return (
-            value.isoformat(timespec="microseconds")
-            .rstrip("0")
-            .rstrip(".")
-            .replace("+00:00", "Z")
-        )
-    return value.isoformat(timespec="seconds").replace("+00:00", "Z")
+        text += "." + f"{value.microsecond:06d}".rstrip("0")
+    return text + "Z"
 
 
 def _parse_tst_info(data: bytes) -> tuple[str, str, bytes, datetime]:
@@ -1442,7 +1533,13 @@ def _parse_rfc3339(value: Any, label: str) -> datetime:
         raise TsaError(f"invalid timestamp claim {label}: {value!r}") from exc
     if parsed.tzinfo is None:
         raise TsaError(f"timestamp claim lacks a timezone {label}: {value!r}")
-    return parsed.astimezone(UTC)
+    try:
+        return parsed.astimezone(UTC)
+    except OverflowError as exc:
+        # 0001-01-01T00:00:00+14:00 is a valid RFC 3339 string whose UTC
+        # instant precedes year 1: no datetime can hold it, and the
+        # conversion's OverflowError is not even a ValueError.
+        raise TsaError(f"invalid timestamp claim {label}: {value!r}") from exc
 
 
 def _creation_claims(payload: dict[str, Any]) -> list[tuple[str, datetime]]:
@@ -1466,6 +1563,41 @@ def _creation_claims(payload: dict[str, Any]) -> list[tuple[str, datetime]]:
     return claims
 
 
+def _require_aware_verification_time(now: datetime | None) -> None:
+    """Refuse a verification time that does not say which instant it is.
+
+    ``astimezone`` reads a naive ``datetime`` as the process's local time,
+    so ``datetime(2026, 9, 27, 12, 30)`` accepted a token under ``TZ=UTC``
+    and refused it under ``TZ=Asia/Tokyo`` -- a verdict that depended on an
+    input nobody named (0.6.2 review, L2 finding 7). The record's own time
+    claims already refuse a missing timezone; the caller's clock is held to
+    the same rule. ``None`` still means "now, in UTC".
+    """
+
+    if now is None:
+        return
+    _utc_instant(now, "verification time")
+
+
+def _utc_instant(value: datetime, label: str) -> datetime:
+    """``value`` in UTC, refusing a time that names no representable instant.
+
+    Naive refuses as above. An aware time whose UTC instant falls outside
+    years 1 to 9999 -- ``datetime(1, 1, 1, tzinfo=+14:00)`` -- raised
+    OverflowError from ``astimezone`` (0.6.2 review, found beside L2 finding
+    7 by the crash-to-refusal sweep).
+    """
+
+    if not isinstance(value, datetime) or value.utcoffset() is None:
+        raise TsaError(f"{label} must be a timezone-aware datetime: {value!r}")
+    try:
+        return value.astimezone(UTC)
+    except (OverflowError, ValueError) as exc:
+        raise TsaError(
+            f"{label} is outside the representable UTC range: {value!r}"
+        ) from exc
+
+
 def validate_token_time(
     payload: dict[str, Any],
     gen_time: datetime,
@@ -1474,20 +1606,43 @@ def validate_token_time(
     max_future_seconds: int,
     max_token_lead_seconds: int,
 ) -> None:
-    """Validate signed time against wall time and internal creation claims."""
+    """Validate signed time against wall time and internal creation claims.
 
-    current = now.astimezone(UTC)
-    if gen_time > current + timedelta(seconds=max_future_seconds):
+    Each bound is compared as a difference of two instants, which is always a
+    representable ``timedelta``, rather than as an instant shifted by an
+    allowance.  ``claim - timedelta(seconds=300)`` for a record claiming
+    ``0001-01-01T00:00:00Z`` has no datetime to be, and raised
+    ``OverflowError`` out of the verification; the difference form decides
+    every such case, and decides every other case exactly as before.
+    """
+
+    current = _utc_instant(now, "verification time")
+    _utc_instant(gen_time, "RFC 3161 genTime")
+    if gen_time - current > _allowance(max_future_seconds):
         raise TsaError(
             f"RFC 3161 genTime {_format_utc(gen_time)} postdates verification "
             f"time {_format_utc(current)}"
         )
     for label, claim in _creation_claims(payload):
-        if gen_time < claim - timedelta(seconds=max_token_lead_seconds):
+        if claim - gen_time > _allowance(max_token_lead_seconds):
             raise TsaError(
                 f"RFC 3161 genTime {_format_utc(gen_time)} impossibly precedes "
                 f"{label}={_format_utc(claim)}"
             )
+
+
+def _allowance(seconds: int) -> timedelta:
+    """``timedelta(seconds=seconds)``, saturating where it cannot be held.
+
+    An allowance past ``timedelta.max`` (some 2.7 million years) already
+    exceeds the distance between any two datetimes, so saturating decides the
+    comparison exactly as the unbounded value would.
+    """
+
+    try:
+        return timedelta(seconds=seconds)
+    except OverflowError:
+        return timedelta.max if seconds > 0 else timedelta.min
 
 
 def _trust_bundle_reference(
@@ -1539,7 +1694,21 @@ def _load_trust_bundle(
         raise TsaError(f"unsupported TSA trust schema: {payload.get('schemaVersion')!r}")
     if not isinstance(payload.get("bundleId"), str) or not payload["bundleId"]:
         raise TsaError(f"TSA trust bundle lacks bundleId: {path}")
-    if bundle_bytes not in {canonical_bytes(payload), canonical_bytes(payload) + b"\n"}:
+    # A payload canonical JSON cannot encode (NaN, an infinity, an integer
+    # beyond the Number range) is by that fact not canonical JSON, and gets
+    # this refusal rather than receipt.canonical's ValueError.  The bundle
+    # is producer-written and read before its commitment is compared, so
+    # this is also where a replaced bundle with such a payload stops; the
+    # parse above has already bounded its depth.  The order of the checks is
+    # kept, so apart from a bundle nested past that bound, which the parse
+    # now refuses first, every bundle refused before keeps its refusal.
+    try:
+        encoded = canonical_bytes(payload)
+    except (ValueError, RecursionError) as exc:
+        raise TsaError(
+            f"TSA trust configuration is not canonical JSON: {path}"
+        ) from exc
+    if bundle_bytes not in {encoded, encoded + b"\n"}:
         raise TsaError(f"TSA trust configuration is not canonical JSON: {path}")
     anchors = payload.get("anchors")
     if not isinstance(anchors, list) or not anchors:
@@ -2556,6 +2725,7 @@ def verify_timestamp_token(
     maintenance release (peer review, fifth gate round one).
     """
 
+    _require_aware_verification_time(now)
     named_records = records
     records = records.resolve()
     evidence, _identity = _verify_timestamp_token(
@@ -2957,7 +3127,10 @@ def _v1_witness_evidence(
     now: datetime | None,
 ) -> WitnessEvidence:
     status = witness.get("status")
-    if status not in {"available", "unavailable"}:
+    # A tuple, not a set: membership by equality, so a producer's list or
+    # object is simply not a status, where a set hashed it and raised
+    # TypeError before this refusal could name it.
+    if status not in ("available", "unavailable"):
         raise TsaError(f"invalid witness status for {path}: {status!r}")
     if status == "unavailable":
         # The v2 per-anchor outcome has held these two rules since it shipped;
@@ -3693,9 +3866,12 @@ def _supplemental_candidates(
     therefore a key that rotation superseded.
 
     Nor may an anchor that is partly one thing and partly another simply be
-    treated as new: the supplemental outcome is supposed to show that whoever
-    holds the new key answered, and an anchor that also allows an active key
-    can satisfy it with a stamp by the authority the chain already trusts.
+    treated as new: an available supplemental outcome is supposed to show that
+    whoever holds the new key answered, and an anchor that also allows an
+    active key can satisfy it with a stamp by the authority the chain already
+    trusts.  (An outcome declared unavailable, with a reason, also satisfies
+    the requirement, as it does in the ported baseline: the rule requires the
+    outcome to be present, not the new key to have answered.)
     Neither reading is true of it, so it is refused and the producer is told
     what to do about it: a rotation belongs under the active ID and root, and
     a new authority belongs in an anchor whose signers are its own.  A pending
@@ -3817,7 +3993,8 @@ def _v2_witness_evidence(
     now: datetime | None,
 ) -> WitnessEvidence:
     status = witness.get("status")
-    if status not in {"available", "unavailable"}:
+    # A tuple for the reason _v1_witness_evidence gives.
+    if status not in ("available", "unavailable"):
         raise TsaError(f"invalid witness status for {path}: {status!r}")
     preferred = preferred_active_trust_bundle(trusted_bundles)
     if witness.get("trustBundlePath") != preferred["path"]:
@@ -4313,7 +4490,19 @@ def _verify_witness_with_updates(
         raise TypeError(
             "supply transition_bundle_updates or prior_pending_updates, not both"
         )
-    named_records = records or path.parents[1]
+    _require_aware_verification_time(now)
+    if records is not None:
+        named_records = records
+    elif len(path.parents) >= 2:
+        named_records = path.parents[1]
+    else:
+        # ``path.parents[1]`` raised IndexError for a bare filename (0.6.2
+        # review, L2 finding 8): the records root defaults to the record's
+        # grandparent, and a one-component path has none to name.
+        raise TsaError(
+            "cannot infer the records root from a record path without a "
+            f"<records>/<date>/ prefix; pass records=: {path}"
+        )
     records = named_records.resolve()
     # One read of the record, and every question about it is asked of these
     # bytes: the digest the sidecar has to match, the trust-bundle updates it

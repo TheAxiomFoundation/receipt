@@ -19,6 +19,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import FrozenInstanceError
 
 import pytest
+from hypothesis import given, settings, strategies as st
 
 import receipt.attest as attest_module
 from receipt.attest import (
@@ -535,6 +536,10 @@ def _verification_payload(workflow: str = WORKFLOW) -> dict[str, object]:
         "verificationResult": {
             "signature": {
                 "certificate": {
+                    "subjectAlternativeName": (
+                        "https://github.com/MaxGhenis/brier/"
+                        f"{workflow}@refs/heads/main"
+                    ),
                     "buildSignerURI": (
                         "https://github.com/MaxGhenis/brier/"
                         f"{workflow}@refs/heads/main"
@@ -695,6 +700,114 @@ def test_verify_commit_old_failure_and_unparseable_success_messages(
     assert verify_commit(pathlib.Path("/repo"), COMMIT, spec=_spec()) == "<verified>"
 
 
+# --- 0.6.2 review, L6 finding 14: the logged identity is the enforced one
+
+
+def _accepting_gh(monkeypatch: pytest.MonkeyPatch, stdout: str) -> None:
+    monkeypatch.setattr(
+        attest_module, "commit_age_seconds", lambda _root, _commit: 10**9
+    )
+    monkeypatch.setattr(
+        attest_module.subprocess,
+        "run",
+        lambda args, **_kwargs: subprocess.CompletedProcess(
+            args, 0, stdout=stdout, stderr=""
+        ),
+    )
+
+
+def test_verify_commit_returns_the_identity_gh_enforced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In a reusable-workflow run the certificate names the called workflow
+    (the SAN gh matched) and the caller (``buildConfigURI``). The smallest
+    identity-shaped string won, so the log could name the caller, a workflow
+    the allowlist excludes."""
+
+    enforced = (
+        "https://github.com/MaxGhenis/brier/.github/workflows/"
+        "roll-docket.yml@refs/heads/main"
+    )
+    caller = (
+        "https://github.com/MaxGhenis/brier/.github/workflows/"
+        "a-unlisted-caller.yml@refs/heads/feature"
+    )
+    payload = [
+        {
+            "verificationResult": {
+                "signature": {
+                    "certificate": {
+                        "subjectAlternativeName": enforced,
+                        "buildConfigURI": caller,
+                    }
+                }
+            }
+        }
+    ]
+    _accepting_gh(monkeypatch, json.dumps(payload))
+    assert verify_commit(pathlib.Path("/repo"), COMMIT, spec=_spec()) == (
+        enforced.removeprefix("https://")
+    )
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        json.dumps([{"verificationResult": {"signature": None}}]),
+        json.dumps([{"verificationResult": {"signature": "text"}}]),
+        json.dumps([{"verificationResult": {"signature": ["list"]}}]),
+        "[" * 100_000 + "]" * 100_000,
+        "not json",
+        "",
+    ],
+    ids=["signature-null", "signature-string", "signature-list", "deep", "text", "empty"],
+)
+def test_verify_commit_reads_malformed_gh_output_as_no_identity(
+    monkeypatch: pytest.MonkeyPatch, stdout: str
+) -> None:
+    """Acceptance is gh's exit status alone; its stdout is only for the log.
+    A ``null`` or string ``signature`` raised AttributeError, and nesting past
+    the decoder's stack raised RecursionError, after gh had accepted."""
+
+    _accepting_gh(monkeypatch, stdout)
+    assert verify_commit(pathlib.Path("/repo"), COMMIT, spec=_spec()) == "<verified>"
+
+
+# --- 0.6.2 review, L6 finding 15: a frozen spec keeps exact strings
+
+
+class _Widening(str):
+    """A str whose escaping widens once ``widen`` is set."""
+
+    widen = False
+
+    def __iter__(self):  # type: ignore[override]
+        return iter(".*" if self.widen else str.__str__(self))
+
+
+@pytest.mark.parametrize(
+    "field", ["repository", "allowed_ref", "protected_prefix", "allowed_workflows"]
+)
+def test_attest_spec_refuses_str_subclasses(field: str) -> None:
+    values = {
+        "repository": _Widening("MaxGhenis/brier"),
+        "allowed_ref": _Widening("refs/heads/main"),
+        "protected_prefix": _Widening("records/"),
+        "allowed_workflows": frozenset({_Widening(WORKFLOW)}),
+    }
+    with pytest.raises(ValueError):
+        _spec(**{field: values[field]})
+
+
+def test_a_constructed_spec_pattern_cannot_change_afterwards() -> None:
+    spec = _spec()
+    before = cert_identity_pattern(spec)
+    assert all(
+        type(value) is str
+        for value in (spec.repository, spec.allowed_ref, spec.protected_prefix)
+    )
+    assert all(type(workflow) is str for workflow in spec.allowed_workflows)
+    assert cert_identity_pattern(spec) == before
 # --- the sweep reads the whole history of the repository it names ----------
 #
 # Review of 0.6.2 (L6 F1, F2, F13 and the inherited-GIT_DIR case). Each
@@ -1014,3 +1127,89 @@ def test_the_sweep_is_invariant_under_ambient_git_state_exhaustively(
                     assert _in_scope(root) == expected, (name, replaced, chosen)
                 sweeps += 1
     assert sweeps == 64
+
+
+@pytest.mark.parametrize("signer", [WORKFLOW, SECOND_WORKFLOW])
+def test_verify_commit_reports_signer_when_caller_is_also_allowed(
+    monkeypatch: pytest.MonkeyPatch, signer: str
+) -> None:
+    """A matching caller URI never substitutes for the certificate's SAN."""
+
+    identity = f"https://github.com/MaxGhenis/brier/{signer}@refs/heads/main"
+    caller_workflow = SECOND_WORKFLOW if signer == WORKFLOW else WORKFLOW
+    caller = f"https://github.com/MaxGhenis/brier/{caller_workflow}@refs/heads/main"
+    payload = [{
+        "verificationResult": {
+            "signature": {
+                "certificate": {
+                    "subjectAlternativeName": identity,
+                    "buildConfigURI": caller,
+                }
+            }
+        }
+    }]
+    _accepting_gh(monkeypatch, json.dumps(payload))
+    assert verify_commit(pathlib.Path("/repo"), COMMIT, spec=_spec()) == (
+        identity.removeprefix("https://")
+    )
+
+
+
+@pytest.mark.parametrize("signer", [None, 7, "https://example.org/unlisted"])
+def test_verify_commit_does_not_report_caller_without_matching_signer(
+    monkeypatch: pytest.MonkeyPatch, signer: object
+) -> None:
+    caller = f"https://github.com/MaxGhenis/brier/{WORKFLOW}@refs/heads/main"
+    payload = [{
+        "verificationResult": {
+            "signature": {
+                "certificate": {
+                    "subjectAlternativeName": signer,
+                    "buildConfigURI": caller,
+                }
+            }
+        }
+    }]
+    _accepting_gh(monkeypatch, json.dumps(payload))
+    assert verify_commit(pathlib.Path("/repo"), COMMIT, spec=_spec()) == "<verified>"
+
+
+@settings(max_examples=40, deadline=None, derandomize=True)
+@given(
+    signer=st.one_of(
+        st.sampled_from([
+            f"https://github.com/MaxGhenis/brier/{workflow}@refs/heads/main"
+            for workflow in (WORKFLOW, SECOND_WORKFLOW)
+        ]),
+        st.none(),
+        st.integers(),
+        st.text(max_size=80),
+    ),
+    caller=st.sampled_from([WORKFLOW, SECOND_WORKFLOW]),
+)
+def test_verified_identity_always_comes_from_the_certificate_san(
+    signer: object, caller: str
+) -> None:
+    """An allowlisted caller never replaces an absent or different signer."""
+
+    payload = [{
+        "verificationResult": {
+            "signature": {
+                "certificate": {
+                    "subjectAlternativeName": signer,
+                    "buildConfigURI": (
+                        f"https://github.com/MaxGhenis/brier/{caller}@refs/heads/main"
+                    ),
+                }
+            }
+        }
+    }]
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _accepting_gh(monkeypatch, json.dumps(payload))
+        identity = verify_commit(pathlib.Path("/repo"), COMMIT, spec=_spec())
+    expected = (
+        signer.removeprefix("https://")
+        if isinstance(signer, str) and re.fullmatch(cert_identity_pattern(_spec()), signer)
+        else "<verified>"
+    )
+    assert identity == expected

@@ -114,6 +114,155 @@ review of 0.6.2, and both were already present in 0.6.1.
   ref present or absent): the epoch and the commits in scope are the
   reference's in every one.
 
+Corrections to code shipped in 0.6.1 and 0.6.2. One fixes a wrongful refusal
+of genuine tokens. Others replace interpreter exceptions (`ValueError`,
+`OverflowError`, `RecursionError`, `AttributeError`, `TypeError`, ...) with the
+module's own refusal, or avoid repeated copying before a refusal. Changes for
+inputs that did not crash before include corrected fractional instant text,
+refusal of genTimes with nonzero digits past the sixth fractional digit, and
+refusal of JSON nested more than 128 deep, including JSON 0.6.1 accepted.
+The properties sample typed parser and time-check inputs: bytes, strings,
+dictionary payloads, aware datetimes and integer allowances. They do not
+establish totality for arbitrary public helper arguments.
+
+- A timestamp token whose genTime carries fractional seconds exactly
+  representable in microseconds verifies. The formatter trimmed trailing
+  zeros from the whole ISO string, so it ate the
+  zeros of `+00:00` and wrote `...12:00:00.249000+00:`. `verify_witness` then
+  refused every such token as `invalid timestamp claim token genTime`, and
+  `verify_timestamp_token` accepted it but reported that string as its
+  `gen_time`. OpenSSL signs sub-second genTimes whenever an authority sets
+  `clock_precision_digits`. A genTime is now written `...12:00:00.249Z`, and
+  that is the form a witness's `tsaGenTime` is compared in. Refusals that
+  quote an instant with a fraction change with it: `postdates verification
+  time 2026-09-28T12:00:00.123456Z` where 0.6.1 wrote `...123456+00:`, which
+  is most of them, since the verification time is `datetime.now()`. Refused:
+  a genTime with nonzero digits past the sixth, which the verifier cannot
+  represent without moving it earlier than the signed instant
+  (`RFC 3161 genTime is finer than a microsecond, which this verifier cannot
+  represent exactly: ...`, the rule `receipt.release_chain` already applied).
+  The direct token verifier in 0.6.1 accepted those genTimes by truncating the
+  fraction; it now refuses them. Trailing zero digits beyond the sixth remain
+  accepted.
+- Token bytes that name no instant or no decodable OID are refused by name.
+  The TSTInfo is parsed from the unauthenticated extraction before either
+  OpenSSL verification, so anyone who can write a token file and its sidecar
+  could end a verification with `ValueError`. A genTime of fourteen digits
+  that is no calendar instant (month 13, February 30th, a leap second, year 0)
+  is now `invalid RFC 3161 genTime: '20261301000000Z'`. An OID arc whose
+  decimal form would exceed 4,300 digits, which the interpreter refuses to
+  write, is `oversized OID subidentifier in RFC 3161 token`, and the decode
+  stops as soon as the bound is crossed. Previously parsed genTimes still
+  accepted, and OIDs still decoded, keep their parsed values.
+- A creation claim at either end of the datetime range is decided, not
+  crashed on. The lead check shifted the claim by the allowance
+  (`claim - timedelta(seconds=300)`), which has no datetime for a record
+  claiming the first minutes of year 1, and converting
+  `0001-01-01T00:00:00+14:00` to UTC has none either. Both raised
+  `OverflowError`, which is not even a `ValueError`. The checks now compare
+  differences of instants, which decide every such case and every other case
+  exactly as before (a differential property against the old comparisons
+  checks the verdict, and the text for whole-second instants), and a claim
+  with no UTC instant is the existing `invalid timestamp claim recordedAt:
+  '...'`.
+- Deep or oversized JSON in a witnessed tree is refused. The record, its
+  sidecar, the chain genesis and a trust bundle are all producer-written, and
+  `json.loads` let 100,000 levels of nesting out as `RecursionError` and a
+  5,000-digit integer out as a bare `ValueError`. They are now decoded by
+  `receipt._bounded_json`: `json.loads` with fixed ceilings of at most 128
+  nested containers and at most 4,300 digits in an integer literal. Acceptance
+  below those ceilings can still depend on the caller's remaining stack and
+  the interpreter's configured integer-digit limit. A recursion or integer
+  conversion failure in `json.loads` becomes `JsonBoundError`, translated to
+  the same `cannot read JSON <path>: ...` refusal as exceeding a ceiling. A
+  `JSONDecodeError` keeps `json.loads`'s message. New refusal: a JSON value
+  nested more than 128 deep.
+  0.6.1 accepted such a record whenever `json.loads` could parse it, and
+  refused such a sidecar, genesis or bundle by its shape
+  (`record must be a JSON object: ...`) or its content; each now gets the
+  depth refusal. A trust bundle whose payload canonical JSON
+  cannot encode (NaN, an infinity, an integer beyond the Number range), which
+  crashed the canonical check that runs before the commitment is compared, is
+  now the existing `TSA trust configuration is not canonical JSON: <path>`.
+  The bundle checks keep their order, so apart from depth a replaced bundle
+  refused before gets the same refusal.
+- A commit whose `tree` or `parent` header has continuation lines is refused
+  at the first one. `receipt.snapshot` rejoined every continuation into the
+  header's value before refusing it, copying the growing value once per line.
+  The tests check refusal at the first continuation and exercise 800,000
+  continuation lines through the parser and `select()`. No value holding a
+  newline is an object name, so the verdict and the text
+  (`commit <oid> is not a canonical commit object`) are what they always
+  were; a differential against the 0.6.1 parser checks this.
+- `verify_append_gate` refuses malformed candidate ledger and prefix bytes
+  with `AppendError`. The ledger and its frozen-prefix manifest are
+  candidate-controlled. A manifest that is not JSON, not an object, missing a
+  key, or holding a count of `null`, `"x"` or `1e400`, a prefix row that is
+  not an object, and an appended row whose `measure`, `source` or
+  `responseArchive` is not an object or whose value is NaN, an infinity, a
+  5,000-digit integer or nested 5,000 deep each raised `JSONDecodeError`,
+  `AttributeError`, `KeyError`, `TypeError`, `ValueError`, `OverflowError` or
+  `RecursionError` out of the gate. The new refusals: `prefix manifest is not
+  valid JSON: ...`, `prefix manifest is not a JSON object`, `prefix manifest
+  lacks <field>`, `prefix manifest prefixLineCount is not a line count: ...`,
+  `prefix manifest lineSha256s is not a list`,
+  `line <n> (<id>) <field> is not an object`,
+  `line <n> (<id>) assertion content is not canonical JSON: ...`, and, for a
+  row no UTF-8 can encode (which only a direct caller of `check_prefix` can
+  pass), `line <n> is not valid UTF-8`. The decoding bounds get the existing
+  `line <n> is not valid JSON: ...`. A rewritten row that is not an object is
+  named `(?)`. Under the default integer-digit limit, the crash corrections
+  preserve prior accepted verdicts and text except that a row or manifest
+  nested more than 128 deep is now refused as not valid JSON. The combined
+  changes also intentionally refuse old accepts under stricter appended-row
+  checks, including `value: true` (`value is not a JSON number`),
+  `observed_at: "2026-99-99"` (`observed_at is not an ASCII YYYY-MM-DD calendar
+  date`), and `source_record_id: 7` (`source_record_id is not a string`).
+  A process that raised the limit could have had the old gate accept a
+  row holding an integer of more than 4,300 digits outside the content
+  address; it is now refused as not valid JSON. A direct caller of
+  `check_prefix` now gets the strict-count refusal for a `prefixLineCount` of
+  `"1"`, `true` or `1.0`, which the old `check_prefix` accepted (the old gate
+  applied that check just after it). An input the old code already refused can
+  now meet a stricter guard first and get a different refusal: a committed
+  manifest whose `prefixLineCount` is the string `"1"` with an empty
+  `lineSha256s` was refused as `prefix manifest line hashes disagree with its
+  count` and is now refused as `immutable prefix manifest prefixLineCount is
+  not a JSON integer`. 0.6.1
+  accepted such a row whenever `json.loads` could parse it and the deep value
+  sat outside the content address, and took later appends on top of it; the
+  bound refuses the row and every later append to a ledger that holds it.
+  `expected_assertion_version_id` raises the same refusals for its own
+  callers, and a falsy `measure`, `source` or `responseArchive` still reads
+  as absent.
+- A release manifest past the decoding bounds, or with a count past the
+  Number range, is refused. The append gate reaches it: `load_manifest`
+  parses a manifest before its filename digest is
+  compared, and `json.loads` let deep nesting and 5,000-digit integers out as
+  `RecursionError` and `ValueError`. A count such as `state.lineCount` of
+  `10**400` passed the schema, which bounds counts only from below, and
+  `receipt.canonical` then raised `ValueError`. These are now the existing
+  `manifest is not valid JSON: <path>: ...` and
+  `manifest bytes are not canonical JSON plus one newline: <path>`. A
+  manifest nested more than 128 deep, which the closed-world schema refused
+  before (`producer.repo must be a string and non-empty`, for one), now gets
+  the depth refusal instead.
+- A witness whose `status` is a JSON list or object is refused by name. The
+  status was checked for membership in a set, which hashes the producer's
+  value, so a list or object raised `TypeError` where a number or a stray
+  string got `invalid witness status for <path>: ...`. Both now get that
+  refusal.
+- The release chain's time bounds decide the ends of the datetime range. A
+  producer-signed, witnessed manifest created in the first five minutes of year
+  1 made `created_at - timedelta(seconds=clock_skew_seconds)` raise
+  `OverflowError` out of `verify_release_chain`, and through it out of
+  `verify_append_gate`. So did a `clock_skew_seconds` too large for a
+  timedelta, which passes the argument check, and a verification time in the
+  last five minutes of year 9999. The bounds are now differences of instants,
+  which decide those cases and every other case exactly as before; the
+  refusal texts are unchanged. This is the release-chain counterpart of the
+  creation-claim fix above.
+
 ## 0.6.2
 
 One widening, in the consumer's hands: an anchor can pin more than one

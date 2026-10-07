@@ -150,6 +150,35 @@ def composed_close(m, repo, patch, mask, history, phase, body):
                 "chain": result.chain is not None, "corpus": result.corpus is not None}
     result = outcome(call)
     assert faults.owners
+    if results and hasattr(faults.owners[0]._state, "close_errors"):
+        # #83's final review revoked claims even when a pass error was already
+        # unwinding. Keep the frozen legacy trace; separately require the
+        # stronger live verdict and the exact closure reason selected by it.
+        answer = results[0]
+        payload = m.verify.result_to_dict(answer)
+        if mask:
+            reasons = {
+                "child": "m3 child close failure",
+                "sentinel": "m3 sentinel audit failure",
+                "configuration": "m3 configuration audit failure",
+                "directory": "OSError: m3 directory cleanup failure",
+            }
+            assert answer.passes == (
+                m.verify.PassResult(
+                    "custody", False, "", "; ".join(reasons[item] for item in mask)
+                ),
+                m.verify.PassResult("binding", False, "", "not reached"),
+            )
+            assert payload["passesCompleted"] == []
+            assert payload["scope"]["established"] == []
+            assert answer.chain is None and answer.corpus is None
+            assert answer.object_store is None
+        elif body == "error":
+            earlier = (["history"] if history and phase != "history" else [])
+            earlier += ["custody", "binding"][
+                : {"history": 0, "custody": 0, "binding": 1, "declaration": 2}[phase]
+            ]
+            assert payload["passesCompleted"] == earlier
     if not mask and body == "none":
         assert result["value"]["ok"]
     if body == "interrupt":

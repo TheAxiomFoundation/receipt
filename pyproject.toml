@@ -27,7 +27,9 @@ dependencies = ["cryptography>=42"]
 # but silently install nothing under `pip install -e ".[dev]"` — a fresh-venv
 # review round caught exactly that.
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+# Hypothesis runs the property tests that state, for every input in a domain,
+# that a parser either answers or refuses with the module's own error.
+dev = ["pytest>=8", "hypothesis>=6"]
 
 [project.scripts]
 receipt = "receipt.cli:main"

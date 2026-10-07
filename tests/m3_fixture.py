@@ -142,12 +142,40 @@ def compare(probe, repo, monkeypatch, *args, expected=None):
                 result = probe(m, repo, patch, *args)
             results.append(plain({"trace": result, "bodies": dict(sorted(counts.items()))}))
     assert codes[0] is not codes[1], "legacy/live selector bodies must be distinct"
-    assert results[0] == results[1], (results[0], results[1])
-    if expected is not None and results[1] != expected:
+    if expected is not None and results[0] != expected:
         # Print the differing leaves, not the whole structures: CI logs truncate
         # a raw dict diff, which hid the host-dependent D7 traces once already.
-        raise AssertionError("observed trace differs from the recorded one: "
-                             + json.dumps(_leaf_differences(results[1], expected), sort_keys=True))
+        raise AssertionError("frozen trace differs from the recorded one: "
+                             + json.dumps(_leaf_differences(results[0], expected), sort_keys=True))
+    identity = {
+        "probe": f"{probe.__module__}.{probe.__qualname__}",
+        "args": plain(args),
+    }
+    key = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    reviewed = json.loads(
+        Path(__file__).with_name("m3_review_deltas.json").read_text()
+    ).get(key)
+    if reviewed is None:
+        # Keep the original aggregate equality and its frozen-first direction;
+        # primitive subclasses can make a reverse leaf comparison asymmetric.
+        assert results[0] == results[1], (
+            "live trace differs outside the reviewed changes", results[0], results[1]
+        )
+        return results[1]
+    assert reviewed["probe"] == identity["probe"]
+    assert reviewed["args"] == identity["args"]
+    allowed = reviewed["differences"]
+    # #83's reviewed fixes add repository re-audits, folded attribute-source
+    # reads and closure invalidation. Each recorded leaf pins both the legacy
+    # value and its reviewed replacement; every other leaf must remain equal.
+    # The frozen source and its captured OBSERVED values stay authenticated.
+    differences = _leaf_differences(results[1], results[0])
+    assert differences == allowed, (
+        "live trace differs outside the reviewed changes: "
+        + json.dumps(_leaf_differences(differences, allowed), sort_keys=True)
+    )
     return results[1]
 
 

@@ -78,7 +78,9 @@ class AttestSpec:
     """Consumer-committed workflow-provenance policy.
 
     Every field is required.  ``allowed_workflows`` is normalized to a
-    ``frozenset`` so the frozen spec does not retain a mutable policy object.
+    ``frozenset`` so the frozen spec does not retain a mutable policy object,
+    and every text field and workflow must be exactly ``str``: a subclass
+    carries methods the pattern would consult later.
     """
 
     repository: str
@@ -88,6 +90,16 @@ class AttestSpec:
     checker_path: pathlib.PurePosixPath
 
     def __post_init__(self) -> None:
+        # Exactly ``str``: a subclass passed every check below and kept its
+        # own methods, and ``re.escape`` consults them when the pattern is
+        # built, so a frozen spec's ``cert_identity_pattern`` could widen
+        # after validation (0.6.2 review, L6 finding 15).
+        for name in ("repository", "allowed_ref", "protected_prefix"):
+            value = getattr(self, name)
+            if isinstance(value, str) and type(value) is not str:
+                raise ValueError(
+                    f"{name} must be a str, not a {type(value).__name__} subclass"
+                )
         _repository_slug(self.repository)
 
         workflows_value: object = self.allowed_workflows
@@ -110,7 +122,7 @@ class AttestSpec:
         for workflow in sorted(workflows, key=repr):
             if (
                 _relative_posix_path(workflow) is None
-                or not isinstance(workflow, str)
+                or type(workflow) is not str
                 or not workflow.startswith(".github/workflows/")
                 or workflow == ".github/workflows/"
                 or "@" in workflow
@@ -358,25 +370,45 @@ def repository_slug(root: pathlib.Path) -> str:
         ) from None
 
 
-def extract_certificate_identities(payload: object) -> set[str]:
-    """Return signer URIs from verificationResult.signature.certificate only."""
+def extract_certificate_identities(
+    payload: object, *, signer_only: bool = False
+) -> set[str]:
+    """Return certificate workflow URIs, optionally restricted to its SAN.
+
+    ``gh --cert-identity-regex`` enforces ``subjectAlternativeName``. Other
+    fields, including ``buildConfigURI``, may name a different workflow.
+    The default retains the broad extraction used by existing callers.
+    """
 
     identities: set[str] = set()
     results = payload if isinstance(payload, list) else [payload]
     for result in results:
         if not isinstance(result, dict):
             continue
-        certificate = (
-            (result.get("verificationResult") or {})
-            .get("signature", {})
-            .get("certificate", {})
-            if isinstance(result.get("verificationResult"), dict)
-            else {}
-        )
+        # Every level is checked for shape before it is read: a ``null`` or
+        # string ``signature`` in gh's output raised AttributeError after gh
+        # had accepted (0.6.2 review, L6 finding 14).
+        verification = result.get("verificationResult")
+        if not isinstance(verification, dict):
+            continue
+        signature = verification.get("signature")
+        if not isinstance(signature, dict):
+            continue
+        certificate = signature.get("certificate")
         if not isinstance(certificate, dict):
             continue
-        for value in certificate.values():
+        values = (
+            (certificate.get("subjectAlternativeName"),)
+            if signer_only
+            else certificate.values()
+        )
+        for value in values:
             if isinstance(value, str):
+                if signer_only:
+                    identity = value.removeprefix("https://")
+                    if SIGNER_RE.fullmatch(identity):
+                        identities.add(identity)
+                    continue
                 for match in SIGNER_RE.finditer(value):
                     identities.add(match.group(0))
     return identities
@@ -402,7 +434,13 @@ def verify_commit(
     now: float | None = None,
     sleep: Callable[[float], None] | None = None,
 ) -> str:
-    """Verify one commit's attestation; return the accepted signer identity."""
+    """Verify one commit's attestation; return the signer identity gh enforced.
+
+    Acceptance is gh's exit status alone. The identity returned is for the
+    log line: the certificate's ``subjectAlternativeName`` matching the
+    pattern gh enforced, or ``"<verified>"`` when output names none. An
+    allowlisted caller's ``buildConfigURI`` never substitutes for the signer.
+    """
 
     payload = attestation_subject(spec.repository, commit)
     with tempfile.TemporaryDirectory() as tmp:
@@ -435,13 +473,22 @@ def verify_commit(
             )
             if completed.returncode == 0:
                 # gh already enforced the certificate identity; parse it back
-                # out of the certificate fields for the log line only.
+                # out of the certificate fields for the log line only. Output
+                # too deep for the decoder is unreadable output, like any
+                # other, and not a crash.
                 try:
                     parsed = json.loads(completed.stdout)
-                except json.JSONDecodeError:
+                except (ValueError, RecursionError):
                     parsed = None
-                identities = extract_certificate_identities(parsed)
-                return sorted(identities)[0] if identities else "<verified>"
+                enforced = re.compile(cert_identity_pattern(spec))
+                identities = sorted(
+                    identity
+                    for identity in extract_certificate_identities(
+                        parsed, signer_only=True
+                    )
+                    if enforced.fullmatch(f"https://{identity}")
+                )
+                return identities[0] if identities else "<verified>"
             last_error = (completed.stderr or completed.stdout).strip()
             if attempt < attempts:
                 (time.sleep if sleep is None else sleep)(

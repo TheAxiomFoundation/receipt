@@ -12,9 +12,9 @@ Shipped:
 
 - `receipt.release_chain` — append-only hash-chained manifests over record sets: enumerated genesis, content-addressed links, immutable-prefix verification
 - `receipt.tsa` — RFC 3161 dual-witness verification against consumer-committed trust bundles and signer identities, with explicit unavailable-witness outcomes
-- `receipt.sign` — Ed25519 producer signatures verified against fingerprints pinned in the consumer's own committed code (shipped: ported ledger primitives, sign-side helpers, N-of-M keyrings with legacy verification generations — retired keys verify immutable history only; rotation by reviewed spec change)
+- `receipt.sign` — Ed25519 producer signatures verified against fingerprints pinned in the consumer's own committed code (shipped: ported ledger primitives, sign-side helpers, N-of-M keyrings with legacy verification generations — retired keys verify only when the caller says the material is history with `allow_legacy=True`, which `verify_threshold` requires at every call and `verify_any_generation` takes as its default; the package cannot tell history from new material; rotation by reviewed spec change)
 - `receipt.attest` — workflow-provenance verification with self-anchoring enforcement epochs and a full-history sweep over every protected-tree commit
-- `receipt.canonical` — one byte stream per value: canonical JSON with UTF-16 code-unit key order and ECMAScript number formatting
+- `receipt.canonical` — one byte stream per JSON value: canonical JSON with UTF-16 code-unit key order and ECMAScript number formatting. The promise covers values as `json.loads` returns them: exact built-in types, finite floats, integers that convert to finite ECMAScript Numbers, and strings with no explicit surrogate pair. Decoding alone does not ensure this numeric range: `1e400` decodes but canonical serialization refuses it. The module is a byte-identical copy of the pinned upstream serializer, so a subclass (whose own methods choose the bytes), an explicit surrogate pair (spelled apart from the character it encodes), and nesting past the interpreter's recursion limit (a `RecursionError`) behave as they do upstream
 - `receipt.append_gate` — a candidate change to an append-only ledger must extend the trusted base exactly: prefix retained, rows valid, releases untouched
 - `receipt.corpus` — closed-world binding of a witnessed journal to a committed tree object: every content file bound, every bound file present, every digest exact, and per-gate reproducibility tiers so a declaration is never mistaken for a verification
 - `receipt verify` — the outside auditor's command: a clone, commodity tools, one offline fail-closed verdict
@@ -52,14 +52,20 @@ verification invokes OpenSSL. Without an effective anchor pin, the claim is
 "custody under the anchor set {digest} the verified tree carries"; without a
 spec pin, the verdict also does not establish that the spec's code was trusted.
 The command performs verification offline; its trust configuration is
-executable Python supplied by the caller.
+executable Python, and the command runs it in its own process. Without
+`--expect-spec-sha256`, that code is whatever the producer committed. It can
+change what the command prints and the exit status it returns, so the verdict
+is only as good as the spec the producer committed. Read the spec once, out of
+band, and pin its digest.
 
 ## What this verdict speaks for
 
-A PASS establishes custody under the reported anchor set and binding of the
-witnessed journal to the named tree. An optional history pass establishes that
-every release object at the supplied base remains byte- and mode-identical.
-The verdict does not establish:
+Under a spec pinned with `--expect-spec-sha256`, a PASS establishes custody
+under the reported anchor set and binding of the witnessed journal to the named
+tree. An optional history pass establishes that every release object at the
+supplied base remains byte- and mode-identical. Without that pin, the spec's
+code ran inside the verifier, so the verdict and its exit status are only as
+good as the spec the producer committed. The verdict does not establish:
 
 - that any declared gate actually passed;
 - that the encoded rules are a correct reading of the law;
@@ -105,8 +111,8 @@ digest of the expanded content. Protected paths with transforming `filter`, `ide
 checkout fidelity is outside the verdict.
 
 `ChainSpec.name_repertoire` and `CorpusSpec.name_repertoire` default to
-`portable`: ASCII letters, digits, `.`, `_`, and `-`, no trailing period or
-Win32 device basename. A spec may declare `posix-bytes` for exact-byte names
+`portable`: ASCII letters, digits, `.`, `_`, and `-`, at most 255 bytes per
+component, no trailing period or Win32 device basename. A spec may declare `posix-bytes` for exact-byte names
 outside the materialized paths; names quoted or folded must still be valid
 UTF-8, and ASCII-fold-equal siblings refuse under both repertoires. Both spec
 fields must agree. Private materialization always requires portable names,

@@ -219,7 +219,22 @@ def test_bounded_v061_memory_and_work(raw_repo, tmp_path, monkeypatch, shape):
         assert counted["reached"] == memory["reached"]
         counted["traced_peak_bytes"] = memory["traced_peak_bytes"]
         rows.append(counted)
-    assert rows[0]["public"] == rows[1]["public"]
+    # #83 also checks the attributes file's own folded name. Each request
+    # walks every distinct non-root ancestor directory once, even when its
+    # metadata was already authenticated. The broad fixture adds one root
+    # walk of two entries; the deep fixture adds 2 + sum(d + 2, d=2..64)
+    # = 2,207 entries. Pin that additional work at each checkpoint, retaining
+    # exact comparison of every other public field and the prior work.
+    attribute_entries = {"broad": 2, "deep": 2207}[shape]
+    reviewed_public = [
+        {
+            **checkpoint,
+            "tree_entries": checkpoint["tree_entries"]
+            + attribute_entries * ((index + 2) // 3),
+        }
+        for index, checkpoint in enumerate(rows[0]["public"])
+    ]
+    assert reviewed_public == rows[1]["public"]
     assert rows[0]["digests"] == rows[1]["digests"]
     for key in ("name_folds", "alias_matches", "attribute_matches", "attribute_lower_calls"):
         assert 0 < rows[1]["actual"][key] < rows[0]["actual"][key]

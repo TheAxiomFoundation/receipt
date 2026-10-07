@@ -4,8 +4,9 @@ A clone, commodity tools, one offline fail-closed verdict. No network, no
 credentials, no service to ask. The loaded spec selects every configured key
 and anchor, and its SHA-256 is printed so that configuration can be quoted.
 Those bytes become auditor-owned trust only when the auditor supplies
-``--expect-spec-sha256``; otherwise the verdict explicitly treats the spec and
-the anchor set it proposes as untrusted.
+``--expect-spec-sha256``. Otherwise the spec is the producer's code, running
+in this process: the verdict treats the anchor set it proposes as untrusted
+and says the verdict is only as good as the spec the producer committed.
 
 The output is deliberately two-part. What the command *established* is stated
 without hedging. What it *did not* establish — that any declared gate actually
@@ -241,6 +242,14 @@ The boundaries below catch ``BaseException``, because ``SystemExit`` is not an
 ``Exception``: a spec or a pass that raised one exited the interpreter with a
 status of its own choosing and printed no verdict at all. ``KeyboardInterrupt``
 is the single deliberate exception — the operator's interrupt is not a verdict.
+
+Every promise above — at most one JSON object, the module's own text as the
+last line, a status the spec cannot choose — is about this module's code. The
+boundaries stop a spec that *raises*. They cannot stop spec code, which runs
+in this process, from writing to the streams, patching this module, or leaving
+the interpreter by other means. Only ``--expect-spec-sha256`` over a spec the
+auditor has read rules that out; without it, the verdict is only as good as
+the spec the producer committed, and the verdict says so.
 """
 
 from __future__ import annotations
@@ -264,6 +273,8 @@ from receipt.verify import (
     TIER_MEANING,
     VerifyResult,
     VerifySpecError,
+    _described_exception,
+    _exception_message,
     load_spec,
     result_to_dict,
     run_verification,
@@ -304,7 +315,11 @@ def _build_parser() -> argparse.ArgumentParser:
     verify.add_argument(
         "--expect-spec-sha256",
         default=None,
-        help="require the exact spec source digest before its code executes",
+        help=(
+            "require the exact spec source digest before its code executes; "
+            "without it the spec is producer code and the verdict is only as "
+            "good as the spec the producer committed"
+        ),
     )
     verify.add_argument(
         "--root",
@@ -887,9 +902,23 @@ def _format_text(result: VerifyResult, *, encoding: str = "utf-8") -> str:
         )
         lines.append("  equal the verified tree.")
         if not result._spec_pinned:
+            # An unpinned spec is the producer's code, and it ran in this
+            # process: it could have changed this verdict and the exit status
+            # (L5 F2 of the 0.6.2 review). Say so in plain words rather than
+            # leave "was trusted" to read as a remark about which keys the
+            # spec chose.
             lines.append(
                 "  It does NOT establish that the spec's code was trusted."
             )
+            lines.append(
+                "  The spec is unpinned (no --expect-spec-sha256): its code ran "
+                "in this"
+            )
+            lines.append(
+                "  process and could have changed this verdict, so the verdict "
+                "is only as"
+            )
+            lines.append("  good as the spec the producer committed.")
         if not result._anchor_set_pinned:
             lines.append(
                 "  It does NOT establish that the anchor set is one the "
@@ -1779,14 +1808,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             expect_sha256=args.expect_spec_sha256,
         )
     except VerifySpecError as exc:
-        return _refuse(as_json, "spec", str(exc), EXIT_USAGE)
+        message = _exception_message(exc)
+        return _refuse(
+            as_json,
+            "spec",
+            message if message is not None else _described_exception(exc),
+            EXIT_USAGE,
+        )
     except KeyboardInterrupt:  # the operator's interrupt, never a verdict
         raise
     except BaseException as exc:  # noqa: BLE001 - reading the spec is fail-closed
         return _refuse(
             as_json,
             "spec",
-            f"unable to read the spec: {type(exc).__name__}: {exc}",
+            f"unable to read the spec: {_described_exception(exc)}",
             EXIT_USAGE,
         )
 
@@ -1801,7 +1836,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _refuse(
             as_json,
             "root",
-            f"unable to resolve the root: {type(exc).__name__}: {exc}",
+            f"unable to resolve the root: {_described_exception(exc)}",
             EXIT_USAGE,
         )
     if not root_ok:
@@ -1825,7 +1860,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             as_json,
             "verification",
             "verification aborted, refusing to return a verdict: "
-            f"{type(exc).__name__}: {exc}",
+            f"{_described_exception(exc)}",
             EXIT_FAIL,
         )
 
@@ -1861,7 +1896,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 as_json,
                 "render",
                 "verdict could not be rendered; treat the run as unverified: "
-                f"{type(exc).__name__}: {exc}",
+                f"{_described_exception(exc)}",
                 EXIT_FAIL,
             )
     else:
@@ -1890,7 +1925,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 False,
                 "render",
                 "verdict could not be rendered; treat the run as unverified: "
-                f"{type(exc).__name__}: {exc}",
+                f"{_described_exception(exc)}",
                 EXIT_FAIL,
             )
     return EXIT_OK if result.ok else EXIT_FAIL
