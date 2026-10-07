@@ -939,11 +939,15 @@ def test_every_git_child_receives_frozen_environment_and_allowed_command(
         else:
             assert cwd is None
         assert environment["HOME"] == home
-        assert {name for name in environment if name.startswith("GIT_")} == {
+        git_keys = {
             "GIT_NO_REPLACE_OBJECTS",
             "GIT_CONFIG_NOSYSTEM",
             "GIT_CONFIG_GLOBAL",
         }
+        if argv[1].startswith("--git-dir="):
+            git_keys.add("GIT_COMMON_DIR")
+            assert environment["GIT_COMMON_DIR"] == os.fspath(selected.common_dir)
+        assert {name for name in environment if name.startswith("GIT_")} == git_keys
         assert not any(
             name in environment
             for name in {

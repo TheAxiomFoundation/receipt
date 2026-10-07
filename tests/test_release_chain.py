@@ -39,6 +39,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
+from hypothesis import given, settings, strategies as st
 
 from receipt import release_chain
 from receipt.canonical import canonical_sha256
@@ -2081,6 +2082,54 @@ def test_out_of_domain_filenames_refuse_cleanly() -> None:
 
     with pytest.raises(ReleaseChainError, match="could not be decoded"):
         _exact_filename(RaisesUnprintable())
+
+
+def test_a_missing_producer_filename_refuses_before_the_path_join(
+    built: pathlib.Path,
+) -> None:
+    """An invalid configured filename must raise the chain's own error."""
+
+    chain = load_spec(built / "verification/spec.py").verification.chain
+    configured = replace(chain, producer_public_key_filename=None)  # type: ignore[arg-type]
+    with pytest.raises(
+        ReleaseChainError, match="producer public key filename must be str or os.PathLike"
+    ):
+        release_chain.verify_producer_signature_bytes(
+            b"manifest", b"\0" * 64,
+            spec=configured,
+            anchor_dir=built / ANCHOR_DIR,
+            enforce_production_pin=False,
+            label="producer.sig",
+        )
+
+
+@settings(max_examples=40, deadline=None, derandomize=True)
+@given(
+    filename=st.one_of(
+        st.none(), st.booleans(), st.integers(), st.floats(),
+        st.binary(max_size=20), st.lists(st.integers(), max_size=3),
+        st.dictionaries(st.text(max_size=3), st.integers(), max_size=3),
+    ),
+    observing=st.booleans(),
+)
+def test_out_of_domain_producer_filenames_are_named_refusals(
+    built: pathlib.Path, filename: object, observing: bool,
+) -> None:
+    """For every non-path filename, either mode refuses before joining it."""
+
+    chain = load_spec(built / "verification/spec.py").verification.chain
+    configured = replace(chain, producer_public_key_filename=filename)  # type: ignore[arg-type]
+    with pytest.raises(
+        ReleaseChainError, match="filenames? must be str or os.PathLike"
+    ):
+        release_chain.verify_producer_signature_bytes(
+            b"manifest", b"\0" * 64,
+            spec=configured,
+            anchor_dir=built / ANCHOR_DIR,
+            enforce_production_pin=False,
+            label="producer.sig",
+            anchor_observer={} if observing else None,
+        )
 
 
 def test_a_lazy_spec_mapping_cannot_alias_through_id_reuse(

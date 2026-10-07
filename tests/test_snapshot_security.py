@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import shutil
 import stat
 import subprocess
 import sys
@@ -248,6 +249,266 @@ def test_git_environment_and_command_allow_lists_are_frozen_independently() -> N
     assert GIT_ENVIRONMENT_DROPPED == EXPECTED_GIT_ENVIRONMENT_DROPPED
     assert len(GIT_ENVIRONMENT_DROPPED_DOCUMENTED) == 73
     assert GIT_COMMANDS == EXPECTED_GIT_COMMANDS
+
+
+@pytest.mark.parametrize(
+    ("boundary", "missing_parent"),
+    [("selection", False)]
+    + [(boundary, missing) for boundary in ("enter", "count", "fsck", "close")
+       for missing in (False, True)],
+)
+def test_commondir_redirection_cannot_substitute_a_shallow_object_store(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+    boundary: str, missing_parent: bool,
+) -> None:
+    """Reuse the review's copied-store control at each frozen-directory boundary."""
+
+    _verify_objects_support()
+    main = _new_repository(tmp_path)
+    parent = _oid(main)
+    (main / "tracked.txt").write_bytes(b"second commit\n")
+    commit = _commit(main, "second")
+    root = tmp_path / "linked"
+    _git(main, "worktree", "add", "-q", "--detach", os.fspath(root), "HEAD")
+    selected = TreeSnapshot.select(root, verify_objects=True)
+    decoy = tmp_path / "decoy.git"
+    shutil.copytree(selected.common_dir, decoy, symlinks=True)
+    if missing_parent:
+        (decoy / "objects" / parent[:2] / parent[2:]).unlink()
+    fsck = [f"--git-dir={decoy}", "fsck", "--full", "--no-dangling",
+            "--no-reflogs", "--no-references", "--no-progress", commit]
+    control = _git(root, *fsck, check=False)
+    assert (control.returncode != 0) == missing_parent
+    (decoy / "shallow").write_text(commit + "\n")
+    assert _git(root, *fsck).returncode == 0
+    original_config = (selected.common_dir / "config").read_bytes()
+    run = snapshot_module._git_run
+    children: list[str] = []
+
+    def redirect() -> None:
+        (selected.git_dir / "commondir").write_text(os.fspath(decoy) + "\n")
+        assert _common_dir(root).resolve() == decoy.resolve()
+        assert (decoy / "config").read_bytes() == original_config
+        assert (selected.common_dir / "config").read_bytes() == original_config
+        assert not (selected.common_dir / "shallow").exists()
+
+    def record_run(arguments: list[str], **kwargs: object):
+        result = run(arguments, **kwargs)
+        for command in ("count-objects", "fsck"):
+            if command in arguments:
+                children.append(command)
+        if ((boundary == "selection" and "--git-common-dir" in arguments)
+                or (boundary == "fsck" and "count-objects" in arguments)):
+            redirect()
+        return result
+
+    monkeypatch.setattr(snapshot_module, "_git_run", record_run)
+    with pytest.raises(SnapshotError, match="common Git directory changed"):
+        if boundary == "selection":
+            TreeSnapshot.select(root, verify_objects=True)
+        else:
+            if boundary == "enter":
+                redirect()
+            with selected:
+                if boundary == "count":
+                    redirect()
+                selected.verify_object_store((commit,))
+                if boundary == "close":
+                    redirect()
+    assert children == {
+        "selection": [], "enter": [], "count": [],
+        "fsck": ["count-objects"], "close": ["count-objects", "fsck"],
+    }[boundary]
+    if boundary != "selection":
+        assert selected._state.closed
+        assert selected.temporary_directory is None
+        if boundary != "enter":
+            assert any("common Git directory changed" in str(error)
+                       for error in selected.close_errors)
+
+
+@pytest.mark.parametrize("boundary", ["config", "revision", "batch"])
+def test_selection_rechecks_commondir_before_each_child(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, boundary: str,
+) -> None:
+    main = _new_repository(tmp_path)
+    root = tmp_path / "linked"
+    _git(main, "worktree", "add", "-q", "--detach", os.fspath(root), "HEAD")
+    git_dir, common_dir = _git_dir(root), _common_dir(root)
+    decoy = tmp_path / "decoy.git"
+    shutil.copytree(common_dir, decoy, symlinks=True)
+    run = snapshot_module._git_run
+    calls: list[str] = []
+
+    def record_run(arguments: list[str], **kwargs: object):
+        result = run(arguments, **kwargs)
+        if "--git-dir=" in " ".join(arguments):
+            calls.append("config" if "config" in arguments else "revision")
+        if ((boundary == "config" and "--git-common-dir" in arguments)
+                or (boundary == "revision" and "config" in arguments
+                    and "--list" in arguments)
+                or (boundary == "batch" and "--verify" in arguments)):
+            (git_dir / "commondir").write_text(os.fspath(decoy) + "\n")
+        return result
+
+    monkeypatch.setattr(snapshot_module, "_git_run", record_run)
+    with pytest.raises(SnapshotError, match="common Git directory changed"):
+        TreeSnapshot.select(root)
+    assert calls == {"config": [], "revision": ["config"],
+                     "batch": ["config", "revision"]}[boundary]
+
+
+@pytest.mark.parametrize("boundary", ["enter", "count", "fsck", "close"])
+def test_commondir_change_during_configuration_audit_is_refused_before_next_child(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, boundary: str,
+) -> None:
+    _verify_objects_support()
+    main = _new_repository(tmp_path)
+    root = tmp_path / "linked"
+    _git(main, "worktree", "add", "-q", "--detach", os.fspath(root), "HEAD")
+    selected = TreeSnapshot.select(root, verify_objects=True)
+    decoy = tmp_path / "decoy.git"
+    shutil.copytree(selected.common_dir, decoy, symlinks=True)
+    run = snapshot_module._git_run
+    target = {"enter": 1, "count": 2, "fsck": 3, "close": 4}[boundary]
+    audits = 0
+    children: list[str] = []
+
+    def record_run(arguments: list[str], **kwargs: object):
+        nonlocal audits
+        result = run(arguments, **kwargs)
+        if "config" in arguments and "--list" in arguments:
+            audits += 1
+            if audits == target:
+                (selected.git_dir / "commondir").write_text(os.fspath(decoy) + "\n")
+        for command in ("count-objects", "fsck"):
+            if command in arguments:
+                children.append(command)
+        return result
+
+    monkeypatch.setattr(snapshot_module, "_git_run", record_run)
+    with pytest.raises(SnapshotError, match="common Git directory changed"):
+        with selected:
+            selected.verify_object_store((selected.commit,))
+    assert children == {"enter": [], "count": [], "fsck": ["count-objects"],
+                        "close": ["count-objects", "fsck"]}[boundary]
+    assert selected._state.closed
+    assert selected.temporary_directory is None
+
+
+@pytest.mark.parametrize("kind", ["empty", "nul", "multiline", "oversized",
+                                  "removed", "directory", "dangling", "fifo"])
+def test_invalid_commondir_is_a_named_refusal_before_sentinel_checks(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, kind: str,
+) -> None:
+    main = _new_repository(tmp_path)
+    root = tmp_path / "linked"
+    _git(main, "worktree", "add", "-q", "--detach", os.fspath(root), "HEAD")
+    selected = TreeSnapshot.select(root)
+    pointer = selected.git_dir / "commondir"
+    pointer.unlink()
+    if kind in {"empty", "nul", "multiline", "oversized"}:
+        pointer.write_bytes({"empty": b"", "nul": b"../..\0",
+                             "multiline": b"../..\nother\n",
+                             "oversized": b"x" * (1024 * 1024 + 1)}[kind])
+    elif kind == "directory":
+        pointer.mkdir()
+    elif kind == "dangling":
+        pointer.symlink_to("absent")
+    elif kind == "fifo":
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("named pipes are unavailable")
+        os.mkfifo(pointer)
+    sentinel_calls: list[object] = []
+    monkeypatch.setattr(TreeSnapshot, "_refuse_grafts_and_shallow",
+                        lambda *args: sentinel_calls.append(args))
+    with pytest.raises(SnapshotError, match="common Git directory|commondir"):
+        selected._reaudit_repository_files()
+    assert sentinel_calls == []
+
+
+@settings(max_examples=12, deadline=None, derandomize=True,
+          suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(suffix=st.binary(max_size=32))
+def test_malformed_commondir_never_reaches_a_sentinel_check(
+    tmp_path: pathlib.Path, suffix: bytes,
+) -> None:
+    # Reuse one immutable selected identity; each example replaces only its
+    # pointer. A NUL cannot name any filesystem path, whatever follows it.
+    main = tmp_path / "repository"
+    if not main.exists():
+        main = _new_repository(tmp_path)
+        _git(main, "worktree", "add", "-q", "--detach",
+             os.fspath(tmp_path / "linked"), "HEAD")
+    git_dir = pathlib.Path((tmp_path / "linked" / ".git").read_text()[8:].strip())
+    pointer = git_dir / "commondir"
+    pointer.write_text("../..\n")
+    selected = TreeSnapshot.select(tmp_path / "linked")
+    pointer.write_bytes(b"../..\0" + suffix)
+    with pytest.raises(SnapshotError, match="common Git directory|commondir"):
+        selected._reaudit_repository_files()
+
+
+@pytest.mark.parametrize("layout", ["ordinary", "separate", "linked"])
+def test_git_children_pin_frozen_common_directory(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, layout: str,
+) -> None:
+    _verify_objects_support()
+    root = _new_repository(tmp_path)
+    if layout == "separate":
+        _git(root, "init", "-q", "--separate-git-dir",
+             os.fspath(tmp_path / "separate.git"))
+    elif layout == "linked":
+        linked = tmp_path / "linked"
+        _git(root, "worktree", "add", "-q", "--detach", os.fspath(linked), "HEAD")
+        root = linked
+    common_dir = _common_dir(root).resolve()
+    monkeypatch.setenv("GIT_COMMON_DIR", os.fspath(tmp_path / "hostile.git"))
+    popen = subprocess.Popen
+    children: list[tuple[str, ...]] = []
+
+    def record_popen(argv, **kwargs):
+        if len(argv) > 1 and argv[1].startswith("--git-dir="):
+            assert kwargs["env"].get("GIT_COMMON_DIR") == os.fspath(common_dir)
+            children.append(tuple(argv))
+        else:
+            assert "GIT_COMMON_DIR" not in kwargs["env"]
+        return popen(argv, **kwargs)
+
+    monkeypatch.setattr(snapshot_module.subprocess, "Popen", record_popen)
+    with TreeSnapshot.select(root, verify_objects=True) as selected:
+        assert selected.blob(selected.entry("tracked.txt"), limit=100)
+        assert selected.verify_object_store((selected.commit,)).objects > 0
+    assert selected.close_errors == ()
+    assert sum("cat-file" in argv for argv in children) == 2
+    assert sum("config" in argv for argv in children) == 5
+    assert sum("count-objects" in argv for argv in children) == 1
+    assert sum("fsck" in argv for argv in children) == 1
+
+
+@pytest.mark.parametrize("spelling", ["relative", "absolute", "alias", "crlf",
+                                      "space-suffix"])
+def test_equivalent_commondir_spellings_preserve_the_selected_directory(
+    tmp_path: pathlib.Path, spelling: str,
+) -> None:
+    main = _new_repository(tmp_path)
+    root = tmp_path / "linked"
+    _git(main, "worktree", "add", "-q", "--detach", os.fspath(root), "HEAD")
+    selected = TreeSnapshot.select(root)
+    if spelling == "relative":
+        target = os.path.relpath(selected.common_dir, selected.git_dir)
+    elif spelling in {"alias", "space-suffix"}:
+        alias = tmp_path / ("common-alias " if spelling == "space-suffix" else "common-alias")
+        alias.symlink_to(selected.common_dir, target_is_directory=True)
+        target = os.fspath(alias)
+    else:
+        target = os.fspath(selected.common_dir)
+    content = os.fsencode(target) + (b"\r\n\r\n" if spelling == "crlf" else b"\n")
+    (selected.git_dir / "commondir").write_bytes(content)
+    assert _common_dir(root).resolve() == selected.common_dir
+    with selected:
+        assert selected.blob(selected.entry("tracked.txt"), limit=100)
+    assert selected.close_errors == ()
 
 
 @pytest.mark.parametrize("boundary", ["enter", "count", "fsck", "close"])
@@ -1194,7 +1455,11 @@ def test_full_verify_objects_uses_exact_commands_heads_and_environment(
         else:
             assert cwd is None
         assert environment["HOME"] == home
-        assert {name for name in environment if name.startswith("GIT_")} == git_keys
+        expected_keys = set(git_keys)
+        if argv[1].startswith("--git-dir="):
+            expected_keys.add("GIT_COMMON_DIR")
+            assert environment["GIT_COMMON_DIR"] == os.fspath(selected.common_dir)
+        assert {name for name in environment if name.startswith("GIT_")} == expected_keys
         assert environment["GIT_NO_REPLACE_OBJECTS"] == "1"
         assert environment["GIT_CONFIG_NOSYSTEM"] == "1"
         assert environment["GIT_CONFIG_GLOBAL"]

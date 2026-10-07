@@ -40,7 +40,7 @@ def select(m, repo, commit=None, **kwargs):
 def d1(m, repo, patch, store):
     s = m.snapshot
     repo.hash(b"", "tree")
-    captures, children, audit_argv = [], [], []
+    captures, children, audit_argv, common_pins = [], [], [], []
     environment, popen = s._git_environment, s.subprocess.Popen
     original_path = os.environ["PATH"]
     def epoch(label):
@@ -55,6 +55,8 @@ def d1(m, repo, patch, store):
         return env
     def spawn(argv, **kwargs):
         env = kwargs["env"]
+        if len(argv) > 1 and argv[1].startswith("--git-dir="):
+            common_pins.append((len(children), env.get("GIT_COMMON_DIR")))
         if "config" in argv and env["RECEIPT_M3_PROBE"] in {"enter", "store"}:
             audit_argv.append(list(argv))
         children.append([env["RECEIPT_M3_PROBE"], Path(env["HOME"]).name,
@@ -76,6 +78,14 @@ def d1(m, repo, patch, store):
             report = a.verify_object_store((a.commit,))
             assert report.seconds >= 0
         epoch("close")
+    if hasattr(s, "_refuse_common_directory_change"):
+        # #86 pins every repository child to the selected common directory.
+        # Assert the added binding before projecting the frozen M3 inventory.
+        # Read state directly so the assertion adds no public property calls.
+        assert common_pins
+        assert all(value == str(a._state.common_dir) for _index, value in common_pins)
+        for index, _value in common_pins:
+            children[index][4].remove("GIT_COMMON_DIR")
     if hasattr(s.TreeSnapshot, "_reaudit_repository_configuration"):
         # #83 deliberately adds these exact checks before repository children.
         # Observe them before projecting the unchanged M3 ownership census.

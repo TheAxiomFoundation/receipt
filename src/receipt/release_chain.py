@@ -951,6 +951,10 @@ def verify_producer_signature_bytes(
         ),
         spki_sha256=spec.producer_spki_sha256,
     )
+    if not isinstance(key_spec.public_key_filename, (str, os.PathLike)):
+        raise ReleaseChainError(
+            "producer public key filename must be str or os.PathLike"
+        )
     public_key_path = anchor_dir / key_spec.public_key_filename
     try:
         public_key_relative = pathlib.PurePosixPath(
