@@ -158,11 +158,15 @@ def compare(probe, repo, monkeypatch, *args, expected=None):
         Path(__file__).with_name("m3_review_deltas.json").read_text()
     ).get(key)
     if reviewed is None:
-        allowed = {}
-    else:
-        assert reviewed["probe"] == identity["probe"]
-        assert reviewed["args"] == identity["args"]
-        allowed = reviewed["differences"]
+        # Keep the original aggregate equality and its frozen-first direction;
+        # primitive subclasses can make a reverse leaf comparison asymmetric.
+        assert results[0] == results[1], (
+            "live trace differs outside the reviewed changes", results[0], results[1]
+        )
+        return results[1]
+    assert reviewed["probe"] == identity["probe"]
+    assert reviewed["args"] == identity["args"]
+    allowed = reviewed["differences"]
     # #83's reviewed fixes add repository re-audits, folded attribute-source
     # reads and closure invalidation. Each recorded leaf pins both the legacy
     # value and its reviewed replacement; every other leaf must remain equal.

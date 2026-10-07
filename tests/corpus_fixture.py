@@ -75,6 +75,10 @@ def _commit_fixture(root: pathlib.Path, message: str, *, initialize: bool) -> st
 
     if initialize:
         _git(root, "init", "--quiet")
+        # Reused fixtures are copied with their .git directories; automatic
+        # housekeeping must not leave a pack writer running after a commit.
+        _git(root, "config", "gc.auto", "0")
+        _git(root, "config", "maintenance.auto", "false")
         _git(root, "config", "user.name", "Receipt Corpus Fixture")
         _git(root, "config", "user.email", "receipt-corpus@example.invalid")
         _git(root, "config", "commit.gpgSign", "false")

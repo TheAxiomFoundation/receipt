@@ -211,10 +211,14 @@ establish totality for arbitrary public helper arguments.
   row no UTF-8 can encode (which only a direct caller of `check_prefix` can
   pass), `line <n> is not valid UTF-8`. The decoding bounds get the existing
   `line <n> is not valid JSON: ...`. A rewritten row that is not an object is
-  named `(?)`. Under the default integer-digit limit, every input the old
-  gate accepted gets the verdict and text it got before, with one exception:
-  a row or manifest nested more than 128 deep is now refused as not valid
-  JSON. A process that raised the limit could have had the old gate accept a
+  named `(?)`. Under the default integer-digit limit, the crash corrections
+  preserve prior accepted verdicts and text except that a row or manifest
+  nested more than 128 deep is now refused as not valid JSON. The combined
+  changes also intentionally refuse old accepts under stricter appended-row
+  checks, including `value: true` (`value is not a JSON number`),
+  `observed_at: "2026-99-99"` (`observed_at is not an ASCII YYYY-MM-DD calendar
+  date`), and `source_record_id: 7` (`source_record_id is not a string`).
+  A process that raised the limit could have had the old gate accept a
   row holding an integer of more than 4,300 digits outside the content
   address; it is now refused as not valid JSON. A direct caller of
   `check_prefix` now gets the strict-count refusal for a `prefixLineCount` of
