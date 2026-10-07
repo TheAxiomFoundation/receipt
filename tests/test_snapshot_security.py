@@ -120,7 +120,15 @@ EXPECTED_GIT_COMMANDS = (
         "--show-object-format",
     ),
     ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
-    ("object", "rev-parse", "--verify", "--end-of-options", "<rev>^{commit}"),
+    (
+        "object",
+        "-c",
+        "core.commitGraph=false",
+        "rev-parse",
+        "--verify",
+        "--end-of-options",
+        "<rev>^{commit}",
+    ),
     ("object", "cat-file", "--batch-command"),
     ("object", "count-objects", "-v"),
     (
@@ -578,6 +586,9 @@ def test_repository_history_sentinels_precede_sha256_refusal(
 
 
 def test_select_refuses_an_existing_nonrepository(tmp_path: pathlib.Path) -> None:
+    # Stop Git discovery at the fixture's parent even when pytest's temporary
+    # directory lives inside a checkout. The selected root stays empty.
+    (tmp_path / ".git").write_text("gitdir: missing-git-directory\n", encoding="utf-8")
     root = tmp_path / "not-a-repository"
     root.mkdir()
     # Stop Git discovering an ancestor repository when pytest's temporary
@@ -740,6 +751,56 @@ def test_replace_refs_cannot_change_the_selected_commit_or_bytes(
         assert selected.commit == original
         assert selected.tree == original_tree
         assert selected.blob(entry, limit=100) == b"original committed bytes\n"
+
+
+def _redirect_commit_graph_parent(root: pathlib.Path, child: str, parent: str) -> None:
+    """Point ``child``'s first parent at ``parent`` in the commit-graph only.
+
+    The commit objects stay untouched, so every object still hashes to its
+    name. Only Git's local commit-graph cache, which no object hash covers,
+    names the wrong parent.
+    """
+
+    _git(root, "commit-graph", "write", "--reachable")
+    graph = _git_dir(root) / "objects" / "info" / "commit-graph"
+    data = bytearray(graph.read_bytes())
+    assert data[:4] == b"CGPH"
+    chunks = {
+        bytes(data[8 + 12 * index : 12 + 12 * index]): int.from_bytes(
+            data[12 + 12 * index : 20 + 12 * index], "big"
+        )
+        for index in range(data[6] + 1)
+    }
+    fanout, lookup, commits = chunks[b"OIDF"], chunks[b"OIDL"], chunks[b"CDAT"]
+    count = int.from_bytes(data[fanout + 255 * 4 : fanout + 256 * 4], "big")
+    oids = [data[lookup + 20 * index : lookup + 20 * index + 20].hex() for index in range(count)]
+    record = commits + oids.index(child) * 36
+    data[record + 20 : record + 24] = oids.index(parent).to_bytes(4, "big")
+    graph.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    graph.write_bytes(bytes(data))
+
+
+def test_parent_relative_revision_follows_commit_objects_not_the_commit_graph(
+    git_repo: pathlib.Path,
+) -> None:
+    first = _oid(git_repo)
+    (git_repo / "second.txt").write_bytes(b"second\n")
+    second = _commit(git_repo, "second")
+    (git_repo / "third.txt").write_bytes(b"third\n")
+    third = _commit(git_repo, "third")
+    _redirect_commit_graph_parent(git_repo, third, first)
+    # The oracle: Git itself now resolves the navigation through the cache.
+    assert _oid(git_repo, f"{third}~1") == first
+    assert _git(git_repo, "cat-file", "-p", third).stdout.splitlines()[1] == (
+        f"parent {second}".encode("ascii")
+    )
+
+    with TreeSnapshot.select(git_repo, f"{third}~1") as selected:
+        assert selected.commit == second
+    with TreeSnapshot.select(git_repo, f"{third}^") as selected:
+        assert selected.commit == second
+    with TreeSnapshot.select(git_repo, f"{third}~2") as selected:
+        assert selected.commit == first
 
 
 def test_candidate_tree_is_rehashed_even_when_cat_file_serves_tampered_bytes(
@@ -936,7 +997,11 @@ def _normalize_recorded_command(
         assert command[:2] == ["config", "-f"]
         command[2] = "<global>"
         command[-1] = "<root>"
-    elif phase == "object" and command[0] == "rev-parse":
+    elif phase == "object" and command[:3] == [
+        "-c",
+        "core.commitGraph=false",
+        "rev-parse",
+    ]:
         command[-1] = "<rev>^{commit}"
     elif phase == "object" and command[:3] == [
         "-c",
@@ -1049,7 +1114,15 @@ def test_full_verify_objects_uses_exact_commands_heads_and_environment(
             "--show-object-format",
         ),
         ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
-        ("object", "rev-parse", "--verify", "--end-of-options", "<rev>^{commit}"),
+        (
+            "object",
+            "-c",
+            "core.commitGraph=false",
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            "<rev>^{commit}",
+        ),
         ("object", "cat-file", "--batch-command"),
         # Configuration is re-audited before every child an entered snapshot
         # starts (0.6.2 review, L3 finding 7).
@@ -1066,7 +1139,15 @@ def test_full_verify_objects_uses_exact_commands_heads_and_environment(
             "--show-object-format",
         ),
         ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
-        ("object", "rev-parse", "--verify", "--end-of-options", "<rev>^{commit}"),
+        (
+            "object",
+            "-c",
+            "core.commitGraph=false",
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            "<rev>^{commit}",
+        ),
         ("object", "cat-file", "--batch-command"),
         ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
         ("object", "cat-file", "--batch-command"),

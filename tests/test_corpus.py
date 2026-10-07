@@ -848,6 +848,224 @@ def test_refuses_a_content_symlink(tmp_path: pathlib.Path) -> None:
         )
 
 
+@pytest.mark.parametrize("name_repertoire", ["portable", "posix-bytes"])
+@pytest.mark.parametrize(
+    ("link", "target"),
+    [
+        # A directory link: a checkout presents staging/*.yaml under the root.
+        (b"rules/ext", b"../staging"),
+        # A link to a content file under a name without the pinned suffix.
+        (b"rules/tax/rate-link", b"rate.yaml"),
+        # A link to a file outside the repository.
+        (b"rules/outside", b"../../outside.yaml"),
+    ],
+)
+def test_refuses_a_symlink_without_a_pinned_suffix_under_a_content_root(
+    tmp_path: pathlib.Path,
+    name_repertoire: str,
+    link: bytes,
+    target: bytes,
+) -> None:
+    """The closed world counts files a checkout presents, not only rows."""
+
+    write_tree(tmp_path)
+    (tmp_path / "staging").mkdir()
+    (tmp_path / "staging/unbound.yaml").write_text("name: rate\nvalue: 0.99\n")
+    _commit_worktree(tmp_path)
+    oid = _commit_index_updates(
+        tmp_path, [("120000", _hash_blob(tmp_path, target), link)]
+    )
+
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(
+            tmp_path,
+            oid,
+            render_journal(journal_rows()),
+            spec=corpus_spec(name_repertoire=name_repertoire),
+        )
+    assert str(caught.value) == (
+        f"content root contains a symlink: '{link.decode('ascii')}'"
+    )
+
+
+def test_refuses_a_symlink_that_keeps_a_tombstoned_path_readable(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A removed row asserts the path no longer survives in any spelling."""
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+    legacy = "rules/legacy/rate.yaml"
+    for state in ("present", "removed"):
+        rows.append(
+            {
+                "schemaVersion": JOURNAL_SCHEMA,
+                "entryIndex": len(rows),
+                "kind": "content",
+                "path": legacy,
+                "sha256": sha256_text(CONTENT["rules/tax/rate.yaml"]),
+                "state": state,
+            }
+        )
+    _commit_worktree(tmp_path)
+    oid = _commit_index_updates(
+        tmp_path, [("120000", _hash_blob(tmp_path, b"tax"), b"rules/legacy")]
+    )
+
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(tmp_path, oid, render_journal(rows), spec=corpus_spec())
+    assert str(caught.value) == "content root contains a symlink: 'rules/legacy'"
+
+
+def test_a_symlink_outside_every_content_root_still_verifies(
+    tmp_path: pathlib.Path,
+) -> None:
+    write_tree(tmp_path)
+    _commit_worktree(tmp_path)
+    oid = _commit_index_updates(
+        tmp_path, [("120000", _hash_blob(tmp_path, b"../rules"), b"misc/rules-link")]
+    )
+
+    verification = _verify_commit(
+        tmp_path, oid, render_journal(journal_rows()), spec=corpus_spec()
+    )
+    assert {entry.path for entry in verification.content} == set(CONTENT)
+
+
+@pytest.mark.parametrize("name_repertoire", ["portable", "posix-bytes"])
+@pytest.mark.parametrize(
+    ("path", "states", "expected"),
+    [
+        (
+            "rules/legacy",
+            ("present",),
+            "bound file is not a regular file: rules/legacy",
+        ),
+        (
+            "rules/legacy/child.txt",
+            ("present",),
+            "bound file is missing or not a regular file: rules/legacy/child.txt",
+        ),
+        (
+            "rules/legacy",
+            ("present", "removed"),
+            "removed path is still present in the tree: rules/legacy",
+        ),
+        (
+            "rules/Legacy",
+            ("present", "removed"),
+            "removed path is still present in the tree under a spelling that "
+            "aliases it on a case- or normalization-insensitive filesystem: "
+            "rules/Legacy ('rules/legacy')",
+        ),
+    ],
+)
+def test_suffixless_symlink_preserves_attestation_and_tombstone_refusals(
+    tmp_path: pathlib.Path,
+    name_repertoire: str,
+    path: str,
+    states: tuple[str, ...],
+    expected: str,
+) -> None:
+    """A new closed-world refusal must not replace existing binding failures."""
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+    for state in states:
+        rows.append(
+            {
+                "schemaVersion": JOURNAL_SCHEMA,
+                "entryIndex": len(rows),
+                "kind": "attested",
+                "path": path,
+                "sha256": sha256_text(CONTENT["rules/tax/rate.yaml"]),
+                "state": state,
+            }
+        )
+    _commit_worktree(tmp_path)
+    oid = _commit_index_updates(
+        tmp_path, [("120000", _hash_blob(tmp_path, b"tax"), b"rules/legacy")]
+    )
+
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(
+            tmp_path,
+            oid,
+            render_journal(rows),
+            spec=corpus_spec(name_repertoire=name_repertoire),
+        )
+    assert str(caught.value) == expected
+
+
+@pytest.mark.parametrize("name_repertoire", ["portable", "posix-bytes"])
+@pytest.mark.parametrize(
+    "old_failure",
+    [
+        "later-root",
+        "unlisted",
+        "absent",
+        "required-attestation",
+        "content-digest",
+        "attested-digest",
+    ],
+)
+def test_suffixless_symlink_preserves_later_binding_refusals(
+    tmp_path: pathlib.Path, name_repertoire: str, old_failure: str
+) -> None:
+    """All old binding checks still run before the added suffixless-link screen."""
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+    overrides: dict[str, object] = {"name_repertoire": name_repertoire}
+    if old_failure == "later-root":
+        overrides["content_roots"] = (
+            pathlib.PurePosixPath("rules"),
+            pathlib.PurePosixPath("missing"),
+        )
+        expected = "pinned content root is absent from the tree: missing"
+    elif old_failure == "unlisted":
+        (tmp_path / "rules/unbound.yaml").write_text("unbound\n")
+        expected = (
+            "1 content file(s) in the tree are not bound by the witnessed "
+            "journal, starting with 'rules/unbound.yaml'"
+        )
+    elif old_failure == "absent":
+        (tmp_path / "rules/tax/rate.yaml").unlink()
+        expected = (
+            "1 content file(s) bound by the journal are missing from the tree, "
+            "starting with 'rules/tax/rate.yaml'"
+        )
+    elif old_failure == "required-attestation":
+        rows = reindex([row for row in rows if row.get("kind") != "attested"])
+        expected = (
+            "the witnessed journal does not attest a path the pinned spec "
+            "requires: '.axiom/toolchain.toml'"
+        )
+    else:
+        kind = "content" if old_failure == "content-digest" else "attested"
+        path = (
+            "rules/tax/rate.yaml" if kind == "content" else ".axiom/toolchain.toml"
+        )
+        for row in rows:
+            if row.get("path") == path:
+                row["sha256"] = "0" * 64
+        body = CONTENT[path] if kind == "content" else ATTESTED[path]
+        expected = (
+            f"{kind} file '{path}' does not match its witnessed digest: tree has "
+            f"{sha256_text(body)}, journal binds {'0' * 64}"
+        )
+    _commit_worktree(tmp_path)
+    oid = _commit_index_updates(
+        tmp_path, [("120000", _hash_blob(tmp_path, b"tax"), b"rules/legacy")]
+    )
+
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(
+            tmp_path, oid, render_journal(rows), spec=corpus_spec(**overrides)
+        )
+    assert str(caught.value) == expected
+
+
 def test_refuses_control_characters_in_gate_evidence(tmp_path: pathlib.Path) -> None:
     """Regression: evidence strings are rendered to a terminal, so a producer
     could embed CR/ESC and redraw the verdict line into a false PASS."""
@@ -970,6 +1188,34 @@ def test_refuses_a_required_gate_the_journal_omits(tmp_path: pathlib.Path) -> No
     verification = verify_corpus_binding(tmp_path, render_journal(rows), spec=spec)
     with pytest.raises(CorpusError, match="does not declare a gate the pinned spec"):
         verify_declarations(verification, spec=spec)
+
+
+def test_suffixless_symlink_refusal_precedes_a_missing_gate_declaration(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binding closes the content root before the later declaration pass."""
+
+    write_tree(tmp_path)
+    rows = reindex(
+        [row for row in journal_rows() if row.get("gateId") != "rulespec/compile"]
+    )
+    spec = corpus_spec()
+    oid = _commit_worktree(tmp_path)
+    verification = _verify_commit(tmp_path, oid, render_journal(rows), spec=spec)
+    with pytest.raises(CorpusError) as caught:
+        verify_declarations(verification, spec=spec)
+    assert str(caught.value) == (
+        "the witnessed journal does not declare a gate the pinned spec "
+        "requires: 'rulespec/compile'"
+    )
+
+    oid = _commit_index_updates(
+        tmp_path, [("120000", _hash_blob(tmp_path, b"tax"), b"rules/legacy")]
+    )
+    with pytest.raises(CorpusError) as caught:
+        verification = _verify_commit(tmp_path, oid, render_journal(rows), spec=spec)
+        verify_declarations(verification, spec=spec)
+    assert str(caught.value) == "content root contains a symlink: 'rules/legacy'"
 
 
 def test_refuses_a_tier_the_spec_does_not_accept(tmp_path: pathlib.Path) -> None:
@@ -3238,7 +3484,7 @@ def test_short_name_suffix_screen_covers_every_tree_entry_kind_in_portable(
         name_repertoire=name_repertoire,
     )
 
-    if name_repertoire == "posix-bytes":
+    if name_repertoire == "posix-bytes" and shape == "directory":
         verification = _verify_commit(
             tmp_path,
             oid,
@@ -3254,10 +3500,14 @@ def test_short_name_suffix_screen_covers_every_tree_entry_kind_in_portable(
                 render_journal(journal_rows()),
                 spec=spec,
             )
-        assert str(caught.value) == (
-            "content root contains a file whose short-name alias would carry a "
-            f"pinned suffix: {path!r}"
-        )
+        if name_repertoire == "posix-bytes":
+            # No 8.3 screen here, but no symlink under a content root either.
+            assert str(caught.value) == f"content root contains a symlink: {path!r}"
+        else:
+            assert str(caught.value) == (
+                "content root contains a file whose short-name alias would carry a "
+                f"pinned suffix: {path!r}"
+            )
 
 
 def _refuses_short_name_alias(tmp_path: pathlib.Path, name: str) -> None:
