@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import pytest
+from hypothesis import HealthCheck, given, settings, strategies as st
 
 import receipt.verify as verify_module
 from receipt.corpus import CorpusVerification
@@ -510,6 +511,59 @@ def test_non_utf8_encoding_refuses_before_execution_and_spec_validation(
         f"executes as the text a reviewer reads: {path.resolve()}"
     )
     assert not marker.exists()
+
+
+def _assert_load_spec_keeps_compiler_refusal(
+    tmp_path: pathlib.Path, source: bytes
+) -> None:
+    path = _spec_file(tmp_path, source)
+    resolved = path.resolve()
+    with pytest.raises(SyntaxError) as compiler_caught:
+        compile(source, str(resolved), "exec")
+
+    with pytest.raises(VerifySpecError) as loader_caught:
+        load_spec(path)
+
+    assert str(loader_caught.value) == (
+        f"spec module raised on load: {resolved}: {compiler_caught.value}"
+    )
+    cause = loader_caught.value.__cause__
+    assert type(cause) is type(compiler_caught.value)
+    assert cause.args == compiler_caught.value.args
+
+
+@pytest.mark.parametrize(
+    "source",
+    [b"(", b"\x00", b"\xff", b"# coding: no-such-encoding\n"],
+    ids=["syntax", "null-byte", "invalid-utf8", "unknown-encoding"],
+)
+def test_load_spec_keeps_the_compilers_own_refusals_with_named_causes(
+    tmp_path: pathlib.Path, source: bytes
+) -> None:
+    _assert_load_spec_keeps_compiler_refusal(tmp_path, source)
+
+
+@settings(
+    max_examples=500,
+    deadline=None,
+    derandomize=True,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+@given(
+    prefix=st.text(
+        alphabet=st.characters(min_codepoint=32, max_codepoint=126), max_size=40
+    ),
+    invalid_byte=st.sampled_from([*range(0x80, 0xC0), *range(0xF5, 0x100)]),
+)
+def test_load_spec_preserves_compiler_refusals_for_invalid_utf8(
+    tmp_path: pathlib.Path, prefix: str, invalid_byte: int
+) -> None:
+    """Every invalid UTF-8 byte stays refused with the compiler's own message."""
+
+    source = (
+        b"# coding: utf-8\n# " + prefix.encode() + b"\n" + bytes([invalid_byte]) + b"\n"
+    )
+    _assert_load_spec_keeps_compiler_refusal(tmp_path, source)
 
 
 JOURNAL_BYTES = b'{"one":"row"}\n'
