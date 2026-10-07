@@ -901,7 +901,9 @@ def run_verification(
         raise
     except BaseException as exc:  # noqa: BLE001 - every other raise is a FAIL
         close_errors = [
-            error for snapshot in snapshots for error in snapshot.close_errors
+            error
+            for snapshot in snapshots
+            for error in getattr(snapshot, "close_errors", ())
         ]
         if close_errors:
             # A failed closure never leaves an affected claim established.

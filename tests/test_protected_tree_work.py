@@ -658,6 +658,7 @@ def attribute_comparison(repo, commit, monkeypatch, requests, *, shared=False, c
                     calls.append((result, asdict(first.work), asdict(second.work), tuple(events), tuple(failures)))
                 results.append(calls)
                 costs.append((dict(counts), None if old else policy._attribute_store(first).work))
+    # Folded source discovery reuses exact admission and preserves every hook.
     assert results[0] == results[1]
     return results[1], costs
 

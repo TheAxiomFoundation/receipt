@@ -219,6 +219,7 @@ def test_bounded_v061_memory_and_work(raw_repo, tmp_path, monkeypatch, shape):
         assert counted["reached"] == memory["reached"]
         counted["traced_peak_bytes"] = memory["traced_peak_bytes"]
         rows.append(counted)
+    # Folded filenames reuse authenticated records without a second logical walk.
     assert rows[0]["public"] == rows[1]["public"]
     assert rows[0]["digests"] == rows[1]["digests"]
     for key in ("name_folds", "alias_matches", "attribute_matches", "attribute_lower_calls"):

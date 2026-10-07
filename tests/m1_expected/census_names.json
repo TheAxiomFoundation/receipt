@@ -135,7 +135,6 @@
     "message": "pinned suffixes must be iterable text"
   },
   "filename/suffix_ignored": {
-    "exception": "receipt._names.NamePolicyError",
-    "message": "pinned suffix must be text: 123"
+    "value": true
   }
 }

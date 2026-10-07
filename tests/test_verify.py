@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import pytest
+from hypothesis import HealthCheck, given, settings, strategies as st
 
 import receipt.verify as verify_module
 from receipt.corpus import CorpusVerification
@@ -179,6 +180,59 @@ def test_expected_digest_refuses_before_compile_or_exec(
 
     assert str(caught.value) == f"spec {digest} is not the expected spec {expected}"
     assert not marker.exists()
+
+
+def _assert_load_spec_keeps_compiler_refusal(
+    tmp_path: pathlib.Path, source: bytes
+) -> None:
+    path = _spec_file(tmp_path, source)
+    resolved = path.resolve()
+    with pytest.raises(SyntaxError) as compiler_caught:
+        compile(source, str(resolved), "exec")
+
+    with pytest.raises(VerifySpecError) as loader_caught:
+        load_spec(path)
+
+    assert str(loader_caught.value) == (
+        f"spec module raised on load: {resolved}: {compiler_caught.value}"
+    )
+    cause = loader_caught.value.__cause__
+    assert type(cause) is type(compiler_caught.value)
+    assert cause.args == compiler_caught.value.args
+
+
+@pytest.mark.parametrize(
+    "source",
+    [b"(", b"\x00", b"\xff", b"# coding: no-such-encoding\n"],
+    ids=["syntax", "null-byte", "invalid-utf8", "unknown-encoding"],
+)
+def test_load_spec_keeps_the_compilers_own_refusals(
+    tmp_path: pathlib.Path, source: bytes
+) -> None:
+    _assert_load_spec_keeps_compiler_refusal(tmp_path, source)
+
+
+@settings(
+    max_examples=500,
+    deadline=None,
+    derandomize=True,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+@given(
+    prefix=st.text(
+        alphabet=st.characters(min_codepoint=32, max_codepoint=126), max_size=40
+    ),
+    invalid_byte=st.sampled_from([*range(0x80, 0xC0), *range(0xF5, 0x100)]),
+)
+def test_load_spec_preserves_compiler_refusals_for_invalid_utf8(
+    tmp_path: pathlib.Path, prefix: str, invalid_byte: int
+) -> None:
+    """Every invalid UTF-8 byte stays refused with the compiler's own message."""
+
+    source = (
+        b"# coding: utf-8\n# " + prefix.encode() + b"\n" + bytes([invalid_byte]) + b"\n"
+    )
+    _assert_load_spec_keeps_compiler_refusal(tmp_path, source)
 
 
 JOURNAL_BYTES = b'{"one":"row"}\n'
@@ -961,3 +1015,50 @@ def test_a_pass_failure_with_clean_closure_keeps_earlier_claims(
     assert payload["passesCompleted"] == expected
     assert len(payload["scope"]["established"]) == len(expected)
     assert next(item for item in result.passes if not item.ok).name == phase
+
+
+@settings(
+    max_examples=20,
+    deadline=None,
+    derandomize=True,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+@given(
+    phase=st.sampled_from(["custody", "binding", "declaration"]),
+    close_revision=st.sampled_from(["candidate-ref", "base-ref"]),
+    message=st.text(max_size=30),
+)
+def test_a_close_failure_revokes_all_claims_for_any_pass_failure(
+    tmp_path: pathlib.Path,
+    phase: str,
+    close_revision: str,
+    message: str,
+) -> None:
+    """Every tree-derived claim is revoked when either snapshot fails closure."""
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _install_verification_pipeline(
+            monkeypatch, close_revision=close_revision,
+            close_error=SnapshotError(message),
+        )
+        loaded = load_spec(_spec_file(tmp_path))
+
+        def fail_pass(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError(f"{phase} failed")
+
+        operation = {
+            "custody": "verify_release_chain",
+            "binding": "verify_corpus_binding",
+            "declaration": "verify_declarations",
+        }[phase]
+        monkeypatch.setattr(verify_module, operation, fail_pass)
+        result = run_verification(
+            tmp_path, loaded, commit="candidate-ref", base_ref="base-ref",
+            expect_commit=CANDIDATE_COMMIT, verify_objects=True,
+        )
+    payload = result_to_dict(result)
+    assert payload["verdict"] == "FAIL"
+    assert payload["passesCompleted"] == []
+    assert payload["scope"]["established"] == []
+    assert result.chain is None and result.corpus is None
+    assert result.object_store is None

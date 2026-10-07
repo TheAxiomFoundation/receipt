@@ -86,16 +86,9 @@ def reached(m):
         for method, descriptor in vars(cls).items():
             if name == "TreeSnapshot" and method == "close_errors":
                 # e911 exposes the already collected close failures to the
-                # composition. Assert this getter's exact state separately;
-                # the measured ownership census predates this observation.
+                # composition. Assert its exact state as well as counting
+                # every read in the reviewed ownership census.
                 close_errors_code = descriptor.fget.__code__
-                continue
-            if method == "_reaudit_repository_configuration":
-                # #83 extracted the former close-only audit and also runs it
-                # before entered readers and object-store children. D1 asserts
-                # its exact added argv/environment/count; retain the frozen
-                # census for the ownership work that M3 compares.
-                continue
             if method == "__replace__":
                 # Synthesized by dataclasses on Python 3.13 and later only; it is
                 # not a receipt body, and counting it made the freeze depend on
@@ -129,8 +122,6 @@ def reached(m):
     hash_new = m.snapshot.hashlib.new
     hash_code = getattr(hash_new, "__code__", None)
     old = sys.getprofile()
-    audit_code = getattr(getattr(m.snapshot.TreeSnapshot,
-                                "_reaudit_repository_configuration", None), "__code__", None)
     def profile(frame, event, arg):
         if frame.f_code is close_errors_code:
             if event == "return":
@@ -138,19 +129,6 @@ def reached(m):
                 assert arg is subject._state.close_errors and isinstance(arg, tuple)
                 assert subject._state.closed
                 close_errors_reads.append(subject)
-            return
-        if (event == "call" and selected.get(frame.f_code)
-                in {"snapshot._git_environment", "snapshot._git_run"}):
-            caller = frame.f_back
-            while caller is not None:
-                if caller.f_code is audit_code:
-                    if (caller.f_back is not None and caller.f_back.f_code.co_name
-                            in {"__enter__", "verify_object_store"}):
-                        # Follow the D1 environment-capture wrapper too. Only
-                        # pre-child transport is additional; close still counts.
-                        return
-                    break
-                caller = caller.f_back
         if event == "call" and frame.f_code in selected:
             counts[selected[frame.f_code]] += 1
         if ((event == "call" and frame.f_code is hash_code
@@ -178,20 +156,47 @@ def compare(probe, repo, monkeypatch, *args, expected=None, expected_live=None):
                 result = probe(m, repo, patch, *args)
             results.append(plain({"trace": result, "bodies": dict(sorted(counts.items()))}))
     assert codes[0] is not codes[1], "legacy/live selector bodies must be distinct"
-    if expected_live is not None:
-        assert expected is not None, "a deliberate correction must retain the frozen expected result"
-        for label, observed, recorded in (("legacy", results[0], expected),
-                                          ("live", results[1], expected_live)):
-            if observed != recorded:
-                raise AssertionError(label + " trace differs from the recorded one: "
-                                     + json.dumps(_leaf_differences(observed, recorded), sort_keys=True))
-        return results[1]
-    assert results[0] == results[1], (results[0], results[1])
-    if expected is not None and results[1] != expected:
+    if expected is not None and results[0] != expected:
         # Print the differing leaves, not the whole structures: CI logs truncate
         # a raw dict diff, which hid the host-dependent D7 traces once already.
-        raise AssertionError("observed trace differs from the recorded one: "
-                             + json.dumps(_leaf_differences(results[1], expected), sort_keys=True))
+        raise AssertionError("frozen trace differs from the recorded one: "
+                             + json.dumps(_leaf_differences(results[0], expected), sort_keys=True))
+    identity = {
+        "probe": f"{probe.__module__}.{probe.__qualname__}",
+        "args": plain(args),
+    }
+    key = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    reviewed = json.loads(
+        Path(__file__).with_name("m3_review_deltas.json").read_text()
+    ).get(key)
+    if reviewed is None:
+        assert expected_live is None, "a deliberate correction needs a reviewed delta"
+        # Keep the original aggregate equality and its frozen-first direction;
+        # primitive subclasses can make a reverse leaf comparison asymmetric.
+        assert results[0] == results[1], (
+            "live trace differs outside the reviewed changes", results[0], results[1]
+        )
+        return results[1]
+    assert reviewed["probe"] == identity["probe"]
+    assert reviewed["args"] == identity["args"]
+    allowed = reviewed["differences"]
+    if expected_live is not None:
+        assert expected is not None, "a deliberate correction must retain the frozen expected result"
+        # #86's explicit corrections must also be present in the combined
+        # review. The exact delta check below still pins every other leaf.
+        for path, change in _leaf_differences(expected_live, expected).items():
+            assert allowed.get(path) == change, (path, change, allowed.get(path))
+    # #83's reviewed fixes add repository re-audits, folded attribute-source
+    # reads and closure invalidation. Each recorded leaf pins both the legacy
+    # value and its reviewed replacement; every other leaf must remain equal.
+    # The frozen source and its captured OBSERVED values stay authenticated.
+    differences = _leaf_differences(results[1], results[0])
+    assert differences == allowed, (
+        "live trace differs outside the reviewed changes: "
+        + json.dumps(_leaf_differences(differences, allowed), sort_keys=True)
+    )
     return results[1]
 
 

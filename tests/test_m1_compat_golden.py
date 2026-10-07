@@ -9,9 +9,11 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import pathlib
+import sys
 from types import SimpleNamespace
 
 import pytest
+from hypothesis import example, given, settings, strategies as st
 
 from receipt import _names as names, corpus, snapshot, release_chain, append_gate
 from receipt.snapshot import TreeSnapshot
@@ -341,10 +343,53 @@ def test_filename_admission_goldens(case):
         "suffix_iterable": lambda: names.short_name_carries_pinned_suffix("a.ymlx", 123),
         "suffix_ignored": lambda: names.short_name_carries_pinned_suffix("a.ymlx", (123, ".yml")),
     }
-    # record: census snapshot.py 3367-3387; _names.py 122-123, 152-162.
-    # #83 intentionally strengthens suffix_ignored: malformed pinned suffixes
-    # now refuse even when another suffix could match.
+    # record: census snapshot.py 3367-3387; _names.py 122-123, 152-162
+    if case == "suffix_ignored":
+        # #83 refuses a non-text pin instead of silently discarding it. Keep
+        # the recorded acceptance against an independently authenticated old
+        # source, then require the complete live refusal and a valid control.
+        from m3_legacy import source_tree
+
+        live_modules = {key: module for key, module in sys.modules.items()
+                        if key == "receipt" or key.startswith("receipt.")}
+        with source_tree(old=True):
+            from receipt import _names as frozen_names
+
+            assert_golden("filename/" + case, outcome(lambda:
+                frozen_names.short_name_carries_pinned_suffix("a.ymlx", (123, ".yml"))))
+        assert {key: module for key, module in sys.modules.items()
+                if key == "receipt" or key.startswith("receipt.")} == live_modules
+        assert outcome(calls[case]) == {
+            "exception": "receipt._names.NamePolicyError",
+            "message": "pinned suffix must be text: 123",
+        }
+        assert names.short_name_carries_pinned_suffix("a.ymlx", (".yml",)) is True
+        return
     assert_golden("filename/" + case, outcome(calls[case]))
+
+
+@settings(max_examples=40, deadline=None, derandomize=True)
+@given(pin=st.one_of(st.none(), st.booleans(), st.integers(), st.binary(max_size=8),
+                    st.lists(st.integers(), max_size=3)),
+       before=st.lists(st.sampled_from((".sig", ".json", ".yml", ".tar.gz")), max_size=3),
+       after=st.lists(st.sampled_from((".sig", ".json", ".yml", ".tar.gz")), max_size=3),
+       container=st.sampled_from(("tuple", "list", "iterator")))
+@example(pin=123, before=[], after=[], container="tuple")
+def test_every_non_text_pin_refuses_before_an_alias_answer(pin, before, after, container):
+    """Every pin must be exact text, even beside a matching valid pin."""
+    valid = (*before, *after, ".sig")
+    assert outcome(lambda: names.short_name_carries_pinned_suffix("ABCDEFGHI.sig", valid)) == {
+        "value": True,
+    }
+    assert outcome(lambda: names.short_name_carries_pinned_suffix("ABCDEFGHI.sig", (".yml",))) == {
+        "value": False,
+    }
+    pins = (*before, pin, *after, ".sig")
+    argument = {"tuple": tuple, "list": list, "iterator": iter}[container](pins)
+    assert outcome(lambda: names.short_name_carries_pinned_suffix("ABCDEFGHI.sig", argument)) == {
+        "exception": "receipt._names.NamePolicyError",
+        "message": f"pinned suffix must be text: {pin!r}",
+    }
 
 
 @pytest.mark.parametrize("case", ("escape", "missing", "unavailable", "nonregular", "changed", "json_alias", "accept",

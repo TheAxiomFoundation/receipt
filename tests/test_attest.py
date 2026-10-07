@@ -19,6 +19,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import FrozenInstanceError
 
 import pytest
+from hypothesis import given, settings, strategies as st
 
 import receipt.attest as attest_module
 from receipt.attest import (
@@ -807,7 +808,6 @@ def test_a_constructed_spec_pattern_cannot_change_afterwards() -> None:
     )
     assert all(type(workflow) is str for workflow in spec.allowed_workflows)
     assert cert_identity_pattern(spec) == before
-
 # --- the sweep reads the whole history of the repository it names ----------
 #
 # Review of 0.6.2 (L6 F1, F2, F13 and the inherited-GIT_DIR case). Each
@@ -1172,3 +1172,44 @@ def test_verify_commit_does_not_report_caller_without_matching_signer(
     }]
     _accepting_gh(monkeypatch, json.dumps(payload))
     assert verify_commit(pathlib.Path("/repo"), COMMIT, spec=_spec()) == "<verified>"
+
+
+@settings(max_examples=40, deadline=None, derandomize=True)
+@given(
+    signer=st.one_of(
+        st.sampled_from([
+            f"https://github.com/MaxGhenis/brier/{workflow}@refs/heads/main"
+            for workflow in (WORKFLOW, SECOND_WORKFLOW)
+        ]),
+        st.none(),
+        st.integers(),
+        st.text(max_size=80),
+    ),
+    caller=st.sampled_from([WORKFLOW, SECOND_WORKFLOW]),
+)
+def test_verified_identity_always_comes_from_the_certificate_san(
+    signer: object, caller: str
+) -> None:
+    """An allowlisted caller never replaces an absent or different signer."""
+
+    payload = [{
+        "verificationResult": {
+            "signature": {
+                "certificate": {
+                    "subjectAlternativeName": signer,
+                    "buildConfigURI": (
+                        f"https://github.com/MaxGhenis/brier/{caller}@refs/heads/main"
+                    ),
+                }
+            }
+        }
+    }]
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _accepting_gh(monkeypatch, json.dumps(payload))
+        identity = verify_commit(pathlib.Path("/repo"), COMMIT, spec=_spec())
+    expected = (
+        signer.removeprefix("https://")
+        if isinstance(signer, str) and re.fullmatch(cert_identity_pattern(_spec()), signer)
+        else "<verified>"
+    )
+    assert identity == expected

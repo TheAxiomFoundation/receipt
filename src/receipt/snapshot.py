@@ -976,7 +976,17 @@ def _canonical_commit(
                     f"commit {oid} is not a canonical commit object"
                 )
             if current_name in {b"tree", b"parent"}:
-                current_value += b"\n" + line[1:]
+                # A continuation puts a newline into the header's value, and
+                # no value holding one is an object name, so this header is
+                # refused whatever follows: in every phase accept_header
+                # either rejects the name or asks object_name, which rejects
+                # the value.  Refused here, at the first continuation, with
+                # that same message.  Rejoining them first cost a copy of the
+                # whole value per line -- quadratic, so a 64 MiB commit of
+                # one-byte continuations took hours to reach this refusal.
+                raise SnapshotError(
+                    f"commit {oid} is not a canonical commit object"
+                )
             continue
         if current_name is not None:
             accept_header(current_name, current_value)
