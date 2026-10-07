@@ -12,8 +12,9 @@ The working tree and index are never subjects of this reader. The private
 configuration setup and Git version children are not repository-addressed and
 run from their own private temporary directories, never the caller's cwd.
 Discovery uses the worktree only to establish that ``root`` is the repository
-top level; every object operation thereafter carries an absolute ``--git-dir``
-and ``--no-replace-objects``. All inherited ``GIT_*`` variables are discarded,
+top level; every configuration audit and object operation thereafter carries
+the same absolute ``--git-dir`` and ``--no-replace-objects``. All inherited
+``GIT_*`` variables are discarded,
 the three variables in :func:`_git_environment` are installed, and ``HOME`` is
 deliberately preserved. Repository configuration is audited without includes
 at selection, before every repository-addressed child an entered snapshot
@@ -467,7 +468,7 @@ GIT_COMMANDS = (
         "--git-common-dir",
         "--show-object-format",
     ),
-    ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
+    ("object", "config", "--list", "--show-scope", "--no-includes", "-z"),
     ("object", "rev-parse", "--verify", "--end-of-options", "<rev>^{commit}"),
     ("object", "cat-file", "--batch-command"),
     ("object", "count-objects", "-v"),
@@ -1833,15 +1834,10 @@ class TreeSnapshot:
             cls._refuse_alternates(git_dir, common_dir)
 
             config_result = _git_run(
-                [
-                    "-C",
-                    os.fspath(selected_root),
-                    "config",
-                    "--list",
-                    "--show-scope",
-                    "--no-includes",
-                    "-z",
-                ],
+                _object_arguments(
+                    git_dir,
+                    ["config", "--list", "--show-scope", "--no-includes", "-z"],
+                ),
                 cwd=None,
                 environment=environment,
             )
@@ -2030,18 +2026,20 @@ class TreeSnapshot:
         after selection (``fsck.badTimezone = ignore``, say) had the batch
         child and ``fsck`` run under it, and one who restored it before close
         went unseen (0.6.2 review, L3 finding 7).
+
+        Address the frozen Git directory just as the object children do.
+        Rediscovering it through ``root`` let a persistent ``.git`` pointer
+        redirection hide changes to the selected repository's configuration.
+        Git still reads that directory's worktree-scoped configuration.
+        Also refuse a redirected worktree association even when both
+        repositories have identical configuration.
         """
 
         completed = _git_run(
-            [
-                "-C",
-                os.fspath(self._state.root),
-                "config",
-                "--list",
-                "--show-scope",
-                "--no-includes",
-                "-z",
-            ],
+            _object_arguments(
+                self.git_dir,
+                ["config", "--list", "--show-scope", "--no-includes", "-z"],
+            ),
             cwd=None,
             environment=_git_environment(global_config),
         )
@@ -2056,6 +2054,34 @@ class TreeSnapshot:
                 "repository configuration changed during verification"
             )
         _audit_config(records, self._state.root)
+
+        try:
+            pointer = self._state.root / ".git"
+            if pointer.is_dir():
+                associated = pointer.resolve()
+            else:
+                with os.fdopen(os.open(
+                    pointer, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                ), "rb") as stream:
+                    if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                        raise ValueError("worktree Git pointer is not a regular file")
+                    # A gitdir file names one filesystem path. Bound the read
+                    # if a writer replaces it with an unrelated large file.
+                    content = stream.read(1024 * 1024 + 1)
+                if len(content) > 1024 * 1024 or not content.startswith(b"gitdir: "):
+                    raise ValueError("invalid worktree Git pointer")
+                target = pathlib.Path(os.fsdecode(content[8:].rstrip(b"\r\n")))
+                if not target.is_absolute():
+                    target = self._state.root / target
+                associated = target.resolve()
+            if associated != self.git_dir and not os.path.samefile(
+                associated, self.git_dir
+            ):
+                raise ValueError("redirected worktree Git pointer")
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise SnapshotError(
+                "worktree Git directory changed during verification"
+            ) from exc
 
     def __enter__(self) -> "TreeSnapshot":
         if self._state.closed:

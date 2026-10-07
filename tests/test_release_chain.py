@@ -34,6 +34,7 @@ import os
 import pathlib
 import shutil
 import subprocess
+import tempfile
 from dataclasses import replace
 
 import pytest
@@ -1118,8 +1119,9 @@ def test_the_producer_openssl_fallback_uses_a_private_leaf(
 ) -> None:
     """A configured producer filename that is absolute would survive the
     temporary-directory join in the OpenSSL fallback and hand the original
-    path to the subprocess. When observing, the temporary name must be a
-    fixed private leaf regardless of configuration."""
+    path to the subprocess. The fallback now names its temporary key file
+    itself, a fixed private leaf, so the release chain hands it only the
+    observed bytes and a name for its diagnostics."""
 
     import dataclasses
 
@@ -1137,11 +1139,11 @@ def test_the_producer_openssl_fallback_uses_a_private_leaf(
         manifests[0].name.replace(".json", ".producer.sig")
     ).read_bytes()
 
-    captured: list[str | None] = []
+    captured: list[list[str]] = []
     fed_pems: list[bytes] = []
 
     def spying_fallback(*args, **kwargs):  # type: ignore[no-untyped-def]
-        captured.append(kwargs.get("temporary_public_key_filename"))
+        captured.append(sorted(kwargs))
         fed_pems.append(args[2])
 
     monkeypatch.setattr(module, "CRYPTOGRAPHY_AVAILABLE", False)
@@ -1158,13 +1160,14 @@ def test_the_producer_openssl_fallback_uses_a_private_leaf(
         label="0000.producer.sig",
         anchor_observer=observer,
     )
-    assert captured == ["producer-key-snapshot.pem"]
+    assert captured == [["label", "public_key_filename", "spki_sha256"]]
     assert absolute_name in observer
     # The bytes handed to the fallback are the observed bytes exactly.
     assert hashlib.sha256(fed_pems[0]).hexdigest() == observer[absolute_name]
 
-    # Non-observing mode must keep origin's behavior exactly: the configured
-    # name is forwarded as the temporary filename, absolute or not.
+    # Non-observing mode forwarded the configured name as the temporary
+    # filename, absolute or not, so the fallback wrote to the anchor itself.
+    # Neither mode forwards a filename to write any more.
     captured.clear()
     module.verify_producer_signature_bytes(
         manifest_bytes,
@@ -1174,7 +1177,63 @@ def test_the_producer_openssl_fallback_uses_a_private_leaf(
         enforce_production_pin=False,
         label="0000.producer.sig",
     )
-    assert captured == [absolute_name]
+    assert captured == [["label", "public_key_filename", "spki_sha256"]]
+
+
+@pytest.mark.parametrize("shape", ["absolute", "subdirectory"])
+def test_the_openssl_fallback_neither_writes_nor_crashes_on_a_configured_key_name(
+    repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shape: str,
+) -> None:
+    """Non-observing mode, for real: the configured producer filename used to
+    name the fallback's temporary key file. Absolute, it rewrote the
+    consumer's anchor in place and read the pin and the key from it in two
+    separate reads; with a directory component it crashed with a raw
+    OSError. (A ``..`` component is refused by the chain's own reader before
+    the fallback.)"""
+
+    import dataclasses
+
+    import receipt.release_chain as module
+
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl is not installed")
+    monkeypatch.setattr(module, "CRYPTOGRAPHY_AVAILABLE", False)
+    private_tmp = tmp_path / "private-tmp"
+    (private_tmp / "work").mkdir(parents=True)
+    monkeypatch.setattr(tempfile, "tempdir", str(private_tmp / "work"))
+    spec = load_spec(repo / "verification/spec.py").verification
+    anchors = repo / ANCHOR_DIR
+    original = anchors / spec.chain.producer_public_key_filename
+    if shape == "absolute":
+        configured = str(original.resolve())
+        watched = original
+    else:
+        (anchors / "keys").mkdir()
+        shutil.copy2(original, anchors / "keys" / original.name)
+        configured = f"keys/{original.name}"
+        watched = anchors / "keys" / original.name
+    os.utime(watched, (1_000_000_000, 1_000_000_000))
+    chain = dataclasses.replace(spec.chain, producer_public_key_filename=configured)
+    manifests = sorted((repo / "releases/manifests").glob("*.json"))
+    manifest_bytes = manifests[0].read_bytes()
+    signature = manifests[0].with_name(
+        manifests[0].name.replace(".json", ".producer.sig")
+    ).read_bytes()
+
+    module.verify_producer_signature_bytes(
+        manifest_bytes,
+        signature,
+        spec=chain,
+        anchor_dir=anchors,
+        enforce_production_pin=True,
+        label="0000.producer.sig",
+    )
+
+    assert watched.stat().st_mtime == 1_000_000_000
+    assert sorted(path.name for path in (private_tmp / "work").iterdir()) == []
 
 
 def test_a_reserialized_producer_key_is_accepted_and_recorded(
@@ -1232,7 +1291,7 @@ def test_the_producer_openssl_fallback_verifies_while_observing(
     )
     assert observer == {key_name: expected}
 
-    # Non-observing mode keeps the original configured-name behavior.
+    # Non-observing mode also verifies the exact supplied bytes.
     module.verify_producer_signature_bytes(
         manifest_bytes,
         signature,

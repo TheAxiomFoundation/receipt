@@ -10,6 +10,7 @@ import os
 import pathlib
 import stat
 import subprocess
+import sys
 import zlib
 
 import pytest
@@ -118,7 +119,7 @@ EXPECTED_GIT_COMMANDS = (
         "--git-common-dir",
         "--show-object-format",
     ),
-    ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
+    ("object", "config", "--list", "--show-scope", "--no-includes", "-z"),
     ("object", "rev-parse", "--verify", "--end-of-options", "<rev>^{commit}"),
     ("object", "cat-file", "--batch-command"),
     ("object", "count-objects", "-v"),
@@ -246,6 +247,202 @@ def test_git_environment_and_command_allow_lists_are_frozen_independently() -> N
     assert GIT_ENVIRONMENT_DROPPED == EXPECTED_GIT_ENVIRONMENT_DROPPED
     assert len(GIT_ENVIRONMENT_DROPPED_DOCUMENTED) == 73
     assert GIT_COMMANDS == EXPECTED_GIT_COMMANDS
+
+
+@pytest.mark.parametrize("boundary", ["enter", "count", "fsck", "close"])
+def test_persistent_git_pointer_redirection_cannot_hide_configuration_drift(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    """Every audit must inspect the Git directory used by its object child.
+
+    Both the weakened real configuration and the worktree's pointer to a
+    decoy persist through close. This needs no check-to-child race.
+    """
+
+    _verify_objects_support()
+    root = tmp_path / "worktree"
+    original = tmp_path / "original.git"
+    decoy = tmp_path / "decoy.git"
+    root.mkdir()
+    _git(root, "init", "-q", "--separate-git-dir", os.fspath(original))
+    _git(root, "config", "user.name", "Snapshot Security Test")
+    _git(root, "config", "user.email", "snapshot-security@example.test")
+    (root / "tracked.txt").write_bytes(b"committed bytes\n")
+    commit = _commit(root, "initial")
+    selected = TreeSnapshot.select(root, verify_objects=True)
+    malformed = (
+        f"tree {selected.tree}\nauthor A <a@b> 0 +99999\n"
+        "committer A <a@b> 0 +0000\n\ninvalid timezone\n"
+    ).encode()
+    _git(root, "hash-object", "--literally", "-t", "commit", "-w", "--stdin",
+         input_bytes=malformed)
+    control = _git(root, "fsck", "--full", "--no-dangling", "--no-reflogs",
+                   "--no-references", "--no-progress", commit, check=False)
+    assert control.returncode != 0 and b"badTimezone" in control.stderr
+    _git(root, "init", "--bare", "-q", os.fspath(decoy))
+    (decoy / "config").write_bytes((original / "config").read_bytes())
+
+    def redirect() -> None:
+        with (original / "config").open("a") as config:
+            config.write("[fsck]\n\tbadTimezone = ignore\n")
+        (root / ".git").write_text(f"gitdir: {decoy}\n")
+        assert selected.git_dir == original.resolve()
+        assert _git_dir(root) == decoy.resolve()
+
+    run = snapshot_module._git_run
+    object_children: list[str] = []
+
+    def record_run(arguments: list[str], **kwargs: object):
+        result = run(arguments, **kwargs)
+        for command in ("count-objects", "fsck"):
+            if command in arguments:
+                object_children.append(command)
+        if boundary == "fsck" and "count-objects" in arguments:
+            redirect()
+        return result
+
+    monkeypatch.setattr(snapshot_module, "_git_run", record_run)
+    with pytest.raises(
+        SnapshotError, match="repository configuration changed during verification"
+    ):
+        if boundary == "enter":
+            redirect()
+        with selected:
+            if boundary in {"count", "close"}:
+                redirect()
+            if boundary != "close":
+                selected.verify_object_store((commit,))
+    assert object_children == (["count-objects"] if boundary == "fsck" else [])
+    assert selected._state.closed
+    assert selected.temporary_directory is None
+    if boundary != "enter":
+        assert any("configuration changed" in str(error)
+                   for error in selected.close_errors)
+
+
+@pytest.mark.parametrize("layout", ["ordinary", "separate", "linked"])
+def test_frozen_configuration_audit_preserves_worktree_scope(
+    tmp_path: pathlib.Path, layout: str
+) -> None:
+    root = _new_repository(tmp_path)
+    _git(root, "config", "extensions.worktreeConfig", "true")
+    if layout == "separate":
+        _git(root, "init", "-q", "--separate-git-dir",
+             os.fspath(tmp_path / "separate.git"))
+    elif layout == "linked":
+        linked = tmp_path / "linked"
+        _git(root, "worktree", "add", "-q", "--detach", os.fspath(linked), "HEAD")
+        root = linked
+    _git(root, "config", "--worktree", "receiptprobe.worktree", layout)
+    selected = TreeSnapshot.select(root)
+    assert ("worktree", "receiptprobe.worktree", layout) in selected._state.config_records
+    with selected:
+        assert selected.blob(selected.entry("tracked.txt"), limit=100)
+    assert selected.close_errors == ()
+
+    selected = TreeSnapshot.select(root)
+    _git(root, "config", "--worktree", "receiptprobe.worktree", "changed")
+    with pytest.raises(SnapshotError, match="repository configuration changed"):
+        selected.__enter__()
+
+
+@pytest.mark.parametrize("layout", ["separate", "linked"])
+@pytest.mark.parametrize("boundary", ["enter", "count", "fsck", "close"])
+def test_git_pointer_redirection_is_refused_without_configuration_drift(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+    layout: str, boundary: str,
+) -> None:
+    """The selected worktree association stays fixed at every child boundary."""
+
+    _verify_objects_support()
+    root = _new_repository(tmp_path)
+    if layout == "separate":
+        _git(root, "init", "-q", "--separate-git-dir",
+             os.fspath(tmp_path / "separate.git"))
+    else:
+        linked = tmp_path / "linked"
+        _git(root, "worktree", "add", "-q", "--detach", os.fspath(linked), "HEAD")
+        root = linked
+    selected = TreeSnapshot.select(root, verify_objects=True)
+    decoy = tmp_path / "decoy.git"
+    _git(root, "init", "--bare", "-q", os.fspath(decoy))
+    # Even the old root-addressed audit sees exactly the selected records.
+    (decoy / "config").write_bytes((_common_dir(root) / "config").read_bytes())
+    original_config = (selected.common_dir / "config").read_bytes()
+
+    def redirect() -> None:
+        (root / ".git").write_text(f"gitdir: {decoy}\n")
+        assert _git_dir(root) == decoy.resolve()
+        assert (selected.common_dir / "config").read_bytes() == original_config
+
+    run = snapshot_module._git_run
+    object_children: list[str] = []
+
+    def record_run(arguments: list[str], **kwargs: object):
+        result = run(arguments, **kwargs)
+        for command in ("count-objects", "fsck"):
+            if command in arguments:
+                object_children.append(command)
+        if boundary == "fsck" and "count-objects" in arguments:
+            redirect()
+        return result
+
+    monkeypatch.setattr(snapshot_module, "_git_run", record_run)
+    with pytest.raises(
+        SnapshotError, match="worktree Git directory changed during verification"
+    ):
+        if boundary == "enter":
+            redirect()
+        with selected:
+            if boundary in {"count", "close"}:
+                redirect()
+            if boundary != "close":
+                selected.verify_object_store((selected.commit,))
+    assert object_children == (["count-objects"] if boundary == "fsck" else [])
+    assert selected._state.closed
+    assert selected.temporary_directory is None
+    if boundary != "enter":
+        assert any("worktree Git directory changed" in str(error)
+                   for error in selected.close_errors)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes are unavailable")
+def test_a_fifo_git_pointer_refuses_without_blocking(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Preserve Git's immediate nonregular-pointer refusal after selection."""
+
+    root = _new_repository(tmp_path)
+    _git(root, "init", "-q", "--separate-git-dir",
+         os.fspath(tmp_path / "separate.git"))
+    probe = """
+import importlib.util, os, pathlib, sys
+sys.path.insert(0, sys.argv[3])
+import receipt
+spec = importlib.util.spec_from_file_location('receipt.snapshot', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+receipt.snapshot = module
+spec.loader.exec_module(module)
+root = pathlib.Path(sys.argv[2])
+selected = module.TreeSnapshot.select(root)
+pointer = root / '.git'
+pointer.unlink()
+os.mkfifo(pointer)
+try:
+    selected.__enter__()
+except module.SnapshotError:
+    assert selected._state.closed
+    assert selected.temporary_directory is None
+else:
+    raise AssertionError('FIFO Git pointer was accepted')
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", probe, snapshot_module.__file__, os.fspath(root),
+         os.fspath(pathlib.Path(__file__).resolve().parents[1] / "src")],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr.decode(errors="replace")
 
 
 @pytest.mark.parametrize(
@@ -1017,12 +1214,12 @@ def test_full_verify_objects_uses_exact_commands_heads_and_environment(
             "--git-common-dir",
             "--show-object-format",
         ),
-        ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
+        ("object", "config", "--list", "--show-scope", "--no-includes", "-z"),
         ("object", "rev-parse", "--verify", "--end-of-options", "<rev>^{commit}"),
         ("object", "cat-file", "--batch-command"),
         # Configuration is re-audited before every child an entered snapshot
         # starts (0.6.2 review, L3 finding 7).
-        ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
+        ("object", "config", "--list", "--show-scope", "--no-includes", "-z"),
         ("object", "cat-file", "--batch-command"),
         ("setup", "config", "-f", "<global>", "safe.directory", "<root>"),
         ("discovery", "version"),
@@ -1034,14 +1231,14 @@ def test_full_verify_objects_uses_exact_commands_heads_and_environment(
             "--git-common-dir",
             "--show-object-format",
         ),
-        ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
+        ("object", "config", "--list", "--show-scope", "--no-includes", "-z"),
         ("object", "rev-parse", "--verify", "--end-of-options", "<rev>^{commit}"),
         ("object", "cat-file", "--batch-command"),
-        ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
+        ("object", "config", "--list", "--show-scope", "--no-includes", "-z"),
         ("object", "cat-file", "--batch-command"),
-        ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
+        ("object", "config", "--list", "--show-scope", "--no-includes", "-z"),
         ("object", "count-objects", "-v"),
-        ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
+        ("object", "config", "--list", "--show-scope", "--no-includes", "-z"),
         (
             "object",
             "-c",
@@ -1055,6 +1252,6 @@ def test_full_verify_objects_uses_exact_commands_heads_and_environment(
             "<candidate>",
             "[<base>]",
         ),
-        ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
-        ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
+        ("object", "config", "--list", "--show-scope", "--no-includes", "-z"),
+        ("object", "config", "--list", "--show-scope", "--no-includes", "-z"),
     ]

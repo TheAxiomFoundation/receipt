@@ -1455,7 +1455,7 @@ def _parse_rfc3339(value: Any, label: str) -> datetime:
         raise TsaError(f"invalid timestamp claim {label}: {value!r}") from exc
     if parsed.tzinfo is None:
         raise TsaError(f"timestamp claim lacks a timezone {label}: {value!r}")
-    return parsed.astimezone(UTC)
+    return _utc_instant(parsed, f"timestamp claim {label}")
 
 
 def _creation_claims(payload: dict[str, Any]) -> list[tuple[str, datetime]]:
@@ -1525,14 +1525,16 @@ def validate_token_time(
     """Validate signed time against wall time and internal creation claims."""
 
     current = _utc_instant(now, "verification time")
-    _utc_instant(gen_time, "RFC 3161 genTime")
-    if gen_time > current + timedelta(seconds=max_future_seconds):
+    gen_time = _utc_instant(gen_time, "RFC 3161 genTime")
+    # Compare elapsed time: valid instants at years 1 and 9999 need not have
+    # representable endpoints after adding or subtracting their allowances.
+    if gen_time - current > timedelta(seconds=max_future_seconds):
         raise TsaError(
             f"RFC 3161 genTime {_format_utc(gen_time)} postdates verification "
             f"time {_format_utc(current)}"
         )
     for label, claim in _creation_claims(payload):
-        if gen_time < claim - timedelta(seconds=max_token_lead_seconds):
+        if claim - gen_time > timedelta(seconds=max_token_lead_seconds):
             raise TsaError(
                 f"RFC 3161 genTime {_format_utc(gen_time)} impossibly precedes "
                 f"{label}={_format_utc(claim)}"

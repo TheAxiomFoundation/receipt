@@ -79,7 +79,8 @@ def d1(m, repo, patch, store):
         # #83 deliberately adds these exact checks before repository children.
         # Observe them before projecting the unchanged M3 ownership census.
         epochs = ["enter"] + (["store", "store"] if store else [])
-        assert audit_argv == [["git", "-C", os.fspath(repo.root), "config",
+        assert audit_argv == [["git", f"--git-dir={a.git_dir}",
+                               "--no-replace-objects", "config",
                                "--list", "--show-scope", "--no-includes", "-z"]] * len(epochs)
         added = [child for child in children
                  if child[-1] == "config" and child[0] in {"enter", "store"}]
