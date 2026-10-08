@@ -813,8 +813,6 @@ def _same_json(left: Any, right: Any) -> bool:
     return bool(left == right)
 
 
-
-
 def _is_calendar_date(value: Any) -> bool:
     """An ASCII ``YYYY-MM-DD`` naming a day that exists."""
 

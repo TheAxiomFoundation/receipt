@@ -258,6 +258,92 @@ def test_validate_token_time_retains_oracle_refusals() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "gen_time",
+    [datetime(2026, 9, 27, 12, tzinfo=UTC), datetime.max.replace(tzinfo=UTC)],
+    ids=["ordinary-token", "latest-token"],
+)
+def test_future_allowance_at_latest_verification_time_does_not_overflow(
+    gen_time: datetime,
+) -> None:
+    """A valid representable clock needs no representable allowance endpoint."""
+
+    validate_token_time(
+        {"recordedAt": "2026-09-27T11:59:00Z"},
+        gen_time,
+        now=datetime.max.replace(tzinfo=UTC),
+        max_future_seconds=300,
+        max_token_lead_seconds=300,
+    )
+
+
+@pytest.mark.parametrize(
+    "gen_time",
+    [datetime.min.replace(tzinfo=UTC), datetime(2026, 9, 27, 12, tzinfo=UTC)],
+    ids=["earliest-token", "ordinary-token"],
+)
+def test_lead_allowance_at_earliest_creation_claim_does_not_overflow(
+    gen_time: datetime,
+) -> None:
+    validate_token_time(
+        {"recordedAt": "0001-01-01T00:00:00Z"},
+        gen_time,
+        now=datetime(2026, 9, 27, 12, 30, tzinfo=UTC),
+        max_future_seconds=300,
+        max_token_lead_seconds=300,
+    )
+
+
+@pytest.mark.parametrize(
+    "recorded_at",
+    ["0001-01-01T00:00:00+14:00", "9999-12-31T23:00:00-14:00"],
+    ids=["before-year-one", "after-year-9999"],
+)
+def test_creation_claim_outside_the_utc_range_is_a_named_refusal(
+    recorded_at: str,
+) -> None:
+    with pytest.raises(TsaError) as caught:
+        validate_token_time(
+            {"recordedAt": recorded_at},
+            datetime(2026, 9, 27, 12, tzinfo=UTC),
+            now=datetime(2026, 9, 27, 12, 30, tzinfo=UTC),
+            max_future_seconds=300,
+            max_token_lead_seconds=300,
+        )
+    assert str(caught.value) == f"invalid timestamp claim recordedAt: {recorded_at!r}"
+
+
+@pytest.mark.parametrize("boundary", ["future", "lead"])
+@pytest.mark.parametrize("excess_microseconds", [-1, 0, 1])
+def test_token_time_allowances_keep_their_strict_elapsed_time_boundaries(
+    boundary: str,
+    excess_microseconds: int,
+) -> None:
+    instant = datetime(2026, 9, 27, 12, tzinfo=UTC)
+    gap = timedelta(seconds=300, microseconds=excess_microseconds)
+    gen_time = instant + gap if boundary == "future" else instant - gap
+    now = instant if boundary == "future" else instant + timedelta(hours=1)
+    payload = {"recordedAt": instant.isoformat()}
+    if excess_microseconds > 0:
+        message = "postdates verification" if boundary == "future" else "impossibly precedes"
+        with pytest.raises(TsaError, match=message):
+            validate_token_time(
+                payload,
+                gen_time,
+                now=now,
+                max_future_seconds=300,
+                max_token_lead_seconds=300,
+            )
+    else:
+        validate_token_time(
+            payload,
+            gen_time,
+            now=now,
+            max_future_seconds=300,
+            max_token_lead_seconds=300,
+        )
+
+
 def test_bundle_lifecycle_helpers_keep_version_and_pending_semantics() -> None:
     v1 = bundle().reference()
     v2_spec = bundle(bundle_id="tsa-anchors-v2", version=2)
@@ -8842,13 +8928,6 @@ def test_a_gentime_finer_than_a_microsecond_is_refused_not_rounded(text: str) ->
 # ---------------------------------------------------------------------------
 # Token bytes that used to crash the parser before any signature was checked
 # (full Opus 5.5 review of 0.6.2, L2 F2)
-
-
-def der_length(size: int) -> bytes:
-    if size < 0x80:
-        return bytes([size])
-    encoded = size.to_bytes((size.bit_length() + 7) // 8, "big")
-    return bytes([0x80 | len(encoded)]) + encoded
 
 
 def der(tag: int, body: bytes) -> bytes:

@@ -642,85 +642,6 @@ def trace_attributes(monkeypatch, *, old):
         assert counts["policy"] == (0 if old else counts["facade"])
 
 
-def reviewed_attribute_trace(repo, commit, requests, calls, *, shared):
-    """Add only #83's folded source discovery to the frozen PR4 trace.
-
-    Git independently supplies each directory's raw records. A folded lookup
-    walks its directory once per request, charging those records, and omits the
-    old source hook when no attribute filename is present. The exact reading
-    already visited that directory, so no tree payload or larger walk is new.
-    These fixtures use canonical attribute filenames; casing refusals have
-    separate tests. No live observation determines an expected value here.
-    """
-    directories = {(): {}}
-    for record in repo.git("ls-tree", "-r", "-t", "-z", commit).split(b"\0"):
-        if not record:
-            continue
-        metadata, path = record.split(b"\t", 1)
-        _mode, kind, _oid = metadata.split()
-        parts = tuple(path.split(b"/"))
-        directories.setdefault(parts[:-1], {})[parts[-1]] = kind
-        if kind == b"tree":
-            directories.setdefault(parts, {})
-
-    def folded_source(directory):
-        parent, walks, count = (), [], 0
-        for name in directory:
-            records = directories[parent]
-            walks.append((len(records), count))
-            count += len(records)
-            if records.get(name) != b"tree":
-                return walks, False
-            parent += (name,)
-        names = tuple(name for name in directories[parent]
-                      if name.lower() == b".gitattributes")
-        assert names in ((), (b".gitattributes",))
-        return walks, bool(names)
-
-    offsets, events, failures, expected = [0, 0], [], [], []
-    old_event_count = old_failure_count = 0
-
-    def work(value, owner):
-        if value is None:
-            return None
-        return {**value, "tree_entries": value["tree_entries"] + offsets[owner]}
-
-    for index, (result, first, second, old_events, old_failures) in enumerate(calls):
-        owner = int(shared and index % 2 == 1)
-        unique = dict.fromkeys(
-            tuple(path.encode("utf-8").split(b"/")) for path in requests[index]
-        )
-        sources = iter((fold, parts[:depth], (*parts[:depth], b".gitattributes"))
-                       for parts in unique for fold in (False, True)
-                       for depth in range(len(parts)))
-        folded_directories = {}
-        for name, argument, before in old_events[old_event_count:]:
-            if name == "_attribute_rules":
-                fold, directory, source = next(sources)
-                assert argument == source
-                if fold:
-                    if directory not in folded_directories:
-                        walks, present = folded_source(directory)
-                        folded_directories[directory] = present
-                        for length, count in walks:
-                            # The old exact source walk covered this prefix
-                            # plus its filename; the added prefix walk is bounded
-                            # by that already admitted walk, even at a ceiling.
-                            assert length + count <= before["max_tree_entries_in_walk"]
-                            events.append(("_charge_walk_records", (length, count), work(before, owner)))
-                            offsets[owner] += length
-                    if not folded_directories[directory]:
-                        continue
-            events.append((name, argument, work(before, owner)))
-        if "value" in result:
-            assert next(sources, None) is None
-        for rule, amount, before in old_failures[old_failure_count:]:
-            failures.append((rule, amount, work(before, owner)))
-        expected.append((result, work(first, 0), work(second, 1), tuple(events), tuple(failures)))
-        old_event_count, old_failure_count = len(old_events), len(old_failures)
-    return expected
-
-
 def attribute_comparison(repo, commit, monkeypatch, requests, *, shared=False, ceilings=None):
     results, costs = [], []
     for old in (True, False):
@@ -737,9 +658,26 @@ def attribute_comparison(repo, commit, monkeypatch, requests, *, shared=False, c
                     calls.append((result, asdict(first.work), asdict(second.work), tuple(events), tuple(failures)))
                 results.append(calls)
                 costs.append((dict(counts), None if old else policy._attribute_store(first).work))
-    expected = reviewed_attribute_trace(repo, commit, requests, results[0], shared=shared)
-    assert expected == results[1]
+    # Folded source discovery reuses exact admission and preserves every hook.
+    assert results[0] == results[1]
     return results[1], costs
+
+
+@pytest.mark.parametrize("depth", (0, 1, 3))
+@pytest.mark.parametrize("has_source", (False, True))
+def test_folded_source_discovery_reuses_exact_directory_admission(raw_repo, monkeypatch, depth, has_source):
+    directory = "/".join(["p"] * depth)
+    prefix = directory + "/" if directory else ""
+    entries = [(prefix + "leaf", "100644")]
+    if has_source:
+        entries.append((prefix + ".gitattributes", "100644", b"* -filter\n"))
+    commit = raw_repo.commit(entries)
+    calls, _ = attribute_comparison(raw_repo, commit, monkeypatch,
+                                    ((prefix + "leaf",),) * 3)
+    assert all(call[0] == {"value": None} for call in calls)
+    # Discovery must retain the exact reader's logical tree/path budget and
+    # hook sequence across nested and repeated canonical or absent sources.
+    assert calls[0][1]["tree_entries"] == calls[-1][1]["tree_entries"]
 
 
 @pytest.mark.parametrize("budget,threshold,attributes,paths", (

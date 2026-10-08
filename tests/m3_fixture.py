@@ -77,12 +77,18 @@ def policy(m, subject):
 def reached(m):
     """Count actual code objects, not wrappers or similarly named live globals."""
     selected = {}
+    close_errors_code = None
     for name in ("TreeSnapshot", "_BatchReader", "_WorkPool", "TreeListing",
                  "_DigestIterator", "Materialization"):
         cls = getattr(m.snapshot, name, None)
         if cls is None:
             continue
         for method, descriptor in vars(cls).items():
+            if name == "TreeSnapshot" and method == "close_errors":
+                # e911 exposes the already collected close failures to the
+                # composition. Assert its exact state as well as counting
+                # every read in the reviewed ownership census.
+                close_errors_code = descriptor.fget.__code__
             if method == "__replace__":
                 # Synthesized by dataclasses on Python 3.13 and later only; it is
                 # not a receipt body, and counting it made the freeze depend on
@@ -112,10 +118,17 @@ def reached(m):
             if hasattr(body, "__code__"):
                 selected[body.__code__] = module.__name__.split(".")[-1] + "." + name
     counts = Counter()
+    close_errors_reads = []
     hash_new = m.snapshot.hashlib.new
     hash_code = getattr(hash_new, "__code__", None)
     old = sys.getprofile()
     def profile(frame, event, arg):
+        if frame.f_code is close_errors_code:
+            if event == "return":
+                subject = frame.f_locals["self"]
+                assert arg is subject._state.close_errors and isinstance(arg, tuple)
+                assert subject._state.closed
+                close_errors_reads.append(subject)
         if event == "call" and frame.f_code in selected:
             counts[selected[frame.f_code]] += 1
         if ((event == "call" and frame.f_code is hash_code
@@ -127,11 +140,12 @@ def reached(m):
     sys.setprofile(profile)
     try:
         yield counts
+        assert len(close_errors_reads) == len({id(subject) for subject in close_errors_reads})
     finally:
         sys.setprofile(old)
 
 
-def compare(probe, repo, monkeypatch, *args, expected=None):
+def compare(probe, repo, monkeypatch, *args, expected=None, expected_live=None):
     """Compare both independently reached implementations and a captured value."""
     results, codes = [], []
     for old in (True, False):
@@ -158,6 +172,7 @@ def compare(probe, repo, monkeypatch, *args, expected=None):
         Path(__file__).with_name("m3_review_deltas.json").read_text()
     ).get(key)
     if reviewed is None:
+        assert expected_live is None, "a deliberate correction needs a reviewed delta"
         # Keep the original aggregate equality and its frozen-first direction;
         # primitive subclasses can make a reverse leaf comparison asymmetric.
         assert results[0] == results[1], (
@@ -167,6 +182,12 @@ def compare(probe, repo, monkeypatch, *args, expected=None):
     assert reviewed["probe"] == identity["probe"]
     assert reviewed["args"] == identity["args"]
     allowed = reviewed["differences"]
+    if expected_live is not None:
+        assert expected is not None, "a deliberate correction must retain the frozen expected result"
+        # #86's explicit corrections must also be present in the combined
+        # review. The exact delta check below still pins every other leaf.
+        for path, change in _leaf_differences(expected_live, expected).items():
+            assert allowed.get(path) == change, (path, change, allowed.get(path))
     # #83's reviewed fixes add repository re-audits, folded attribute-source
     # reads and closure invalidation. Each recorded leaf pins both the legacy
     # value and its reviewed replacement; every other leaf must remain equal.

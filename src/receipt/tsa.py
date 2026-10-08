@@ -1617,7 +1617,7 @@ def validate_token_time(
     """
 
     current = _utc_instant(now, "verification time")
-    _utc_instant(gen_time, "RFC 3161 genTime")
+    gen_time = _utc_instant(gen_time, "RFC 3161 genTime")
     if gen_time - current > _allowance(max_future_seconds):
         raise TsaError(
             f"RFC 3161 genTime {_format_utc(gen_time)} postdates verification "

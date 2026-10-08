@@ -916,7 +916,6 @@ def _verify_producer_signature_with_openssl(
             signature,
             public_key_pem,
             public_key_filename=spec.producer_public_key_filename,
-            temporary_public_key_filename=spec.producer_public_key_filename,
             spki_sha256=(
                 spec.producer_spki_sha256 if enforce_production_pin else None
             ),
@@ -941,7 +940,7 @@ def verify_producer_signature_bytes(
     key_spec = _sign.ProducerKeySpec(
         # When observing, normalized once here: the join below,
         # read_producer_public_key's own join, the observer key, and the
-        # fallback's temporary filename all flow from this one value, so no
+        # fallback's diagnostic name all flow from this one value, so no
         # later __fspath__ call exists for a stateful PathLike to answer
         # differently. When not observing, the raw configured value flows
         # exactly as it always has.
@@ -952,6 +951,10 @@ def verify_producer_signature_bytes(
         ),
         spki_sha256=spec.producer_spki_sha256,
     )
+    if not isinstance(key_spec.public_key_filename, (str, os.PathLike)):
+        raise ReleaseChainError(
+            "producer public key filename must be str or os.PathLike"
+        )
     public_key_path = anchor_dir / key_spec.public_key_filename
     try:
         public_key_relative = pathlib.PurePosixPath(
@@ -981,22 +984,14 @@ def verify_producer_signature_bytes(
             anchor_observer, key_spec.public_key_filename, public_key_pem
         )
         if not CRYPTOGRAPHY_AVAILABLE:
-            # When observing, the temporary key file must be a private leaf:
-            # a configured filename that is absolute would survive the
-            # temporary-directory join and hand OpenSSL (and the write
-            # before it) the original path, breaking the snapshot guarantee
-            # the observed digest depends on.
-            temporary_key_name = (
-                "producer-key-snapshot.pem"
-                if anchor_observer is not None
-                else key_spec.public_key_filename
-            )
+            # The fallback writes these exact bytes to a fixed private leaf of
+            # its own, never to a name derived from the configuration, so the
+            # observed digest is the digest of the key OpenSSL reads.
             _sign._verify_producer_signature_with_openssl(
                 manifest,
                 signature,
                 public_key_pem,
                 public_key_filename=str(public_key_path),
-                temporary_public_key_filename=temporary_key_name,
                 spki_sha256=(
                     key_spec.spki_sha256 if enforce_production_pin else None
                 ),

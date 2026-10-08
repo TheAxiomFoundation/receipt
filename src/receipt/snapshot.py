@@ -12,9 +12,11 @@ The working tree and index are never subjects of this reader. The private
 configuration setup and Git version children are not repository-addressed and
 run from their own private temporary directories, never the caller's cwd.
 Discovery uses the worktree only to establish that ``root`` is the repository
-top level; every object operation thereafter carries an absolute ``--git-dir``
-and ``--no-replace-objects``. All inherited ``GIT_*`` variables are discarded,
-the three variables in :func:`_git_environment` are installed, and ``HOME`` is
+top level; every configuration audit and object operation thereafter carries
+the same absolute ``--git-dir`` and ``--no-replace-objects``, with the frozen
+common directory explicitly installed as ``GIT_COMMON_DIR``. All inherited
+``GIT_*`` variables are discarded, the three baseline variables in
+:func:`_git_environment` are installed, and ``HOME`` is
 deliberately preserved. Repository configuration is audited without includes
 at selection, before every repository-addressed child an entered snapshot
 starts (the batch child, ``count-objects`` and ``fsck``), and again at close.
@@ -467,7 +469,7 @@ GIT_COMMANDS = (
         "--git-common-dir",
         "--show-object-format",
     ),
-    ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
+    ("object", "config", "--list", "--show-scope", "--no-includes", "-z"),
     ("object", "rev-parse", "--verify", "--end-of-options", "<rev>^{commit}"),
     ("object", "cat-file", "--batch-command"),
     ("object", "count-objects", "-v"),
@@ -492,7 +494,8 @@ def _git_environment(global_config: pathlib.Path | str) -> dict[str, str]:
 
     Every inherited name beginning ``GIT_`` is removed, including numbered
     config channels and names introduced by a later Git. Exactly three Git
-    variables are installed. ``HOME`` and all non-Git ambient variables
+    baseline variables are installed. Repository children additionally pin
+    ``GIT_COMMON_DIR``. ``HOME`` and all non-Git ambient variables
     survive; global and system configuration are redirected instead.
     """
 
@@ -507,6 +510,55 @@ def _git_environment(global_config: pathlib.Path | str) -> dict[str, str]:
         }
     )
     return environment
+
+
+def _object_environment(
+    global_config: pathlib.Path, common_dir: pathlib.Path
+) -> dict[str, str]:
+    environment = _git_environment(global_config)
+    environment["GIT_COMMON_DIR"] = os.fspath(common_dir)
+    return environment
+
+
+def _refuse_common_directory_change(
+    git_dir: pathlib.Path, common_dir: pathlib.Path
+) -> None:
+    """Bind Git's mutable common-directory pointer to the selected store."""
+
+    pointer = git_dir / "commondir"
+    actual = git_dir
+    try:
+        try:
+            pointer.lstat()
+        except FileNotFoundError:
+            present = False
+        else:
+            present = True
+        if present:
+            with os.fdopen(os.open(
+                pointer, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+            ), "rb") as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    raise ValueError("commondir is not a regular file")
+                content = stream.read(MAX_GIT_OUTPUT_BYTES + 1)
+            if len(content) > MAX_GIT_OUTPUT_BYTES:
+                raise ValueError("commondir exceeds the pointer read budget")
+            # Match Git's CR/LF trimming; spaces remain part of the pathname.
+            content = content.rstrip(b"\r\n")
+            if not content or any(byte in content for byte in (b"\0", b"\r", b"\n")):
+                raise ValueError("commondir does not name one filesystem path")
+            actual = pathlib.Path(os.fsdecode(content))
+            if not actual.is_absolute():
+                actual = git_dir / actual
+            actual = actual.resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise SnapshotError("invalid common Git directory pointer (commondir)") from exc
+    try:
+        unchanged = actual == common_dir or os.path.samefile(actual, common_dir)
+    except OSError:
+        unchanged = False
+    if not unchanged:
+        raise SnapshotError("common Git directory changed during verification")
 
 
 def _kill_reap_and_close(process: subprocess.Popen[bytes]) -> None:
@@ -1832,6 +1884,8 @@ class TreeSnapshot:
             if not common_dir.is_absolute():
                 common_dir = selected_root / common_dir
             common_dir = common_dir.resolve()
+            _refuse_common_directory_change(git_dir, common_dir)
+            environment["GIT_COMMON_DIR"] = os.fspath(common_dir)
             cls._refuse_grafts_and_shallow(git_dir, common_dir)
             if object_format != "sha1":
                 if object_format == "sha256":
@@ -1843,18 +1897,14 @@ class TreeSnapshot:
             cls._refuse_alternates(git_dir, common_dir)
 
             config_result = _git_run(
-                [
-                    "-C",
-                    os.fspath(selected_root),
-                    "config",
-                    "--list",
-                    "--show-scope",
-                    "--no-includes",
-                    "-z",
-                ],
+                _object_arguments(
+                    git_dir,
+                    ["config", "--list", "--show-scope", "--no-includes", "-z"],
+                ),
                 cwd=None,
                 environment=environment,
             )
+            _refuse_common_directory_change(git_dir, common_dir)
             if config_result.returncode != 0:
                 raise SnapshotError(
                     f"cannot audit repository configuration: {_first_error(config_result)}"
@@ -1888,6 +1938,7 @@ class TreeSnapshot:
                 raise SnapshotError(f"cannot resolve commit '{revision}'")
             candidate_oid = candidate.decode("ascii")
 
+            _refuse_common_directory_change(git_dir, common_dir)
             cls._refuse_grafts_and_shallow(git_dir, common_dir)
             cls._refuse_alternates(git_dir, common_dir)
             with _BatchReader(
@@ -2028,6 +2079,7 @@ class TreeSnapshot:
     def _reaudit_repository_files(self) -> None:
         """Recheck repository-control sentinels before another Git child."""
 
+        _refuse_common_directory_change(self.git_dir, self._state.common_dir)
         self._refuse_grafts_and_shallow(self.git_dir, self._state.common_dir)
         self._refuse_alternates(self.git_dir, self._state.common_dir)
 
@@ -2040,21 +2092,25 @@ class TreeSnapshot:
         after selection (``fsck.badTimezone = ignore``, say) had the batch
         child and ``fsck`` run under it, and one who restored it before close
         went unseen (0.6.2 review, L3 finding 7).
+
+        Address the frozen Git directory just as the object children do.
+        Rediscovering it through ``root`` let a persistent ``.git`` pointer
+        redirection hide changes to the selected repository's configuration.
+        Git still reads that directory's worktree-scoped configuration.
+        Also refuse a redirected worktree association even when both
+        repositories have identical configuration.
         """
 
+        _refuse_common_directory_change(self.git_dir, self._state.common_dir)
         completed = _git_run(
-            [
-                "-C",
-                os.fspath(self._state.root),
-                "config",
-                "--list",
-                "--show-scope",
-                "--no-includes",
-                "-z",
-            ],
+            _object_arguments(
+                self.git_dir,
+                ["config", "--list", "--show-scope", "--no-includes", "-z"],
+            ),
             cwd=None,
-            environment=_git_environment(global_config),
+            environment=_object_environment(global_config, self._state.common_dir),
         )
+        _refuse_common_directory_change(self.git_dir, self._state.common_dir)
         if completed.returncode != 0:
             raise SnapshotError(
                 f"cannot re-audit repository configuration: "
@@ -2066,6 +2122,34 @@ class TreeSnapshot:
                 "repository configuration changed during verification"
             )
         _audit_config(records, self._state.root)
+
+        try:
+            pointer = self._state.root / ".git"
+            if pointer.is_dir():
+                associated = pointer.resolve()
+            else:
+                with os.fdopen(os.open(
+                    pointer, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                ), "rb") as stream:
+                    if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                        raise ValueError("worktree Git pointer is not a regular file")
+                    # A gitdir file names one filesystem path. Bound the read
+                    # if a writer replaces it with an unrelated large file.
+                    content = stream.read(1024 * 1024 + 1)
+                if len(content) > 1024 * 1024 or not content.startswith(b"gitdir: "):
+                    raise ValueError("invalid worktree Git pointer")
+                target = pathlib.Path(os.fsdecode(content[8:].rstrip(b"\r\n")))
+                if not target.is_absolute():
+                    target = self._state.root / target
+                associated = target.resolve()
+            if associated != self.git_dir and not os.path.samefile(
+                associated, self.git_dir
+            ):
+                raise ValueError("redirected worktree Git pointer")
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise SnapshotError(
+                "worktree Git directory changed during verification"
+            ) from exc
 
     def __enter__(self) -> "TreeSnapshot":
         if self._state.closed:
@@ -2082,7 +2166,7 @@ class TreeSnapshot:
             self._reaudit_repository_configuration(global_path)
             batch = _BatchReader(
                 self.git_dir,
-                environment=_git_environment(global_path),
+                environment=_object_environment(global_path, self._state.common_dir),
                 object_format=self.object_format,
             )
         except BaseException as caught:
@@ -2799,7 +2883,9 @@ class TreeSnapshot:
                 "verify_object_store heads must be exactly the resolved candidate and base"
             )
         self._state.object_store_attempted = True
-        environment = _git_environment(self._state.global_config)
+        environment = _object_environment(
+            self._state.global_config, self._state.common_dir
+        )
         self._reaudit_repository_files()
         self._reaudit_repository_configuration(self._state.global_config)
         counted = _git_run(

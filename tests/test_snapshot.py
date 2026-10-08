@@ -939,11 +939,15 @@ def test_every_git_child_receives_frozen_environment_and_allowed_command(
         else:
             assert cwd is None
         assert environment["HOME"] == home
-        assert {name for name in environment if name.startswith("GIT_")} == {
+        git_keys = {
             "GIT_NO_REPLACE_OBJECTS",
             "GIT_CONFIG_NOSYSTEM",
             "GIT_CONFIG_GLOBAL",
         }
+        if argv[1].startswith("--git-dir="):
+            git_keys.add("GIT_COMMON_DIR")
+            assert environment["GIT_COMMON_DIR"] == os.fspath(selected.common_dir)
+        assert {name for name in environment if name.startswith("GIT_")} == git_keys
         assert not any(
             name in environment
             for name in {
@@ -989,14 +993,14 @@ def test_every_git_child_receives_frozen_environment_and_allowed_command(
             "--git-common-dir",
             "--show-object-format",
         ),
-        ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
+        ("object", "config", "--list", "--show-scope", "--no-includes", "-z"),
         ("object", "rev-parse", "--verify", "--end-of-options", "<rev>^{commit}"),
         ("object", "cat-file", "--batch-command"),
         # The configuration re-audit before the entered batch child starts
         # (0.6.2 review, L3 finding 7), then the child, then close's re-audit.
-        ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
+        ("object", "config", "--list", "--show-scope", "--no-includes", "-z"),
         ("object", "cat-file", "--batch-command"),
-        ("discovery", "config", "--list", "--show-scope", "--no-includes", "-z"),
+        ("object", "config", "--list", "--show-scope", "--no-includes", "-z"),
     ]
 
 

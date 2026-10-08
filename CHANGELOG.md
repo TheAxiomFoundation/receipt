@@ -56,6 +56,100 @@ through its own words and exception classes.
 
 ## 0.6.3 (unreleased)
 
+Corrections from a full review of the 0.6.1 code, present in 0.6.1 and 0.6.2
+alike. Several are refusals of inputs those releases accepted; a few are inputs
+they refused for a reason that was not true.
+
+Claims corrected, with no change in behavior:
+
+- Without `--expect-spec-sha256`, the spec is the producer's code running in
+  the verifier's own process, and it can change what `receipt verify` prints
+  and the exit status. The README ("Using it", "What this verdict speaks
+  for"), the option's help text, the unpinned text verdict, and the JSON
+  `scope.notEstablished` list now say the verdict is only as good as the spec
+  the producer committed. The existing "spec's code was trusted" line and
+  entry are kept; the JSON list gains one entry.
+- `receipt.canonical`'s "one byte stream per value" covers values as
+  `json.loads` returns them, with finite floats and integers that convert to
+  finite ECMAScript Numbers; decoding `1e400` alone does not meet that range.
+  `canonical.py` stays byte-identical to its pinned
+  upstream source, so subclasses, explicit surrogate pairs and nesting past
+  the recursion limit behave as they do upstream; the README says so.
+- Retired keys verify when the caller says the material is history
+  (`allow_legacy=True`), which `verify_any_generation` takes as its default;
+  the README had said they verify "immutable history only".
+- Docstrings: a new authority's supplemental outcome may be declared
+  unavailable (the ported rule, unchanged); `eol=crlf` does transform checkout
+  bytes (accepted as a stated residual); a journal of gate rows alone is a
+  closed world of zero content files (the "genesis must bind content" branch
+  never ran and is removed); a case-only rename cannot be journalled, because
+  only an exact-spelling row lifts a tombstone.
+
+New refusals, each of an input 0.6.1 accepted or crashed on:
+
+- `receipt.tsa`: a verification time without a UTC offset (`astimezone` read
+  it as local time, so the verdict followed the process's time zone), or one
+  whose UTC instant falls outside years 1 to 9999 (was `OverflowError`); a bare
+  record filename with no `records=` (was `IndexError`). The duplicate
+  token-path rule keys on Unicode's canonical caseless match, so eleven
+  spellings APFS stores as one entry are one path to it, as every spelling
+  the old key joined still is.
+- `receipt.snapshot`: in the ASCII-folded attribute reading, the attributes
+  file is the entry whose name folds to `.gitattributes` (a case-insensitive
+  checkout applies `.GITATTRIBUTES`), and two such entries in one directory
+  refuse; repository configuration is re-audited before every Git child an
+  entered snapshot starts, not only at close; an unencodable revision, an
+  argument over the kernel's limit, a symlink-loop root and an unusable
+  materialization destination refuse as `SnapshotError`.
+- `receipt.corpus`: a journal row `json.loads` cannot decode (an integer over
+  the digit limit, nesting past the decoder's stack) and malformed
+  `CorpusSpec` set members or API arguments refuse as `CorpusError`.
+- `receipt.verify` and `receipt verify`: a close-time repository re-audit
+  failure invalidates every tree-derived pass, including when binding or
+  declaration has already raised, so a FAIL leaves no affected claim
+  established and reports the close failure; formatting a caught exception
+  can no longer raise, so a spec
+  whose exception's `__str__` exits cannot end the command with status 0.
+- `receipt.append_gate`: rows after the frozen prefix must carry a string
+  `source_record_id` and `supersedes`, a numeric (not boolean) `value`, an
+  ASCII `YYYY-MM-DD` `observed_at` naming a real day, and no repeated JSON
+  key; the frozen prefix manifest is compared as JSON values (`true` and `1.0`
+  are not `1`) and `prefixLineCount` must be a JSON integer; a gate-only
+  proposal that changes the ledger, its prefix manifest or their ancestors
+  refuses whatever the spec's surfaces classify; row text quoted in a refusal has unprintable
+  characters escaped (printable text, and every refusal the differential
+  harness binds, is unchanged).
+- `receipt.attest`: `AttestSpec` text fields and workflows must be exactly
+  `str`.
+- `receipt.sign`: `KeySpec` requires a `str` key_id and a fingerprint of 64
+  lowercase hex characters; presented key ids must be `str`; without
+  `cryptography`, the OpenSSL fallback refuses a key that is not an Ed25519
+  PEM public key (a DER SPKI, a private key, a P-224 key), as the primary path
+  does, and refuses a signature over the empty message, which no OpenSSL
+  command it can rely on verifies, as that rather than as a failed signature;
+  `read_producer_public_key` reads only inside the anchor directory,
+  without following links; a bytes-subclass signature's refusal names its
+  type rather than its length.
+- `receipt._names`: a portable component is at most 255 bytes, and pinned
+  suffixes must be exactly `str`.
+
+Inputs that now verify, each refused in 0.6.1 for a reason that was not true:
+
+- A repository root spelled in another case on a case-insensitive volume, or
+  whose name holds a Unicode line separator.
+- An ancestry through a commit whose root tree uses a legacy mode Git accepts:
+  walked root trees are rehashed and type-bound without the content grammar,
+  and no longer held in memory for the snapshot's lifetime.
+- A spec that defines a dataclass or pickles its own objects: the spec is
+  compiled without the loader's `__future__` flags and executed as a module
+  registered in `sys.modules`. On Python 3.11 to 3.13 a spec's module-level
+  annotations are therefore evaluated, as they are when the file runs.
+
+`verify_commit` logs the certificate's `subjectAlternativeName` that gh
+enforced, even if the caller's `buildConfigURI` is also allowlisted, and
+reads output it cannot parse as naming
+no identity; acceptance is gh's exit status, as before.
+
 Two refusals, each an input 0.6.2 and 0.6.1 accepted into a verdict about
 something other than what it named. Both are the high findings of the full
 review of 0.6.2, and both were already present in 0.6.1.

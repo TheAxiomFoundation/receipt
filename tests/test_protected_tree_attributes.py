@@ -424,3 +424,22 @@ def test_consumers_reach_attribute_policy_after_their_existing_barriers(
         assert calls[0][0] == "append-attributes"
     assert len(calls) == 1 and calls[0][1]
     assert (calls[0][2] > 0) == (consumer != "append")
+
+
+def test_only_committed_sources_are_inputs_and_folded_source_modes_refuse(raw_repo, tmp_path):
+    commit = raw_repo.commit(((".gitattributes", "100644", b"* -filter\n"),
+                              ("P/.gitattributes", "120000"),
+                              ("p/.GITATTRIBUTES", "160000")))
+    (raw_repo.root / ".gitattributes").write_bytes(b"* filter\n")
+    (raw_repo.root / ".git/info/attributes").write_bytes(b"* filter\n")
+    global_attributes = tmp_path / "global-attributes"
+    global_attributes.write_bytes(b"* filter\n")
+    raw_repo.git("config", "core.attributesFile", str(global_attributes))
+    with raw_repo.snapshot(commit) as snap:
+        view, result = evaluate(snap, plan("q/missing"))
+        assert result == {"value": None}
+        assert view.attribute_outcomes[b"q/missing"].sources == (".gitattributes", "q/.gitattributes")
+        # The folded reading discovers the committed alias, including its mode.
+        # Worktree, info/attributes and global attributes remain unused.
+        with pytest.raises(snapshot.SnapshotError, match=r"unsupported \.gitattributes entry at p/\.GITATTRIBUTES: mode 160000"):
+            evaluate(snap, plan("p/missing"))
