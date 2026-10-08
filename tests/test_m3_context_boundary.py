@@ -7,9 +7,10 @@ is the compatibility boundary: pairing admits six totals, without adopting a
 process, config baseline, entry capability, policy outcome or failure domain.
 
 Decision record for the next migration steps:
-- D1 is a pending capture-once correction. D1-False records the actual sequence
+- D1 is a pending capture-once correction. Frozen D1-False records the sequence
   ["select", "select", "enter", "close"]; D1-True additionally records the store
-  capture and every Git child. Neither trace is a capture-once guarantee.
+  capture and every Git child. Reviewed #83 configuration audits add captures
+  before child startup. Neither trace is a capture-once guarantee.
 - A7 is a separate pending availability correction. The 288 D7 cases retain the
   independent warm/cold refusal split, including both read orders and selection
   warmth. No successful payload is substituted for a cold-owner refusal.
@@ -19,6 +20,7 @@ Decision record for the next migration steps:
 These tests grant neither approval and introduce no ownership/linkage removal.
 """
 from dataclasses import asdict, replace
+from copy import deepcopy
 from pathlib import Path, PurePosixPath
 import os
 import shutil
@@ -38,7 +40,7 @@ def select(m, repo, commit=None, **kwargs):
 def d1(m, repo, patch, store):
     s = m.snapshot
     repo.hash(b"", "tree")
-    captures, children = [], []
+    captures, children, audit_argv, common_pins = [], [], [], []
     environment, popen = s._git_environment, s.subprocess.Popen
     original_path = os.environ["PATH"]
     def epoch(label):
@@ -53,6 +55,10 @@ def d1(m, repo, patch, store):
         return env
     def spawn(argv, **kwargs):
         env = kwargs["env"]
+        if len(argv) > 1 and argv[1].startswith("--git-dir="):
+            common_pins.append((len(children), env.get("GIT_COMMON_DIR")))
+        if "config" in argv and env["RECEIPT_M3_PROBE"] in {"enter", "store"}:
+            audit_argv.append(list(argv))
         children.append([env["RECEIPT_M3_PROBE"], Path(env["HOME"]).name,
                          env["PATH"].rsplit(os.pathsep, 1)[-1].split("/")[-1],
                          env["LC_ALL"], sorted(k for k in env if k.startswith("GIT_")),
@@ -72,6 +78,28 @@ def d1(m, repo, patch, store):
             report = a.verify_object_store((a.commit,))
             assert report.seconds >= 0
         epoch("close")
+    if hasattr(s, "_refuse_common_directory_change"):
+        # #86 pins every repository child to the selected common directory.
+        # Assert the added binding before projecting the frozen M3 inventory.
+        # Read state directly so the assertion adds no public property calls.
+        assert common_pins
+        assert all(value == str(a._state.common_dir) for _index, value in common_pins)
+        for index, _value in common_pins:
+            children[index][4].remove("GIT_COMMON_DIR")
+    if hasattr(s.TreeSnapshot, "_reaudit_repository_configuration"):
+        # #83 deliberately adds these exact checks before repository children.
+        # Observe them before projecting the unchanged M3 ownership census.
+        epochs = ["enter"] + (["store", "store"] if store else [])
+        assert audit_argv == [["git", f"--git-dir={a.git_dir}",
+                               "--no-replace-objects", "config",
+                               "--list", "--show-scope", "--no-includes", "-z"]] * len(epochs)
+        added = [child for child in children
+                 if child[-1] == "config" and child[0] in {"enter", "store"}]
+        assert added == [[epoch, "home-" + epoch, epoch, "C.UTF-8",
+                          ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_NO_REPLACE_OBJECTS"],
+                          "config"] for epoch in epochs]
+        assert captures == (["select", "select", "enter", "enter", "store", "store", "store", "close"]
+                            if store else ["select", "select", "enter", "enter", "close"])
     return {"captures": captures, "children": children, "initial": initial,
             "final": work(a), "closed": a._state.closed}
 
@@ -81,14 +109,34 @@ def d2(m, repo, patch, restore):
     repo.git("config", "m3.probe", "changed")
     try:
         b = select(m, repo)
-        a.__enter__()
+        entry_refusal = None
+        try:
+            a.__enter__()
+        except m.snapshot.SnapshotError as exc:
+            # #83 refuses a changed configuration before starting A's child.
+            # The frozen implementation still reaches its original closes.
+            assert str(exc) == "repository configuration changed during verification"
+            assert not a._state.entered
+            assert a.batch_pid is None
+            assert a.temporary_directory is None
+            entry_refusal = {
+                "exception": f"{type(exc).__module__}.{type(exc).__qualname__}",
+                "message": str(exc),
+                "notes": list(getattr(exc, "__notes__", ())),
+            }
         b.__enter__()
         different = a._state.config_records != b._state.config_records
         if restore:
             repo.git("config", "--unset", "m3.probe")
         trace = Trace(a, b)
+        if entry_refusal is not None:
+            trace.events.append(["A entry refused", entry_refusal, work(a, b)])
         trace.call("B close", lambda: b.__exit__(None, None, None))
         trace.call("A close", lambda: a.__exit__(None, None, None))
+        if entry_refusal is not None:
+            assert a._state.closed and b._state.closed
+            assert a.batch_pid is b.batch_pid is None
+            assert a.temporary_directory is b.temporary_directory is None
         return {"different_records": different, "events": trace.events,
                 "closed": [a._state.closed, b._state.closed],
                 "resources": [a.batch_pid, b.batch_pid, a.temporary_directory, b.temporary_directory]}
@@ -304,6 +352,12 @@ def d14(m, repo, patch, heads):
         trace.call("base unready", lambda: b.verify_object_store((b.commit,)))
         if heads != "unproven":
             a.assert_ancestor(b)
+            if hasattr(a._state, "authenticated_trees"):
+                # Ancestry authenticates the base root without retaining a
+                # parsed content tree. Main's legacy-mode/hash tests pin the
+                # successful ancestry and corrupt-object refusal separately.
+                assert a._state.authenticated_trees == {b.tree}
+                assert b.tree not in a._state.tree_cache
         values = {"exact": (a.commit, b.commit), "reverse": (b.commit, a.commit),
                   "duplicate": (a.commit, a.commit), "missing": (a.commit,),
                   "three": (a.commit, b.commit, b.commit), "scalar": a.commit,
@@ -378,4 +432,55 @@ CASES = {
 def test_context_boundary(repo, monkeypatch, case):
     from m3_context_expected import OBSERVED
     probe, *args = CASES[case]
-    compare(probe, repo, monkeypatch, *args, expected=OBSERVED[case])
+    expected_live = None
+    if case.startswith("D14-") and case != "D14-unproven":
+        # #83 streams ancestry root authentication instead of parsing and
+        # retaining the root. Keep the complete frozen result and all public
+        # work, refusal, hash/read counts; only these three body entries change.
+        expected_live = deepcopy(OBSERVED[case])
+        bodies = expected_live["bodies"]
+        assert bodies.pop("TreeSnapshot._tree_object") == 1
+        assert "TreeSnapshot._authenticate_tree" not in bodies
+        bodies["TreeSnapshot._authenticate_tree"] = 1
+        assert bodies["snapshot._parse_raw_tree"] == 3
+        bodies["snapshot._parse_raw_tree"] = 2
+    compare(probe, repo, monkeypatch, *args, expected=OBSERVED[case],
+            expected_live=expected_live)
+
+
+@pytest.mark.parametrize("restore", (False, True))
+def test_configuration_drift_refuses_before_entered_batch_starts(repo, monkeypatch, restore):
+    from receipt import snapshot
+
+    first = snapshot.TreeSnapshot.select(repo.root, repo.base)
+    repo.git("config", "m3.probe", "changed")
+    second = snapshot.TreeSnapshot.select(repo.root, repo.base)
+    if restore:
+        repo.git("config", "--unset", "m3.probe")
+    batches = []
+    original_init = snapshot._BatchReader.__init__
+    def init(batch, *args, **kwargs):
+        batches.append(batch)
+        original_init(batch, *args, **kwargs)
+    monkeypatch.setattr(snapshot._BatchReader, "__init__", init)
+    try:
+        subjects = (first, second)
+        refused_index = int(restore)
+        accepted_index = 1 - refused_index
+        refused, accepted = (second, first) if restore else (first, second)
+        results = [outcome(lambda s=subject: s.__enter__() and None) for subject in subjects]
+        assert results[refused_index] == {
+            "exception": "receipt.snapshot.SnapshotError",
+            "message": "repository configuration changed during verification", "notes": []}
+        assert results[accepted_index] == {"value": None}
+        assert len(batches) == 1 and accepted._state.batch is batches[0]
+        assert refused._state.closed and refused.batch_pid is refused.temporary_directory is None
+        accepted.__exit__(None, None, None)
+        assert accepted._state.closed and batches[0].process.poll() is not None
+        assert accepted.batch_pid is accepted.temporary_directory is None
+    finally:
+        for subject in (first, second):
+            if subject._state.entered:
+                subject.__exit__(None, None, None)
+        if not restore:
+            repo.git("config", "--unset", "m3.probe")

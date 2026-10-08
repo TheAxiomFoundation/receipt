@@ -12,6 +12,7 @@ import inspect
 import itertools
 import os
 import pathlib
+import os
 import shutil
 import subprocess
 from collections.abc import Callable, Iterator, Mapping
@@ -615,7 +616,7 @@ def test_keyring_construction_refusals_and_frozen_specs() -> None:
     with pytest.raises(SignError, match="^keyring must contain at least one key$"):
         KeyringSpec((), 1)
 
-    key_a = KeySpec("key-a", "fingerprint-a", "spki-sha256")
+    key_a = KeySpec("key-a", "a" * 64, "spki-sha256")
     for threshold in (0, -1):
         with pytest.raises(SignError) as caught:
             KeyringSpec((key_a,), threshold)
@@ -627,20 +628,20 @@ def test_keyring_construction_refusals_and_frozen_specs() -> None:
         KeyringSpec((key_a,), 2)
     assert str(caught.value) == "keyring threshold 2 exceeds key count 1"
 
-    duplicate_id = KeySpec("key-a", "fingerprint-b", "raw-sha256")
+    duplicate_id = KeySpec("key-a", "b" * 64, "raw-sha256")
     with pytest.raises(SignError) as caught:
         KeyringSpec((key_a, duplicate_id), 1)
     assert str(caught.value) == "duplicate key_id in keyring: 'key-a'"
 
     duplicate_fingerprint = KeySpec(
         "key-b",
-        "fingerprint-a",
+        "a" * 64,
         "raw-sha256",
     )
     with pytest.raises(SignError) as caught:
         KeyringSpec((key_a, duplicate_fingerprint), 1)
     assert str(caught.value) == (
-        "duplicate fingerprint in keyring: 'fingerprint-a'"
+        f"duplicate fingerprint in keyring: {'a' * 64!r}"
     )
 
     keyring = KeyringSpec((key_a,), 1)
@@ -664,8 +665,8 @@ def test_keyring_threshold_must_be_an_exact_int() -> None:
     that survives ``<`` and ``>`` against an int constructed a keyring.
     """
 
-    key_a = KeySpec("key-a", "fingerprint-a", "spki-sha256")
-    key_b = KeySpec("key-b", "fingerprint-b", "raw-sha256")
+    key_a = KeySpec("key-a", "a" * 64, "spki-sha256")
+    key_b = KeySpec("key-b", "b" * 64, "raw-sha256")
 
     for threshold in (
         True,
@@ -1348,13 +1349,13 @@ def _rotated_keyring() -> tuple[
 
 
 def test_keyring_legacy_construction_refusals() -> None:
-    current = KeySpec("root", "fp-current", "spki-sha256")
+    current = KeySpec("root", "c" * 64, "spki-sha256")
 
     with pytest.raises(SignError) as caught:
         KeyringSpec(
             (current,),
             1,
-            legacy_keys=(KeySpec("root", "fp-old", "spki-sha256"),),
+            legacy_keys=(KeySpec("root", "d" * 64, "spki-sha256"),),
         )
     assert str(caught.value) == "duplicate key_id in keyring: 'root'"
 
@@ -1362,27 +1363,27 @@ def test_keyring_legacy_construction_refusals() -> None:
         KeyringSpec(
             (current,),
             1,
-            legacy_keys=(KeySpec("old", "fp-current", "raw-sha256"),),
+            legacy_keys=(KeySpec("old", "c" * 64, "raw-sha256"),),
         )
-    assert str(caught.value) == "duplicate fingerprint in keyring: 'fp-current'"
+    assert str(caught.value) == f"duplicate fingerprint in keyring: {'c' * 64!r}"
 
     with pytest.raises(SignError) as caught:
         KeyringSpec(
             (current,),
             1,
             legacy_keys=(
-                KeySpec("old-a", "fp-old", "spki-sha256"),
-                KeySpec("old-b", "fp-old", "spki-sha256"),
+                KeySpec("old-a", "d" * 64, "spki-sha256"),
+                KeySpec("old-b", "d" * 64, "spki-sha256"),
             ),
         )
-    assert str(caught.value) == "duplicate fingerprint in keyring: 'fp-old'"
+    assert str(caught.value) == f"duplicate fingerprint in keyring: {'d' * 64!r}"
 
     # Threshold is defined over current keys alone; legacy keys never raise it.
     with pytest.raises(SignError) as caught:
         KeyringSpec(
             (current,),
             2,
-            legacy_keys=(KeySpec("old", "fp-old", "spki-sha256"),),
+            legacy_keys=(KeySpec("old", "d" * 64, "spki-sha256"),),
         )
     assert str(caught.value) == "keyring threshold 2 exceeds key count 1"
 
@@ -1687,8 +1688,8 @@ def test_verify_any_generation_requires_material_and_threshold_one() -> None:
 
     wide = KeyringSpec(
         keys=(
-            KeySpec("a", "fp-a", "spki-sha256"),
-            KeySpec("b", "fp-b", "spki-sha256"),
+            KeySpec("a", "a" * 64, "spki-sha256"),
+            KeySpec("b", "b" * 64, "spki-sha256"),
         ),
         threshold=2,
     )
@@ -2075,3 +2076,336 @@ def test_verify_any_generation_attempt_order_is_declaration_order(
         == "zz-current"
     )
     assert calls == ["zz-current"]
+
+
+# --- 0.6.2 review, L7 finding 7: a KeySpec pin is a lowercase SHA-256 hex digest
+
+
+@pytest.mark.parametrize(
+    "fingerprint",
+    [
+        "A" * 64,
+        "a" * 64 + "\n",
+        b"a" * 64,
+        "sha256:" + "a" * 64,
+        "a" * 63,
+        None,
+    ],
+    ids=["uppercase", "newline", "bytes", "prefixed", "short", "none"],
+)
+def test_key_spec_refuses_a_fingerprint_that_can_never_match(
+    fingerprint: object,
+) -> None:
+    """Only ``scheme`` was checked, so each of these constructed and then
+    refused every key as a "mismatch" printing the same digest."""
+
+    with pytest.raises(SignError, match="must be 64 lowercase hex characters"):
+        KeySpec("k", fingerprint, "spki-sha256")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("key_id", [["k"], {"k": 1}, 1, None])
+def test_key_spec_refuses_a_key_id_that_is_not_a_str(key_id: object) -> None:
+    with pytest.raises(SignError, match="^key_id must be a str"):
+        KeySpec(key_id, "a" * 64, "spki-sha256")  # type: ignore[arg-type]
+
+
+def test_a_str_subclass_pin_cannot_accept_a_stranger_key() -> None:
+    """A pin whose ``__ne__`` always answered False compared equal to any
+    computed fingerprint, so a stranger's key and signature satisfied the
+    keyring."""
+
+    class Agreeable(str):
+        def __ne__(self, other: object) -> bool:
+            return False
+
+    with pytest.raises(SignError, match="must be 64 lowercase hex characters"):
+        KeySpec("k", Agreeable("a" * 64), "spki-sha256")
+
+
+def test_presented_key_ids_of_mixed_type_refuse_as_sign_errors() -> None:
+    private_a, public_a = generate_signing_keypair()
+    ring = KeyringSpec((KeySpec("a", spki_sha256(public_a), "spki-sha256"),), 1)
+    signature = sign_payload(private_a, b"p", domain=b"")
+    with pytest.raises(SignError, match="presented signature key_id must be a str"):
+        verify_threshold(
+            b"p", {7: bytes(64), "z": bytes(64)}, {}, ring,  # type: ignore[dict-item]
+            domain=b"", label="r", allow_legacy=False,
+        )
+    with pytest.raises(SignError, match="presented public key key_id must be a str"):
+        verify_threshold(
+            b"p", {"a": signature}, {"a": public_a, 1: public_a},  # type: ignore[dict-item]
+            ring, domain=b"", label="r", allow_legacy=False,
+        )
+    with pytest.raises(SignError, match="presented public key key_id must be a str"):
+        verify_any_generation(
+            b"p", signature, {1: public_a},  # type: ignore[dict-item]
+            ring, domain=b"", label="r",
+        )
+
+
+def test_a_bytes_subclass_signature_is_refused_for_its_type() -> None:
+    """0.6.2 review, L7 finding 8: "must be exactly 64 raw bytes; found=64"."""
+
+    class Signature(bytes):
+        pass
+
+    private_key, public_key = generate_signing_keypair()
+    signature = Signature(sign_payload(private_key, b"p", domain=b""))
+    with pytest.raises(SignError) as caught:
+        verify_signature_bytes(
+            b"p",
+            signature,
+            public_key,
+            public_key_filename="producer.pub",
+            spki_sha256=None,
+            label="x",
+        )
+    assert str(caught.value) == (
+        "producer signature for x must be exactly 64 raw bytes; "
+        "found=Signature (a bytes subclass)"
+    )
+    ring = KeyringSpec((KeySpec("a", spki_sha256(public_key), "spki-sha256"),), 1)
+    with pytest.raises(SignError) as caught:
+        verify_any_generation(
+            b"p", signature, {"a": public_key}, ring, domain=b"", label="r"
+        )
+    assert str(caught.value) == (
+        "signature for r must be exactly 64 raw bytes; "
+        "found=Signature (a bytes subclass)"
+    )
+    # The ported texts are unchanged for exact bytes and for non-bytes.
+    with pytest.raises(SignError, match="found=3$"):
+        verify_signature_bytes(
+            b"p", b"abc", public_key, public_key_filename="p", spki_sha256=None,
+            label="x",
+        )
+    with pytest.raises(SignError, match="found=non-bytes$"):
+        verify_signature_bytes(
+            b"p", "abc", public_key, public_key_filename="p",  # type: ignore[arg-type]
+            spki_sha256=None, label="x",
+        )
+
+
+# --- 0.6.2 review, L7 finding 5: the OpenSSL fallback accepts what the
+# cryptography path accepts, and nothing else
+
+
+def _p224_key_with_a_64_byte_signature(payload: bytes) -> tuple[bytes, bytes]:
+    from cryptography.hazmat.primitives import hashes
+
+    key = ec.generate_private_key(ec.SECP224R1())
+    for _attempt in range(200):
+        signature = key.sign(payload, ec.ECDSA(hashes.SHA256()))
+        if len(signature) == 64:
+            public_pem = key.public_key().public_bytes(
+                serialization.Encoding.PEM,
+                serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+            return public_pem, signature
+    raise AssertionError("no 64-byte P-224 signature in 200 tries")
+
+
+def test_forced_openssl_path_refuses_what_the_cryptography_path_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl is not installed")
+
+    private_key_pem, public_key_pem = generate_signing_keypair()
+    payload = b"payload"
+    signature = sign_payload(private_key_pem, payload, domain=b"")
+    public_key = serialization.load_pem_public_key(public_key_pem)
+    der_spki = public_key.public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    p224_pem, p224_signature = _p224_key_with_a_64_byte_signature(payload)
+    cases = {
+        "der_spki": (signature, der_spki),
+        "private_key_pem": (signature, private_key_pem),
+        "p224_unpinned": (p224_signature, p224_pem),
+    }
+    for name, (candidate_signature, key_bytes) in cases.items():
+        crypto = _outcome(
+            lambda: _verify(payload, candidate_signature, key_bytes, pin=None)
+        )
+        with monkeypatch.context() as patch:
+            patch.setattr(sign_module, "CRYPTOGRAPHY_AVAILABLE", False)
+            fallback = _outcome(
+                lambda: _verify(payload, candidate_signature, key_bytes, pin=None)
+            )
+        assert crypto[0] == "refused", name
+        assert fallback[0] == "refused", (name, fallback)
+    with monkeypatch.context() as patch:
+        patch.setattr(sign_module, "CRYPTOGRAPHY_AVAILABLE", False)
+        assert _outcome(
+            lambda: _verify(payload, p224_signature, p224_pem, pin=None)
+        ) == ("refused", "producer public key is not Ed25519: producer-ed25519.pub")
+        assert _outcome(
+            lambda: _verify(payload, signature, private_key_pem, pin=None)
+        ) == (
+            "refused",
+            "cannot decode producer Ed25519 public key: producer-ed25519.pub",
+        )
+        # The Ed25519 control still verifies on the fallback.
+        assert _outcome(
+            lambda: _verify(payload, signature, public_key_pem, pin=None)
+        ) == ("accepted", "")
+
+
+def test_forced_openssl_path_names_why_it_cannot_verify_the_empty_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """0.6.2 review, L7 finding 6: ``pkeyutl -rawin`` cannot take zero bytes.
+
+    The fallback refused a valid signature over ``b""`` as "signature
+    verification failed", blaming the signature for a tool limit, while the
+    cryptography path accepted it. No OpenSSL command the fallback can rely
+    on verifies the empty message (``dgst -verify`` did with OpenSSL 3.6 and
+    refused a valid signature on the CI runners), so it still refuses, on
+    every version, and says why.
+    """
+
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl is not installed")
+    private_key_pem, public_key_pem = generate_signing_keypair()
+    _, other_public_key_pem = generate_signing_keypair()
+    signature = sign_payload(private_key_pem, b"", domain=b"")
+    assert _outcome(lambda: _verify(b"", signature, public_key_pem, pin=None)) == (
+        "accepted",
+        "",
+    )
+    monkeypatch.setattr(sign_module, "CRYPTOGRAPHY_AVAILABLE", False)
+    reason = (
+        "producer Ed25519 signature over an empty message for artifact.sig "
+        "cannot be verified without the cryptography package"
+    )
+    for key in (public_key_pem, other_public_key_pem):
+        for candidate in (signature, bytes(64)):
+            assert _outcome(lambda: _verify(b"", candidate, key, pin=None)) == (
+                "refused",
+                reason,
+            )
+    # A pin mismatch is still reported first, as on the cryptography path.
+    assert _outcome(
+        lambda: _verify(b"", signature, other_public_key_pem, pin=_spki_pin(public_key_pem))
+    )[1].startswith("producer public-key SPKI is not code-pinned")
+
+
+def test_forced_openssl_path_agrees_with_cryptography_over_short_payloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Differential over the payload sizes beside the empty-message edge:
+    every size from one byte up, signature and tamper answers the same on
+    both paths. The empty message is the test above."""
+
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl is not installed")
+    private_key_pem, public_key_pem = generate_signing_keypair()
+    calls: dict[tuple[int, str], Callable[[], None]] = {}
+    for size in (1, 2, 3, 31, 32, 33, 64):
+        payload = bytes((index * 37 + 11) % 256 for index in range(size))
+        signature = sign_payload(private_key_pem, payload, domain=b"")
+        flipped = bytes([signature[0] ^ 1]) + signature[1:]
+        tampered_payload = payload + b"\x00"
+        for tamper, arguments in {
+            "none": (payload, signature),
+            "signature": (payload, flipped),
+            "payload": (tampered_payload, signature),
+        }.items():
+            calls[(size, tamper)] = (
+                lambda arguments=arguments: _verify(
+                    *arguments, public_key_pem, pin=None
+                )
+            )
+    crypto = {key: _outcome(call) for key, call in calls.items()}
+    monkeypatch.setattr(sign_module, "CRYPTOGRAPHY_AVAILABLE", False)
+    fallback = {key: _outcome(call) for key, call in calls.items()}
+    assert fallback == crypto
+    assert all(
+        outcome[0] == ("accepted" if tamper == "none" else "refused")
+        for (_size, tamper), outcome in crypto.items()
+    )
+
+
+# --- 0.6.2 review, L7 finding 9: the key is read from inside anchor_dir only
+
+
+@pytest.mark.parametrize("filename", [None, 7, b"producer.pub", pathlib.Path("producer.pub")])
+def test_read_producer_public_key_refuses_non_string_filenames(
+    tmp_path: pathlib.Path, filename: object
+) -> None:
+    """Filename type validation runs before any path join or filesystem read."""
+
+    with pytest.raises(SignError, match="^producer public key filename must be a str$"):
+        read_producer_public_key(
+            tmp_path, ProducerKeySpec(filename, "0" * 64)  # type: ignore[arg-type]
+        )
+
+
+def test_read_producer_public_key_stays_inside_the_anchor_directory(
+    tmp_path: pathlib.Path,
+) -> None:
+    anchors = tmp_path / "anchors"
+    anchors.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "producer.pub").write_bytes(b"outside bytes")
+    (anchors / "linked").symlink_to(outside, target_is_directory=True)
+    nested = anchors / "keys"
+    nested.mkdir()
+    (nested / "producer.pub").write_bytes(b"nested bytes")
+
+    for filename in (
+        "linked/producer.pub",
+        "../outside/producer.pub",
+        str(outside / "producer.pub"),
+        "keys/../../outside/producer.pub",
+        "",
+        "keys/./producer.pub",
+    ):
+        spec = ProducerKeySpec(filename, "0" * 64)
+        with pytest.raises(SignError) as caught:
+            read_producer_public_key(anchors, spec)
+        assert str(caught.value) == (
+            f"missing or non-regular producer public key: {anchors / filename}"
+        ), filename
+
+    assert (
+        read_producer_public_key(anchors, ProducerKeySpec("keys/producer.pub", "0" * 64))
+        == b"nested bytes"
+    )
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads files mode 000")
+def test_an_unreadable_producer_public_key_is_a_sign_error(
+    tmp_path: pathlib.Path,
+) -> None:
+    anchors = tmp_path / "anchors"
+    anchors.mkdir()
+    key = anchors / "unreadable.pub"
+    key.write_bytes(b"key")
+    key.chmod(0)
+    try:
+        with pytest.raises(
+            SignError, match="^cannot read producer public key: "
+        ):
+            read_producer_public_key(anchors, ProducerKeySpec("unreadable.pub", "0" * 64))
+    finally:
+        key.chmod(0o600)
+
+
+def test_the_retired_key_claim_names_the_default_that_makes_it_conditional() -> None:
+    """0.6.2 review, L7 finding 12: "retired keys verify immutable history
+    only" was unconditional, but ``verify_any_generation`` tries retired keys
+    unless the caller says ``allow_legacy=False`` (the default is intended
+    and pinned elsewhere). The README and the module now say the condition."""
+
+    readme = (pathlib.Path(__file__).resolve().parents[1] / "README.md").read_text(
+        encoding="utf-8"
+    )
+    line = next(item for item in readme.splitlines() if item.startswith("- `receipt.sign`"))
+    assert "retired keys verify immutable history only" not in line
+    assert "`verify_any_generation` takes as its default" in line
+    module_doc = " ".join((sign_module.__doc__ or "").split())
+    assert "Legacy keys can vouch only where the caller explicitly" not in module_doc
+    assert "a caller who says nothing gets legacy verification" in module_doc

@@ -3,12 +3,14 @@ from __future__ import annotations
 import builtins
 import hashlib
 import pathlib
+import sys
 import types
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
 from typing import Any
 
 import pytest
+from hypothesis import HealthCheck, given, settings, strategies as st
 
 import receipt.verify as verify_module
 from receipt.corpus import CorpusVerification
@@ -324,25 +326,132 @@ def test_load_spec_accepts_utf8_declarations_and_a_bom(
     assert loaded.verification.name == "règles"
 
 
+@settings(
+    max_examples=80,
+    deadline=None,
+    derandomize=True,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+@given(
+    prefix=st.sampled_from(
+        [
+            b"",
+            b"# -*- coding: utf-8 -*-\n",
+            b"# coding: utf8\n",
+            b"\xef\xbb\xbf",
+            b"\xef\xbb\xbf# coding: utf-8\n",
+        ]
+    ),
+    annotation=st.sampled_from(
+        ["int", "str", "list[int]", "dict[str, int]", "tuple[int, ...]"]
+    ),
+    future_annotations=st.booleans(),
+    previous_present=st.booleans(),
+)
+def test_utf8_spec_compilation_preserves_normal_module_semantics(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prefix: bytes,
+    annotation: str,
+    future_annotations: bool,
+    previous_present: bool,
+) -> None:
+    """UTF-8 checks preserve annotations, class module lookup, and module state."""
+
+    future = b"from __future__ import annotations\n" if future_annotations else b""
+    expected = repr(annotation) if future_annotations else annotation
+    source = prefix + future + SPEC_SOURCE + (
+        "\nimport dataclasses, sys\n"
+        "@dataclasses.dataclass(frozen=True)\n"
+        "class Probe:\n"
+        f"    value: {annotation}\n"
+        f"assert Probe.__annotations__['value'] == {expected}\n"
+        "assert sys.modules[__name__].__dict__ is globals()\n"
+    ).encode()
+    module_name = "_receipt_consumer_spec"
+    sentinel = types.ModuleType(module_name)
+    with monkeypatch.context() as patch:
+        if previous_present:
+            patch.setitem(sys.modules, module_name, sentinel)
+        else:
+            patch.delitem(sys.modules, module_name, raising=False)
+
+        loaded = load_spec(
+            _spec_file(tmp_path, source),
+            expect_sha256=hashlib.sha256(source).hexdigest(),
+        )
+
+        assert loaded.verification.name == "loaded-spec-test"
+        if previous_present:
+            assert sys.modules[module_name] is sentinel
+        else:
+            assert module_name not in sys.modules
+
+
 @pytest.mark.parametrize(
-    ("source", "detail"),
+    "source",
     [
-        (b"# coding: bogus\n" + SPEC_SOURCE, "unknown encoding: bogus"),
-        (b"x = '\xff'\n" + SPEC_SOURCE, "\\xff"),
+        b"# coding: bogus\n" + SPEC_SOURCE,
+        b"x = '\xff'\n" + SPEC_SOURCE,
     ],
 )
-def test_load_spec_keeps_the_compilers_own_refusals(
-    tmp_path: pathlib.Path, source: bytes, detail: str
+def test_load_spec_keeps_unknown_codec_and_invalid_utf8_refusal_details(
+    tmp_path: pathlib.Path, source: bytes
 ) -> None:
-    path = tmp_path / "spec.py"
-    path.write_bytes(source)
+    _assert_load_spec_keeps_compiler_refusal(tmp_path, source)
 
-    with pytest.raises(VerifySpecError) as caught:
+
+def _assert_load_spec_keeps_compiler_refusal(
+    tmp_path: pathlib.Path, source: bytes
+) -> None:
+    path = _spec_file(tmp_path, source)
+    resolved = path.resolve()
+    with pytest.raises(SyntaxError) as compiler_caught:
+        compile(source, str(resolved), "exec", dont_inherit=True)
+
+    with pytest.raises(VerifySpecError) as loader_caught:
         load_spec(path)
 
-    message = str(caught.value)
-    assert message.startswith(f"spec module raised on load: {path.resolve()}: ")
-    assert detail in message
+    assert str(loader_caught.value) == (
+        f"spec module raised on load: {resolved}: {compiler_caught.value}"
+    )
+    cause = loader_caught.value.__cause__
+    assert type(cause) is type(compiler_caught.value)
+    assert cause.args == compiler_caught.value.args
+
+
+@pytest.mark.parametrize(
+    "source",
+    [b"(", b"\x00", b"\xff", b"# coding: no-such-encoding\n"],
+    ids=["syntax", "null-byte", "invalid-utf8", "unknown-encoding"],
+)
+def test_load_spec_keeps_the_compilers_own_refusals(
+    tmp_path: pathlib.Path, source: bytes
+) -> None:
+    _assert_load_spec_keeps_compiler_refusal(tmp_path, source)
+
+
+@settings(
+    max_examples=500,
+    deadline=None,
+    derandomize=True,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+@given(
+    prefix=st.text(
+        alphabet=st.characters(min_codepoint=32, max_codepoint=126), max_size=40
+    ),
+    invalid_byte=st.sampled_from([*range(0x80, 0xC0), *range(0xF5, 0x100)]),
+)
+def test_load_spec_preserves_compiler_refusals_for_invalid_utf8(
+    tmp_path: pathlib.Path, prefix: str, invalid_byte: int
+) -> None:
+    """Every invalid UTF-8 byte stays refused with the compiler's own message."""
+
+    source = (
+        b"# coding: utf-8\n# " + prefix.encode() + b"\n" + bytes([invalid_byte]) + b"\n"
+    )
+    _assert_load_spec_keeps_compiler_refusal(tmp_path, source)
 
 
 JOURNAL_BYTES = b'{"one":"row"}\n'
@@ -360,6 +469,8 @@ def _install_verification_pipeline(
     materialized_anchor: str = ANCHOR_DIGEST,
     verified_anchor: str | None = None,
     object_failure: str | None = None,
+    close_revision: str | None = None,
+    close_error: BaseException | None = None,
 ) -> dict[str, Any]:
     """Install a recording snapshot around the spanning composition.
 
@@ -401,6 +512,8 @@ def _install_verification_pipeline(
 
     class FakeSnapshot:
         def __init__(self, revision: str) -> None:
+            self.revision = revision
+            self.close_errors: tuple[BaseException, ...] = ()
             if revision == "base-ref":
                 self.commit = BASE_COMMIT
                 self.tree = BASE_TREE
@@ -435,8 +548,18 @@ def _install_verification_pipeline(
         def __enter__(self) -> FakeSnapshot:
             return self
 
-        def __exit__(self, *args: object) -> None:
-            del args
+        def __exit__(
+            self, _type: object, exc: BaseException | None, _tb: object
+        ) -> None:
+            if self.revision == close_revision:
+                failure = close_error if close_error is not None else SnapshotError(
+                    "repository configuration changed during verification"
+                )
+                self.close_errors = (failure,)
+                if exc is not None:
+                    exc.add_note(f"Snapshot close also failed: {failure}")
+                else:
+                    raise failure
 
         def assert_ancestor(self, base: FakeSnapshot) -> str:
             calls["ancestor"] = (self, base)
@@ -946,3 +1069,215 @@ def test_attribute_verdict_is_independent_of_ignorecase(
         "releases/anchors/alpha-root.pem"
     )
     assert results[0]["passesCompleted"] == []
+
+
+# A failed closure never leaves an affected claim established, even when a
+# binding or declaration exception is already unwinding either snapshot.
+@pytest.mark.parametrize("phase", ["binding", "declaration"])
+@pytest.mark.parametrize("close_revision", ["candidate-ref", "base-ref"])
+def test_close_failure_invalidates_claims_during_a_failed_pass(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    close_revision: str,
+) -> None:
+    _install_verification_pipeline(monkeypatch, close_revision=close_revision)
+    loaded = load_spec(
+        _spec_file(tmp_path),
+        expect_sha256=hashlib.sha256(SPEC_SOURCE).hexdigest(),
+    )
+
+    def fail_pass(*_args: object, **_kwargs: object) -> None:
+        raise verify_module.CorpusError(f"{phase} failed before snapshot closure")
+
+    operation = (
+        "verify_corpus_binding" if phase == "binding" else "verify_declarations"
+    )
+    monkeypatch.setattr(verify_module, operation, fail_pass)
+    result = run_verification(
+        tmp_path,
+        loaded,
+        commit="candidate-ref",
+        base_ref="base-ref",
+        expect_commit=CANDIDATE_COMMIT,
+        verify_objects=True,
+    )
+    payload = result_to_dict(result)
+
+    assert payload["verdict"] == "FAIL"
+    assert payload["passesCompleted"] == []
+    assert payload["scope"]["established"] == []
+    assert result.chain is None and result.corpus is None
+    assert result.object_store is None
+    assert payload["objectStore"] == {"requested": True, "report": None}
+    assert [item.name for item in result.passes] == ["custody", "binding"]
+    assert (
+        "repository configuration changed during verification"
+        in result.passes[0].failure
+    )
+
+
+def test_a_pinned_missing_gate_cannot_hide_concurrent_close_failure(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The declaration error is a real absent gate; only the writer is injected."""
+
+    from corpus_fixture import _git, build_corpus
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    build_corpus(root, tmp_path / "keys")
+    commit = _git(root, "rev-parse", "HEAD")
+    spec_path = tmp_path / "auditor-spec.py"
+    spec_path.write_bytes(
+        (root / "verification/spec.py").read_bytes()
+        + b"\nimport dataclasses\n"
+        + b"SPEC = dataclasses.replace(SPEC, corpus=dataclasses.replace(\n"
+        + b"    SPEC.corpus, required_gates=SPEC.corpus.required_gates | "
+        + b"frozenset({'audit/missing'})))\n"
+    )
+    loaded = load_spec(
+        spec_path,
+        expect_sha256=hashlib.sha256(spec_path.read_bytes()).hexdigest(),
+    )
+    control = run_verification(
+        root, loaded, base_ref=commit, expect_commit=commit
+    )
+    control_payload = result_to_dict(control)
+    assert control_payload["spec"]["pinned"] is True
+    assert control_payload["passesCompleted"] == ["history", "custody", "binding"]
+    assert len(control_payload["scope"]["established"]) == 3
+    assert "'audit/missing'" in control.passes[-1].failure
+
+    original = verify_module.verify_declarations
+
+    def declarations_with_concurrent_writer(
+        *args: object, **kwargs: object
+    ) -> object:
+        with open(root / ".git" / "config", "a") as handle:
+            handle.write("[receiptprobe]\n\tconcurrent = 1\n")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        verify_module, "verify_declarations", declarations_with_concurrent_writer
+    )
+    result = run_verification(
+        root, loaded, base_ref=commit, expect_commit=commit
+    )
+    payload = result_to_dict(result)
+    assert payload["spec"]["pinned"] is True
+    assert payload["verdict"] == "FAIL"
+    assert payload["passesCompleted"] == []
+    assert payload["scope"]["established"] == []
+    assert result.chain is None and result.corpus is None
+    assert (
+        "repository configuration changed during verification"
+        in result.passes[0].failure
+    )
+
+
+def test_an_unprintable_close_error_still_invalidates_claims(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnprintableCloseError(BaseException):
+        def __str__(self) -> str:
+            raise SystemExit(0)
+
+    _install_verification_pipeline(
+        monkeypatch,
+        close_revision="candidate-ref",
+        close_error=UnprintableCloseError(),
+    )
+    loaded = load_spec(_spec_file(tmp_path))
+
+    def fail_declaration(*_args: object, **_kwargs: object) -> None:
+        raise verify_module.CorpusError("declaration failed")
+
+    monkeypatch.setattr(verify_module, "verify_declarations", fail_declaration)
+    result = run_verification(tmp_path, loaded, commit="candidate-ref")
+    payload = result_to_dict(result)
+
+    assert payload["passesCompleted"] == []
+    assert payload["scope"]["established"] == []
+    assert result.passes[0].failure == (
+        "UnprintableCloseError (its message could not be rendered)"
+    )
+
+
+@pytest.mark.parametrize("phase", ["custody", "binding", "declaration"])
+def test_a_pass_failure_with_clean_closure_keeps_earlier_claims(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    _install_verification_pipeline(monkeypatch)
+    loaded = load_spec(_spec_file(tmp_path))
+
+    def fail_pass(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError(f"{phase} failed")
+
+    operation = {
+        "custody": "verify_release_chain",
+        "binding": "verify_corpus_binding",
+        "declaration": "verify_declarations",
+    }[phase]
+    monkeypatch.setattr(verify_module, operation, fail_pass)
+    result = run_verification(
+        tmp_path, loaded, base_ref="base-ref", expect_commit=CANDIDATE_COMMIT
+    )
+    payload = result_to_dict(result)
+    expected = ["history", "custody", "binding"][:
+        {"custody": 1, "binding": 2, "declaration": 3}[phase]
+    ]
+    assert payload["passesCompleted"] == expected
+    assert len(payload["scope"]["established"]) == len(expected)
+    assert next(item for item in result.passes if not item.ok).name == phase
+
+
+@settings(
+    max_examples=20,
+    deadline=None,
+    derandomize=True,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+@given(
+    phase=st.sampled_from(["custody", "binding", "declaration"]),
+    close_revision=st.sampled_from(["candidate-ref", "base-ref"]),
+    message=st.text(max_size=30),
+)
+def test_a_close_failure_revokes_all_claims_for_any_pass_failure(
+    tmp_path: pathlib.Path,
+    phase: str,
+    close_revision: str,
+    message: str,
+) -> None:
+    """Every tree-derived claim is revoked when either snapshot fails closure."""
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _install_verification_pipeline(
+            monkeypatch, close_revision=close_revision,
+            close_error=SnapshotError(message),
+        )
+        loaded = load_spec(_spec_file(tmp_path))
+
+        def fail_pass(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError(f"{phase} failed")
+
+        operation = {
+            "custody": "verify_release_chain",
+            "binding": "verify_corpus_binding",
+            "declaration": "verify_declarations",
+        }[phase]
+        monkeypatch.setattr(verify_module, operation, fail_pass)
+        result = run_verification(
+            tmp_path, loaded, commit="candidate-ref", base_ref="base-ref",
+            expect_commit=CANDIDATE_COMMIT, verify_objects=True,
+        )
+    payload = result_to_dict(result)
+    assert payload["verdict"] == "FAIL"
+    assert payload["passesCompleted"] == []
+    assert payload["scope"]["established"] == []
+    assert result.chain is None and result.corpus is None
+    assert result.object_store is None

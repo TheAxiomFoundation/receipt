@@ -1,5 +1,6 @@
 """D17: ordered primary/notes and physical cleanup with completed evidence."""
 from datetime import datetime, timezone
+from copy import deepcopy
 import hashlib
 from pathlib import Path
 from types import SimpleNamespace
@@ -150,6 +151,35 @@ def composed_close(m, repo, patch, mask, history, phase, body):
                 "chain": result.chain is not None, "corpus": result.corpus is not None}
     result = outcome(call)
     assert faults.owners
+    if results and hasattr(faults.owners[0]._state, "close_errors"):
+        # #83's final review revoked claims even when a pass error was already
+        # unwinding. Keep the frozen legacy trace; separately require the
+        # stronger live verdict and the exact closure reason selected by it.
+        answer = results[0]
+        payload = m.verify.result_to_dict(answer)
+        if mask:
+            reasons = {
+                "child": "m3 child close failure",
+                "sentinel": "m3 sentinel audit failure",
+                "configuration": "m3 configuration audit failure",
+                "directory": "OSError: m3 directory cleanup failure",
+            }
+            assert answer.passes == (
+                m.verify.PassResult(
+                    "custody", False, "", "; ".join(reasons[item] for item in mask)
+                ),
+                m.verify.PassResult("binding", False, "", "not reached"),
+            )
+            assert payload["passesCompleted"] == []
+            assert payload["scope"]["established"] == []
+            assert answer.chain is None and answer.corpus is None
+            assert answer.object_store is None
+        elif body == "error":
+            earlier = (["history"] if history and phase != "history" else [])
+            earlier += ["custody", "binding"][
+                : {"history": 0, "custody": 0, "binding": 1, "declaration": 2}[phase]
+            ]
+            assert payload["passesCompleted"] == earlier
     if not mask and body == "none":
         assert result["value"]["ok"]
     if body == "interrupt":
@@ -175,5 +205,23 @@ CASES = {
 def test_cleanup_and_pass_publication(repo, monkeypatch, case):
     from m3_cleanup_expected import OBSERVED
     probe, *args = CASES[case]
-    observed = compare(probe, repo, monkeypatch, *args, expected=OBSERVED[case])
+    expected_live = None
+    if probe is composed_close and args[0] and args[-1] != "interrupt":
+        # e911 deliberately invalidates every affected claim after failed
+        # closure, including when a pass error was already unwinding. Keep
+        # the old exact result authenticated, and assert the stronger live
+        # result while preserving all cleanup/work/notes/body observations.
+        errors = {"child": "m3 child close failure",
+                  "sentinel": "m3 sentinel audit failure",
+                  "configuration": "m3 configuration audit failure",
+                  "directory": "OSError: m3 directory cleanup failure"}
+        expected_live = deepcopy(OBSERVED[case])
+        expected_live["trace"]["result"] = {"value": {
+            "class": "receipt.verify.VerifyResult", "ok": False,
+            "passes": [{"name": "custody", "ok": False, "detail": "",
+                        "failure": "; ".join(errors[name] for name in args[0])},
+                       {"name": "binding", "ok": False, "detail": "", "failure": "not reached"}],
+            "chain": False, "corpus": False}}
+    observed = compare(probe, repo, monkeypatch, *args, expected=OBSERVED[case],
+                       expected_live=expected_live)
     assert all(all(item) for item in observed["trace"]["cleanup"]["physical"])
