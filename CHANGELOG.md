@@ -89,8 +89,9 @@ the append gate at fixture authorities has one keyword to add.
 - `load_spec` refuses a PEP 263 declaration of any source encoding other than
   UTF-8, with `spec declares source encoding <codec>; a spec must be UTF-8 so
   it executes as the text a reviewer reads: <path>`, and executes the program
-  the UTF-8 text compiles to, refusing when the bytes compile to anything
-  else. A pinned spec's bytes could otherwise run code its reviewer never
+  the UTF-8 text compiles to, refusing when the bytes compile to a different program. The two
+  compilations are compared at marshal format 2, so object sharing and
+  interning cannot refuse an identical program. A pinned spec's bytes could otherwise run code its reviewer never
   read. Byte-compilation errors keep their texts and run first. The encoding
   refusal precedes module execution (including its exceptions), missing-SPEC
   and wrong-SPEC-type refusals, so unsafe source never runs to recover a

@@ -494,7 +494,11 @@ def load_spec(
         # Code-object equality compares constants by value, so NaN != NaN
         # falsely rejects identical programs. Marshal preserves float bits
         # and nested code objects for both compilations in this interpreter.
-        if text_code is None or marshal.dumps(text_code) != marshal.dumps(code):
+        # Format 2 is pinned: formats 3+ also record object sharing and
+        # interning, which differ between two compilations of one program
+        # (a set literal shared by two scopes, or a string interned earlier
+        # in the process), and would refuse a valid, declaration-free spec.
+        if text_code is None or marshal.dumps(text_code, 2) != marshal.dumps(code, 2):
             code = None
         else:
             exec(text_code, module.__dict__)  # noqa: S102 - the audited repo's own pins

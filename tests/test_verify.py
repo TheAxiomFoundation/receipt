@@ -5,6 +5,7 @@ import hashlib
 import pathlib
 import sys
 import types
+import uuid
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
 from typing import Any
@@ -1465,3 +1466,27 @@ def test_a_close_failure_revokes_all_claims_for_any_pass_failure(
     assert payload["scope"]["established"] == []
     assert result.chain is None and result.corpus is None
     assert result.object_store is None
+
+
+@pytest.mark.parametrize("shape", ["function", "lambda", "for-loop"])
+def test_load_spec_accepts_a_set_literal_shared_by_two_scopes(
+    tmp_path: pathlib.Path, shape: str
+) -> None:
+    """A declaration-free UTF-8 spec loads even when its two compilations
+    share constants differently.
+
+    The strings are built at runtime: literals in this test file are interned
+    when it compiles, which would hide the marshal-format dependence on
+    interning and object sharing.
+    """
+
+    a, b = "zq" + uuid.uuid4().hex, "zq" + uuid.uuid4().hex
+    literal = f'{{"{a}", "{b}"}}'
+    second = {
+        "function": f"def f():\n    return 'q' in {literal}\n",
+        "lambda": f"g = lambda: 'q' in {literal}\n",
+        "for-loop": f"def h():\n    for _v in {literal}:\n        pass\n",
+    }[shape]
+    path = tmp_path / "spec.py"
+    path.write_bytes(f"A = 'q' in {literal}\n{second}".encode("ascii") + SPEC_SOURCE)
+    assert load_spec(path).verification.name == "loaded-spec-test"
