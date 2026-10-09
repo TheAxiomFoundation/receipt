@@ -37,9 +37,10 @@ import subprocess
 import tempfile
 from dataclasses import replace
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
-from hypothesis import given, settings, strategies as st
+from hypothesis import example, given, settings, strategies as st
 
 from receipt import release_chain
 from receipt.canonical import canonical_bytes, canonical_sha256
@@ -496,6 +497,84 @@ def test_release_history_accepts_an_append_to_a_manifest_directory_outside_the_r
     assert resolved == base_oid
     assert new_files == set()
     assert not any(path.startswith("manifests/") for path in base_entries)
+
+
+@pytest.fixture(scope="module")
+def outside_manifest_standin_history(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[pathlib.Path, str, dict[str, str]]:
+    root = tmp_path_factory.mktemp("outside-standin-history") / "repo"
+    root.mkdir()
+    note = root / "releases" / "published-note.txt"
+    note.parent.mkdir()
+    note.write_bytes(b"published\n")
+    conventional = root / "releases" / "manifests"
+    conventional.mkdir()
+    (conventional / "0000.json").write_bytes(b"{}\n")
+    manifest_roots = ("manifests", "release-data/manifests", "releases-old/manifests")
+    for directory in manifest_roots:
+        manifest = root / directory / "0000.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_bytes(b"{}\n")
+    base_oid = commit_snapshot(root, "publish release and outside manifests")
+    (note.parent / "new-note.txt").write_bytes(b"new\n")
+    (conventional / "0001.json").write_bytes(b"{}\n")
+    for directory in manifest_roots:
+        (root / directory / "0001.json").write_bytes(b"{}\n")
+    appended = commit_snapshot(root, "append to release and outside manifests")
+    for directory in manifest_roots:
+        (root / directory / "0000.json").write_bytes(b'{"rewritten": true}\n')
+    rewritten = commit_snapshot(root, "rewrite outside manifests")
+    note.write_bytes(b"rewritten\n")
+    both_rewritten = commit_snapshot(root, "also rewrite the release root")
+    return root, base_oid, {
+        "append": appended, "outside-rewrite": rewritten, "both-rewritten": both_rewritten,
+    }
+
+
+@settings(max_examples=9, deadline=None, derandomize=True)
+@example(manifest_root="manifests", outcome="outside-rewrite")
+@example(manifest_root="releases/manifests", outcome="append")
+@given(
+    manifest_root=st.sampled_from(
+        ["manifests", "release-data/manifests", "releases-old/manifests"]
+    ),
+    outcome=st.sampled_from(["append", "outside-rewrite", "both-rewritten"]),
+)
+def test_complete_history_standin_compares_outside_manifests(
+    outside_manifest_standin_history: tuple[pathlib.Path, str, dict[str, str]],
+    manifest_root: str, outcome: str,
+) -> None:
+    """A complete stand-in retains outside history and release-root semantics."""
+
+    root, base_oid, candidates = outside_manifest_standin_history
+    spec = SimpleNamespace(
+        release_root_relative=pathlib.PurePosixPath("releases"),
+        manifest_relative=pathlib.PurePosixPath(manifest_root),
+    )
+    with TreeSnapshot.select(root, candidates[outcome]) as candidate:
+        with TreeSnapshot.select(root, base_oid) as base:
+            if outcome == "append":
+                resolved, new_files, base_entries = verify_release_history_immutable(
+                    spec, candidate=candidate, base=base
+                )
+                assert resolved == base_oid
+                assert new_files == {
+                    "releases/new-note.txt", "releases/manifests/0001.json",
+                }
+                assert set(base_entries) == {
+                    "releases/published-note.txt", "releases/manifests/0000.json",
+                }
+            else:
+                with pytest.raises(ReleaseChainError) as caught:
+                    verify_release_history_immutable(spec, candidate=candidate, base=base)
+                changed = (
+                    "releases/published-note.txt" if outcome == "both-rewritten"
+                    else f"{manifest_root}/0000.json"
+                )
+                assert str(caught.value) == (
+                    f"existing release file bytes changed relative to {base_oid}: {changed}"
+                )
 
 
 @pytest.mark.parametrize("outside_error", ["symlink", "changed-bytes"])

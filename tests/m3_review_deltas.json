@@ -13228,9 +13228,25 @@
       "public-path"
     ],
     "differences": {
+      "$.trace.authority.ProtectedSelection": {
+        "expected": 10,
+        "observed": 11
+      },
+      "$.trace.authority.ProtectedTreeView": {
+        "expected": 10,
+        "observed": 11
+      },
+      "$.trace.bodies_after_import.TreeSnapshot._batch": {
+        "expected": 150,
+        "observed": 152
+      },
       "$.trace.bodies_after_import.TreeSnapshot._reaudit_repository_configuration": {
         "expected": "<absent>",
         "observed": 2
+      },
+      "$.trace.bodies_after_import._BatchReader.abandoned": {
+        "expected": 150,
+        "observed": 152
       },
       "$.trace.bodies_after_import.snapshot._git_environment": {
         "expected": 4,
@@ -16522,9 +16538,25 @@
       "shared"
     ],
     "differences": {
+      "$.trace.authority.ProtectedSelection": {
+        "expected": 10,
+        "observed": 11
+      },
+      "$.trace.authority.ProtectedTreeView": {
+        "expected": 10,
+        "observed": 11
+      },
+      "$.trace.bodies_after_import.TreeSnapshot._batch": {
+        "expected": 149,
+        "observed": 151
+      },
       "$.trace.bodies_after_import.TreeSnapshot._reaudit_repository_configuration": {
         "expected": "<absent>",
         "observed": 2
+      },
+      "$.trace.bodies_after_import._BatchReader.abandoned": {
+        "expected": 149,
+        "observed": 151
       },
       "$.trace.bodies_after_import.snapshot._git_environment": {
         "expected": 4,
@@ -16660,9 +16692,17 @@
       "entered"
     ],
     "differences": {
+      "$.bodies.TreeSnapshot._batch": {
+        "expected": 52,
+        "observed": 54
+      },
       "$.bodies.TreeSnapshot._reaudit_repository_configuration": {
         "expected": "<absent>",
         "observed": 2
+      },
+      "$.bodies._BatchReader.abandoned": {
+        "expected": 52,
+        "observed": 54
       },
       "$.bodies.snapshot._git_environment": {
         "expected": 4,
@@ -16671,6 +16711,14 @@
       "$.bodies.snapshot._git_run": {
         "expected": 6,
         "observed": 7
+      },
+      "$.trace.authority.ProtectedSelection": {
+        "expected": 4,
+        "observed": 5
+      },
+      "$.trace.authority.ProtectedTreeView": {
+        "expected": 4,
+        "observed": 5
       }
     },
     "probe": "test_m3_context_substitution.public_matrix"
