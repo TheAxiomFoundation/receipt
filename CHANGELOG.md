@@ -136,9 +136,11 @@ the append gate at fixture authorities has one keyword to add.
   types, and verification uses only those copies. Nonbytes signatures remain
   failed slots; public-key type refusals keep their sorted material-check order.
   Once these snapshots have
-  been validated, callbacks acting through the objects the caller passed in
-  cannot change the verdict. Code inspecting the verifier's frames or the
-  garbage collector is outside this guarantee. A mutable
+  been validated, callbacks that use only the ordinary behaviour of the
+  objects the caller passed in cannot change the verdict. Code that reaches
+  interpreter internals is outside this guarantee: inspecting the verifier's
+  frames or the garbage collector, patching receipt's classes, functions or
+  builtins, or writing memory directly (for example with ctypes). A mutable
   string subclass installed through `object.__setattr__` is refused rather
   than shared with the caller; it cannot turn one signature into two counted
   identities or change a checked fingerprint through a mapping callback.

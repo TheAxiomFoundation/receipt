@@ -752,9 +752,12 @@ def verify_threshold(
     of the checked threshold and generations, including detached key-field
     values, is used throughout. Each caller field, mapping ID and distinct
     mapping value is read once; verification uses the validated copies.
-    Once these snapshots are taken, callbacks acting through the objects the
-    caller passed in cannot change the verdict. Code inspecting the verifier's
-    frames or the garbage collector is outside this guarantee.
+    Once these snapshots are taken,
+    callbacks that use only the ordinary behaviour of the objects the caller
+    passed in cannot change the verdict. Code that reaches interpreter
+    internals is outside this guarantee: inspecting the verifier's frames or
+    the garbage collector, patching receipt's classes, functions or builtins,
+    or writing memory directly (for example with ctypes).
     """
 
     if type(payload) is not bytes:
@@ -865,9 +868,11 @@ def verify_any_generation(
     verification, including calls into the caller's public-key mapping. Each
     caller field, mapping ID and distinct mapping value is read once;
     verification uses the validated copies. Once these snapshots are taken,
-    callbacks acting through the objects the caller passed in cannot change
-    the verdict. Code inspecting the verifier's frames or the garbage collector
-    is outside this guarantee.
+    callbacks that use only the ordinary behaviour of the objects the caller
+    passed in cannot change the verdict. Code that reaches interpreter
+    internals is outside this guarantee: inspecting the verifier's frames or
+    the garbage collector, patching receipt's classes, functions or builtins,
+    or writing memory directly (for example with ctypes).
     """
 
     keyring = _require_keyring(keyring)

@@ -59,13 +59,14 @@ def _swap_on_read(key: KeySpec, field: str, replacement: str, swap_after: int) -
 
     namespace = vars(key)
     seen = 0
+    armed = False
 
     class Name(str):
         __hash__ = str.__hash__
 
         def __eq__(self, other: object) -> bool:
             nonlocal seen
-            if type(other) is str and str.__eq__(other, field):
+            if armed and type(other) is str and str.__eq__(other, field):
                 seen += 1
                 if seen >= swap_after:
                     namespace[self] = replacement
@@ -73,6 +74,7 @@ def _swap_on_read(key: KeySpec, field: str, replacement: str, swap_after: int) -
 
     value = namespace.pop(field)
     namespace[Name(field)] = value
+    armed = True
 
 
 @pytest.mark.parametrize("verifier", ["threshold", "any_generation"])
@@ -130,12 +132,13 @@ def test_keyring_field_snapshot_reads_each_caller_field_once(verifier: str, key_
     ring = KeyringSpec((key,), 1)
     namespace = vars(key)
     reads = {field: 0 for field in ("key_id", "fingerprint", "scheme")}
+    armed = False
 
     class Name(str):
         __hash__ = str.__hash__
 
         def __eq__(self, other: object) -> bool:
-            if type(other) is str and str.__eq__(self, other):
+            if armed and type(other) is str and str.__eq__(self, other):
                 reads[other] += 1
                 assert reads[other] == 1, "caller field reread after its snapshot"
             return str.__eq__(self, other)
@@ -143,6 +146,7 @@ def test_keyring_field_snapshot_reads_each_caller_field_once(verifier: str, key_
     for field in reads:
         value = namespace.pop(field)
         namespace[Name(field)] = value
+    armed = True
     if verifier == "threshold":
         result = verify_threshold(payload, {key_id: signature}, {key_id: pair[1]}, ring,
                                   domain=domain, label="fields-once", allow_legacy=False)
