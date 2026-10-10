@@ -89,7 +89,10 @@ the append gate at fixture authorities has one keyword to add.
 - `load_spec` refuses a PEP 263 declaration of any source encoding other than
   UTF-8, with `spec declares source encoding <codec>; a spec must be UTF-8 so
   it executes as the text a reviewer reads: <path>`, and executes the program
-  the UTF-8 text compiles to, refusing when the bytes compile to a different program. The two
+  the UTF-8 text compiles to, refusing bytes that are not valid UTF-8 with
+  `spec is not valid UTF-8: <path>` and refusing a differing byte/text program
+  with `spec does not compile to the program its UTF-8 text reads as; a source
+  encoding declaration changed it: <path>`. The two
   compilations are compared at marshal format 2, so object sharing and
   interning cannot refuse an identical program. A pinned spec's bytes could otherwise run code its reviewer never
   read. Byte-compilation errors keep their texts and run first. The encoding
@@ -126,9 +129,11 @@ the append gate at fixture authorities has one keyword to add.
   accept exactly a `KeyringSpec` and re-run its checks. A list mutated after
   construction, a subclass with its own `__post_init__`, a stand-in object,
   or `object.__setattr__` could otherwise put a count of zero, NaN or
-  duplicated signers into a threshold. An auditor can now conclude, as 0.6.1
-  said, that a keyring which reaches a verifier names a real signature
-  count. A keyring built from lists still constructs, now hashable. Scalar
+  duplicated signers into a threshold. Both verifiers use a private snapshot
+  of the checked threshold and generations, with detached key-field values,
+  so later caller mapping callbacks cannot change that verification policy.
+  An auditor can now conclude, as 0.6.1 said, that verification uses a real
+  signature count. A keyring built from lists still constructs, now hashable. Scalar
   threshold checks keep their constructor precedence, as do duplicate IDs
   and fingerprints among exact `KeySpec` entries. New iterable and exact-entry
   checks can replace count or duplicate refusals when a generation or entry
@@ -156,6 +161,9 @@ newly enforced pins before downstream release checks, and malformed-keyring
 checks before the signing families named above, plus outside-manifest history
 checks before later chain verification. Tests pin those intended
 first refusals; already-invalid inputs in these families can change text.
+Invalid UTF-8 bytes now say `spec is not valid UTF-8: <path>` instead of
+blaming a source encoding declaration that need not exist; the distinct
+declaration-driven program-mismatch refusal is preserved.
 
 Corrections from a full review of the 0.6.1 code, present in 0.6.1 and 0.6.2
 alike. Several are refusals of inputs those releases accepted; a few are inputs

@@ -301,8 +301,8 @@ def _hidden_marker_spec(marker: pathlib.Path, *, cookie: bytes, framing: str) ->
         (b"# coding: raw_unicode_escape\n", "escaped-newline", "raw-unicode-escape"),
         (b"# -*- coding: unicode_escape -*-\n", "escaped-newline", "unicode-escape"),
         (b"# vim: set fileencoding=utf-7 :\n", "utf-7", "utf-7"),
-        # A lone CR ends line 1 for the compiler, so the declaration on the
-        # next line is honoured although tokenize.detect_encoding misses it.
+        # A lone CR ends the shebang for the compiler. tokenize.detect_encoding
+        # also finds this cookie; the pre-check normalizes CR for other layouts.
         (b"#!/usr/bin/env python\r# coding: raw_unicode_escape\n", "escaped-newline", "raw-unicode-escape"),
     ],
 )
@@ -330,8 +330,9 @@ def test_load_spec_refuses_a_source_encoding_other_than_utf8(
     assert not marker.exists()
 
 
+@pytest.mark.parametrize("pinned", [False, True])
 def test_load_spec_refuses_bytes_that_compile_to_another_program_than_their_text(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, pinned: bool
 ) -> None:
     """The backstop: a declaration the pre-check misses still cannot run code."""
 
@@ -349,13 +350,97 @@ def test_load_spec_refuses_bytes_that_compile_to_another_program_than_their_text
     )
 
     with pytest.raises(VerifySpecError) as caught:
-        load_spec(path)
+        load_spec(
+            path,
+            expect_sha256=hashlib.sha256(path.read_bytes()).hexdigest() if pinned else None,
+        )
 
     assert str(caught.value) == (
         "spec does not compile to the program its UTF-8 text reads as; a source "
         f"encoding declaration changed it: {path.resolve()}"
     )
     assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [b"raise ValueError('later refusal')\n", b"pass\n", b"SPEC = object()\n", SPEC_SOURCE],
+    ids=["execution-error", "missing-SPEC", "wrong-SPEC-type", "valid-SPEC"],
+)
+@pytest.mark.parametrize("pinned", [False, True])
+def test_load_spec_refuses_invalid_utf8_before_execution_and_spec_validation(
+    tmp_path: pathlib.Path, body: bytes, pinned: bool
+) -> None:
+    """Invalid UTF-8 comments refuse without blaming an absent declaration."""
+
+    marker = tmp_path / "spec-executed"
+    source = (
+        b"# caf\xe9\n"
+        + f"open({str(marker)!r}, 'w').close()\n".encode()
+        + body
+    )
+    path = _spec_file(tmp_path, source)
+    compile(source, str(path.resolve()), "exec", dont_inherit=True)
+
+    with pytest.raises(VerifySpecError) as caught:
+        load_spec(
+            path,
+            expect_sha256=hashlib.sha256(source).hexdigest() if pinned else None,
+        )
+
+    assert str(caught.value) == f"spec is not valid UTF-8: {path.resolve()}"
+    assert not marker.exists()
+
+
+@settings(
+    max_examples=40,
+    deadline=None,
+    derandomize=True,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+@given(
+    invalid_byte=st.integers(min_value=0x80, max_value=0xFF),
+    prefix=st.sampled_from([b"# ", b"# caf", b"# coding: utf-8\n# "]),
+    pinned=st.booleans(),
+    previous_present=st.booleans(),
+)
+def test_invalid_utf8_comments_refuse_without_execution_or_module_state_changes(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_byte: int,
+    prefix: bytes,
+    pinned: bool,
+    previous_present: bool,
+) -> None:
+    """A byte compiler's ignored comment cannot bypass the UTF-8 boundary."""
+
+    marker = tmp_path / "spec-executed"
+    source = (
+        prefix + bytes([invalid_byte]) + b"\n"
+        + f"open({str(marker)!r}, 'w').close()\n".encode()
+        + SPEC_SOURCE
+    )
+    path = _spec_file(tmp_path, source)
+    module_name = "_receipt_consumer_spec"
+    sentinel = types.ModuleType(module_name)
+    with monkeypatch.context() as patch:
+        if previous_present:
+            patch.setitem(sys.modules, module_name, sentinel)
+        else:
+            patch.delitem(sys.modules, module_name, raising=False)
+
+        with pytest.raises(VerifySpecError) as caught:
+            load_spec(
+                path,
+                expect_sha256=hashlib.sha256(source).hexdigest() if pinned else None,
+            )
+
+        assert str(caught.value) == f"spec is not valid UTF-8: {path.resolve()}"
+        assert not marker.exists()
+        if previous_present:
+            assert sys.modules[module_name] is sentinel
+        else:
+            assert module_name not in sys.modules
 
 
 @pytest.mark.parametrize("bypass_declaration_check", [False, True])

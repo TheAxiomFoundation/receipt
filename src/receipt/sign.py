@@ -582,18 +582,37 @@ def _check_keyring(keyring: KeyringSpec) -> None:
 
 
 def _require_keyring(keyring: object) -> KeyringSpec:
-    """Accept exactly a KeyringSpec whose invariants still hold.
+    """Snapshot exactly a KeyringSpec whose outer invariants still hold.
 
     A subclass can override ``__post_init__`` and a stand-in object never ran
     it, so either could carry a threshold of zero or NaN into the count.
+    Caller mapping callbacks can run after this check and mutate even frozen
+    fields with ``object.__setattr__``. Keep a private copy of the checked
+    threshold and generations, plus detached key-field values, throughout
+    each verification.
     """
 
     if type(keyring) is not KeyringSpec:
         raise SignError(
             f"keyring must be a KeyringSpec, not {type(keyring).__name__}"
         )
-    _check_keyring(keyring)
-    return keyring
+    snapshot = object.__new__(KeyringSpec)
+    for name in ("keys", "threshold", "legacy_keys"):
+        object.__setattr__(snapshot, name, getattr(keyring, name))
+    # Do not construct through __post_init__: it freezes a mutated list,
+    # whereas verification must retain the existing tuple-only refusal.
+    _check_keyring(snapshot)
+    for name in ("keys", "legacy_keys"):
+        keys: list[KeySpec] = []
+        for key in getattr(snapshot, name):
+            detached = object.__new__(KeySpec)
+            # Preserve the outer-ring check's scope: constituent field
+            # validation is not rerun, but callbacks cannot change our copy.
+            for field in ("key_id", "fingerprint", "scheme"):
+                object.__setattr__(detached, field, getattr(key, field))
+            keys.append(detached)
+        object.__setattr__(snapshot, name, tuple(keys))
+    return snapshot
 
 
 @dataclass(frozen=True)
@@ -681,7 +700,10 @@ def verify_threshold(
 
     Independent input checks retain their precedence. Outer-ring validation
     then precedes all checks that consult the ring, including key policy,
-    material normalization and the final threshold verdict.
+    material normalization and the final threshold verdict. A private snapshot
+    of the checked threshold and generations, including detached key-field
+    values, is used throughout; later caller mapping callbacks cannot change
+    that verification policy.
     """
 
     if type(payload) is not bytes:
@@ -783,7 +805,9 @@ def verify_any_generation(
 
     Outer-ring validation runs first, before the threshold-1, envelope and
     key-material checks. An invalid outer ring therefore replaces their
-    downstream refusal with its own named refusal.
+    downstream refusal with its own named refusal. The checked threshold and
+    generations, plus detached key-field values, are snapshotted for the whole
+    verification, including calls into the caller's public-key mapping.
     """
 
     keyring = _require_keyring(keyring)

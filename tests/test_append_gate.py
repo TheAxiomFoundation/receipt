@@ -3046,9 +3046,8 @@ def test_an_appended_row_must_end_in_exactly_one_lf(
     ledger = candidate.root / CHAIN_SPEC.state_relative
     row = jsonl_line(observation_row(BASE_ROW_COUNT + 1))
     ledger.write_bytes(ledger.read_bytes() + (row + terminator).encode("utf-8"))
-    if terminator == "\r":
-        # A lone CR at the end still needs the LF the ledger ends with.
-        ledger.write_bytes(ledger.read_bytes() + b"\n")
+    # Keep the two inputs distinct: the lone-CR case has no following LF.
+    assert ledger.read_bytes().endswith(terminator.encode("utf-8"))
 
     with pytest.raises(AppendError) as caught:
         if path == "base":

@@ -823,6 +823,153 @@ def test_every_mutation_of_the_callers_lists_leaves_the_keyring_unchanged() -> N
         assert keyring == KeyringSpec((key_a, key_b), 2, legacy_keys=(key_c,))
 
 
+def test_mapping_callback_cannot_lower_the_checked_signature_threshold() -> None:
+    """The threshold verdict uses the ring checked before mapping callbacks."""
+
+    key = KeySpec("a", "0" * 64, "spki-sha256")
+    keyring = KeyringSpec((key,), 1)
+
+    class MutatingKeys(dict[str, bytes]):
+        iterations = 0
+
+        def __iter__(self) -> Iterator[str]:
+            self.iterations += 1
+            if self.iterations == 2:
+                object.__setattr__(keyring, "threshold", 0)
+            return super().__iter__()
+
+    with pytest.raises(SignError) as caught:
+        verify_threshold(
+            b"payload", {}, MutatingKeys(), keyring,
+            domain=b"domain", label="probe", allow_legacy=False,
+        )
+    assert str(caught.value) == (
+        "signature threshold not satisfied for probe: threshold=1; "
+        "satisfied=(); failed=(); absent=('a',)"
+    )
+    assert keyring.threshold == 0
+
+
+@pytest.mark.parametrize("verifier", ["threshold", "any_generation"])
+@pytest.mark.parametrize(
+    "mutation", ["keys", "legacy_keys", "key_id", "fingerprint", "scheme"]
+)
+def test_mapping_callback_cannot_change_checked_keyring_values(
+    verifier: str, mutation: str,
+) -> None:
+    """Both verifiers use detached generations, key identities and key pins."""
+
+    first, second, key_a, key_b = _two_keys()
+    keyring = KeyringSpec((key_a,), 1, legacy_keys=(key_b,))
+    payload, domain = b"payload", b"consumer/v1\0"
+    signature = sign_payload(first[0], payload, domain=domain)
+
+    class MutatingKeys(dict[str, bytes]):
+        iterations = 0
+
+        def __iter__(self) -> Iterator[str]:
+            self.iterations += 1
+            # Threshold's first iteration is its independent key-id check;
+            # the generation verifier checks its ring before that iteration.
+            if self.iterations == (2 if verifier == "threshold" else 1):
+                if mutation in {"keys", "legacy_keys"}:
+                    object.__setattr__(keyring, mutation, ())
+                else:
+                    replacement = {
+                        "key_id": "changed", "fingerprint": "0" * 64,
+                        "scheme": "raw-sha256",
+                    }[mutation]
+                    object.__setattr__(key_a, mutation, replacement)
+            return super().__iter__()
+
+    public_keys = MutatingKeys(a=first[1], b=second[1])
+    if verifier == "threshold":
+        assert verify_threshold(
+            payload, {"a": signature}, public_keys, keyring,
+            domain=domain, label="record", allow_legacy=True,
+        ) == ThresholdVerification(("a",), (), ("b",))
+    else:
+        assert verify_any_generation(
+            payload, signature, public_keys, keyring,
+            domain=domain, label="record", allow_legacy=True,
+        ) == "a"
+    assert public_keys.iterations >= (2 if verifier == "threshold" else 1)
+    if mutation in {"keys", "legacy_keys"}:
+        assert getattr(keyring, mutation) == ()
+    else:
+        assert getattr(key_a, mutation) == {
+            "key_id": "changed", "fingerprint": "0" * 64,
+            "scheme": "raw-sha256",
+        }[mutation]
+
+
+def test_callback_mutations_leave_the_threshold_verdict_at_its_validated_state() -> None:
+    """Changing any outer field after validation preserves its checked verdict."""
+
+    from hypothesis import example, given, settings, strategies as st
+
+    first, _second, key_a, key_b = _two_keys()
+    payload, domain = b"payload", b"consumer/v1\0"
+    signature = sign_payload(first[0], payload, domain=domain)
+
+    @settings(max_examples=30, deadline=None, derandomize=True)
+    @example(field="threshold", value=0)
+    @given(
+        field=st.sampled_from(["threshold", "keys", "legacy_keys"]),
+        value=st.integers(min_value=-5, max_value=5),
+    )
+    def exercise(field: str, value: int) -> None:
+        keyring = KeyringSpec((key_a, key_b), 2)
+
+        class MutatingKeys(dict[str, bytes]):
+            iterations = 0
+
+            def __iter__(self) -> Iterator[str]:
+                self.iterations += 1
+                if self.iterations == 2:
+                    replacement = value if field == "threshold" else (key_a,) * abs(value)
+                    object.__setattr__(keyring, field, replacement)
+                return super().__iter__()
+
+        with pytest.raises(SignError) as caught:
+            verify_threshold(
+                payload, {"a": signature}, MutatingKeys(a=first[1]), keyring,
+                domain=domain, label="record", allow_legacy=True,
+            )
+        assert str(caught.value) == (
+            "signature threshold not satisfied for record: threshold=2; "
+            "satisfied=('a',); failed=(); absent=('b',)"
+        )
+
+    exercise()
+
+
+def test_keyring_freezes_generators_once_into_hashable_generations() -> None:
+    key_a = KeySpec("a", "a" * 64, "spki-sha256")
+    key_b = KeySpec("b", "b" * 64, "spki-sha256")
+    keys = (key for key in (key_a,))
+    legacy = (key for key in (key_b,))
+    keyring = KeyringSpec(keys, 1, legacy_keys=legacy)  # type: ignore[arg-type]
+    expected = KeyringSpec((key_a,), 1, legacy_keys=(key_b,))
+
+    assert type(keyring.keys) is tuple and type(keyring.legacy_keys) is tuple
+    assert keyring == expected and hash(keyring) == hash(expected)
+    assert tuple(keys) == () and tuple(legacy) == ()
+
+
+def test_empty_generator_refusal_precedes_legacy_generator_consumption() -> None:
+    consumed: list[bool] = []
+
+    def legacy() -> Iterator[KeySpec]:
+        consumed.append(True)
+        yield KeySpec("b", "b" * 64, "spki-sha256")
+
+    with pytest.raises(SignError) as caught:
+        KeyringSpec(iter(()), 1, legacy_keys=legacy())  # type: ignore[arg-type]
+    assert str(caught.value) == "keyring must contain at least one key"
+    assert consumed == []
+
+
 def test_a_keyring_subclass_or_stand_in_cannot_reach_a_verifier() -> None:
     first, _second, key_a, _key_b = _two_keys()
 

@@ -401,10 +401,11 @@ def load_spec(
     bytes; a mismatched spec therefore has no opportunity to run.
 
     The bytes must also be the UTF-8 text a reviewer reads: a PEP 263
-    declaration of any other source encoding is refused, and the program
-    executed is the one that text compiles to, so no declaration can turn
-    what reads as a comment into code. Byte-compilation errors retain their
-    original refusal; an encoding refusal precedes execution errors, a missing
+    declaration of any other source encoding is refused, as are bytes that
+    are not valid UTF-8. The program executed is the one that text compiles
+    to, so no declaration can turn what reads as a comment into code.
+    Byte-compilation errors retain their original refusal; an encoding refusal
+    precedes execution errors, a missing
     SPEC, or a SPEC of the wrong type, without executing the module.
     """
 
@@ -466,6 +467,10 @@ def load_spec(
             f"spec declares source encoding {declared}; a spec must be UTF-8 so "
             f"it executes as the text a reviewer reads: {spec_path}"
         )
+    try:
+        text = source.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise VerifySpecError(f"spec is not valid UTF-8: {spec_path}") from exc
 
     # The spec runs the way Python runs the same file as a module (0.6.2
     # review, L5 finding 5). ``dont_inherit=True``: compile() otherwise
@@ -487,9 +492,9 @@ def load_spec(
         # compiled, their UTF-8 reading must compile to the same program.
         try:
             text_code = compile(
-                source.decode("utf-8-sig"), str(spec_path), "exec", dont_inherit=True
+                text, str(spec_path), "exec", dont_inherit=True
             )
-        except (UnicodeDecodeError, SyntaxError, ValueError):
+        except (SyntaxError, ValueError):
             text_code = None
         # Code-object equality compares constants by value, so NaN != NaN
         # falsely rejects identical programs. Marshal preserves float bits
