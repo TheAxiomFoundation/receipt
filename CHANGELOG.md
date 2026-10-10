@@ -56,6 +56,134 @@ through its own words and exception classes.
 
 ## 0.6.3 (unreleased)
 
+Eight corrections to inputs 0.6.2 and 0.6.1 accepted into a verdict that
+said more than was checked. Seven add verification refusals; the
+OpenSSL-fallback fix also stops refusing a valid signature, and stops crashing,
+when the configured key name collides with the fallback's own files or has a
+directory component. One changes an API default, so a caller that points
+the append gate at fixture authorities has one keyword to add.
+
+- Revisions are resolved with Git's commit-graph disabled. The commit-graph
+  is a local cache no object hash covers; when it disagreed with the commit
+  objects it decided which commit a parent-relative revision such as
+  `<oid>~1` named, so a history pass could compare against a base the
+  commits never named. An auditor can now conclude that `~` and `^` follow
+  the parents written in the commit objects, as grafts are refused for.
+- The corpus binding refuses a symlink under a content root whatever its
+  name; a suffixless link uses `content root contains a symlink: '<path>'`.
+  A link without a pinned suffix was skipped as not content, although a
+  checkout resolves it to files no journal row binds, or keeps a tombstoned
+  path readable. An auditor can now conclude that the authenticated tree
+  contains no link beneath a content root. A gitlink, a suffix-bearing link
+  and an 8.3-alias name keep their refusals. Existing binding checks run before the new
+  suffixless-symlink screen; that screen still precedes the composed
+  verification's required-gate declarations.
+- The history pass also compares the manifest directory when the spec keeps
+  it outside `release_root_relative`, a layout `ChainSpec` accepts. Before,
+  `--base-ref` compared no manifest, signature or receipt in that layout, and
+  a rewritten, re-signed, re-witnessed history passed it. For manifests under
+  the release root nothing changes; the returned new files still speak for
+  the release root, so the append gate only gains refusals. Existing
+  release-root history errors keep priority; new outside-manifest history
+  errors precede later chain verification and can replace its first refusal.
+- `load_spec` refuses a PEP 263 declaration of any source encoding other than
+  UTF-8, with `spec declares source encoding <codec>; a spec must be UTF-8 so
+  it executes as the text a reviewer reads: <path>`, and executes the program
+  the UTF-8 text compiles to, refusing bytes that are not valid UTF-8 with
+  `spec is not valid UTF-8: <path>` and refusing a differing byte/text program
+  with `spec does not compile to the program its UTF-8 text reads as; a source
+  encoding declaration changed it: <path>`. The two
+  compilations are compared at marshal format 2, so object sharing and
+  interning cannot refuse an identical program. A pinned spec's bytes could otherwise run code its reviewer never
+  read. Byte-compilation errors keep their texts and run first. The encoding
+  refusal precedes module execution (including its exceptions), missing-SPEC
+  and wrong-SPEC-type refusals, so unsafe source never runs to recover a
+  later diagnostic.
+- `verify_append_gate` and `verify_append_gate_verdict` apply the spec's pins
+  to anchors read from `release_anchor_dir`. Naming that directory used to
+  turn off every pin (producer SPKI, anchor PEM digest, policy OID, and the
+  responder certificate and SPKI pairs, `additional_signers` included), so
+  the 0.6.2 claim about certificate-and-key pairs did not hold in that mode.
+  A caller whose anchor directory holds authorities of its own, such as a
+  test fixture, now says `enforce_production_pins=False`, which is refused
+  without `release_anchor_dir` and for anything but a bool. Named directories
+  must be nonempty paths and are normalized to plain `pathlib.Path`; a path
+  subclass's truth value cannot select the trusted-root anchors instead.
+  **Compatibility:**
+  such a caller refuses with the first pin its fixture fails until it adds
+  the keyword. Each newly enforced pin keeps its existing verification
+  position: producer SPKI before cryptographic signature verification,
+  anchor PEM before receipt inspection, policy OID before receipt trust
+  verification, and responder certificate/SPKI before later time and state
+  checks. Combined invalid inputs can now report a pin refusal first.
+- When ledger checks run, the append gate refuses a carriage return anywhere
+  in the ledger, with
+  `ledger line <n> contains a carriage return; a JSONL row ends with exactly
+  one LF, the framing the release chain verifies`. The gate split rows on CR
+  as well as LF while the release chain frames by LF alone, so one accepted
+  verdict could count rows differently from the manifest it witnessed.
+  Existing chain and binding checks run first, including the release chain's
+  exact CRLF-row refusal.
+- `KeyringSpec` freezes `keys` and `legacy_keys` into tuples and requires
+  exact `KeySpec` entries, and `verify_threshold` and `verify_any_generation`
+  accept exactly a `KeyringSpec` and re-run its checks. A list mutated after
+  construction, a subclass with its own `__post_init__`, a stand-in object,
+  or `object.__setattr__` could otherwise put a count of zero, NaN or
+  duplicated signers into a threshold. Both verifiers read each key field once
+  into a private snapshot, then validate those copies as exact `str` values
+  against `KeySpec`'s constructor rules and uniqueness checks. Presented
+  mappings are copied once with exact string IDs and the required exact value
+  types, and verification uses only those copies. Nonbytes signatures remain
+  failed slots; public-key type refusals keep their sorted material-check order.
+  Once these snapshots have
+  been validated, callbacks that use only the ordinary behaviour of the
+  objects the caller passed in cannot change the verdict. Code that reaches
+  interpreter internals is outside this guarantee: inspecting the verifier's
+  frames or the garbage collector, patching receipt's classes, functions or
+  builtins, or writing memory directly (for example with ctypes). A mutable
+  string subclass installed through `object.__setattr__` is refused rather
+  than shared with the caller; it cannot turn one signature into two counted
+  identities or change a checked fingerprint through a mapping callback.
+  An auditor can now conclude, as 0.6.1 said, that verification uses a real
+  signature count. A keyring built from lists still constructs, now hashable. Scalar
+  threshold checks keep their constructor precedence, as do duplicate IDs
+  and fingerprints among constructor-valid exact `KeySpec` entries. New
+  iterable and exact-entry checks can replace count or duplicate refusals
+  when a generation or entry is unusable, including a `KeySpec` subclass with
+  a duplicate ID or fingerprint. All entry types are checked before any
+  field; all exact field types are checked before their
+  constructor rules and uniqueness. The new field-type refusal is
+  `keyring <field> must be a str; found=<type>` for `key_id`, `fingerprint`
+  and `scheme`. Constructor revalidation also retains
+  `unsupported key fingerprint scheme: <repr>` and
+  `key fingerprint for '<id>' must be 64 lowercase hex characters: <repr>`.
+  At verification, outer-ring type, tuple, count, entry, field and uniqueness
+  checks precede key-policy, public-key normalization, fingerprint,
+  duplicate-material and signature threshold refusals.
+  `verify_any_generation` also runs these checks before its threshold-1,
+  payload/domain, legacy-switch, presented-ID, signature-size,
+  missing-material and no-generation-verifies refusals.
+- The OpenSSL fallback (no `cryptography`) writes the public key to a fixed
+  private file name. The name used to come from the configured key
+  filename, so a configured name could replace the payload or signature
+  file, or, from the release chain, write to the consumer's anchor or crash
+  with a raw `OSError`. The configured name now decides nothing but
+  diagnostics.
+
+Each change has a regression test that fails on the commit before it.
+Existing refusal precedence is preserved where the checks can safely run
+first. The exceptions are non-UTF-8 spec validation before execution and SPEC
+validation, suffixless content symlinks before composed gate declarations,
+newly enforced pins before downstream release checks, and malformed-keyring
+checks before the signing families named above, including exact constituent
+field checks before constructor-value and duplicate refusals, plus
+outside-manifest history checks before later chain verification. Tests pin
+those intended first refusals; already-invalid inputs in these families can
+change text.
+Invalid UTF-8 bytes now say `spec is not valid UTF-8: <path>` instead of
+blaming a source encoding declaration that need not exist; the distinct
+declaration-driven program-mismatch refusal is preserved.
+
 Corrections from a full review of the 0.6.1 code, present in 0.6.1 and 0.6.2
 alike. Several are refusals of inputs those releases accepted; a few are inputs
 they refused for a reason that was not true.

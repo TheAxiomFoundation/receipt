@@ -72,6 +72,8 @@ class ProtectionPlan:
     require_ancestors: bool = False
     # Preserve bytes/text argument spelling until the legacy enter-time admission.
     export_requests: tuple[str | bytes, ...] = ()
+    # Corpus checks bound digests before the added suffixless-link refusal.
+    defer_content_links: bool = field(default=False, kw_only=True)
 
     def __post_init__(self) -> None:
         for item in fields(self):
@@ -672,6 +674,11 @@ class _NameRun:
                         if self.plan.repertoire == "portable" and self.facts.short_suffix(
                             path.rpartition("/")[2], self.plan.content_suffixes):
                             raise _Refusal(Finding("content-short-suffix", stage, (*position, 1), path=path))
+                        if fact.mode == "120000" and not self.plan.defer_content_links:
+                            # No content row, but a checkout resolves it: to a
+                            # directory, it presents files under the root no row
+                            # binds, and it keeps a tombstoned path readable.
+                            raise _Refusal(Finding("content-link", stage, (*position, 2), path=path))
                         continue
                     self.mode_facts[path, "attested-leaf"] = fact
                     if not fact.regular:

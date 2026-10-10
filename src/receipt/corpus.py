@@ -1451,6 +1451,8 @@ def _binding_error(finding) -> CorpusError:
     if finding.kind == "content-symlink":
         return CorpusError("content root contains a symlink where a regular file was "
                            f"recorded: {_quoted(finding.path)}")
+    if finding.kind == "content-link":
+        return CorpusError(f"content root contains a symlink: {_quoted(finding.path)}")
     if finding.kind == "content-mode":
         return CorpusError(f"content root contains a non-regular file: {_quoted(finding.path)}")
     if finding.role == "attested-leaf":
@@ -1525,10 +1527,37 @@ def _content_entries_from_listing(
     """Forward root/mode/suffix selection with the suffixless-link exception."""
     from receipt.protected_tree import evaluate_binding_mapping
 
-    run = evaluate_binding_mapping(entries, _binding_plan(spec, ("content",)), stage="content")
+    run = evaluate_binding_mapping(entries,
+        _binding_plan(spec, ("content",), defer_content_links=True), stage="content")
     if run.findings:
         raise _binding_error(run.findings[0])
     return {path: entries[path] for path in run.selected_paths}
+
+
+def _assert_no_suffixless_content_symlinks(
+    entries: Mapping[str, GitEntry], spec: CorpusSpec, *, policy=None
+) -> None:
+    """Close the content roots after the established binding checks.
+
+    A link without a pinned suffix is no content row, but a checkout resolves
+    it: a directory link presents unbound files, and a link can keep a
+    tombstoned path readable. Checking the same authenticated listing after
+    the old binding checks preserves their first refusal without allowing
+    such a link to reach a successful binding verdict.
+    """
+
+    from receipt.protected_tree import evaluate_binding_mapping
+
+    # Reuse main's content decision over the same admitted, immutable listing.
+    # Its established checks already passed; only deferred links can refuse.
+    plan = _binding_plan(spec, ("content",))
+    if policy is None:
+        run = evaluate_binding_mapping(entries, plan, stage="content")
+        if run.findings:
+            raise _binding_error(run.findings[0])
+    else:
+        view = policy.evaluate(plan, stage="content")
+        view.require(plan.use, render=_binding_error)
 
 
 def _assert_tombstones_absent_from_listing(
@@ -1597,14 +1626,14 @@ def _attested_selections(snapshot, attested, policy):
     return result
 
 
-def _binding_plan(spec, obligations):
+def _binding_plan(spec, obligations, *, defer_content_links=False):
     """Compile binding's admitted roots and suffixes without adding attributes."""
     from receipt.protected_tree import ProtectionPlan
 
     return ProtectionPlan(repertoire=spec.name_repertoire, whole_tree_name_scope=True,
         content_roots=tuple(root.as_posix() for root in spec.content_roots),
         content_suffixes=spec.content_suffixes, phase="binding", use="binding",
-        obligations=obligations)
+        obligations=obligations, defer_content_links=defer_content_links)
 
 
 def _verify_binding_digests(
@@ -1736,7 +1765,7 @@ def _verify_corpus_binding(snapshot, journal_bytes, *, spec, policy=None):
         roots_plan = replace(plan, obligations=("content-roots",))
         roots = policy.evaluate(roots_plan, stage="content-roots")
         roots.require(roots_plan.use, render=_binding_error)
-        content_plan = replace(plan, obligations=("content",))
+        content_plan = replace(plan, obligations=("content",), defer_content_links=True)
         content_view = policy.evaluate(content_plan, stage="content")
         content_selection = content_view.require(content_plan.use, render=_binding_error)
         tree = content_selection.entries_for(snapshot, use=content_plan.use, plan=content_plan)
@@ -1778,6 +1807,7 @@ def _verify_corpus_binding(snapshot, journal_bytes, *, spec, policy=None):
         attested,
         attested_entries,
     )
+    _assert_no_suffixless_content_symlinks(entries, spec, policy=policy)
 
     return CorpusVerification(
         content=tuple(content[path] for path in sorted(content)),

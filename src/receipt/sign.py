@@ -489,8 +489,8 @@ class KeyringSpec:
 
     ``keys`` are the current generation: they sign and verify new material,
     and ``threshold`` is defined over them — an exact ``int`` between 1 and
-    the number of current keys, checked at construction so no other value
-    can reach a comparison. ``legacy_keys`` are retired keys kept only so
+    the number of current keys, checked at construction and verification.
+    ``legacy_keys`` are retired keys kept only so
     immutable pre-rotation history stays verifiable; they never satisfy
     anything unless the caller explicitly allows them.
     """
@@ -502,31 +502,136 @@ class KeyringSpec:
     def __post_init__(self) -> None:
         if not self.keys:
             raise SignError("keyring must contain at least one key")
-        if type(self.threshold) is not int:
-            raise SignError(
-                "keyring threshold must be an integer between 1 and the "
-                f"number of current keys; found={self.threshold!r}"
-            )
-        if self.threshold < 1:
-            raise SignError(
-                f"keyring threshold must be at least 1; found={self.threshold}"
-            )
-        if self.threshold > len(self.keys):
-            raise SignError(
-                f"keyring threshold {self.threshold} exceeds key count "
-                f"{len(self.keys)}"
-            )
-        seen_key_ids: set[str] = set()
-        seen_fingerprints: set[str] = set()
-        for key in (*self.keys, *self.legacy_keys):
-            if key.key_id in seen_key_ids:
-                raise SignError(f"duplicate key_id in keyring: {key.key_id!r}")
-            if key.fingerprint in seen_fingerprints:
+        # Keep the existing scalar-threshold refusals ahead of the new
+        # generation checks. The count check needs the frozen current keys.
+        _check_keyring_threshold(self.threshold)
+        # Freeze both generations: a list the caller keeps could otherwise
+        # change after these checks ran, and the frozen dataclass would
+        # protect nothing.
+        for name in ("keys", "legacy_keys"):
+            value = getattr(self, name)
+            if isinstance(value, (str, bytes)):
                 raise SignError(
-                    f"duplicate fingerprint in keyring: {key.fingerprint!r}"
+                    f"keyring {name} must be an iterable of KeySpec; "
+                    f"found={type(value).__name__}"
                 )
-            seen_key_ids.add(key.key_id)
-            seen_fingerprints.add(key.fingerprint)
+            try:
+                frozen = tuple(value)
+            except TypeError as exc:
+                raise SignError(
+                    f"keyring {name} must be an iterable of KeySpec; "
+                    f"found={type(value).__name__}"
+                ) from exc
+            object.__setattr__(self, name, frozen)
+            if name == "keys":
+                if not frozen:
+                    raise SignError("keyring must contain at least one key")
+                _check_keyring_threshold(self.threshold, len(frozen))
+        _check_keyring(self)
+
+
+def _check_keyring_threshold(threshold: object, key_count: int | None = None) -> None:
+    if type(threshold) is not int:
+        raise SignError(
+            "keyring threshold must be an integer between 1 and the "
+            f"number of current keys; found={threshold!r}"
+        )
+    if threshold < 1:
+        raise SignError(f"keyring threshold must be at least 1; found={threshold}")
+    if key_count is not None and threshold > key_count:
+        raise SignError(f"keyring threshold {threshold} exceeds key count {key_count}")
+
+
+def _check_keyring_outer(keyring: KeyringSpec) -> None:
+    """Check generations, count and every entry type before reading fields."""
+
+    if not keyring.keys:
+        raise SignError("keyring must contain at least one key")
+    for name in ("keys", "legacy_keys"):
+        value = getattr(keyring, name)
+        if type(value) is not tuple:
+            raise SignError(
+                f"keyring {name} must be a tuple of KeySpec; "
+                f"found={type(value).__name__}"
+            )
+    _check_keyring_threshold(keyring.threshold, len(keyring.keys))
+    for key in (*keyring.keys, *keyring.legacy_keys):
+        # A subclass can run code while its fields are read and replace the
+        # outer ring after its count was checked. Refuse it before any read.
+        if type(key) is not KeySpec:
+            raise SignError(
+                f"keyring entries must be KeySpec, not {type(key).__name__}"
+            )
+
+
+def _check_keyring(keyring: KeyringSpec) -> None:
+    """The keyring invariants, at construction and every verification.
+
+    Construction is not the only way to reach a verifier: ``object.__setattr__``
+    reaches past a frozen dataclass, so the verifiers run these checks again.
+    Verification checks detached field copies. Exact immutable field types
+    precede constructor-value checks and uniqueness, so corrupted fields
+    cannot run comparison or hash callbacks.
+    """
+
+    _check_keyring_outer(keyring)
+    for key in (*keyring.keys, *keyring.legacy_keys):
+        for field in ("key_id", "fingerprint", "scheme"):
+            value = getattr(key, field)
+            if type(value) is not str:
+                # Bypass both metaclass hooks and str-subclass formatting.
+                kind = str.__str__(type.__dict__["__name__"].__get__(type(value)))
+                raise SignError(
+                    f"keyring {field} must be a str; found={kind}"
+                )
+    for key in (*keyring.keys, *keyring.legacy_keys):
+        KeySpec.__post_init__(key)
+    seen_key_ids: set[str] = set()
+    seen_fingerprints: set[str] = set()
+    for key in (*keyring.keys, *keyring.legacy_keys):
+        if key.key_id in seen_key_ids:
+            raise SignError(f"duplicate key_id in keyring: {key.key_id!r}")
+        if key.fingerprint in seen_fingerprints:
+            raise SignError(
+                f"duplicate fingerprint in keyring: {key.fingerprint!r}"
+            )
+        seen_key_ids.add(key.key_id)
+        seen_fingerprints.add(key.fingerprint)
+
+
+def _require_keyring(keyring: object) -> KeyringSpec:
+    """Snapshot exactly a KeyringSpec whose constructor invariants still hold.
+
+    A subclass can override ``__post_init__`` and a stand-in object never ran
+    it, so either could carry a threshold of zero or NaN into the count.
+    Caller mapping callbacks can run after this check and mutate even frozen
+    fields with ``object.__setattr__``. Read each original field once, then
+    validate the private copies used throughout each verification.
+    """
+
+    if type(keyring) is not KeyringSpec:
+        raise SignError(
+            f"keyring must be a KeyringSpec, not {type(keyring).__name__}"
+        )
+    snapshot = object.__new__(KeyringSpec)
+    for name in ("keys", "threshold", "legacy_keys"):
+        object.__setattr__(snapshot, name, object.__getattribute__(keyring, name))
+    # Do not construct through __post_init__: it freezes a mutated list,
+    # whereas verification must retain the existing tuple-only refusal.
+    _check_keyring_outer(snapshot)
+    for name in ("keys", "legacy_keys"):
+        keys: list[KeySpec] = []
+        for key in getattr(snapshot, name):
+            detached = object.__new__(KeySpec)
+            # Even an exact KeySpec can have a str-subclass attribute name
+            # in its instance dict. Its lookup can run a callback, so check
+            # the values actually copied rather than rereading the original.
+            for field in ("key_id", "fingerprint", "scheme"):
+                object.__setattr__(detached, field, object.__getattribute__(key, field))
+            keys.append(detached)
+        object.__setattr__(snapshot, name, tuple(keys))
+    _check_keyring(snapshot)
+    return snapshot
 
 
 @dataclass(frozen=True)
@@ -551,6 +656,7 @@ def _key_fingerprint(public_key: Ed25519PublicKey, scheme: str) -> str:
 def _normalize_pinned_public_keys(
     public_keys: Mapping[str, bytes],
     specs: Mapping[str, KeySpec],
+    invalid_key_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Ed25519PublicKey]:
     """Fingerprint-check every supplied key and refuse duplicate material.
 
@@ -563,6 +669,8 @@ def _normalize_pinned_public_keys(
     normalized_public_keys: dict[str, Ed25519PublicKey] = {}
     seen_material: dict[bytes, str] = {}
     for key_id in sorted(set(public_keys)):
+        if key_id in invalid_key_ids:
+            raise SignError("Ed25519 public key must be bytes")
         key_spec = specs[key_id]
         normalized = _load_ed25519_public_key(public_keys[key_id])
         computed = _key_fingerprint(normalized, key_spec.scheme)
@@ -583,16 +691,41 @@ def _normalize_pinned_public_keys(
     return normalized_public_keys
 
 
-def _require_str_key_ids(presented: Mapping[str, bytes], what: str) -> None:
-    """Refuse a presented key_id that is not a str before any set is sorted.
+def _require_str_key_ids(presented: Mapping[str, bytes], what: str) -> tuple[str, ...]:
+    """Capture exact string IDs in one traversal, before any set is sorted.
 
     Ids of mixed types reached ``sorted`` and escaped as TypeError (0.6.2
     review, L7 finding 7).
     """
 
+    key_ids: dict[str, None] = {}
     for key_id in presented:
         if type(key_id) is not str:
             raise SignError(f"presented {what} key_id must be a str: {key_id!r}")
+        key_ids[key_id] = None
+    return tuple(key_ids)
+
+
+def _snapshot_presented(
+    presented: Mapping[str, bytes], key_ids: tuple[str, ...],
+) -> tuple[dict[str, bytes], frozenset[str]]:
+    """Read each captured ID's value once into an exact, immutable-value dict.
+
+    IDs are captured separately to preserve independent-ID and key-policy
+    refusal precedence. Nonbytes values become empty bytes plus a detached
+    invalid-ID set: signatures remain failed slots, while public-key type
+    refusals retain their position in sorted material validation.
+    """
+
+    snapshot: dict[str, bytes] = {}
+    invalid_key_ids: set[str] = set()
+    for key_id in key_ids:
+        value = presented[key_id]
+        if type(value) is not bytes:
+            invalid_key_ids.add(key_id)
+            value = b""
+        snapshot[key_id] = value
+    return snapshot, frozenset(invalid_key_ids)
 
 
 def verify_threshold(
@@ -611,6 +744,20 @@ def verify_threshold(
     material says ``False`` and refuses any keyring-legacy key loudly;
     verification of immutable pre-rotation history says ``True`` and legacy
     keys count toward the threshold (reported in ``legacy_satisfied``).
+
+    Independent input checks retain their precedence. Keyring validation,
+    including exact constituent field types and constructor rules, then
+    precedes all checks that consult the ring, including key policy,
+    material normalization and the final threshold verdict. A private snapshot
+    of the checked threshold and generations, including detached key-field
+    values, is used throughout. Each caller field, mapping ID and distinct
+    mapping value is read once; verification uses the validated copies.
+    Once these snapshots are taken,
+    callbacks that use only the ordinary behaviour of the objects the caller
+    passed in cannot change the verdict. Code that reaches interpreter
+    internals is outside this guarantee: inspecting the verifier's frames or
+    the garbage collector, patching receipt's classes, functions or builtins,
+    or writing memory directly (for example with ctypes).
     """
 
     if type(payload) is not bytes:
@@ -620,25 +767,29 @@ def verify_threshold(
     if type(allow_legacy) is not bool:
         raise SignError("allow_legacy must be a bool")
 
-    _require_str_key_ids(signatures, "signature")
-    _require_str_key_ids(public_keys, "public key")
+    signature_ids = _require_str_key_ids(signatures, "signature")
+    public_key_ids = _require_str_key_ids(public_keys, "public key")
+    keyring = _require_keyring(keyring)
     legacy_ids = {key.key_id for key in keyring.legacy_keys}
     specs = {
         key.key_id: key for key in (*keyring.keys, *keyring.legacy_keys)
     }
-    unknown_key_ids = sorted((set(signatures) | set(public_keys)) - set(specs))
+    presented_ids = set(signature_ids) | set(public_key_ids)
+    unknown_key_ids = sorted(presented_ids - set(specs))
     if unknown_key_ids:
         raise SignError(f"unknown key_id: {unknown_key_ids[0]!r}")
     if not allow_legacy:
-        presented_legacy = sorted(
-            (set(signatures) | set(public_keys)) & legacy_ids
-        )
+        presented_legacy = sorted(presented_ids & legacy_ids)
         if presented_legacy:
             raise SignError(
                 f"legacy key_id refused for new material: {presented_legacy[0]!r}"
             )
 
-    normalized_public_keys = _normalize_pinned_public_keys(public_keys, specs)
+    signatures, _ = _snapshot_presented(signatures, signature_ids)
+    public_keys, invalid_public_key_ids = _snapshot_presented(public_keys, public_key_ids)
+    normalized_public_keys = _normalize_pinned_public_keys(
+        public_keys, specs, invalid_public_key_ids,
+    )
 
     eligible = (
         (*keyring.keys, *keyring.legacy_keys) if allow_legacy else keyring.keys
@@ -708,8 +859,23 @@ def verify_any_generation(
     retired key is tried, a presented retired key_id is refused loudly the
     way ``verify_threshold`` refuses one, and key material is then required
     for the current generation only.
+
+    Keyring validation, including exact constituent field types and
+    constructor rules, runs first, before the threshold-1, envelope and
+    key-material checks. An invalid ring therefore replaces their
+    downstream refusal with its own named refusal. The checked threshold and
+    generations, plus detached key-field values, are snapshotted for the whole
+    verification, including calls into the caller's public-key mapping. Each
+    caller field, mapping ID and distinct mapping value is read once;
+    verification uses the validated copies. Once these snapshots are taken,
+    callbacks that use only the ordinary behaviour of the objects the caller
+    passed in cannot change the verdict. Code that reaches interpreter
+    internals is outside this guarantee: inspecting the verifier's frames or
+    the garbage collector, patching receipt's classes, functions or builtins,
+    or writing memory directly (for example with ctypes).
     """
 
+    keyring = _require_keyring(keyring)
     if keyring.threshold != 1:
         raise SignError(
             "verify_any_generation requires a threshold-1 keyring; "
@@ -728,14 +894,14 @@ def verify_any_generation(
             f"found={_signature_found(signature)}"
         )
 
-    _require_str_key_ids(public_keys, "public key")
+    public_key_ids = _require_str_key_ids(public_keys, "public key")
     known = {key.key_id: key for key in (*keyring.keys, *keyring.legacy_keys)}
-    unknown_key_ids = sorted(set(public_keys) - set(known))
+    unknown_key_ids = sorted(set(public_key_ids) - set(known))
     if unknown_key_ids:
         raise SignError(f"unknown key_id: {unknown_key_ids[0]!r}")
     if not allow_legacy:
         presented_legacy = sorted(
-            set(public_keys) & {key.key_id for key in keyring.legacy_keys}
+            set(public_key_ids) & {key.key_id for key in keyring.legacy_keys}
         )
         if presented_legacy:
             raise SignError(
@@ -746,14 +912,17 @@ def verify_any_generation(
         (*keyring.keys, *keyring.legacy_keys) if allow_legacy else keyring.keys
     )
     specs = {key.key_id: key for key in ordered}
-    missing = sorted(set(specs) - set(public_keys))
+    missing = sorted(set(specs) - set(public_key_ids))
     if missing:
         raise SignError(
             "verify_any_generation requires key material for every keyring "
             f"key; missing={missing}"
         )
 
-    normalized_public_keys = _normalize_pinned_public_keys(public_keys, specs)
+    public_keys, invalid_public_key_ids = _snapshot_presented(public_keys, public_key_ids)
+    normalized_public_keys = _normalize_pinned_public_keys(
+        public_keys, specs, invalid_public_key_ids,
+    )
 
     message = domain + payload
     for key_spec in ordered:

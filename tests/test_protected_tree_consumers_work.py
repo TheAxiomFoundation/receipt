@@ -69,6 +69,16 @@ for fault, entries in (
     SCOPES.append(('D9-'+fault, entries, (), (), 'posix-bytes'))
 
 
+# 0.6.3 refuses a symlink under a content root whatever its name. The PR5
+# binding bodies skipped one whose name carries no pinned suffix, so these
+# binding cases are the one intended divergence between the legs.
+CONTENT_LINKS = {
+    'D5-rules-120000': 'rules/link.txt',
+    'D7-rules-120000-posix-bytes': 'rules/hidden.ymlx',
+    'D8-source-rules/.gitattributes-120000': 'rules/.gitattributes',
+}
+
+
 def test_pr5_verbatim_body_sha256():
     for group_name, hashes in legacy.PR5_BODY_SHA256.items():
         for name, expected in hashes.items():
@@ -103,6 +113,11 @@ def test_d1_to_d11_consumer_work(signed_repo, monkeypatch, consumer, case, entri
                 results.append((result, work_observation(events, subjects)))
                 if not old:
                     assert sum(n for key,n in counts.items() if key.startswith('policy:')) > 0
+    if consumer == 'binding' and case in CONTENT_LINKS:
+        assert 'value' in results[0][0]
+        assert results[1][0] == {'exception': 'receipt.corpus.CorpusError',
+                                 'message': f"content root contains a symlink: '{CONTENT_LINKS[case]}'"}
+        return
     assert results[0] == results[1]
 
 

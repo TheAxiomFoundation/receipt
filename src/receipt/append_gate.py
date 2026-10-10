@@ -30,6 +30,7 @@ from receipt.release_chain import (
     ChainVerification,
     MANIFEST_RE,
     ReleaseChainError,
+    _normalized_anchor_dir,
     _screen_protected_tree_names,
     assert_no_redirecting_git_environment,
     verify_base_release_chain,
@@ -338,6 +339,25 @@ def reject_non_append_bytes(text: str) -> None:
                 f"line {index} is blank or whitespace-only; a JSONL row is one "
                 "non-empty line and a stray blank line is a tamper"
             )
+
+
+def _reject_carriage_returns(ledger_bytes: bytes) -> None:
+    """Refuse a carriage return anywhere in the ledger bytes.
+
+    ``_as_text`` translates ``\r\n`` and a lone ``\r`` into row breaks, but
+    the release chain frames rows by LF alone and refuses CRLF. With a CR in
+    the ledger the two would disagree about what the rows are: the gate could
+    validate two rows where the signed manifest counts one that no JSON
+    reader can parse. Refusing the byte leaves one framing for both.
+    """
+
+    position = ledger_bytes.find(b"\r")
+    if position != -1:
+        line = ledger_bytes.count(b"\n", 0, position) + 1
+        raise AppendError(
+            f"ledger line {line} contains a carriage return; a JSONL row ends "
+            "with exactly one LF, the framing the release chain verifies"
+        )
 
 
 def expected_assertion_version_id(row: dict[str, Any], spec: AppendGateSpec) -> str:
@@ -1384,6 +1404,7 @@ def _verify_selected_tree(
     base: _BaseCommit | None,
     trusted_code_root: pathlib.Path,
     release_anchor_dir: pathlib.Path | None,
+    enforce_production_pins: bool,
 ) -> str:
     """Run reader preflights, then retained checks, over entered snapshots."""
 
@@ -1448,9 +1469,12 @@ def _verify_selected_tree(
         )
         appended = check_append_only(base, lines, candidate)
     check_rows(lines, binding_boundary, spec)
-
-    production_pins = release_anchor_dir is None
-    anchor_dir = release_anchor_dir or (trusted_code_root / spec.chain.anchor_relative)
+    production_pins = enforce_production_pins
+    anchor_dir = (
+        trusted_code_root / spec.chain.anchor_relative
+        if release_anchor_dir is None
+        else release_anchor_dir
+    )
     release_index = (
         check_release_proposal(
             base,
@@ -1481,6 +1505,9 @@ def _verify_selected_tree(
                 prefix_entry.path: prefix_entry,
             },
         )
+    # Existing chain, binding and mode refusals retain their first-error
+    # order; the byte screen then rejects any CR those checks accepted.
+    _reject_carriage_returns(ledger_bytes)
 
     resolved = (
         f" {base.ref} ({base.commit})"
@@ -1503,8 +1530,22 @@ def verify_append_gate_verdict(
     commit: str = "HEAD",
     trusted_code_root: pathlib.Path = CODE_ROOT,
     release_anchor_dir: pathlib.Path | None = None,
+    enforce_production_pins: bool = True,
 ) -> AppendGateVerdict:
-    """Verify a selected commit and return its immutable object identities."""
+    """Verify a selected commit and return its immutable object identities.
+
+    Anchors are read from ``trusted_code_root / spec.chain.anchor_relative``,
+    or from ``release_anchor_dir`` when one is named. Named paths are
+    normalized to plain ``pathlib.Path`` objects; empty strings and non-path
+    values refuse rather than selecting the trusted code root. Either way
+    the spec's pins apply to what is read there: the producer SPKI, each
+    anchor's PEM digest and policy OID, and its responder certificate and
+    SPKI pairs.
+    A caller whose anchor directory holds authorities of its own, such as a
+    test fixture, says so with ``enforce_production_pins=False``, which is
+    accepted only together with ``release_anchor_dir``; the verdict then
+    speaks for that caller's trust material, not the spec's pins.
+    """
 
     try:
         assert_no_redirecting_git_environment()
@@ -1515,6 +1556,20 @@ def verify_append_gate_verdict(
         type(commit) is not str or re.fullmatch(r"[0-9a-f]{40}", commit) is None
     ):
         raise AppendError("base_ref requires a full commit OID")
+    if type(enforce_production_pins) is not bool:
+        raise AppendError("enforce_production_pins must be a bool")
+    try:
+        release_anchor_dir = _normalized_anchor_dir(
+            release_anchor_dir, label="release_anchor_dir"
+        )
+    except ReleaseChainError as exc:
+        raise AppendError(str(exc)) from exc
+    if not enforce_production_pins and release_anchor_dir is None:
+        raise AppendError(
+            "enforce_production_pins=False requires release_anchor_dir; the "
+            "anchors under the trusted code root are always checked against "
+            "the spec's pins"
+        )
 
     try:
         selected = TreeSnapshot.select(root, commit)
@@ -1531,6 +1586,7 @@ def verify_append_gate_verdict(
                     base=None,
                     trusted_code_root=trusted_code_root,
                     release_anchor_dir=release_anchor_dir,
+                    enforce_production_pins=enforce_production_pins,
                 )
                 return AppendGateVerdict(
                     summary=summary,
@@ -1563,6 +1619,7 @@ def verify_append_gate_verdict(
                     base=base,
                     trusted_code_root=trusted_code_root,
                     release_anchor_dir=release_anchor_dir,
+                    enforce_production_pins=enforce_production_pins,
                 )
                 return AppendGateVerdict(
                     summary=summary,
@@ -1587,8 +1644,12 @@ def verify_append_gate(
     commit: str = "HEAD",
     trusted_code_root: pathlib.Path = CODE_ROOT,
     release_anchor_dir: pathlib.Path | None = None,
+    enforce_production_pins: bool = True,
 ) -> str:
-    """Verify one selected commit and return the baseline success text."""
+    """Verify one selected commit and return the baseline success text.
+
+    The anchor and pin rules are :func:`verify_append_gate_verdict`'s.
+    """
 
     return verify_append_gate_verdict(
         root,
@@ -1597,4 +1658,5 @@ def verify_append_gate(
         commit=commit,
         trusted_code_root=trusted_code_root,
         release_anchor_dir=release_anchor_dir,
+        enforce_production_pins=enforce_production_pins,
     ).summary

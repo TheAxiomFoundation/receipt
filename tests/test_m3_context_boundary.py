@@ -242,7 +242,8 @@ def d6(m, repo, patch, barrier):
             trace.call("changed paths", lambda: a.changed_paths(b))
         else:
             trace.call("borrowed history", lambda: m.release_chain.verify_release_history_immutable(
-                SimpleNamespace(release_root_relative=PurePosixPath("releases")), candidate=a, base=b)[0])
+                SimpleNamespace(release_root_relative=PurePosixPath("releases"),
+                                manifest_relative=PurePosixPath("releases/manifests")), candidate=a, base=b)[0])
         return {"events": trace.events,
                 "linked": a._state.work_pool.root() is b._state.work_pool.root(),
                 "ancestry_bases": sorted(a._state.ancestry_bases)}
