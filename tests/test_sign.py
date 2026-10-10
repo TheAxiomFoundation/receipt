@@ -944,6 +944,537 @@ def test_callback_mutations_leave_the_threshold_verdict_at_its_validated_state()
     exercise()
 
 
+# A snapshot contains only revalidated immutable constituent values.
+
+
+class _MutableKeyField(str):
+    def __new__(cls, value: str):
+        instance = super().__new__(cls, value)
+        instance.current = value
+        return instance
+
+    def __hash__(self) -> int:
+        return hash(self.current)
+
+    def __eq__(self, other: object) -> bool:
+        return self.current == other
+
+    def __ne__(self, other: object) -> bool:
+        return self.current != other
+
+
+@pytest.mark.parametrize("callback", [False, True])
+def test_mutable_key_id_cannot_count_one_signature_twice(callback: bool) -> None:
+    """A pre-corrupted id must refuse before one signer can count twice."""
+
+    first, _second, key_a, key_b = _two_keys()
+    ring = KeyringSpec((key_a, key_b), 2)
+    identity = _MutableKeyField("b")
+    object.__setattr__(key_b, "key_id", identity)
+    payload, domain = b"synthetic count control", b"receipt/r8\0"
+    signature = sign_payload(first[0], payload, domain=domain)
+
+    class CallbackKeys(dict[str, bytes]):
+        iterations = 0
+
+        def __iter__(self) -> Iterator[str]:
+            self.iterations += 1
+            if callback and self.iterations == 2:
+                identity.current = "a"
+            return super().__iter__()
+
+    public_keys = CallbackKeys(a=first[1])
+    with pytest.raises(SignError) as caught:
+        verify_threshold(
+            payload, {"a": signature}, public_keys, ring,
+            domain=domain, label="2-of-2 control", allow_legacy=False,
+        )
+    assert str(caught.value) == "keyring key_id must be a str; found=_MutableKeyField"
+    assert identity.current == "b"
+    assert public_keys.iterations == 1
+
+
+@pytest.mark.parametrize("verifier", ["threshold", "any_generation"])
+@pytest.mark.parametrize("callback", [False, True])
+def test_mutable_fingerprint_cannot_change_a_checked_verdict(
+    verifier: str, callback: bool,
+) -> None:
+    """A mutable pin refuses before a callback can bless a stranger key."""
+
+    victim, attacker = generate_signing_keypair(), generate_signing_keypair()
+    victim_pin, attacker_pin = spki_sha256(victim[1]), spki_sha256(attacker[1])
+    key = KeySpec("a", victim_pin, "spki-sha256")
+    ring = KeyringSpec((key,), 1)
+    pin = _MutableKeyField(victim_pin)
+    object.__setattr__(key, "fingerprint", pin)
+    payload, domain = b"callback mutation probe", b"receipt/r8\0"
+    signature = sign_payload(attacker[0], payload, domain=domain)
+
+    class CallbackKeys(dict[str, bytes]):
+        iterations = 0
+
+        def __iter__(self) -> Iterator[str]:
+            self.iterations += 1
+            if callback and self.iterations == (2 if verifier == "threshold" else 1):
+                pin.current = attacker_pin
+            return super().__iter__()
+
+    public_keys = CallbackKeys(a=attacker[1])
+    with pytest.raises(SignError) as caught:
+        if verifier == "threshold":
+            verify_threshold(
+                payload, {"a": signature}, public_keys, ring,
+                domain=domain, label="mutated-pin", allow_legacy=False,
+            )
+        else:
+            verify_any_generation(
+                payload, signature, public_keys, ring,
+                domain=domain, label="mutated-pin", allow_legacy=False,
+            )
+    assert str(caught.value) == "keyring fingerprint must be a str; found=_MutableKeyField"
+    assert pin.current == victim_pin
+    assert public_keys.iterations == (1 if verifier == "threshold" else 0)
+
+
+@pytest.mark.parametrize("verifier", ["threshold", "any_generation"])
+def test_exact_key_fields_keep_the_snapshot_verdict(verifier: str) -> None:
+    """Every original ring/key field may change after the immutable snapshot."""
+
+    from hypothesis import example, given, settings, strategies as st
+
+    material = tuple(generate_signing_keypair() for _ in range(3))
+    payload, domain = b"snapshot property", b"receipt/r8\0"
+
+    @settings(max_examples=40, deadline=None, derandomize=True)
+    @example(ids=["a", "b", "old"], raw=(False, True, False),
+             mismatched=(False, False, False), legacy=True, threshold=2,
+             signature_mask=3, signer=0, wrong_message=False)
+    @example(ids=["a", "b", "old"], raw=(True, False, True),
+             mismatched=(False, False, False), legacy=True, threshold=2,
+             signature_mask=1, signer=2, wrong_message=True)
+    @given(
+        ids=st.lists(st.text(max_size=8), min_size=3, max_size=3, unique=True),
+        raw=st.tuples(st.booleans(), st.booleans(), st.booleans()),
+        mismatched=st.tuples(st.booleans(), st.booleans(), st.booleans()),
+        legacy=st.booleans(), threshold=st.integers(min_value=1, max_value=2),
+        signature_mask=st.integers(min_value=0, max_value=7),
+        signer=st.integers(min_value=0, max_value=2), wrong_message=st.booleans(),
+    )
+    def exercise(ids, raw, mismatched, legacy, threshold,
+                 signature_mask, signer, wrong_message) -> None:
+        count = 3 if legacy else 2
+        schemes = tuple("raw-sha256" if value else "spki-sha256" for value in raw)
+        pins = tuple(
+            hashlib.sha256(f"untrusted pin {index}".encode()).hexdigest()
+            if mismatched[index] else (
+                raw_public_key_sha256(material[index][1]) if raw[index]
+                else spki_sha256(material[index][1])
+            )
+            for index in range(3)
+        )
+        signatures = {
+            ids[index]: sign_payload(
+                material[index][0], payload + (b"!" if wrong_message else b""),
+                domain=domain,
+            )
+            for index in range(count) if signature_mask & (1 << index)
+        }
+        signature = sign_payload(
+            material[signer][0], payload + (b"!" if wrong_message else b""),
+            domain=domain,
+        )
+
+        def run(mutate: bool) -> tuple[str, object]:
+            keys = tuple(KeySpec(ids[index], pins[index], schemes[index])
+                         for index in range(count))
+            ring = KeyringSpec(keys[:2], threshold if verifier == "threshold" else 1,
+                               legacy_keys=keys[2:])
+
+            class CallbackKeys(dict[str, bytes]):
+                iterations = 0
+                changed = False
+
+                def __iter__(self) -> Iterator[str]:
+                    self.iterations += 1
+                    if mutate and self.iterations == (2 if verifier == "threshold" else 1):
+                        self.changed = True
+                        for key in keys:
+                            object.__setattr__(key, "key_id", "callback-changed")
+                            object.__setattr__(key, "fingerprint", "0" * 64)
+                            object.__setattr__(key, "scheme", "unsupported")
+                        object.__setattr__(ring, "threshold", 0)
+                        object.__setattr__(ring, "keys", ())
+                        object.__setattr__(ring, "legacy_keys", ())
+                    return super().__iter__()
+
+            public_keys = CallbackKeys(
+                (ids[index], material[index][1]) for index in range(count)
+            )
+            try:
+                if verifier == "threshold":
+                    result = verify_threshold(
+                        payload, signatures, public_keys, ring, domain=domain,
+                        label="snapshot", allow_legacy=True,
+                    )
+                else:
+                    result = verify_any_generation(
+                        payload, signature, public_keys, ring, domain=domain,
+                        label="snapshot", allow_legacy=True,
+                    )
+            except SignError as exc:
+                outcome = ("REFUSE", str(exc))
+            else:
+                outcome = ("PASS", result)
+            assert public_keys.changed is mutate
+            return outcome
+
+        assert run(True) == run(False)
+
+    exercise()
+
+
+def _verify_r8_ring(
+    verifier: str, ring: KeyringSpec, *, public_keys=None, **changes,
+):
+    inputs = dict(payload=b"payload", public_keys={} if public_keys is None else public_keys,
+                  domain=b"domain", label="r8", allow_legacy=False)
+    inputs.update(changes)
+    if verifier == "threshold":
+        return verify_threshold(signatures={}, keyring=ring, **inputs)
+    return verify_any_generation(signature=bytes(64), keyring=ring, **inputs)
+
+
+def _constituent_refusal(field: str, value: object, *, key_id="a") -> str:
+    if type(value) is not str:
+        return f"keyring {field} must be a str; found={type(value).__name__}"
+    if field == "scheme":
+        return f"unsupported key fingerprint scheme: {value!r}"
+    return (f"key fingerprint for {key_id!r} must be 64 lowercase hex "
+            f"characters: {value!r}")
+
+
+@pytest.mark.parametrize("verifier", ["threshold", "any_generation"])
+@pytest.mark.parametrize("generation", ["keys", "legacy_keys"])
+@pytest.mark.parametrize("field", ["key_id", "fingerprint", "scheme"])
+def test_non_exact_key_fields_are_refused(
+    verifier: str, generation: str, field: str,
+) -> None:
+    """Every non-exact constituent refuses at construction and verification."""
+
+    from hypothesis import given, settings, strategies as st
+
+    class StringSubclass(str):
+        pass
+
+    class BytesSubclass(bytes):
+        pass
+
+    class IntSubclass(int):
+        pass
+
+    @settings(max_examples=12, deadline=None, derandomize=True)
+    @given(kind=st.sampled_from([
+        "str_subclass", "bytes_subclass", "int_subclass", "bytes",
+        "int", "float", "list", "none",
+    ]))
+    def exercise(kind: str) -> None:
+        key = KeySpec("a", "a" * 64, "spki-sha256")
+        other = KeySpec("b", "b" * 64, "raw-sha256")
+        ring = KeyringSpec((key,) if generation == "keys" else (other,), 1,
+                           legacy_keys=(key,) if generation == "legacy_keys" else ())
+        original = getattr(key, field)
+        value = {
+            "str_subclass": StringSubclass(original),
+            "bytes_subclass": BytesSubclass(original.encode()),
+            "int_subclass": IntSubclass(1), "bytes": original.encode(),
+            "int": 1, "float": 1.0, "list": [original], "none": None,
+        }[kind]
+        object.__setattr__(key, field, value)
+        expected = _constituent_refusal(field, value)
+        with pytest.raises(SignError) as caught:
+            _verify_r8_ring(verifier, ring)
+        assert str(caught.value) == expected
+        with pytest.raises(SignError) as caught:
+            KeyringSpec(ring.keys, 1, legacy_keys=ring.legacy_keys)
+        assert str(caught.value) == expected
+
+    exercise()
+
+
+
+@pytest.mark.parametrize("verifier", ["threshold", "any_generation"])
+@pytest.mark.parametrize("generation", ["keys", "legacy_keys"])
+@pytest.mark.parametrize("field", ["key_id", "fingerprint", "scheme"])
+def test_non_exact_fields_refuse_without_calling_their_methods(
+    verifier: str, generation: str, field: str,
+) -> None:
+    """Refusing a hostile field cannot call its repr, comparison or hashing."""
+
+    calls: list[str] = []
+
+    class HostileField(str):
+        def _unexpected(self, method: str):
+            calls.append(method)
+            raise AssertionError(f"refusal called {method}")
+
+        def __repr__(self):
+            return self._unexpected("repr")
+
+        def __hash__(self):
+            return self._unexpected("hash")
+
+        def __eq__(self, other):
+            return self._unexpected("eq")
+
+        def __ne__(self, other):
+            return self._unexpected("ne")
+
+        def __len__(self):
+            return self._unexpected("len")
+
+        def __iter__(self):
+            return self._unexpected("iter")
+
+    key = KeySpec("a", "a" * 64, "spki-sha256")
+    other = KeySpec("b", "b" * 64, "raw-sha256")
+    ring = KeyringSpec((key,) if generation == "keys" else (other,), 1,
+                       legacy_keys=(key,) if generation == "legacy_keys" else ())
+    object.__setattr__(key, field, HostileField(getattr(key, field)))
+    with pytest.raises(SignError) as caught:
+        _verify_r8_ring(verifier, ring)
+    assert str(caught.value) == f"keyring {field} must be a str; found=HostileField"
+    with pytest.raises(SignError) as caught:
+        KeyringSpec(ring.keys, 1, legacy_keys=ring.legacy_keys)
+    assert str(caught.value) == f"keyring {field} must be a str; found=HostileField"
+    assert calls == []
+
+
+@pytest.mark.parametrize("verifier", ["threshold", "any_generation"])
+@pytest.mark.parametrize("generation", ["keys", "legacy_keys"])
+@pytest.mark.parametrize("field", ["key_id", "fingerprint", "scheme"])
+@pytest.mark.parametrize("name_hook", ["lookup", "descriptor"])
+def test_non_exact_fields_refuse_without_calling_metaclass_name_hooks(
+    verifier: str, generation: str, field: str, name_hook: str,
+) -> None:
+    """Naming a refused field type cannot invoke caller metaclass methods."""
+
+    calls: list[str] = []
+
+    class NameLookupTrap(type):
+        def __getattribute__(cls, name: str):
+            if name == "__name__":
+                calls.append("lookup")
+                raise RuntimeError("refusal called metaclass name lookup")
+            return super().__getattribute__(name)
+
+    class NameDescriptorTrap(type):
+        @property
+        def __name__(cls):
+            calls.append("descriptor")
+            raise RuntimeError("refusal called metaclass name descriptor")
+
+    class NameLookupField(str, metaclass=NameLookupTrap):
+        pass
+
+    class NameDescriptorField(str, metaclass=NameDescriptorTrap):
+        pass
+
+    field_type = NameLookupField if name_hook == "lookup" else NameDescriptorField
+    expected_name = "NameLookupField" if name_hook == "lookup" else "NameDescriptorField"
+    key = KeySpec("a", "a" * 64, "spki-sha256")
+    other = KeySpec("b", "b" * 64, "raw-sha256")
+    ring = KeyringSpec((key,) if generation == "keys" else (other,), 1,
+                       legacy_keys=(key,) if generation == "legacy_keys" else ())
+    object.__setattr__(key, field, field_type(getattr(key, field)))
+    expected = f"keyring {field} must be a str; found={expected_name}"
+    with pytest.raises(SignError) as caught:
+        _verify_r8_ring(verifier, ring)
+    assert str(caught.value) == expected
+    with pytest.raises(SignError) as caught:
+        KeyringSpec(ring.keys, 1, legacy_keys=ring.legacy_keys)
+    assert str(caught.value) == expected
+    assert calls == []
+
+
+@pytest.mark.parametrize("verifier", ["threshold", "any_generation"])
+@pytest.mark.parametrize("generation", ["keys", "legacy_keys"])
+@pytest.mark.parametrize("field", ["key_id", "fingerprint", "scheme"])
+def test_all_field_types_precede_constituent_semantic_refusals(
+    verifier: str, generation: str, field: str,
+) -> None:
+    """Every field type is checked before any constructor-value refusal."""
+
+    first = KeySpec("a", "a" * 64, "spki-sha256")
+    last = KeySpec("b", "b" * 64, "raw-sha256")
+    ring = KeyringSpec((first, last) if generation == "keys" else (first,), 1,
+                       legacy_keys=(last,) if generation == "legacy_keys" else ())
+    object.__setattr__(first, "scheme", "unsupported")
+    object.__setattr__(last, field, _MutableKeyField(getattr(last, field)))
+    with pytest.raises(SignError) as caught:
+        _verify_r8_ring(verifier, ring)
+    assert str(caught.value) == f"keyring {field} must be a str; found=_MutableKeyField"
+
+
+@pytest.mark.parametrize("verifier", ["threshold", "any_generation"])
+@pytest.mark.parametrize("generation", ["keys", "legacy_keys"])
+@pytest.mark.parametrize(("field", "value"), [
+    ("scheme", "sha256"), ("fingerprint", "A" * 64),
+    ("fingerprint", "a" * 63), ("fingerprint", "a" * 64 + "\n"),
+])
+def test_corrupt_exact_key_fields_are_revalidated(
+    verifier: str, generation: str, field: str, value: str,
+) -> None:
+    key = KeySpec("a", "a" * 64, "spki-sha256")
+    other = KeySpec("b", "b" * 64, "raw-sha256")
+    ring = KeyringSpec((key,) if generation == "keys" else (other,), 1,
+                       legacy_keys=(key,) if generation == "legacy_keys" else ())
+    object.__setattr__(key, field, value)
+    with pytest.raises(SignError) as caught:
+        _verify_r8_ring(verifier, ring)
+    assert str(caught.value) == _constituent_refusal(field, value)
+
+
+@pytest.mark.parametrize("verifier", ["threshold", "any_generation"])
+@pytest.mark.parametrize("generation", ["keys", "legacy_keys"])
+@pytest.mark.parametrize("field", ["scheme", "fingerprint"])
+@pytest.mark.parametrize("duplicate", ["key_id", "fingerprint"])
+def test_constituent_semantic_refusals_precede_uniqueness(
+    verifier: str, generation: str, field: str, duplicate: str,
+) -> None:
+    """Malformed constructor values refuse before either duplicate check."""
+
+    first = KeySpec("a", "a" * 64, "spki-sha256")
+    last = KeySpec("b", "b" * 64, "raw-sha256")
+    ring = KeyringSpec((first, last) if generation == "keys" else (first,), 1,
+                       legacy_keys=(last,) if generation == "legacy_keys" else ())
+    value = "unsupported" if field == "scheme" else "b" * 63
+    object.__setattr__(last, field, value)
+    if duplicate == "key_id":
+        object.__setattr__(last, "key_id", first.key_id)
+    else:
+        object.__setattr__(first, "fingerprint", last.fingerprint)
+    expected = _constituent_refusal(field, value, key_id=last.key_id)
+    if field == "fingerprint" and duplicate == "fingerprint":
+        expected = _constituent_refusal(field, value, key_id=first.key_id)
+    with pytest.raises(SignError) as caught:
+        _verify_r8_ring(verifier, ring)
+    assert str(caught.value) == expected
+    with pytest.raises(SignError) as caught:
+        KeyringSpec(ring.keys, 1, legacy_keys=ring.legacy_keys)
+    assert str(caught.value) == expected
+
+
+@pytest.mark.parametrize("verifier", ["threshold", "any_generation"])
+@pytest.mark.parametrize(("outer", "expected"), [
+    ("empty", "keyring must contain at least one key"),
+    ("generation", "keyring keys must be a tuple of KeySpec; found=list"),
+    ("legacy_generation", "keyring legacy_keys must be a tuple of KeySpec; found=list"),
+    ("scalar", "keyring threshold must be at least 1; found=0"),
+    ("count", "keyring threshold 2 exceeds key count 1"),
+    ("entry", "keyring entries must be KeySpec, not str"),
+    ("legacy_entry", "keyring entries must be KeySpec, not str"),
+])
+def test_keyring_outer_refusals_precede_corrupt_constituent_fields(
+    verifier: str, outer: str, expected: str,
+) -> None:
+    key = KeySpec("a", "a" * 64, "spki-sha256")
+    ring = KeyringSpec((key,), 1)
+    object.__setattr__(key, "scheme", _MutableKeyField("spki-sha256"))
+    field, value = {
+        "empty": ("keys", ()), "generation": ("keys", [key]),
+        "legacy_generation": ("legacy_keys", []), "scalar": ("threshold", 0),
+        "count": ("threshold", 2), "entry": ("keys", (key, "bad")),
+        "legacy_entry": ("legacy_keys", ("bad",)),
+    }[outer]
+    object.__setattr__(ring, field, value)
+    with pytest.raises(SignError) as caught:
+        _verify_r8_ring(verifier, ring)
+    assert str(caught.value) == expected
+
+
+@pytest.mark.parametrize("verifier", ["threshold", "any_generation"])
+@pytest.mark.parametrize("field", ["key_id", "fingerprint"])
+def test_constituent_fields_are_checked_before_any_duplicate_hash_callback(
+    verifier: str, field: str,
+) -> None:
+    """Validate every key before any constituent can run duplicate-check code."""
+
+    calls: list[str] = []
+
+    class HashCallback(str):
+        def __hash__(self) -> int:
+            calls.append("hash")
+            return str.__hash__(self)
+
+    first = KeySpec("a", "a" * 64, "spki-sha256")
+    last = KeySpec("b", "b" * 64, "raw-sha256")
+    ring = KeyringSpec((first,), 1, legacy_keys=(last,))
+    value = HashCallback(getattr(first, field))
+    object.__setattr__(first, field, value)
+    object.__setattr__(last, "scheme", "unsupported")
+    with pytest.raises(SignError) as caught:
+        _verify_r8_ring(verifier, ring)
+    assert str(caught.value) == _constituent_refusal(field, value)
+    assert calls == []
+
+
+@pytest.mark.parametrize("verifier", ["threshold", "any_generation"])
+@pytest.mark.parametrize("later", ["unknown", "legacy", "nonbytes", "malformed"])
+def test_constituent_refusal_precedes_policy_and_key_material(
+    verifier: str, later: str,
+) -> None:
+    key = KeySpec("a", "a" * 64, "spki-sha256")
+    retired = KeySpec("b", "b" * 64, "raw-sha256")
+    ring = KeyringSpec((key,), 1, legacy_keys=(retired,))
+    object.__setattr__(key, "scheme", _MutableKeyField("spki-sha256"))
+    material = {
+        "unknown": {"z": bytes(32)}, "legacy": {"b": bytes(32)},
+        "nonbytes": {"a": "PEM"}, "malformed": {"a": b"invalid"},
+    }[later]
+    with pytest.raises(SignError) as caught:
+        _verify_r8_ring(verifier, ring, public_keys=material)
+    assert str(caught.value) == "keyring scheme must be a str; found=_MutableKeyField"
+
+
+@pytest.mark.parametrize(("field", "value", "expected"), [
+    ("payload", "payload", "signature payload must be bytes"),
+    ("domain", "domain", "signature domain must be bytes"),
+    ("allow_legacy", 0, "allow_legacy must be a bool"),
+    ("signatures", {0: bytes(64)}, "presented signature key_id must be a str: 0"),
+    ("public_keys", {0: bytes(32)}, "presented public key key_id must be a str: 0"),
+])
+def test_threshold_independent_checks_precede_constituent_refusals(
+    field: str, value: object, expected: str,
+) -> None:
+    key = KeySpec("a", "a" * 64, "spki-sha256")
+    ring = KeyringSpec((key,), 1)
+    object.__setattr__(key, "scheme", _MutableKeyField("spki-sha256"))
+    inputs = dict(payload=b"payload", signatures={}, public_keys={},
+                  domain=b"domain", label="r8", allow_legacy=False)
+    inputs[field] = value
+    with pytest.raises(SignError) as caught:
+        verify_threshold(keyring=ring, **inputs)
+    assert str(caught.value) == expected
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("payload", "payload"), ("domain", "domain"), ("allow_legacy", 0),
+    ("signature", b"short"), ("public_keys", {0: bytes(32)}),
+])
+def test_any_generation_constituents_precede_envelope_checks(
+    field: str, value: object,
+) -> None:
+    key = KeySpec("a", "a" * 64, "spki-sha256")
+    ring = KeyringSpec((key,), 1)
+    object.__setattr__(key, "scheme", _MutableKeyField("spki-sha256"))
+    inputs = dict(payload=b"payload", signature=bytes(64), public_keys={},
+                  domain=b"domain", label="r8", allow_legacy=False)
+    inputs[field] = value
+    with pytest.raises(SignError) as caught:
+        verify_any_generation(keyring=ring, **inputs)
+    assert str(caught.value) == "keyring scheme must be a str; found=_MutableKeyField"
+
+
 def test_keyring_freezes_generators_once_into_hashable_generations() -> None:
     key_a = KeySpec("a", "a" * 64, "spki-sha256")
     key_b = KeySpec("b", "b" * 64, "spki-sha256")

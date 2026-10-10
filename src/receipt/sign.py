@@ -543,12 +543,13 @@ def _check_keyring_threshold(threshold: object, key_count: int | None = None) ->
 
 
 def _check_keyring(keyring: KeyringSpec) -> None:
-    """The outer-ring invariants, at construction and every verification.
+    """The keyring invariants, at construction and every verification.
 
     Construction is not the only way to reach a verifier: ``object.__setattr__``
     reaches past a frozen dataclass, so the verifiers run these checks again.
-    This checks the generations, count, entry types and uniqueness; it does
-    not rerun each constituent KeySpec's field validation.
+    This checks generations, count and all entry types before reading their
+    fields. Exact immutable field types precede constructor-value checks and
+    uniqueness, so corrupted fields cannot run comparison or hash callbacks.
     """
 
     if not keyring.keys:
@@ -568,6 +569,17 @@ def _check_keyring(keyring: KeyringSpec) -> None:
             raise SignError(
                 f"keyring entries must be KeySpec, not {type(key).__name__}"
             )
+    for key in (*keyring.keys, *keyring.legacy_keys):
+        for field in ("key_id", "fingerprint", "scheme"):
+            value = getattr(key, field)
+            if type(value) is not str:
+                # Bypass a field's metaclass name hooks in the refusal too.
+                kind = type.__dict__["__name__"].__get__(type(value))
+                raise SignError(
+                    f"keyring {field} must be a str; found={kind}"
+                )
+    for key in (*keyring.keys, *keyring.legacy_keys):
+        KeySpec.__post_init__(key)
     seen_key_ids: set[str] = set()
     seen_fingerprints: set[str] = set()
     for key in (*keyring.keys, *keyring.legacy_keys):
@@ -582,14 +594,14 @@ def _check_keyring(keyring: KeyringSpec) -> None:
 
 
 def _require_keyring(keyring: object) -> KeyringSpec:
-    """Snapshot exactly a KeyringSpec whose outer invariants still hold.
+    """Snapshot exactly a KeyringSpec whose constructor invariants still hold.
 
     A subclass can override ``__post_init__`` and a stand-in object never ran
     it, so either could carry a threshold of zero or NaN into the count.
     Caller mapping callbacks can run after this check and mutate even frozen
     fields with ``object.__setattr__``. Keep a private copy of the checked
-    threshold and generations, plus detached key-field values, throughout
-    each verification.
+    threshold and generations, plus detached, revalidated exact immutable
+    key-field values, throughout each verification.
     """
 
     if type(keyring) is not KeyringSpec:
@@ -606,8 +618,8 @@ def _require_keyring(keyring: object) -> KeyringSpec:
         keys: list[KeySpec] = []
         for key in getattr(snapshot, name):
             detached = object.__new__(KeySpec)
-            # Preserve the outer-ring check's scope: constituent field
-            # validation is not rerun, but callbacks cannot change our copy.
+            # Only revalidated exact strings enter the copy; a mutable
+            # subclass would stay shared and could change the checked policy.
             for field in ("key_id", "fingerprint", "scheme"):
                 object.__setattr__(detached, field, getattr(key, field))
             keys.append(detached)
@@ -698,11 +710,13 @@ def verify_threshold(
     verification of immutable pre-rotation history says ``True`` and legacy
     keys count toward the threshold (reported in ``legacy_satisfied``).
 
-    Independent input checks retain their precedence. Outer-ring validation
-    then precedes all checks that consult the ring, including key policy,
+    Independent input checks retain their precedence. Keyring validation,
+    including exact constituent field types and constructor rules, then
+    precedes all checks that consult the ring, including key policy,
     material normalization and the final threshold verdict. A private snapshot
     of the checked threshold and generations, including detached key-field
-    values, is used throughout; later caller mapping callbacks cannot change
+    values, is used throughout; only revalidated exact immutable values enter
+    that snapshot. Later caller mapping callbacks cannot change
     that verification policy.
     """
 
@@ -803,11 +817,13 @@ def verify_any_generation(
     way ``verify_threshold`` refuses one, and key material is then required
     for the current generation only.
 
-    Outer-ring validation runs first, before the threshold-1, envelope and
-    key-material checks. An invalid outer ring therefore replaces their
+    Keyring validation, including exact constituent field types and
+    constructor rules, runs first, before the threshold-1, envelope and
+    key-material checks. An invalid ring therefore replaces their
     downstream refusal with its own named refusal. The checked threshold and
     generations, plus detached key-field values, are snapshotted for the whole
-    verification, including calls into the caller's public-key mapping.
+    verification, including calls into the caller's public-key mapping. Only
+    revalidated exact immutable values enter that snapshot.
     """
 
     keyring = _require_keyring(keyring)

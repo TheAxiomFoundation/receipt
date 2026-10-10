@@ -132,20 +132,30 @@ the append gate at fixture authorities has one keyword to add.
   duplicated signers into a threshold. Both verifiers use a private snapshot
   of the checked threshold and generations, with detached key-field values,
   so later caller mapping callbacks cannot change that verification policy.
+  Every constituent field is revalidated as an exact `str`, then against
+  `KeySpec`'s constructor rules, before it enters the snapshot. A mutable
+  string subclass installed through `object.__setattr__` is refused rather
+  than shared with the caller; it cannot turn one signature into two counted
+  identities or change a checked fingerprint through a mapping callback.
   An auditor can now conclude, as 0.6.1 said, that verification uses a real
   signature count. A keyring built from lists still constructs, now hashable. Scalar
   threshold checks keep their constructor precedence, as do duplicate IDs
-  and fingerprints among exact `KeySpec` entries. New iterable and exact-entry
-  checks can replace count or duplicate refusals when a generation or entry
-  is unusable, including a `KeySpec` subclass with a duplicate ID or fingerprint.
-  Entry types are checked before their fields so an invalid subclass cannot
-  run methods while its outer ring is being validated. At verification, outer-ring
-  type, tuple, count, entry and uniqueness checks precede key-policy,
-  public-key normalization, fingerprint, duplicate-material and signature
-  threshold refusals. `verify_any_generation` also runs these checks before
-  its threshold-1, payload/domain, legacy-switch, presented-ID, signature-size,
-  missing-material and no-generation-verifies refusals. These checks cover
-  the outer keyring, without rerunning constituent `KeySpec` field validation.
+  and fingerprints among constructor-valid exact `KeySpec` entries. New
+  iterable and exact-entry checks can replace count or duplicate refusals
+  when a generation or entry is unusable, including a `KeySpec` subclass with
+  a duplicate ID or fingerprint. All entry types are checked before any
+  field; all exact field types are checked before their
+  constructor rules and uniqueness. The new field-type refusal is
+  `keyring <field> must be a str; found=<type>` for `key_id`, `fingerprint`
+  and `scheme`. Constructor revalidation also retains
+  `unsupported key fingerprint scheme: <value>` and
+  `key fingerprint for '<id>' must be 64 lowercase hex characters: <value>`.
+  At verification, outer-ring type, tuple, count, entry, field and uniqueness
+  checks precede key-policy, public-key normalization, fingerprint,
+  duplicate-material and signature threshold refusals.
+  `verify_any_generation` also runs these checks before its threshold-1,
+  payload/domain, legacy-switch, presented-ID, signature-size,
+  missing-material and no-generation-verifies refusals.
 - The OpenSSL fallback (no `cryptography`) writes the public key to a fixed
   private file name. The name used to come from the configured key
   filename, so a configured name could replace the payload or signature
@@ -158,9 +168,11 @@ Existing refusal precedence is preserved where the checks can safely run
 first. The exceptions are non-UTF-8 spec validation before execution and SPEC
 validation, suffixless content symlinks before composed gate declarations,
 newly enforced pins before downstream release checks, and malformed-keyring
-checks before the signing families named above, plus outside-manifest history
-checks before later chain verification. Tests pin those intended
-first refusals; already-invalid inputs in these families can change text.
+checks before the signing families named above, including exact constituent
+field checks before constructor-value and duplicate refusals, plus
+outside-manifest history checks before later chain verification. Tests pin
+those intended first refusals; already-invalid inputs in these families can
+change text.
 Invalid UTF-8 bytes now say `spec is not valid UTF-8: <path>` instead of
 blaming a source encoding declaration that need not exist; the distinct
 declaration-driven program-mismatch refusal is preserved.
