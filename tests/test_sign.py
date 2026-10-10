@@ -826,21 +826,22 @@ def test_every_mutation_of_the_callers_lists_leaves_the_keyring_unchanged() -> N
 def test_mapping_callback_cannot_lower_the_checked_signature_threshold() -> None:
     """The threshold verdict uses the ring checked before mapping callbacks."""
 
-    key = KeySpec("a", "0" * 64, "spki-sha256")
+    _private, public = generate_signing_keypair()
+    key = KeySpec("a", spki_sha256(public), "spki-sha256")
     keyring = KeyringSpec((key,), 1)
 
     class MutatingKeys(dict[str, bytes]):
-        iterations = 0
+        reads = 0
 
-        def __iter__(self) -> Iterator[str]:
-            self.iterations += 1
-            if self.iterations == 2:
-                object.__setattr__(keyring, "threshold", 0)
-            return super().__iter__()
+        def __getitem__(self, key_id: str) -> bytes:
+            self.reads += 1
+            object.__setattr__(keyring, "threshold", 0)
+            return super().__getitem__(key_id)
 
+    public_keys = MutatingKeys(a=public)
     with pytest.raises(SignError) as caught:
         verify_threshold(
-            b"payload", {}, MutatingKeys(), keyring,
+            b"payload", {}, public_keys, keyring,
             domain=b"domain", label="probe", allow_legacy=False,
         )
     assert str(caught.value) == (
@@ -848,6 +849,7 @@ def test_mapping_callback_cannot_lower_the_checked_signature_threshold() -> None
         "satisfied=(); failed=(); absent=('a',)"
     )
     assert keyring.threshold == 0
+    assert public_keys.reads == 1
 
 
 @pytest.mark.parametrize("verifier", ["threshold", "any_generation"])
@@ -865,13 +867,12 @@ def test_mapping_callback_cannot_change_checked_keyring_values(
     signature = sign_payload(first[0], payload, domain=domain)
 
     class MutatingKeys(dict[str, bytes]):
-        iterations = 0
+        reads = 0
 
-        def __iter__(self) -> Iterator[str]:
-            self.iterations += 1
-            # Threshold's first iteration is its independent key-id check;
-            # the generation verifier checks its ring before that iteration.
-            if self.iterations == (2 if verifier == "threshold" else 1):
+        def __getitem__(self, key_id: str) -> bytes:
+            self.reads += 1
+            # Value reads run after both verifiers have detached the ring.
+            if self.reads == 1:
                 if mutation in {"keys", "legacy_keys"}:
                     object.__setattr__(keyring, mutation, ())
                 else:
@@ -880,7 +881,7 @@ def test_mapping_callback_cannot_change_checked_keyring_values(
                         "scheme": "raw-sha256",
                     }[mutation]
                     object.__setattr__(key_a, mutation, replacement)
-            return super().__iter__()
+            return super().__getitem__(key_id)
 
     public_keys = MutatingKeys(a=first[1], b=second[1])
     if verifier == "threshold":
@@ -893,7 +894,7 @@ def test_mapping_callback_cannot_change_checked_keyring_values(
             payload, signature, public_keys, keyring,
             domain=domain, label="record", allow_legacy=True,
         ) == "a"
-    assert public_keys.iterations >= (2 if verifier == "threshold" else 1)
+    assert public_keys.reads == 2
     if mutation in {"keys", "legacy_keys"}:
         assert getattr(keyring, mutation) == ()
     else:
@@ -922,14 +923,10 @@ def test_callback_mutations_leave_the_threshold_verdict_at_its_validated_state()
         keyring = KeyringSpec((key_a, key_b), 2)
 
         class MutatingKeys(dict[str, bytes]):
-            iterations = 0
-
-            def __iter__(self) -> Iterator[str]:
-                self.iterations += 1
-                if self.iterations == 2:
-                    replacement = value if field == "threshold" else (key_a,) * abs(value)
-                    object.__setattr__(keyring, field, replacement)
-                return super().__iter__()
+            def __getitem__(self, key_id: str) -> bytes:
+                replacement = value if field == "threshold" else (key_a,) * abs(value)
+                object.__setattr__(keyring, field, replacement)
+                return super().__getitem__(key_id)
 
         with pytest.raises(SignError) as caught:
             verify_threshold(
@@ -944,7 +941,7 @@ def test_callback_mutations_leave_the_threshold_verdict_at_its_validated_state()
     exercise()
 
 
-# A snapshot contains only revalidated immutable constituent values.
+# Verification validates the detached immutable constituent values it uses.
 
 
 class _MutableKeyField(str):
@@ -979,9 +976,12 @@ def test_mutable_key_id_cannot_count_one_signature_twice(callback: bool) -> None
 
         def __iter__(self) -> Iterator[str]:
             self.iterations += 1
-            if callback and self.iterations == 2:
-                identity.current = "a"
             return super().__iter__()
+
+        def __getitem__(self, key_id: str) -> bytes:
+            if callback:
+                identity.current = "a"
+            return super().__getitem__(key_id)
 
     public_keys = CallbackKeys(a=first[1])
     with pytest.raises(SignError) as caught:
@@ -1015,9 +1015,12 @@ def test_mutable_fingerprint_cannot_change_a_checked_verdict(
 
         def __iter__(self) -> Iterator[str]:
             self.iterations += 1
-            if callback and self.iterations == (2 if verifier == "threshold" else 1):
-                pin.current = attacker_pin
             return super().__iter__()
+
+        def __getitem__(self, key_id: str) -> bytes:
+            if callback:
+                pin.current = attacker_pin
+            return super().__getitem__(key_id)
 
     public_keys = CallbackKeys(a=attacker[1])
     with pytest.raises(SignError) as caught:
@@ -1091,12 +1094,10 @@ def test_exact_key_fields_keep_the_snapshot_verdict(verifier: str) -> None:
                                legacy_keys=keys[2:])
 
             class CallbackKeys(dict[str, bytes]):
-                iterations = 0
                 changed = False
 
-                def __iter__(self) -> Iterator[str]:
-                    self.iterations += 1
-                    if mutate and self.iterations == (2 if verifier == "threshold" else 1):
+                def __getitem__(self, key_id: str) -> bytes:
+                    if mutate and not self.changed:
                         self.changed = True
                         for key in keys:
                             object.__setattr__(key, "key_id", "callback-changed")
@@ -1105,7 +1106,7 @@ def test_exact_key_fields_keep_the_snapshot_verdict(verifier: str) -> None:
                         object.__setattr__(ring, "threshold", 0)
                         object.__setattr__(ring, "keys", ())
                         object.__setattr__(ring, "legacy_keys", ())
-                    return super().__iter__()
+                    return super().__getitem__(key_id)
 
             public_keys = CallbackKeys(
                 (ids[index], material[index][1]) for index in range(count)
@@ -2015,6 +2016,39 @@ def test_unknown_key_id_refuses_even_when_threshold_is_met(
             allow_legacy=False,
         )
     assert str(caught.value) == "unknown key_id: 'unknown-root'"
+
+
+@pytest.mark.parametrize("verifier", ["threshold", "any_generation"])
+@pytest.mark.parametrize("first_failure", ["pin", "malformed", "unavailable"])
+def test_public_key_snapshot_retains_sorted_material_refusals(
+    verifier: str, first_failure: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later nonbytes value cannot overtake the first key's material error."""
+
+    first, second, key_a, key_b = _two_keys()
+    ring = KeyringSpec((key_a, key_b), 1)
+    material = second[1] if first_failure == "pin" else b"invalid"
+    if first_failure == "unavailable":
+        material = first[1]
+        monkeypatch.setattr(sign_module, "CRYPTOGRAPHY_AVAILABLE", False)
+    public_keys = {"b": None, "a": material}
+    with pytest.raises(SignError) as caught:
+        if verifier == "threshold":
+            verify_threshold(
+                b"payload", {}, public_keys, ring,
+                domain=b"domain", label="sorted", allow_legacy=False,
+            )
+        else:
+            verify_any_generation(
+                b"payload", bytes(64), public_keys, ring,
+                domain=b"domain", label="sorted", allow_legacy=False,
+            )
+    expected = {
+        "pin": "public key fingerprint mismatch for 'a'",
+        "malformed": "cannot decode Ed25519 public key",
+        "unavailable": "Ed25519 public-key normalization requires cryptography",
+    }[first_failure]
+    assert str(caught.value).startswith(expected)
 
 
 def test_fingerprint_mismatch_refuses_with_computed_value_after_threshold_met() -> None:
@@ -2964,8 +2998,8 @@ def test_verify_any_generation_attempt_order_is_declaration_order(
     calls: list[str] = []
     real_normalize = sign_module._normalize_pinned_public_keys
 
-    def recording_normalize(supplied, specs):  # type: ignore[no-untyped-def]
-        normalized = real_normalize(supplied, specs)
+    def recording_normalize(supplied, specs, invalid_key_ids=frozenset()):  # type: ignore[no-untyped-def]
+        normalized = real_normalize(supplied, specs, invalid_key_ids)
         return {
             key_id: _RecordingKey(key, key_id, calls)
             for key_id, key in normalized.items()

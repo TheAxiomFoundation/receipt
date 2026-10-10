@@ -129,11 +129,16 @@ the append gate at fixture authorities has one keyword to add.
   accept exactly a `KeyringSpec` and re-run its checks. A list mutated after
   construction, a subclass with its own `__post_init__`, a stand-in object,
   or `object.__setattr__` could otherwise put a count of zero, NaN or
-  duplicated signers into a threshold. Both verifiers use a private snapshot
-  of the checked threshold and generations, with detached key-field values,
-  so later caller mapping callbacks cannot change that verification policy.
-  Every constituent field is revalidated as an exact `str`, then against
-  `KeySpec`'s constructor rules, before it enters the snapshot. A mutable
+  duplicated signers into a threshold. Both verifiers read each key field once
+  into a private snapshot, then validate those copies as exact `str` values
+  against `KeySpec`'s constructor rules and uniqueness checks. Presented
+  mappings are copied once with exact string IDs and the required exact value
+  types, and verification uses only those copies. Nonbytes signatures remain
+  failed slots; public-key type refusals keep their sorted material-check order.
+  Once these snapshots have
+  been validated, callbacks acting through the objects the caller passed in
+  cannot change the verdict. Code inspecting the verifier's frames or the
+  garbage collector is outside this guarantee. A mutable
   string subclass installed through `object.__setattr__` is refused rather
   than shared with the caller; it cannot turn one signature into two counted
   identities or change a checked fingerprint through a mapping callback.
@@ -148,8 +153,8 @@ the append gate at fixture authorities has one keyword to add.
   constructor rules and uniqueness. The new field-type refusal is
   `keyring <field> must be a str; found=<type>` for `key_id`, `fingerprint`
   and `scheme`. Constructor revalidation also retains
-  `unsupported key fingerprint scheme: <value>` and
-  `key fingerprint for '<id>' must be 64 lowercase hex characters: <value>`.
+  `unsupported key fingerprint scheme: <repr>` and
+  `key fingerprint for '<id>' must be 64 lowercase hex characters: <repr>`.
   At verification, outer-ring type, tuple, count, entry, field and uniqueness
   checks precede key-policy, public-key normalization, fingerprint,
   duplicate-material and signature threshold refusals.
