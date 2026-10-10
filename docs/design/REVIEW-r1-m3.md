@@ -1,5 +1,7 @@
 Defensive correctness and completeness audit — receipt 0.7 M3, round 1
 
+> Note added 2026-10-10: this review read the record at `4e97711`, which was measured at `9dc1f85`. Main has since changed behavior this review describes, including D2 and D17; the record's "Baseline and supersession" section lists the changes, and the record was re-measured at `dca9020f7`. The `audit/m3-design-r1/` evidence named below was never committed to this repository. The review text below is unchanged.
+
 Verdict: **changes_requested**. The ownership census, deliberate environment correction, legacy pair boundary, and D12 accounting approach are substantially sound. One transport compatibility problem remains unresolved: per-account Python cache isolation and repeated `info`/`consume` calls cannot reproduce the availability behavior of independent Git processes. The packed-object counterexample below produces a PASS/refusal difference using the existing reader.
 
 The reviewed artifact is `docs/design/0.7-m3-repository-context.md` at `4e977114c933798db7b39d5e95e86e1ba36b2a14`. Source locators below refer to that revision; unqualified production paths are under `src/receipt/`, and test paths under `tests/`. The supplied issue #62 text and `CONTRIBUTING.md:18–22,34–38` define the compatibility and review requirements. No production module, test, or design record was edited. Review evidence and PROGRESS.md are committed separately.

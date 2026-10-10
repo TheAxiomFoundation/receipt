@@ -1,5 +1,7 @@
 Defensive correctness and completeness audit — receipt 0.7 M3, round 2
 
+> Note added 2026-10-10: this review read the record at `9401e7bc`, which was measured at `9dc1f85`. Main has since changed behavior this review describes, including D2 and D17; the record's "Baseline and supersession" section lists the changes, and the record was re-measured at `dca9020f7`. The `audit/m3-design-r2/` evidence named below was never committed to this repository. The review text below is unchanged.
+
 Verdict: **approve**. The folded record resolves round 1's transport finding by explicitly choosing context-scoped availability, documenting the lost cold-process refusal and possible verdict differences, and requiring separate approval and implementation evidence. The choice is sound for authenticating selected objects. It does not establish fresh-process availability or a filesystem snapshot of the object store. This review approves the design record; it does not supply the maintainer's D1/A7 approvals or certify unimplemented context code.
 
 The reviewed artifact is `docs/design/0.7-m3-repository-context.md` at `9401e7bcad67e082bed967acb081392eb8bb2c48`. Locators below refer to that revision. Unqualified production paths are under `src/receipt/`, test paths under `tests/`; M1 and M3 designate their respective design records. Evidence is committed under `audit/m3-design-r2/`. The record, production modules, and tests were not edited. One reviewer performed this offline audit without subagents or background jobs.
