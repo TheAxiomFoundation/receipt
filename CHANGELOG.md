@@ -4,6 +4,531 @@ Every entry says what changed and what an auditor can conclude from it that
 they could not before. Refusals are named as refusals: a check added here is an
 input the package used to accept, or accept for the wrong reason.
 
+## 0.7.0 (unreleased)
+
+### One protected-tree policy (M1 of #62; #64 to #71)
+
+An auditor can now conclude that the protected-tree screens every pass applies
+are one decision procedure, not five. Before, `verify.py`, `release_chain.py`,
+`append_gate.py`, `corpus.py` and `snapshot.py` each carried their own
+decisions over names, aliases, modes and ancestors (attribute matching lived in
+`snapshot.py` alone), and the twelve places where those decisions disagreed
+(D1 to D12 in the design record) were observable as differences in which pass
+refused, with which words, in what order, and with what public admission work.
+Those duplicate decisions are gone. Every pass compiles a plan, evaluates it
+through `receipt.protected_tree` at the barrier it always used, and renders
+through its own words and exception classes.
+
+- Every refusal text, phase and public work counter is the same, input for
+  input. Each census refusal is a full-string golden captured from a run; the
+  twelve disagreements are permanent raw-index fixtures asserting each site's
+  current text; the same-stage two-way swap and the D12 charge example are
+  fixtures too. Those files entered with #65 and are byte-identical through
+  #71. The 108 differential cases (two legs, zero skips) passed at the merged
+  head of every pull request from #65 on; Chronicle's byte-transparency and
+  isolation suites (52 cases, run against a wheel built from the head and
+  installed in a copy of the shim with its pin refreshed to the candidate
+  version) passed at every head from #66 on; the thesis and axiom-encode
+  signing suites, run the same way at their mains, passed at #70 and #71.
+  The commands and results are recorded on each pull request.
+- One policy is not one universal verdict. Each pass keeps its obligations,
+  its scope, its order and its renderer: a case-fold collision still refuses
+  in custody under the five pinned chain paths and their ancestors, and in
+  binding elsewhere, with each pass's own text.
+- Attribute evaluation is one fixed, versioned policy (item 2 of #62 landed
+  here): exact and ASCII-folded readings computed independently, a transform
+  under either refused, committed sources only, no repository setting as
+  input. Repeated evaluation follows the compatibility charge schedule, so
+  public work counters land where 0.6 left them: a repeated
+  `protected.txt -filter` line still reaches 28 then 56 matching steps and
+  refuses at a ceiling of 40 with the counter at 40.
+- A public `verify_corpus_binding` patched at any time governs the binding
+  pass, including a patch installed before `receipt.verify` is imported: the
+  composed command shares its evaluator with corpus only while its bound name
+  is corpus's original definition. A `TreeSnapshot` subclass selected through
+  the inherited public API binds through the shared mapping decisions and
+  never receives a policy view or a certified selection. Both contracts are
+  pinned by tests.
+- Consumers keep every old name and module path; nothing was retired. Retiring
+  the forwarding names needs a separately agreed compatibility policy.
+- Design record: `docs/design/0.7-m1-protected-tree-policy.md`, with the two
+  review rounds beside it.
+
+## 0.6.3 (unreleased)
+
+Eight corrections to inputs 0.6.2 and 0.6.1 accepted into a verdict that
+said more than was checked. Seven add verification refusals; the
+OpenSSL-fallback fix also stops refusing a valid signature, and stops crashing,
+when the configured key name collides with the fallback's own files or has a
+directory component. One changes an API default, so a caller that points
+the append gate at fixture authorities has one keyword to add.
+
+- Revisions are resolved with Git's commit-graph disabled. The commit-graph
+  is a local cache no object hash covers; when it disagreed with the commit
+  objects it decided which commit a parent-relative revision such as
+  `<oid>~1` named, so a history pass could compare against a base the
+  commits never named. An auditor can now conclude that `~` and `^` follow
+  the parents written in the commit objects, as grafts are refused for.
+- The corpus binding refuses a symlink under a content root whatever its
+  name; a suffixless link uses `content root contains a symlink: '<path>'`.
+  A link without a pinned suffix was skipped as not content, although a
+  checkout resolves it to files no journal row binds, or keeps a tombstoned
+  path readable. An auditor can now conclude that the authenticated tree
+  contains no link beneath a content root. A gitlink, a suffix-bearing link
+  and an 8.3-alias name keep their refusals. Existing binding checks run before the new
+  suffixless-symlink screen; that screen still precedes the composed
+  verification's required-gate declarations.
+- The history pass also compares the manifest directory when the spec keeps
+  it outside `release_root_relative`, a layout `ChainSpec` accepts. Before,
+  `--base-ref` compared no manifest, signature or receipt in that layout, and
+  a rewritten, re-signed, re-witnessed history passed it. For manifests under
+  the release root nothing changes; the returned new files still speak for
+  the release root, so the append gate only gains refusals. Existing
+  release-root history errors keep priority; new outside-manifest history
+  errors precede later chain verification and can replace its first refusal.
+- `load_spec` refuses a PEP 263 declaration of any source encoding other than
+  UTF-8, with `spec declares source encoding <codec>; a spec must be UTF-8 so
+  it executes as the text a reviewer reads: <path>`, and executes the program
+  the UTF-8 text compiles to, refusing bytes that are not valid UTF-8 with
+  `spec is not valid UTF-8: <path>` and refusing a differing byte/text program
+  with `spec does not compile to the program its UTF-8 text reads as; a source
+  encoding declaration changed it: <path>`. The two
+  compilations are compared at marshal format 2, so object sharing and
+  interning cannot refuse an identical program. A pinned spec's bytes could otherwise run code its reviewer never
+  read. Byte-compilation errors keep their texts and run first. The encoding
+  refusal precedes module execution (including its exceptions), missing-SPEC
+  and wrong-SPEC-type refusals, so unsafe source never runs to recover a
+  later diagnostic.
+- `verify_append_gate` and `verify_append_gate_verdict` apply the spec's pins
+  to anchors read from `release_anchor_dir`. Naming that directory used to
+  turn off every pin (producer SPKI, anchor PEM digest, policy OID, and the
+  responder certificate and SPKI pairs, `additional_signers` included), so
+  the 0.6.2 claim about certificate-and-key pairs did not hold in that mode.
+  A caller whose anchor directory holds authorities of its own, such as a
+  test fixture, now says `enforce_production_pins=False`, which is refused
+  without `release_anchor_dir` and for anything but a bool. Named directories
+  must be nonempty paths and are normalized to plain `pathlib.Path`; a path
+  subclass's truth value cannot select the trusted-root anchors instead.
+  **Compatibility:**
+  such a caller refuses with the first pin its fixture fails until it adds
+  the keyword. Each newly enforced pin keeps its existing verification
+  position: producer SPKI before cryptographic signature verification,
+  anchor PEM before receipt inspection, policy OID before receipt trust
+  verification, and responder certificate/SPKI before later time and state
+  checks. Combined invalid inputs can now report a pin refusal first.
+- When ledger checks run, the append gate refuses a carriage return anywhere
+  in the ledger, with
+  `ledger line <n> contains a carriage return; a JSONL row ends with exactly
+  one LF, the framing the release chain verifies`. The gate split rows on CR
+  as well as LF while the release chain frames by LF alone, so one accepted
+  verdict could count rows differently from the manifest it witnessed.
+  Existing chain and binding checks run first, including the release chain's
+  exact CRLF-row refusal.
+- `KeyringSpec` freezes `keys` and `legacy_keys` into tuples and requires
+  exact `KeySpec` entries, and `verify_threshold` and `verify_any_generation`
+  accept exactly a `KeyringSpec` and re-run its checks. A list mutated after
+  construction, a subclass with its own `__post_init__`, a stand-in object,
+  or `object.__setattr__` could otherwise put a count of zero, NaN or
+  duplicated signers into a threshold. Both verifiers read each key field once
+  into a private snapshot, then validate those copies as exact `str` values
+  against `KeySpec`'s constructor rules and uniqueness checks. Presented
+  mappings are copied once with exact string IDs and the required exact value
+  types, and verification uses only those copies. Nonbytes signatures remain
+  failed slots; public-key type refusals keep their sorted material-check order.
+  Once these snapshots have
+  been validated, callbacks that use only the ordinary behaviour of the
+  objects the caller passed in cannot change the verdict. Code that reaches
+  interpreter internals is outside this guarantee: inspecting the verifier's
+  frames or the garbage collector, patching receipt's classes, functions or
+  builtins, or writing memory directly (for example with ctypes). A mutable
+  string subclass installed through `object.__setattr__` is refused rather
+  than shared with the caller; it cannot turn one signature into two counted
+  identities or change a checked fingerprint through a mapping callback.
+  An auditor can now conclude, as 0.6.1 said, that verification uses a real
+  signature count. A keyring built from lists still constructs, now hashable. Scalar
+  threshold checks keep their constructor precedence, as do duplicate IDs
+  and fingerprints among constructor-valid exact `KeySpec` entries. New
+  iterable and exact-entry checks can replace count or duplicate refusals
+  when a generation or entry is unusable, including a `KeySpec` subclass with
+  a duplicate ID or fingerprint. All entry types are checked before any
+  field; all exact field types are checked before their
+  constructor rules and uniqueness. The new field-type refusal is
+  `keyring <field> must be a str; found=<type>` for `key_id`, `fingerprint`
+  and `scheme`. Constructor revalidation also retains
+  `unsupported key fingerprint scheme: <repr>` and
+  `key fingerprint for '<id>' must be 64 lowercase hex characters: <repr>`.
+  At verification, outer-ring type, tuple, count, entry, field and uniqueness
+  checks precede key-policy, public-key normalization, fingerprint,
+  duplicate-material and signature threshold refusals.
+  `verify_any_generation` also runs these checks before its threshold-1,
+  payload/domain, legacy-switch, presented-ID, signature-size,
+  missing-material and no-generation-verifies refusals.
+- The OpenSSL fallback (no `cryptography`) writes the public key to a fixed
+  private file name. The name used to come from the configured key
+  filename, so a configured name could replace the payload or signature
+  file, or, from the release chain, write to the consumer's anchor or crash
+  with a raw `OSError`. The configured name now decides nothing but
+  diagnostics.
+
+Each change has a regression test that fails on the commit before it.
+Existing refusal precedence is preserved where the checks can safely run
+first. The exceptions are non-UTF-8 spec validation before execution and SPEC
+validation, suffixless content symlinks before composed gate declarations,
+newly enforced pins before downstream release checks, and malformed-keyring
+checks before the signing families named above, including exact constituent
+field checks before constructor-value and duplicate refusals, plus
+outside-manifest history checks before later chain verification. Tests pin
+those intended first refusals; already-invalid inputs in these families can
+change text.
+Invalid UTF-8 bytes now say `spec is not valid UTF-8: <path>` instead of
+blaming a source encoding declaration that need not exist; the distinct
+declaration-driven program-mismatch refusal is preserved.
+
+Corrections from a full review of the 0.6.1 code, present in 0.6.1 and 0.6.2
+alike. Several are refusals of inputs those releases accepted; a few are inputs
+they refused for a reason that was not true.
+
+Claims corrected, with no change in behavior:
+
+- Without `--expect-spec-sha256`, the spec is the producer's code running in
+  the verifier's own process, and it can change what `receipt verify` prints
+  and the exit status. The README ("Using it", "What this verdict speaks
+  for"), the option's help text, the unpinned text verdict, and the JSON
+  `scope.notEstablished` list now say the verdict is only as good as the spec
+  the producer committed. The existing "spec's code was trusted" line and
+  entry are kept; the JSON list gains one entry.
+- `receipt.canonical`'s "one byte stream per value" covers values as
+  `json.loads` returns them, with finite floats and integers that convert to
+  finite ECMAScript Numbers; decoding `1e400` alone does not meet that range.
+  `canonical.py` stays byte-identical to its pinned
+  upstream source, so subclasses, explicit surrogate pairs and nesting past
+  the recursion limit behave as they do upstream; the README says so.
+- Retired keys verify when the caller says the material is history
+  (`allow_legacy=True`), which `verify_any_generation` takes as its default;
+  the README had said they verify "immutable history only".
+- Docstrings: a new authority's supplemental outcome may be declared
+  unavailable (the ported rule, unchanged); `eol=crlf` does transform checkout
+  bytes (accepted as a stated residual); a journal of gate rows alone is a
+  closed world of zero content files (the "genesis must bind content" branch
+  never ran and is removed); a case-only rename cannot be journalled, because
+  only an exact-spelling row lifts a tombstone.
+
+New refusals, each of an input 0.6.1 accepted or crashed on:
+
+- `receipt.tsa`: a verification time without a UTC offset (`astimezone` read
+  it as local time, so the verdict followed the process's time zone), or one
+  whose UTC instant falls outside years 1 to 9999 (was `OverflowError`); a bare
+  record filename with no `records=` (was `IndexError`). The duplicate
+  token-path rule keys on Unicode's canonical caseless match, so eleven
+  spellings APFS stores as one entry are one path to it, as every spelling
+  the old key joined still is.
+- `receipt.snapshot`: in the ASCII-folded attribute reading, the attributes
+  file is the entry whose name folds to `.gitattributes` (a case-insensitive
+  checkout applies `.GITATTRIBUTES`), and two such entries in one directory
+  refuse; repository configuration is re-audited before every Git child an
+  entered snapshot starts, not only at close; an unencodable revision, an
+  argument over the kernel's limit, a symlink-loop root and an unusable
+  materialization destination refuse as `SnapshotError`.
+- `receipt.corpus`: a journal row `json.loads` cannot decode (an integer over
+  the digit limit, nesting past the decoder's stack) and malformed
+  `CorpusSpec` set members or API arguments refuse as `CorpusError`.
+- `receipt.verify` and `receipt verify`: a close-time repository re-audit
+  failure invalidates every tree-derived pass, including when binding or
+  declaration has already raised, so a FAIL leaves no affected claim
+  established and reports the close failure; formatting a caught exception
+  can no longer raise, so a spec
+  whose exception's `__str__` exits cannot end the command with status 0.
+- `receipt.append_gate`: rows after the frozen prefix must carry a string
+  `source_record_id` and `supersedes`, a numeric (not boolean) `value`, an
+  ASCII `YYYY-MM-DD` `observed_at` naming a real day, and no repeated JSON
+  key; the frozen prefix manifest is compared as JSON values (`true` and `1.0`
+  are not `1`) and `prefixLineCount` must be a JSON integer; a gate-only
+  proposal that changes the ledger, its prefix manifest or their ancestors
+  refuses whatever the spec's surfaces classify; row text quoted in a refusal has unprintable
+  characters escaped (printable text, and every refusal the differential
+  harness binds, is unchanged).
+- `receipt.attest`: `AttestSpec` text fields and workflows must be exactly
+  `str`.
+- `receipt.sign`: `KeySpec` requires a `str` key_id and a fingerprint of 64
+  lowercase hex characters; presented key ids must be `str`; without
+  `cryptography`, the OpenSSL fallback refuses a key that is not an Ed25519
+  PEM public key (a DER SPKI, a private key, a P-224 key), as the primary path
+  does, and refuses a signature over the empty message, which no OpenSSL
+  command it can rely on verifies, as that rather than as a failed signature;
+  `read_producer_public_key` reads only inside the anchor directory,
+  without following links; a bytes-subclass signature's refusal names its
+  type rather than its length.
+- `receipt._names`: a portable component is at most 255 bytes, and pinned
+  suffixes must be exactly `str`.
+
+Inputs that now verify, each refused in 0.6.1 for a reason that was not true:
+
+- A repository root spelled in another case on a case-insensitive volume, or
+  whose name holds a Unicode line separator.
+- An ancestry through a commit whose root tree uses a legacy mode Git accepts:
+  walked root trees are rehashed and type-bound without the content grammar,
+  and no longer held in memory for the snapshot's lifetime.
+- A spec that defines a dataclass or pickles its own objects: the spec is
+  compiled without the loader's `__future__` flags and executed as a module
+  registered in `sys.modules`. On Python 3.11 to 3.13 a spec's module-level
+  annotations are therefore evaluated, as they are when the file runs.
+
+`verify_commit` logs the certificate's `subjectAlternativeName` that gh
+enforced, even if the caller's `buildConfigURI` is also allowlisted, and
+reads output it cannot parse as naming
+no identity; acceptance is gh's exit status, as before.
+
+Two refusals, each an input 0.6.2 and 0.6.1 accepted into a verdict about
+something other than what it named. Both are the high findings of the full
+review of 0.6.2, and both were already present in 0.6.1.
+
+- `receipt verify` without `--root` finds the repository from the spec's path
+  as the auditor named it, not from its resolution, and refuses when a symlink
+  lies between the spec and the nearest directory above it holding `.git`,
+  that directory included: `the spec's path crosses a symlink at or below its
+  repository top level, so the repository to verify is ambiguous; supply
+  --root: <path>`. 0.6.2 and 0.6.1 resolved the path first, so a directory
+  committed as a symlink beside the spec could move the walk into another
+  repository, and the command then verified that repository's commit and
+  tree, exiting 0, while the clone's own rule files went unchecked. Pinning
+  the spec and the anchor set did not catch it, because the other repository
+  can carry the same spec and anchors. It also refuses when the spec path,
+  resolved, is not the file the walk names below that top level, which a `..`
+  after a link in the supplied path can cause: `the spec's path resolves to a
+  file other than the one it names below its repository top level; supply
+  --root: <path>`. An auditor can now conclude that a PASS without `--root` is
+  about the repository the named spec lies in, with that spec loaded. `--root`
+  is unchanged, and so is every run whose spec path crosses no symlink at or
+  below the top level; links above the top level are not examined, but a
+  checkout named through a link to its top level itself now refuses and needs
+  `--root`. `tests/test_cli.py` checks the walk exhaustively over 512 layouts
+  (three directories between a base and the spec, each real or a link and
+  each holding `.git` or not; the base holding `.git` or not and named
+  directly or through a link; the link targets inside a repository or not):
+  the refusal is exact, a returned top level contains the spec at the path
+  named, and where nothing refuses the result resolves to the earlier walk's.
+  The earlier walk, the same in 0.6.2 and 0.6.1, named a repository other than
+  the named spec's in 140 of them.
+- `receipt.attest` sweeps the whole history of the repository it is given.
+  `enforcement_epoch`, `records_commits` and `commit_in_scope` refuse a
+  shallow repository with `shallow repositories are unsupported` and one with
+  a graft file with `repository grafts are unsupported`; every git command
+  runs with `--no-replace-objects` and `core.commitGraph=false` and with every
+  inherited `GIT_*` variable dropped; and revisions are passed after
+  `--end-of-options`. In 0.6.2 and 0.6.1 a shallow clone, the GitHub Actions
+  checkout default, made its boundary the enforcement epoch, so an unattested
+  protected-tree commit at a depth-1 clone's tip was exempt and the sweep
+  accepted it. A replace ref, an inherited `GIT_DIR`, `GIT_GRAFT_FILE` or
+  `GIT_REPLACE_REF_BASE`, an altered commit-graph file (a cache git reads
+  parents and trees from without checking them against the commits), or a
+  range git read as an option could likewise keep commits out of the sweep.
+  An auditor can now conclude that an accepted sweep saw every protected-tree
+  commit after the epoch in the named repository's own history. The 0.5.2
+  note that `receipt.attest` "runs its own git commands under the ambient
+  environment and is neither guarded nor claimed to be" no longer holds; it
+  drops the variables rather than refusing them, because it reads the
+  repository only through git, so a drop leaves one subject. Configuration
+  files are still read where git finds them. The pinned upstream verifier
+  accepts the shallow clone; `tests/test_attest_equivalence.py` records that
+  divergence against the oracle, and `tests/test_attest.py` pins the rest and
+  checks the sweep exhaustively over 64 combinations (two histories, every
+  subset of four inherited variables that can move a git read, and a replace
+  ref present or absent): the epoch and the commits in scope are the
+  reference's in every one.
+
+Corrections to code shipped in 0.6.1 and 0.6.2. One fixes a wrongful refusal
+of genuine tokens. Others replace interpreter exceptions (`ValueError`,
+`OverflowError`, `RecursionError`, `AttributeError`, `TypeError`, ...) with the
+module's own refusal, or avoid repeated copying before a refusal. Changes for
+inputs that did not crash before include corrected fractional instant text,
+refusal of genTimes with nonzero digits past the sixth fractional digit, and
+refusal of JSON nested more than 128 deep, including JSON 0.6.1 accepted.
+The properties sample typed parser and time-check inputs: bytes, strings,
+dictionary payloads, aware datetimes and integer allowances. They do not
+establish totality for arbitrary public helper arguments.
+
+- A timestamp token whose genTime carries fractional seconds exactly
+  representable in microseconds verifies. The formatter trimmed trailing
+  zeros from the whole ISO string, so it ate the
+  zeros of `+00:00` and wrote `...12:00:00.249000+00:`. `verify_witness` then
+  refused every such token as `invalid timestamp claim token genTime`, and
+  `verify_timestamp_token` accepted it but reported that string as its
+  `gen_time`. OpenSSL signs sub-second genTimes whenever an authority sets
+  `clock_precision_digits`. A genTime is now written `...12:00:00.249Z`, and
+  that is the form a witness's `tsaGenTime` is compared in. Refusals that
+  quote an instant with a fraction change with it: `postdates verification
+  time 2026-09-28T12:00:00.123456Z` where 0.6.1 wrote `...123456+00:`, which
+  is most of them, since the verification time is `datetime.now()`. Refused:
+  a genTime with nonzero digits past the sixth, which the verifier cannot
+  represent without moving it earlier than the signed instant
+  (`RFC 3161 genTime is finer than a microsecond, which this verifier cannot
+  represent exactly: ...`, the rule `receipt.release_chain` already applied).
+  The direct token verifier in 0.6.1 accepted those genTimes by truncating the
+  fraction; it now refuses them. Trailing zero digits beyond the sixth remain
+  accepted.
+- Token bytes that name no instant or no decodable OID are refused by name.
+  The TSTInfo is parsed from the unauthenticated extraction before either
+  OpenSSL verification, so anyone who can write a token file and its sidecar
+  could end a verification with `ValueError`. A genTime of fourteen digits
+  that is no calendar instant (month 13, February 30th, a leap second, year 0)
+  is now `invalid RFC 3161 genTime: '20261301000000Z'`. An OID arc whose
+  decimal form would exceed 4,300 digits, which the interpreter refuses to
+  write, is `oversized OID subidentifier in RFC 3161 token`, and the decode
+  stops as soon as the bound is crossed. Previously parsed genTimes still
+  accepted, and OIDs still decoded, keep their parsed values.
+- A creation claim at either end of the datetime range is decided, not
+  crashed on. The lead check shifted the claim by the allowance
+  (`claim - timedelta(seconds=300)`), which has no datetime for a record
+  claiming the first minutes of year 1, and converting
+  `0001-01-01T00:00:00+14:00` to UTC has none either. Both raised
+  `OverflowError`, which is not even a `ValueError`. The checks now compare
+  differences of instants, which decide every such case and every other case
+  exactly as before (a differential property against the old comparisons
+  checks the verdict, and the text for whole-second instants), and a claim
+  with no UTC instant is the existing `invalid timestamp claim recordedAt:
+  '...'`.
+- Deep or oversized JSON in a witnessed tree is refused. The record, its
+  sidecar, the chain genesis and a trust bundle are all producer-written, and
+  `json.loads` let 100,000 levels of nesting out as `RecursionError` and a
+  5,000-digit integer out as a bare `ValueError`. They are now decoded by
+  `receipt._bounded_json`: `json.loads` with fixed ceilings of at most 128
+  nested containers and at most 4,300 digits in an integer literal. Acceptance
+  below those ceilings can still depend on the caller's remaining stack and
+  the interpreter's configured integer-digit limit. A recursion or integer
+  conversion failure in `json.loads` becomes `JsonBoundError`, translated to
+  the same `cannot read JSON <path>: ...` refusal as exceeding a ceiling. A
+  `JSONDecodeError` keeps `json.loads`'s message. New refusal: a JSON value
+  nested more than 128 deep.
+  0.6.1 accepted such a record whenever `json.loads` could parse it, and
+  refused such a sidecar, genesis or bundle by its shape
+  (`record must be a JSON object: ...`) or its content; each now gets the
+  depth refusal. A trust bundle whose payload canonical JSON
+  cannot encode (NaN, an infinity, an integer beyond the Number range), which
+  crashed the canonical check that runs before the commitment is compared, is
+  now the existing `TSA trust configuration is not canonical JSON: <path>`.
+  The bundle checks keep their order, so apart from depth a replaced bundle
+  refused before gets the same refusal.
+- A commit whose `tree` or `parent` header has continuation lines is refused
+  at the first one. `receipt.snapshot` rejoined every continuation into the
+  header's value before refusing it, copying the growing value once per line.
+  The tests check refusal at the first continuation and exercise 800,000
+  continuation lines through the parser and `select()`. No value holding a
+  newline is an object name, so the verdict and the text
+  (`commit <oid> is not a canonical commit object`) are what they always
+  were; a differential against the 0.6.1 parser checks this.
+- `verify_append_gate` refuses malformed candidate ledger and prefix bytes
+  with `AppendError`. The ledger and its frozen-prefix manifest are
+  candidate-controlled. A manifest that is not JSON, not an object, missing a
+  key, or holding a count of `null`, `"x"` or `1e400`, a prefix row that is
+  not an object, and an appended row whose `measure`, `source` or
+  `responseArchive` is not an object or whose value is NaN, an infinity, a
+  5,000-digit integer or nested 5,000 deep each raised `JSONDecodeError`,
+  `AttributeError`, `KeyError`, `TypeError`, `ValueError`, `OverflowError` or
+  `RecursionError` out of the gate. The new refusals: `prefix manifest is not
+  valid JSON: ...`, `prefix manifest is not a JSON object`, `prefix manifest
+  lacks <field>`, `prefix manifest prefixLineCount is not a line count: ...`,
+  `prefix manifest lineSha256s is not a list`,
+  `line <n> (<id>) <field> is not an object`,
+  `line <n> (<id>) assertion content is not canonical JSON: ...`, and, for a
+  row no UTF-8 can encode (which only a direct caller of `check_prefix` can
+  pass), `line <n> is not valid UTF-8`. The decoding bounds get the existing
+  `line <n> is not valid JSON: ...`. A rewritten row that is not an object is
+  named `(?)`. Under the default integer-digit limit, the crash corrections
+  preserve prior accepted verdicts and text except that a row or manifest
+  nested more than 128 deep is now refused as not valid JSON. The combined
+  changes also intentionally refuse old accepts under stricter appended-row
+  checks, including `value: true` (`value is not a JSON number`),
+  `observed_at: "2026-99-99"` (`observed_at is not an ASCII YYYY-MM-DD calendar
+  date`), and `source_record_id: 7` (`source_record_id is not a string`).
+  A process that raised the limit could have had the old gate accept a
+  row holding an integer of more than 4,300 digits outside the content
+  address; it is now refused as not valid JSON. A direct caller of
+  `check_prefix` now gets the strict-count refusal for a `prefixLineCount` of
+  `"1"`, `true` or `1.0`, which the old `check_prefix` accepted (the old gate
+  applied that check just after it). An input the old code already refused can
+  now meet a stricter guard first and get a different refusal: a committed
+  manifest whose `prefixLineCount` is the string `"1"` with an empty
+  `lineSha256s` was refused as `prefix manifest line hashes disagree with its
+  count` and is now refused as `immutable prefix manifest prefixLineCount is
+  not a JSON integer`. 0.6.1
+  accepted such a row whenever `json.loads` could parse it and the deep value
+  sat outside the content address, and took later appends on top of it; the
+  bound refuses the row and every later append to a ledger that holds it.
+  `expected_assertion_version_id` raises the same refusals for its own
+  callers, and a falsy `measure`, `source` or `responseArchive` still reads
+  as absent.
+- A release manifest past the decoding bounds, or with a count past the
+  Number range, is refused. The append gate reaches it: `load_manifest`
+  parses a manifest before its filename digest is
+  compared, and `json.loads` let deep nesting and 5,000-digit integers out as
+  `RecursionError` and `ValueError`. A count such as `state.lineCount` of
+  `10**400` passed the schema, which bounds counts only from below, and
+  `receipt.canonical` then raised `ValueError`. These are now the existing
+  `manifest is not valid JSON: <path>: ...` and
+  `manifest bytes are not canonical JSON plus one newline: <path>`. A
+  manifest nested more than 128 deep, which the closed-world schema refused
+  before (`producer.repo must be a string and non-empty`, for one), now gets
+  the depth refusal instead.
+- A witness whose `status` is a JSON list or object is refused by name. The
+  status was checked for membership in a set, which hashes the producer's
+  value, so a list or object raised `TypeError` where a number or a stray
+  string got `invalid witness status for <path>: ...`. Both now get that
+  refusal.
+- The release chain's time bounds decide the ends of the datetime range. A
+  producer-signed, witnessed manifest created in the first five minutes of year
+  1 made `created_at - timedelta(seconds=clock_skew_seconds)` raise
+  `OverflowError` out of `verify_release_chain`, and through it out of
+  `verify_append_gate`. So did a `clock_skew_seconds` too large for a
+  timedelta, which passes the argument check, and a verification time in the
+  last five minutes of year 9999. The bounds are now differences of instants,
+  which decide those cases and every other case exactly as before; the
+  refusal texts are unchanged. This is the release-chain counterpart of the
+  creation-claim fix above.
+
+## 0.6.2
+
+One widening, in the consumer's hands: an anchor can pin more than one
+responder certificate under its root. Nothing a 0.6.1 spec accepts or refuses
+changes, unless it subclasses `AnchorSpec` with a field or property of its
+own named `additional_signers`.
+
+- `AnchorSpec` takes `additional_signers: tuple[PinnedSigner, ...] = ()`, and
+  `PinnedSigner(certificate_sha256, spki_sha256)` pins one responder as a pair.
+  A timestamp authority replaces its responder certificate periodically while
+  the receipts it already issued stay signed by the old one. DigiCert did so
+  between 2026-09-03 and 2026-09-04 ("DigiCert SHA256 RSA4096 Timestamp
+  Responder 2026 1", certificate SHA-256 `2da09da7…`, SPKI SHA-256
+  `753596b6…`). A 0.6.1 spec could pin only one of the two, so a chain that
+  spans the change refused either its new releases (old pin kept) or its old
+  ones (pin replaced). With the old pin kept and the new one added, both eras
+  verify. An auditor can conclude that a receipt verified only if its
+  certificate and its key are the two halves of one entry the consumer
+  committed; the certificate of one entry with the key of another is refused.
+  Membership is the whole rule: `openssl cms -verify -attime` has already
+  required the certificate to chain to the pinned root and be valid at the
+  token's signed time, so no order across releases is imposed.
+- Refused at construction: `additional_signers` that is not a tuple (a list,
+  set or generator has no reviewable order, and a list would not hash), an
+  entry that is not exactly a `PinnedSigner` (a subclass included), a digest
+  that is not 64 lowercase hex characters (checked by `PinnedSigner` and again
+  by `AnchorSpec`, so an entry cannot skip the check), and a certificate
+  pinned twice, primary included.
+- `additional_signers` is keyword-only, and `AnchorSpec` gains no other
+  attribute: construction and verification read the pins through a module
+  function. So a 0.6.1 subclass of `AnchorSpec` that adds its own fields or
+  attributes, one named `signers` included, constructs and verifies as before,
+  positionally included.
+- With no additional signers every verdict is the 0.6.1 verdict, refusal texts
+  included: `RFC 3161 signer certificate is not pinned for <receipt>: <sha256>`
+  for an unknown certificate, `RFC 3161 signer SPKI is not pinned for
+  <receipt>: <sha256>` for a known certificate with another key. The decision
+  is now `_check_signer_pins`, a pure function of the anchor and the two
+  digests, and `tests/test_anchor_signer_set.py` checks its acceptance rule,
+  refusal texts and order independence exhaustively over 225 anchors by 12
+  presented pairs, and agreement with a transcription of the 0.6.1
+  comparison over the 9 anchors without additional signers, besides a
+  two-release chain whose responder rotates under one root.
+
 ## 0.6.1
 
 Two keyring corrections. Both are refusals: values 0.6.0 accepted, one of them

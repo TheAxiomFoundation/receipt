@@ -1600,3 +1600,326 @@ def test_an_explicitly_empty_ignorecase_value_is_false_like_git(
     with snapshot:
         with pytest.raises(SnapshotError, match="transforming attribute filter applies"):
             snapshot.refuse_transforming_attributes(["releases/manifests/x.json"])
+
+
+# --- 0.6.2 review, L3 finding 3: the folded reading folds the file's own name
+
+
+def _attributes_named(
+    root: pathlib.Path, files: Iterable[tuple[bytes, bytes]]
+) -> TreeSnapshot:
+    protected_blob = _hash_object(root, "blob", b"$Id$\n")
+    entries = [
+        (b"100644", name, _hash_object(root, "blob", payload))
+        for name, payload in files
+    ]
+    entries.append((b"100644", b"protected.txt", protected_blob))
+    tree = _tree_object(root, entries)
+    return TreeSnapshot.select(root, _commit_object(root, tree))
+
+
+@pytest.mark.parametrize(
+    "name", [b".gitattributes", b".GITATTRIBUTES", b".GitAttributes"]
+)
+def test_a_case_variant_attributes_file_is_read_in_the_folded_reading(
+    git_repo: pathlib.Path, name: bytes
+) -> None:
+    """A case-insensitive checkout finds ``.GITATTRIBUTES`` when Git opens
+    ``.gitattributes`` and applies its ``ident`` to the protected path; the
+    reader looked the file up by its exact spelling only, found none, and
+    accepted a transform the README says refuses."""
+
+    with _attributes_named(git_repo, [(name, b"protected.txt ident\n")]) as selected:
+        with pytest.raises(
+            SnapshotError,
+            match="transforming attribute ident applies to protected path",
+        ):
+            selected.refuse_transforming_attributes(("protected.txt",))
+
+
+def test_two_attribute_files_that_fold_together_refuse(
+    git_repo: pathlib.Path,
+) -> None:
+    """Which of two fold-equal attribute files a case-insensitive checkout
+    keeps depends on write order, not on the tree, so neither is read."""
+
+    files = [(b".GITATTRIBUTES", b"protected.txt ident\n"), (b".gitattributes", b"")]
+    with _attributes_named(git_repo, files) as selected:
+        with pytest.raises(
+            SnapshotError,
+            match=(
+                r"attribute files \.GITATTRIBUTES, \.gitattributes in the root "
+                r"are one file on a case-insensitive checkout"
+            ),
+        ):
+            selected.refuse_transforming_attributes(("protected.txt",))
+
+
+def test_a_harmless_case_variant_attributes_file_is_accepted(
+    git_repo: pathlib.Path,
+) -> None:
+    with _attributes_named(
+        git_repo, [(b".GitAttributes", b"protected.txt text eol=lf\n")]
+    ) as selected:
+        selected.refuse_transforming_attributes(("protected.txt",))
+
+
+def test_eol_is_accepted_as_a_stated_residual_not_as_byte_neutral(
+    git_repo: pathlib.Path,
+) -> None:
+    """0.6.2 review, L3 finding 8: ``eol=crlf`` rewrites checkout bytes.
+
+    The docstring justified accepting ``text`` and ``eol`` by saying only
+    ``filter``, ``ident`` and ``working-tree-encoding`` transform raw blob
+    bytes. ``eol=crlf`` transforms them too; the acceptance is a residual
+    the README states (checkout fidelity is outside the verdict), and the
+    docstring now says so instead of denying the transform.
+    """
+
+    selected = _raw_attribute_snapshot(git_repo, b"protected.txt text eol=crlf\n")
+    with selected:
+        selected.refuse_transforming_attributes(("protected.txt",))
+    documented = " ".join(
+        (TreeSnapshot.refuse_transforming_attributes.__doc__ or "").split()
+    )
+    assert "Only ``filter``" not in documented
+    assert "``eol=crlf`` checks a blob's ``LF`` out as ``CRLF``" in documented
+
+
+# --- 0.6.2 review, L3 finding 5: invalid public arguments raise SnapshotError
+
+
+def _one_file_commit(root: pathlib.Path) -> str:
+    _write(root, "x.txt", b"x\n")
+    return _commit(root)
+
+
+@pytest.mark.parametrize(
+    "revision, message",
+    [
+        ("\ud800", "snapshot revision cannot be encoded as a command argument"),
+        ("HEAD" + "x" * 2_000_000, "cannot start git: OSError"),
+    ],
+    ids=["lone-surrogate", "over-the-argument-limit"],
+)
+def test_select_refuses_an_unusable_revision_as_a_snapshot_error(
+    git_repo: pathlib.Path, revision: str, message: str
+) -> None:
+    _one_file_commit(git_repo)
+    with pytest.raises(SnapshotError, match=message):
+        TreeSnapshot.select(git_repo, revision)
+
+
+def test_select_refuses_a_root_that_is_a_symlink_loop(tmp_path: pathlib.Path) -> None:
+    """Python 3.11 and 3.12 raise RuntimeError from ``resolve()`` on a loop."""
+
+    loop = tmp_path / "loop"
+    os.symlink(loop, loop)
+    with pytest.raises(SnapshotError):
+        TreeSnapshot.select(loop)
+
+
+@pytest.mark.parametrize(
+    "destination",
+    ["/tmp/\0x", "/tmp/\ud800"],
+    ids=["embedded-nul", "lone-surrogate"],
+)
+def test_materialize_refuses_an_unusable_destination_as_a_snapshot_error(
+    git_repo: pathlib.Path, destination: str
+) -> None:
+    commit = _one_file_commit(git_repo)
+    with TreeSnapshot.select(git_repo, commit) as selected:
+        with pytest.raises(
+            SnapshotError, match="materialization destination does not exist"
+        ):
+            with selected.materialize([""], destination, repertoire="portable"):
+                pass
+
+
+# --- 0.6.2 review, L3 finding 6: discovery refused valid roots, wrongly named
+
+
+@pytest.mark.parametrize(
+    "separator", ["\x1c", "\x0b", "\x0c", "\x85", " "],
+    ids=["FS", "VT", "FF", "NEL", "LS"],
+)
+def test_a_root_whose_name_holds_a_unicode_line_separator_is_selected(
+    tmp_path: pathlib.Path, separator: str
+) -> None:
+    """``str.splitlines`` split Git's discovery output on these too, so a
+    valid top level was refused as "repository discovery output is
+    malformed"; Git ends its lines with LF only."""
+
+    root = tmp_path / f"r{separator}x"
+    _init(root)
+    commit = _one_file_commit(root)
+    with TreeSnapshot.select(root, commit) as selected:
+        assert selected.commit == commit
+
+
+def test_a_top_level_spelled_in_another_case_is_selected(
+    tmp_path: pathlib.Path,
+) -> None:
+    """On a case-insensitive volume one directory has two spellings, and
+    ``resolve()`` keeps the caller's: ``--root ~/Code/Repo`` for
+    ``~/code/repo`` was refused as "not the top level of its repository"."""
+
+    root = tmp_path / "repo"
+    _init(root)
+    commit = _one_file_commit(root)
+    respelled = tmp_path / "REPO"
+    if not respelled.exists():
+        pytest.skip("this volume is case-sensitive")
+    with TreeSnapshot.select(respelled, commit) as selected:
+        assert selected.commit == commit
+        assert selected.blob(selected.entry("x.txt"), limit=16) == b"x\n"
+
+
+def test_a_subdirectory_is_still_not_the_top_level(tmp_path: pathlib.Path) -> None:
+    root = tmp_path / "repo"
+    _init(root)
+    _write(root, "sub/x.txt", b"x\n")
+    _commit(root)
+    with pytest.raises(SnapshotError, match="root is not the top level"):
+        TreeSnapshot.select(root / "sub")
+
+
+# --- 0.6.2 review, L3 finding 7: configuration is re-audited at child boundaries
+
+
+def test_a_configuration_change_after_selection_refuses_before_the_batch_child(
+    git_repo: pathlib.Path,
+) -> None:
+    """Configuration was audited at selection and at close only, so the
+    entered snapshot's batch child ran under a configuration changed after
+    selection, and a writer who restored it before close went unseen."""
+
+    commit = _one_file_commit(git_repo)
+    selected = TreeSnapshot.select(git_repo, commit)
+    with open(git_repo / ".git" / "config", "a") as handle:
+        handle.write("[receiptprobe]\n\tconcurrent = 1\n")
+    with pytest.raises(
+        SnapshotError, match="repository configuration changed during verification"
+    ):
+        selected.__enter__()
+
+
+@pytest.mark.parametrize("body_fails", [False, True])
+def test_close_errors_are_observable_even_while_a_body_error_unwinds(
+    git_repo: pathlib.Path, body_fails: bool
+) -> None:
+    commit = _one_file_commit(git_repo)
+    selected = TreeSnapshot.select(git_repo, commit)
+    failure = RuntimeError("body failed") if body_fails else None
+    with pytest.raises(
+        RuntimeError if body_fails else SnapshotError,
+        match="body failed" if body_fails else "configuration changed",
+    ) as caught:
+        with selected:
+            with open(git_repo / ".git" / "config", "a") as handle:
+                handle.write("[receiptprobe]\n\tconcurrent = 1\n")
+            if failure is not None:
+                raise failure
+
+    assert selected.close_errors
+    assert all(isinstance(error, SnapshotError) for error in selected.close_errors)
+    assert any(
+        "configuration changed during verification" in str(error)
+        for error in selected.close_errors
+    )
+    if failure is not None:
+        assert caught.value is failure
+        assert any("Snapshot close also failed" in note for note in failure.__notes__)
+
+
+def test_a_configuration_change_refuses_before_fsck_runs_under_it(
+    git_repo: pathlib.Path,
+) -> None:
+    """An unreachable commit with a malformed timezone fails ``fsck``; a
+    writer adding ``fsck.badTimezone = ignore`` after the snapshot was
+    entered had ``count-objects`` and ``fsck`` run under the weakened
+    configuration, and the store verified, before close refused."""
+
+    _require_store_verification_support()
+    commit = _one_file_commit(git_repo)
+    tree = _git(git_repo, "rev-parse", f"{commit}^{{tree}}").stdout.decode().strip()
+    _hash_object(
+        git_repo,
+        "commit",
+        (
+            f"tree {tree}\nauthor t <t@example.test> 0 +99999\n"
+            "committer t <t@example.test> 0 +0000\n\nbad\n"
+        ).encode(),
+    )
+    with pytest.raises(
+        SnapshotError, match="repository configuration changed during verification"
+    ):
+        with TreeSnapshot.select(git_repo, commit, verify_objects=True) as selected:
+            with open(git_repo / ".git" / "config", "a") as handle:
+                handle.write("[fsck]\n\tbadTimezone = ignore\n")
+            try:
+                selected.verify_object_store((selected.commit,))
+            except SnapshotError as caught:
+                assert "configuration changed" in str(caught)
+                raise
+            pytest.fail("verify_object_store ran fsck under the changed configuration")
+
+
+# --- 0.6.2 review, L3 findings 9 and 4: ancestry authenticates, never parses
+
+
+def _commit_with_parents(root: pathlib.Path, tree: str, *parents: str) -> str:
+    payload = (
+        f"tree {tree}\n".encode("ascii")
+        + b"".join(f"parent {parent}\n".encode("ascii") for parent in parents)
+        + b"author Snapshot Test <snapshot@example.test> 0 +0000\n"
+        + b"committer Snapshot Test <snapshot@example.test> 0 +0000\n\nfixture\n"
+    )
+    return _hash_object(root, "commit", payload)
+
+
+def test_ancestry_through_a_legacy_mode_tree_is_proved(
+    git_repo: pathlib.Path,
+) -> None:
+    """A <- M <- C where M's root tree holds a ``100664`` entry, which Git
+    accepts (``fsck`` is clean and ``merge-base --is-ancestor`` agrees).
+    ``assert_ancestor`` parsed every walked root tree with the reader's
+    content grammar and refused the true ancestry over a tree mode."""
+
+    blob = _hash_object(git_repo, "blob", b"x\n")
+    good = _tree_object(git_repo, [(b"100644", b"x.txt", blob)])
+    legacy = _tree_object(git_repo, [(b"100664", b"x.txt", blob)])
+    base = _commit_with_parents(git_repo, good)
+    middle = _commit_with_parents(git_repo, legacy, base)
+    candidate = _commit_with_parents(git_repo, good, middle)
+    assert _git(git_repo, "merge-base", "--is-ancestor", base, candidate, check=False).returncode == 0
+
+    with TreeSnapshot.select(git_repo, base) as base_snapshot:
+        with TreeSnapshot.select(git_repo, candidate) as selected:
+            assert selected.assert_ancestor(base_snapshot) == base
+            # Authenticated, not retained: the walked root tree is not in the
+            # content cache, so its parse costs no memory for the snapshot's
+            # lifetime.
+            assert legacy in selected._state.authenticated_trees
+            assert legacy not in selected._state.tree_cache
+
+
+def test_ancestry_still_refuses_a_root_tree_that_does_not_hash_to_its_name(
+    git_repo: pathlib.Path,
+) -> None:
+    blob = _hash_object(git_repo, "blob", b"x\n")
+    good = _tree_object(git_repo, [(b"100644", b"x.txt", blob)])
+    other = _tree_object(git_repo, [(b"100644", b"y.txt", blob)])
+    base = _commit_with_parents(git_repo, good)
+    middle = _commit_with_parents(git_repo, other, base)
+    candidate = _commit_with_parents(git_repo, good, middle)
+    loose = git_repo / ".git" / "objects" / other[:2] / other[2:]
+    import zlib
+
+    forged = zlib.compress(b"tree 0\0")
+    loose.chmod(0o644)
+    loose.write_bytes(forged)
+    with TreeSnapshot.select(git_repo, base) as base_snapshot:
+        with TreeSnapshot.select(git_repo, candidate) as selected:
+            with pytest.raises(SnapshotError):
+                selected.assert_ancestor(base_snapshot)

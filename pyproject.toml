@@ -4,11 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "receipt"
-version = "0.6.1"
+version = "0.6.2"
 description = "Verifiable custody of agent-produced records: chained manifests, RFC 3161 witnesses, pinned Ed25519 signatures, workflow attestation, closed-world corpus binding — one offline verification command"
 readme = "README.md"
 requires-python = ">=3.11"
-license = "Apache-2.0"
+license = "MIT"
 authors = [{ name = "The Axiom Foundation" }]
 classifiers = [
     "Development Status :: 1 - Planning",
@@ -27,7 +27,9 @@ dependencies = ["cryptography>=42"]
 # but silently install nothing under `pip install -e ".[dev]"` — a fresh-venv
 # review round caught exactly that.
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+# Hypothesis runs the property tests that state, for every input in a domain,
+# that a parser either answers or refuses with the module's own error.
+dev = ["pytest>=8", "hypothesis>=6"]
 
 [project.scripts]
 receipt = "receipt.cli:main"

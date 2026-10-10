@@ -34,13 +34,18 @@ import os
 import pathlib
 import shutil
 import subprocess
+import tempfile
 from dataclasses import replace
+from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
+from hypothesis import example, given, settings, strategies as st
 
 from receipt import release_chain
-from receipt.canonical import canonical_sha256
+from receipt.canonical import canonical_bytes, canonical_sha256
 from receipt.release_chain import (
+    ChainSpec,
     ReleaseChainError,
     TIME_STAMP_RE,
     _combined_anchor_digest,
@@ -53,11 +58,13 @@ from receipt.release_chain import (
     verify_release_chain,
     verify_release_history_immutable,
 )
+from receipt.sign import generate_signing_keypair, sign_payload
 from receipt.snapshot import GitEntry as SnapshotGitEntry
 from receipt.snapshot import Materialization, SnapshotError, TreeSnapshot
 from receipt.cli import EXIT_FAIL, main
-from receipt.verify import load_spec, run_verification
+from receipt.verify import load_spec, result_to_dict, run_verification
 
+import corpus_fixture
 from corpus_fixture import CONTENT, append_release, build_corpus
 
 ANCHOR_DIR = "releases/anchors"
@@ -233,6 +240,72 @@ def test_by_default_no_digest_is_computed(repo: pathlib.Path) -> None:
     assert verification.anchor_file_sha256s == ()
 
 
+@pytest.mark.parametrize(
+    "anchor_kind", ["path", "falsy-path", "false", "empty", "zero", "bytes", "object"]
+)
+def test_a_named_anchor_directory_never_selects_the_default_directory(
+    repo: pathlib.Path, anchor_kind: str
+) -> None:
+    spec = load_spec(repo / "verification/spec.py").verification
+    anchors = repo.parent / "different-anchors"
+    shutil.copytree(repo / ANCHOR_DIR, anchors)
+    _private, different_public = generate_signing_keypair()
+    (anchors / spec.chain.producer_public_key_filename).write_bytes(different_public)
+
+    class FalsyPath(type(pathlib.Path())):
+        def __bool__(self) -> bool:
+            return False
+
+    named = {
+        "path": anchors,
+        "falsy-path": FalsyPath(anchors),
+        "false": False,
+        "empty": "",
+        "zero": 0,
+        "bytes": bytes(anchors),
+        "object": object(),
+    }[anchor_kind]
+    stem = next((repo / spec.chain.manifest_relative).glob("*.json")).stem
+    with pytest.raises(ReleaseChainError) as caught:
+        verify_release_chain(
+            repo,
+            spec=spec.chain,
+            anchor_dir=named,  # type: ignore[arg-type]
+            enforce_production_pins=False,
+        )
+    expected = (
+        f"producer Ed25519 signature verification failed for {stem}.producer.sig"
+        if anchor_kind in {"path", "falsy-path"}
+        else "anchor_dir must be a non-empty filesystem path"
+    )
+    assert str(caught.value) == expected
+
+
+@settings(max_examples=30, deadline=None, derandomize=True)
+@given(
+    named=st.one_of(
+        st.booleans(), st.integers(), st.floats(), st.binary(max_size=20),
+        st.lists(st.integers(), max_size=3), st.just(""),
+        st.text(max_size=20).map(lambda value: "\0" + value),
+    ),
+)
+def test_malformed_named_anchors_refuse_before_release_subject_selection(
+    built: pathlib.Path, named: object,
+) -> None:
+    """No malformed named directory can select or verify default anchors."""
+
+    spec = load_spec(built / "verification/spec.py").verification
+    with pytest.raises(ReleaseChainError) as caught:
+        verify_release_chain(
+            built / "missing-named-anchor-subject",
+            spec=spec.chain,
+            anchor_dir=named,  # type: ignore[arg-type]
+            enforce_production_pins=False,
+            require_chain=False,
+        )
+    assert str(caught.value) == "anchor_dir must be a non-empty filesystem path"
+
+
 def test_chain_spec_defaults_to_the_portable_name_repertoire(
     repo: pathlib.Path,
 ) -> None:
@@ -288,6 +361,459 @@ def test_release_history_compares_two_entered_trees_and_returns_new_files(
     assert resolved == base_oid
     assert new_files == {"releases/new-note.txt"}
     assert "releases/new-note.txt" not in base_entries
+
+
+def _redirect_commit_graph_parent(root: pathlib.Path, child: str, parent: str) -> None:
+    """Point ``child``'s first parent at ``parent`` in Git's commit-graph only."""
+
+    subprocess.run(
+        ["git", "-C", str(root), "commit-graph", "write", "--reachable"],
+        check=True,
+        capture_output=True,
+    )
+    graph = root / ".git" / "objects" / "info" / "commit-graph"
+    data = bytearray(graph.read_bytes())
+    assert data[:4] == b"CGPH"
+    chunks = {
+        bytes(data[8 + 12 * index : 12 + 12 * index]): int.from_bytes(
+            data[12 + 12 * index : 20 + 12 * index], "big"
+        )
+        for index in range(data[6] + 1)
+    }
+    fanout, lookup, commits = chunks[b"OIDF"], chunks[b"OIDL"], chunks[b"CDAT"]
+    count = int.from_bytes(data[fanout + 255 * 4 : fanout + 256 * 4], "big")
+    oids = [data[lookup + 20 * index : lookup + 20 * index + 20].hex() for index in range(count)]
+    record = commits + oids.index(child) * 36
+    data[record + 20 : record + 24] = oids.index(parent).to_bytes(4, "big")
+    graph.chmod(0o644)
+    graph.write_bytes(bytes(data))
+
+
+def test_release_history_base_follows_commit_parents_not_the_commit_graph(
+    repo: pathlib.Path,
+) -> None:
+    spec = load_spec(repo / "verification/spec.py").verification
+    first = commit_snapshot(repo, "before the note")
+    note = repo / "releases" / "published-note.txt"
+    note.write_text("published\n", encoding="utf-8")
+    published = commit_snapshot(repo, "publish the note")
+    note.write_text("published, then rewritten\n", encoding="utf-8")
+    rewritten = commit_snapshot(repo, "rewrite the note")
+    _redirect_commit_graph_parent(repo, rewritten, first)
+    oracle = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", f"{rewritten}~1"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert oracle.stdout.strip() == first
+
+    with TreeSnapshot.select(repo, rewritten, expect_commit=rewritten) as candidate:
+        with TreeSnapshot.select(repo, f"{rewritten}~1") as base:
+            assert base.commit == published
+            candidate.assert_ancestor(base)
+            with pytest.raises(ReleaseChainError) as caught:
+                verify_release_history_immutable(
+                    spec.chain,
+                    candidate=candidate,
+                    base=base,
+                )
+
+    assert str(caught.value) == (
+        "existing release file bytes changed relative to "
+        f"{published}: releases/published-note.txt"
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("delete", "existing release file was deleted relative to {base}: "),
+        ("mode", "existing release file mode changed relative to {base}: "),
+        ("bytes", "existing release file bytes changed relative to {base}: "),
+        ("symlink", "release path is a symlink: "),
+    ],
+)
+def test_release_history_covers_a_manifest_directory_outside_the_release_root(
+    repo: pathlib.Path,
+    mutation: str,
+    message: str,
+) -> None:
+    """ChainSpec accepts manifests outside the release root; history must too."""
+
+    chain = replace(
+        load_spec(repo / "verification/spec.py").verification.chain,
+        manifest_relative=pathlib.PurePosixPath("manifests"),
+    )
+    published = repo / "manifests" / "0000-0000000000000000.json"
+    published.parent.mkdir()
+    published.write_text('{"releaseIndex": 0}\n', encoding="utf-8")
+    base_oid = commit_snapshot(repo, "publish a manifest outside releases/")
+    if mutation == "delete":
+        published.unlink()
+    elif mutation == "mode":
+        published.chmod(0o755)
+    elif mutation == "bytes":
+        published.write_text('{"releaseIndex": 0, "rewritten": true}\n')
+    else:
+        published.unlink()
+        published.symlink_to(repo / "receipt/corpus-journal.jsonl")
+    candidate_oid = commit_snapshot(repo, mutation)
+
+    with TreeSnapshot.select(repo, candidate_oid) as candidate:
+        with TreeSnapshot.select(repo, base_oid) as base:
+            candidate.assert_ancestor(base)
+            with pytest.raises(ReleaseChainError) as caught:
+                verify_release_history_immutable(chain, candidate=candidate, base=base)
+
+    detail = mutation == "mode" and " (100644 -> 100755)" or ""
+    assert str(caught.value) == (
+        message.format(base=base_oid) + "manifests/0000-0000000000000000.json" + detail
+    )
+
+
+def test_release_history_accepts_an_append_to_a_manifest_directory_outside_the_root(
+    repo: pathlib.Path,
+) -> None:
+    chain = replace(
+        load_spec(repo / "verification/spec.py").verification.chain,
+        manifest_relative=pathlib.PurePosixPath("manifests"),
+    )
+    manifests = repo / "manifests"
+    manifests.mkdir()
+    (manifests / "0000-0000000000000000.json").write_text("{}\n", encoding="utf-8")
+    base_oid = commit_snapshot(repo, "genesis outside releases/")
+    (manifests / "0001-0000000000000001.json").write_text("{}\n", encoding="utf-8")
+    candidate_oid = commit_snapshot(repo, "next release outside releases/")
+
+    with TreeSnapshot.select(repo, candidate_oid) as candidate:
+        with TreeSnapshot.select(repo, base_oid) as base:
+            candidate.assert_ancestor(base)
+            resolved, new_files, base_entries = verify_release_history_immutable(
+                chain, candidate=candidate, base=base
+            )
+
+    # The return value still speaks for the release root only.
+    assert resolved == base_oid
+    assert new_files == set()
+    assert not any(path.startswith("manifests/") for path in base_entries)
+
+
+@pytest.fixture(scope="module")
+def outside_manifest_standin_history(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[pathlib.Path, str, dict[str, str]]:
+    root = tmp_path_factory.mktemp("outside-standin-history") / "repo"
+    root.mkdir()
+    note = root / "releases" / "published-note.txt"
+    note.parent.mkdir()
+    note.write_bytes(b"published\n")
+    conventional = root / "releases" / "manifests"
+    conventional.mkdir()
+    (conventional / "0000.json").write_bytes(b"{}\n")
+    manifest_roots = ("manifests", "release-data/manifests", "releases-old/manifests")
+    for directory in manifest_roots:
+        manifest = root / directory / "0000.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_bytes(b"{}\n")
+    base_oid = commit_snapshot(root, "publish release and outside manifests")
+    (note.parent / "new-note.txt").write_bytes(b"new\n")
+    (conventional / "0001.json").write_bytes(b"{}\n")
+    for directory in manifest_roots:
+        (root / directory / "0001.json").write_bytes(b"{}\n")
+    appended = commit_snapshot(root, "append to release and outside manifests")
+    for directory in manifest_roots:
+        (root / directory / "0000.json").write_bytes(b'{"rewritten": true}\n')
+    rewritten = commit_snapshot(root, "rewrite outside manifests")
+    note.write_bytes(b"rewritten\n")
+    both_rewritten = commit_snapshot(root, "also rewrite the release root")
+    return root, base_oid, {
+        "append": appended, "outside-rewrite": rewritten, "both-rewritten": both_rewritten,
+    }
+
+
+@settings(max_examples=9, deadline=None, derandomize=True)
+@example(manifest_root="manifests", outcome="outside-rewrite")
+@example(manifest_root="releases/manifests", outcome="append")
+@given(
+    manifest_root=st.sampled_from(
+        ["manifests", "release-data/manifests", "releases-old/manifests"]
+    ),
+    outcome=st.sampled_from(["append", "outside-rewrite", "both-rewritten"]),
+)
+def test_complete_history_standin_compares_outside_manifests(
+    outside_manifest_standin_history: tuple[pathlib.Path, str, dict[str, str]],
+    manifest_root: str, outcome: str,
+) -> None:
+    """A complete stand-in retains outside history and release-root semantics."""
+
+    root, base_oid, candidates = outside_manifest_standin_history
+    spec = SimpleNamespace(
+        release_root_relative=pathlib.PurePosixPath("releases"),
+        manifest_relative=pathlib.PurePosixPath(manifest_root),
+    )
+    with TreeSnapshot.select(root, candidates[outcome]) as candidate:
+        with TreeSnapshot.select(root, base_oid) as base:
+            if outcome == "append":
+                resolved, new_files, base_entries = verify_release_history_immutable(
+                    spec, candidate=candidate, base=base
+                )
+                assert resolved == base_oid
+                assert new_files == {
+                    "releases/new-note.txt", "releases/manifests/0001.json",
+                }
+                assert set(base_entries) == {
+                    "releases/published-note.txt", "releases/manifests/0000.json",
+                }
+            else:
+                with pytest.raises(ReleaseChainError) as caught:
+                    verify_release_history_immutable(spec, candidate=candidate, base=base)
+                changed = (
+                    "releases/published-note.txt" if outcome == "both-rewritten"
+                    else f"{manifest_root}/0000.json"
+                )
+                assert str(caught.value) == (
+                    f"existing release file bytes changed relative to {base_oid}: {changed}"
+                )
+
+
+@pytest.mark.parametrize("outside_error", ["symlink", "changed-bytes"])
+def test_release_root_history_refusals_precede_outside_manifest_refusals(
+    repo: pathlib.Path, outside_error: str
+) -> None:
+    chain = replace(
+        load_spec(repo / "verification/spec.py").verification.chain,
+        manifest_relative=pathlib.PurePosixPath("manifests"),
+    )
+    note = repo / "releases" / "published-note.txt"
+    note.write_text("published\n", encoding="utf-8")
+    manifest = repo / "manifests" / "0000-0000000000000000.json"
+    manifest.parent.mkdir()
+    manifest.write_text("{}\n", encoding="utf-8")
+    base_oid = commit_snapshot(repo, "publish both directories")
+    note.write_text("rewritten\n", encoding="utf-8")
+    if outside_error == "symlink":
+        manifest.unlink()
+        manifest.symlink_to(note)
+    else:
+        manifest.write_text('{"rewritten": true}\n', encoding="utf-8")
+    candidate_oid = commit_snapshot(repo, "rewrite both directories")
+
+    with TreeSnapshot.select(repo, candidate_oid) as candidate:
+        with TreeSnapshot.select(repo, base_oid) as base:
+            with pytest.raises(ReleaseChainError) as caught:
+                verify_release_history_immutable(chain, candidate=candidate, base=base)
+    assert str(caught.value) == (
+        "existing release file bytes changed relative to "
+        f"{base_oid}: releases/published-note.txt"
+    )
+
+
+@pytest.fixture(scope="module")
+def dual_history_precedence(
+    built: pathlib.Path, tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[pathlib.Path, ChainSpec, str, dict[str, str]]:
+    """Prepare shared immutable subjects; examples only change configured roots."""
+
+    root = tmp_path_factory.mktemp("history-precedence") / "repo"
+    shutil.copytree(built, root, symlinks=True)
+    chain = load_spec(root / "verification/spec.py").verification.chain
+    release_roots = ("a-releases", "releases", "z-releases")
+    manifest_roots = ("a-manifests", "manifests", "z-manifests")
+    for directory in release_roots:
+        (root / directory).mkdir(exist_ok=True)
+        (root / directory / "published-note.txt").write_bytes(b"published\n")
+    for directory in manifest_roots:
+        (root / directory).mkdir()
+        (root / directory / "0000-0000000000000000.json").write_bytes(b"{}\n")
+    base_oid = commit_snapshot(root, "publish roots for precedence properties")
+    for directory in release_roots:
+        (root / directory / "published-note.txt").write_bytes(b"rewritten\n")
+    for directory in manifest_roots:
+        (root / directory / "0000-0000000000000000.json").write_bytes(
+            b'{"rewritten": true}\n'
+        )
+    changed = commit_snapshot(root, "rewrite both sets of roots")
+    for directory in manifest_roots:
+        manifest = root / directory / "0000-0000000000000000.json"
+        manifest.unlink()
+        manifest.symlink_to(root / "releases" / "published-note.txt")
+    linked = commit_snapshot(root, "replace outside manifests with links")
+    return root, chain, base_oid, {"changed-bytes": changed, "symlink": linked}
+
+
+@settings(max_examples=24, deadline=None, derandomize=True)
+@given(
+    release_root=st.sampled_from(["a-releases", "releases", "z-releases"]),
+    manifest_root=st.sampled_from(["a-manifests", "manifests", "z-manifests"]),
+    outside_error=st.sampled_from(["changed-bytes", "symlink"]),
+)
+def test_release_root_refusal_precedence_is_independent_of_directory_sort_order(
+    dual_history_precedence: tuple[pathlib.Path, ChainSpec, str, dict[str, str]],
+    release_root: str, manifest_root: str, outside_error: str,
+) -> None:
+    """Old release-root history refusals win for every outside-directory order."""
+
+    root, original, base_oid, candidates = dual_history_precedence
+    chain = replace(
+        original,
+        release_root_relative=pathlib.PurePosixPath(release_root),
+        manifest_relative=pathlib.PurePosixPath(manifest_root),
+    )
+    with TreeSnapshot.select(root, candidates[outside_error]) as candidate:
+        with TreeSnapshot.select(root, base_oid) as base:
+            with pytest.raises(ReleaseChainError) as caught:
+                verify_release_history_immutable(chain, candidate=candidate, base=base)
+    assert str(caught.value) == (
+        "existing release file bytes changed relative to "
+        f"{base_oid}: {release_root}/published-note.txt"
+    )
+
+
+def test_outside_manifest_history_precedes_a_later_invalid_chain(
+    repo: pathlib.Path,
+) -> None:
+    """New outside-root history checks can replace a later custody refusal."""
+
+    spec_path = repo / "verification/spec.py"
+    spec_path.write_text(
+        spec_path.read_text(encoding="utf-8").replace("releases/manifests", "manifests"),
+        encoding="utf-8",
+    )
+    loaded = load_spec(spec_path)
+    assert loaded.verification.chain.manifest_relative == pathlib.PurePosixPath("manifests")
+    manifests = repo / "manifests"
+    shutil.move(repo / "releases/manifests", manifests)
+    manifest = next(manifests.glob("*.json"))
+    signature = manifests / f"{manifest.stem}.producer.sig"
+    signature.write_bytes(bytes(64))
+    base_oid = commit_snapshot(repo, "outside genesis with an invalid signature")
+    before = result_to_dict(
+        run_verification(repo, loaded, commit=base_oid, expect_commit=base_oid)
+    )
+    custody = next(item for item in before["passes"] if item["name"] == "custody")
+    assert custody["failure"] == (
+        f"producer Ed25519 signature verification failed for {manifest.stem}.producer.sig"
+    )
+
+    signature.write_bytes(b"\x01" + bytes(63))
+    candidate_oid = commit_snapshot(repo, "rewrite an outside producer signature")
+    after = result_to_dict(
+        run_verification(
+            repo,
+            loaded,
+            base_ref=base_oid,
+            commit=candidate_oid,
+            expect_commit=candidate_oid,
+        )
+    )
+    history = next(item for item in after["passes"] if item["name"] == "history")
+    assert history["failure"] == (
+        "release history is not immutable: existing release file bytes changed "
+        f"relative to {base_oid}: manifests/{signature.name}"
+    )
+
+
+def test_base_ref_refuses_a_rewitnessed_genesis_kept_outside_the_release_root(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: the producer re-signs and re-stamps a rewritten genesis.
+
+    With the manifests outside ``release_root_relative`` the history pass
+    compared nothing the rewrite touched and the verdict was PASS.
+    """
+
+    monkeypatch.setattr(corpus_fixture, "MANIFEST_RELATIVE", "manifests")
+    root, workspace = tmp_path / "repo", tmp_path / "keys"
+    root.mkdir()
+    base_oid = build_corpus(root, workspace)
+    spec_path = root / "verification" / "spec.py"
+    spec_digest = hashlib.sha256(spec_path.read_bytes()).hexdigest()
+    assert load_spec(spec_path).verification.chain.manifest_relative == (
+        pathlib.PurePosixPath("manifests")
+    )
+
+    manifests = root / "manifests"
+    old_stems = sorted({path.name.split(".")[0] for path in manifests.iterdir()})
+    assert len(old_stems) == 1
+
+    # The producer rewrites history: new content, journal, prefix and genesis,
+    # signed by the pinned key and stamped by both pinned authorities.
+    content = {**CONTENT, "rules/tax/rate.yaml": "name: rate\nvalue: 0.99\n"}
+    for relative, text in content.items():
+        (root / relative).write_text(text)
+    journal_bytes = corpus_fixture.render_journal(corpus_fixture.journal_rows(content))
+    (root / corpus_fixture.JOURNAL_RELATIVE).write_bytes(journal_bytes)
+    lines = journal_bytes.decode("utf-8").split("\n")[:-1]
+    prefix = {
+        "schemaVersion": "receipt/test-corpus-prefix/v1",
+        "prefixLineCount": len(lines),
+        "lineSha256s": [corpus_fixture.sha256_text(line) for line in lines],
+        "prefixSha256": corpus_fixture.sha256_text("\n".join(lines) + "\n"),
+    }
+    prefix_bytes = canonical_bytes(prefix) + b"\n"
+    (root / corpus_fixture.PREFIX_RELATIVE).write_bytes(prefix_bytes)
+    manifest = {
+        "schemaVersion": corpus_fixture.SCHEMA_VERSION,
+        "releaseIndex": 0,
+        "previousManifestSha256": None,
+        "state": {
+            "path": corpus_fixture.JOURNAL_RELATIVE,
+            "jsonlSha256": corpus_fixture.sha256_bytes(journal_bytes),
+            "lineCount": len(lines),
+            "immutablePrefixSha256": corpus_fixture.sha256_bytes(prefix_bytes),
+        },
+        "append": None,
+        "createdAtUtc": corpus_fixture.created_at(60),
+        "producer": {"repo": "TheAxiomFoundation/receipt", "branch": "test"},
+    }
+    manifest_bytes = canonical_bytes(manifest) + b"\n"
+    digest = corpus_fixture.sha256_bytes(manifest_bytes)
+    for old in manifests.iterdir():
+        old.unlink()
+    stem = f"0000-{digest[:16]}"
+    assert [stem] != old_stems
+    (manifests / f"{stem}.json").write_bytes(manifest_bytes)
+    (manifests / f"{stem}.producer.sig").write_bytes(
+        sign_payload((workspace / "producer.key").read_bytes(), manifest_bytes, domain=b"")
+    )
+    for name in corpus_fixture.ANCHOR_NAMES:
+        directory = workspace / name
+        corpus_fixture.LocalTsa(
+            name=name,
+            directory=directory,
+            root_pem=directory / f"{name}-root.pem",
+            policy_oid="",
+            signer_certificate_sha256="",
+            signer_spki_sha256="",
+        ).stamp(digest, manifests / f"{stem}.{name}.tsr")
+    candidate_oid = commit_snapshot(root, "rewritten, re-witnessed genesis")
+    assert hashlib.sha256(spec_path.read_bytes()).hexdigest() == spec_digest
+
+    loaded = load_spec(spec_path, expect_sha256=spec_digest)
+    unanchored = result_to_dict(
+        run_verification(
+            root, loaded, commit=candidate_oid, expect_commit=candidate_oid
+        )
+    )
+    # Without a base the rewrite is a valid chain: the key signed it.
+    assert unanchored["verdict"] == "PASS"
+    payload = result_to_dict(
+        run_verification(
+            root,
+            loaded,
+            base_ref=base_oid,
+            commit=candidate_oid,
+            expect_commit=candidate_oid,
+        )
+    )
+    assert payload["verdict"] == "FAIL"
+    history = next(item for item in payload["passes"] if item["name"] == "history")
+    assert history["ok"] is False
+    assert history["failure"] == (
+        "release history is not immutable: existing release file was deleted "
+        f"relative to {base_oid}: manifests/{old_stems[0]}.alpha.tsr"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1118,8 +1644,9 @@ def test_the_producer_openssl_fallback_uses_a_private_leaf(
 ) -> None:
     """A configured producer filename that is absolute would survive the
     temporary-directory join in the OpenSSL fallback and hand the original
-    path to the subprocess. When observing, the temporary name must be a
-    fixed private leaf regardless of configuration."""
+    path to the subprocess. The fallback now names its temporary key file
+    itself, a fixed private leaf, so the release chain hands it only the
+    observed bytes and a name for its diagnostics."""
 
     import dataclasses
 
@@ -1137,11 +1664,11 @@ def test_the_producer_openssl_fallback_uses_a_private_leaf(
         manifests[0].name.replace(".json", ".producer.sig")
     ).read_bytes()
 
-    captured: list[str | None] = []
+    captured: list[list[str]] = []
     fed_pems: list[bytes] = []
 
     def spying_fallback(*args, **kwargs):  # type: ignore[no-untyped-def]
-        captured.append(kwargs.get("temporary_public_key_filename"))
+        captured.append(sorted(kwargs))
         fed_pems.append(args[2])
 
     monkeypatch.setattr(module, "CRYPTOGRAPHY_AVAILABLE", False)
@@ -1158,13 +1685,14 @@ def test_the_producer_openssl_fallback_uses_a_private_leaf(
         label="0000.producer.sig",
         anchor_observer=observer,
     )
-    assert captured == ["producer-key-snapshot.pem"]
+    assert captured == [["label", "public_key_filename", "spki_sha256"]]
     assert absolute_name in observer
     # The bytes handed to the fallback are the observed bytes exactly.
     assert hashlib.sha256(fed_pems[0]).hexdigest() == observer[absolute_name]
 
-    # Non-observing mode must keep origin's behavior exactly: the configured
-    # name is forwarded as the temporary filename, absolute or not.
+    # Non-observing mode forwarded the configured name as the temporary
+    # filename, absolute or not, so the fallback wrote to the anchor itself.
+    # Neither mode forwards a filename to write any more.
     captured.clear()
     module.verify_producer_signature_bytes(
         manifest_bytes,
@@ -1174,7 +1702,63 @@ def test_the_producer_openssl_fallback_uses_a_private_leaf(
         enforce_production_pin=False,
         label="0000.producer.sig",
     )
-    assert captured == [absolute_name]
+    assert captured == [["label", "public_key_filename", "spki_sha256"]]
+
+
+@pytest.mark.parametrize("shape", ["absolute", "subdirectory"])
+def test_the_openssl_fallback_neither_writes_nor_crashes_on_a_configured_key_name(
+    repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shape: str,
+) -> None:
+    """Non-observing mode, for real: the configured producer filename used to
+    name the fallback's temporary key file. Absolute, it rewrote the
+    consumer's anchor in place and read the pin and the key from it in two
+    separate reads; with a directory component it crashed with a raw
+    OSError. (A ``..`` component is refused by the chain's own reader before
+    the fallback.)"""
+
+    import dataclasses
+
+    import receipt.release_chain as module
+
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl is not installed")
+    monkeypatch.setattr(module, "CRYPTOGRAPHY_AVAILABLE", False)
+    private_tmp = tmp_path / "private-tmp"
+    (private_tmp / "work").mkdir(parents=True)
+    monkeypatch.setattr(tempfile, "tempdir", str(private_tmp / "work"))
+    spec = load_spec(repo / "verification/spec.py").verification
+    anchors = repo / ANCHOR_DIR
+    original = anchors / spec.chain.producer_public_key_filename
+    if shape == "absolute":
+        configured = str(original.resolve())
+        watched = original
+    else:
+        (anchors / "keys").mkdir()
+        shutil.copy2(original, anchors / "keys" / original.name)
+        configured = f"keys/{original.name}"
+        watched = anchors / "keys" / original.name
+    os.utime(watched, (1_000_000_000, 1_000_000_000))
+    chain = dataclasses.replace(spec.chain, producer_public_key_filename=configured)
+    manifests = sorted((repo / "releases/manifests").glob("*.json"))
+    manifest_bytes = manifests[0].read_bytes()
+    signature = manifests[0].with_name(
+        manifests[0].name.replace(".json", ".producer.sig")
+    ).read_bytes()
+
+    module.verify_producer_signature_bytes(
+        manifest_bytes,
+        signature,
+        spec=chain,
+        anchor_dir=anchors,
+        enforce_production_pin=True,
+        label="0000.producer.sig",
+    )
+
+    assert watched.stat().st_mtime == 1_000_000_000
+    assert sorted(path.name for path in (private_tmp / "work").iterdir()) == []
 
 
 def test_a_reserialized_producer_key_is_accepted_and_recorded(
@@ -1232,7 +1816,7 @@ def test_the_producer_openssl_fallback_verifies_while_observing(
     )
     assert observer == {key_name: expected}
 
-    # Non-observing mode keeps the original configured-name behavior.
+    # Non-observing mode also verifies the exact supplied bytes.
     module.verify_producer_signature_bytes(
         manifest_bytes,
         signature,
@@ -2023,6 +2607,54 @@ def test_out_of_domain_filenames_refuse_cleanly() -> None:
         _exact_filename(RaisesUnprintable())
 
 
+def test_a_missing_producer_filename_refuses_before_the_path_join(
+    built: pathlib.Path,
+) -> None:
+    """An invalid configured filename must raise the chain's own error."""
+
+    chain = load_spec(built / "verification/spec.py").verification.chain
+    configured = replace(chain, producer_public_key_filename=None)  # type: ignore[arg-type]
+    with pytest.raises(
+        ReleaseChainError, match="producer public key filename must be str or os.PathLike"
+    ):
+        release_chain.verify_producer_signature_bytes(
+            b"manifest", b"\0" * 64,
+            spec=configured,
+            anchor_dir=built / ANCHOR_DIR,
+            enforce_production_pin=False,
+            label="producer.sig",
+        )
+
+
+@settings(max_examples=40, deadline=None, derandomize=True)
+@given(
+    filename=st.one_of(
+        st.none(), st.booleans(), st.integers(), st.floats(),
+        st.binary(max_size=20), st.lists(st.integers(), max_size=3),
+        st.dictionaries(st.text(max_size=3), st.integers(), max_size=3),
+    ),
+    observing=st.booleans(),
+)
+def test_out_of_domain_producer_filenames_are_named_refusals(
+    built: pathlib.Path, filename: object, observing: bool,
+) -> None:
+    """For every non-path filename, either mode refuses before joining it."""
+
+    chain = load_spec(built / "verification/spec.py").verification.chain
+    configured = replace(chain, producer_public_key_filename=filename)  # type: ignore[arg-type]
+    with pytest.raises(
+        ReleaseChainError, match="filenames? must be str or os.PathLike"
+    ):
+        release_chain.verify_producer_signature_bytes(
+            b"manifest", b"\0" * 64,
+            spec=configured,
+            anchor_dir=built / ANCHOR_DIR,
+            enforce_production_pin=False,
+            label="producer.sig",
+            anchor_observer={} if observing else None,
+        )
+
+
 def test_a_lazy_spec_mapping_cannot_alias_through_id_reuse(
     repo: pathlib.Path,
 ) -> None:
@@ -2688,3 +3320,167 @@ def test_a_manifest_path_this_verifier_cannot_stat_is_not_no_chain(
         )
     finally:
         releases.chmod(0o755)
+
+
+# ---------------------------------------------------------------------------
+# Manifest bytes that escaped as interpreter exceptions. A manifest is parsed
+# before its filename digest is compared, so these bytes need no key.
+
+
+def _genesis_manifest(repo: pathlib.Path) -> pathlib.Path:
+    spec = load_spec(repo / "verification/spec.py").verification
+    manifests = sorted((repo / spec.chain.manifest_relative).glob("0000-*.json"))
+    assert len(manifests) == 1
+    return manifests[0]
+
+
+@pytest.mark.parametrize(
+    ("data", "reason"),
+    [
+        (b"[" * 100_000 + b"]" * 100_000, "JSON nesting exceeds 128 levels at char 128"),
+        (
+            b'{"releaseIndex": ' + b"9" * 5000 + b"}",
+            "JSON integer literal has 5000 digits, more than 4300",
+        ),
+    ],
+    ids=["nested-100000-deep", "integer-5000-digits"],
+)
+def test_a_manifest_past_the_decoding_bounds_is_not_valid_json(
+    repo: pathlib.Path, data: bytes, reason: str
+) -> None:
+    """``json.loads`` let these out as ``RecursionError`` and ``ValueError``;
+    they are now the existing ``manifest is not valid JSON`` refusal."""
+
+    manifest = _genesis_manifest(repo)
+    manifest.write_bytes(data)
+    spec = load_spec(repo / "verification/spec.py").verification
+    with pytest.raises(ReleaseChainError) as caught:
+        verify_release_chain(repo, spec=spec.chain)
+    message = str(caught.value)
+    assert message.startswith("manifest is not valid JSON: ")
+    assert message.endswith(f": {reason}")
+
+
+@pytest.mark.parametrize("field", ["lineCount", "previousLineCount"])
+def test_a_manifest_count_past_the_number_range_is_not_canonical(
+    repo: pathlib.Path, field: str
+) -> None:
+    """The schema bounds counts below only, so a count of 10**400 passed it
+    and reached ``receipt.canonical``, which has no encoding for it and
+    raised ``ValueError``. Such bytes are not canonical JSON: the existing
+    refusal."""
+
+    manifest = _genesis_manifest(repo)
+    payload = json.loads(manifest.read_text())
+    if field == "lineCount":
+        payload["state"]["lineCount"] = 10**400
+    else:
+        payload["releaseIndex"] = 1
+        payload["previousManifestSha256"] = "0" * 64
+        payload["append"] = {
+            "previousLineCount": 10**400,
+            "appendedRowCount": 1,
+            "appendedBytesSha256": "0" * 64,
+        }
+    manifest.write_text(json.dumps(payload) + "\n")
+    spec = load_spec(repo / "verification/spec.py").verification
+    with pytest.raises(ReleaseChainError) as caught:
+        release_chain.load_manifest(manifest, spec.chain)
+    assert str(caught.value) == (
+        f"manifest bytes are not canonical JSON plus one newline: {manifest}"
+    )
+    with pytest.raises(ReleaseChainError):
+        verify_release_chain(repo, spec=spec.chain)
+
+
+# ---------------------------------------------------------------------------
+# Time bounds at the ends of the datetime range: the release-chain
+# counterpart of the L2 F3 fix in receipt.tsa (found by the adversarial sweep
+# over this branch).
+
+
+def _resign_genesis_alone(
+    repo: pathlib.Path, workspace: pathlib.Path, *, created_at: str
+) -> None:
+    """Replace the chain with a genesis created at ``created_at``, signed by
+    the fixture producer and stamped by both fixture authorities."""
+
+    from corpus_fixture import ANCHOR_NAMES, LocalTsa
+    from receipt.canonical import canonical_bytes
+    from receipt.sign import sign_payload
+
+    spec = load_spec(repo / "verification/spec.py").verification
+    manifests = repo / spec.chain.manifest_relative
+    payload = json.loads(_genesis_manifest(repo).read_bytes())
+    payload["createdAtUtc"] = created_at
+    for entry in list(manifests.iterdir()):
+        entry.unlink()
+    raw = canonical_bytes(payload) + b"\n"
+    digest = hashlib.sha256(raw).hexdigest()
+    stem = f"0000-{digest[:16]}"
+    (manifests / f"{stem}.json").write_bytes(raw)
+    (manifests / f"{stem}.producer.sig").write_bytes(
+        sign_payload((workspace / "producer.key").read_bytes(), raw, domain=b"")
+    )
+    for name in ANCHOR_NAMES:
+        directory = workspace / name
+        LocalTsa(
+            name=name,
+            directory=directory,
+            root_pem=directory / f"{name}-root.pem",
+            policy_oid="",
+            signer_certificate_sha256="",
+            signer_spki_sha256="",
+        ).stamp(digest, manifests / f"{stem}.{name}.tsr")
+
+
+def test_a_genesis_created_in_year_one_is_measured_not_crashed_on(
+    repo: pathlib.Path, built: pathlib.Path
+) -> None:
+    """``created_at - timedelta(seconds=clock_skew_seconds)`` has no
+    datetime for a manifest created in the first five minutes of year 1, and
+    raised OverflowError after both receipts had verified -- out of
+    verify_release_chain and, through it, verify_append_gate. The bound is now
+    a difference of instants: the receipts postdate the claim, so the genesis
+    verifies, exactly as it does when created one second after the window."""
+
+    workspace = built.parent / "tsa-workspace"
+    spec = load_spec(repo / "verification/spec.py").verification
+    for created_at in ("0001-01-01T00:00:00Z", "0001-01-01T00:04:59Z", "0001-01-01T00:05:00Z"):
+        _resign_genesis_alone(repo, workspace, created_at=created_at)
+        verification = verify_release_chain(repo, spec=spec.chain)
+        assert [release.manifest["createdAtUtc"] for release in verification.releases] == [
+            created_at
+        ]
+
+
+def test_an_oversized_clock_skew_saturates_rather_than_overflowing(
+    repo: pathlib.Path,
+) -> None:
+    """A skew too large for a timedelta passed the argument check and then
+    raised OverflowError; an allowance that large exceeds every distance
+    between datetimes, so the chain verifies as it does under any large
+    skew."""
+
+    spec = load_spec(repo / "verification/spec.py").verification
+    reference = verify_release_chain(repo, spec=spec.chain, clock_skew_seconds=10**6)
+    saturated = verify_release_chain(repo, spec=spec.chain, clock_skew_seconds=10**15)
+    assert len(saturated.releases) == len(reference.releases)
+
+
+@pytest.mark.parametrize(
+    "now",
+    [
+        datetime.max.replace(tzinfo=timezone.utc),
+        datetime(9999, 12, 31, 23, 55, tzinfo=timezone.utc),
+    ],
+    ids=["datetime-max", "last-five-minutes"],
+)
+def test_a_verification_time_at_the_top_of_the_range_is_decided(
+    repo: pathlib.Path, now: datetime
+) -> None:
+    """``current + timedelta(seconds=300)`` overflowed for a verification
+    time in the last five minutes of year 9999."""
+
+    spec = load_spec(repo / "verification/spec.py").verification
+    assert verify_release_chain(repo, spec=spec.chain, now=now).releases

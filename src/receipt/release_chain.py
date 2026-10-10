@@ -34,10 +34,11 @@ import stat
 import subprocess
 import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
+from receipt import _bounded_json as bounded_json
 from receipt import sign as _sign
 from receipt import tsa as _tsa
 from receipt._names import (
@@ -117,12 +118,53 @@ def _spec_relative_path(value: Any, label: str) -> pathlib.PurePosixPath:
 
 
 @dataclass(frozen=True)
+class PinnedSigner:
+    """One RFC 3161 responder certificate an anchor accepts, pinned as a pair.
+
+    The certificate digest and the SPKI digest belong to one entry, and a
+    receipt must match both halves of the same entry: the certificate of one
+    entry with the key of another is a certificate nobody reviewed.
+    """
+
+    certificate_sha256: str
+    spki_sha256: str
+
+    def __post_init__(self) -> None:
+        _sha256(self.certificate_sha256, "PinnedSigner certificate_sha256")
+        _sha256(self.spki_sha256, "PinnedSigner spki_sha256")
+
+
+@dataclass(frozen=True)
 class AnchorSpec:
+    """One timestamp authority: its root, its policy, and the responders it may use.
+
+    ``signer_certificate_sha256`` and ``signer_spki_sha256`` pin the first
+    accepted responder, exactly as in 0.6.1. ``additional_signers`` pins any
+    further responder certificates the same authority has used under the same
+    root, oldest first. A timestamp authority replaces its responder
+    certificate periodically while the receipts it already issued stay signed
+    by the old one, so a chain that spans the change must accept both: the
+    old entry is kept and the new one is added, never substituted.
+
+    Membership is the whole rule. By the time the pins are compared,
+    ``openssl cms -verify -purpose timestampsign -attime <genTime>`` has
+    required the responder certificate to chain to the pinned root and to be
+    valid at the token's signed time, so no entry vouches for a token outside
+    its own certificate's validity. No order across releases is imposed, and
+    the verdict does not say which entry matched. Adding an entry is a trust
+    decision, made in the consumer's committed code like every other pin.
+    """
+
     filename: str
     pem_sha256: str
     policy_oid: str
     signer_certificate_sha256: str
     signer_spki_sha256: str
+    # Keyword-only, so a 0.6.1 subclass that adds its own fields keeps
+    # constructing, positionally included.
+    additional_signers: tuple[PinnedSigner, ...] = field(
+        default=(), kw_only=True
+    )
 
     def __post_init__(self) -> None:
         """Refuse an anchor whose pins cannot pin anything.
@@ -151,6 +193,51 @@ class AnchorSpec:
                 "AnchorSpec policy_oid must be a dotted-decimal OID: "
                 f"{self.policy_oid!r}"
             )
+        # A list would construct and then fail to hash; a set or a generator
+        # has no declared order to review. Only a tuple is a spec line.
+        if type(self.additional_signers) is not tuple:
+            raise ReleaseChainError(
+                "AnchorSpec additional_signers must be a tuple of PinnedSigner, "
+                f"not {type(self.additional_signers).__name__}"
+            )
+        seen: set[str] = set()
+        for signer in _pinned_signers(self):
+            # Exactly PinnedSigner, and its digests checked again here: a
+            # subclass or a look-alike could skip PinnedSigner's own checks,
+            # and an unhashable or string-subclass digest must be refused
+            # before it is hashed or compared.
+            if type(signer) is not PinnedSigner:
+                raise ReleaseChainError(
+                    "AnchorSpec additional_signers entries must be PinnedSigner, "
+                    f"not {type(signer).__name__}"
+                )
+            _sha256(
+                signer.certificate_sha256, "PinnedSigner certificate_sha256"
+            )
+            _sha256(signer.spki_sha256, "PinnedSigner spki_sha256")
+            # One certificate has one key, so a repeated certificate digest is
+            # either a duplicate line or a pair that cannot both be right.
+            if signer.certificate_sha256 in seen:
+                raise ReleaseChainError(
+                    "AnchorSpec pins signer certificate "
+                    f"{signer.certificate_sha256} more than once"
+                )
+            seen.add(signer.certificate_sha256)
+
+
+
+def _pinned_signers(anchor: "AnchorSpec") -> tuple[PinnedSigner, ...]:
+    """Every accepted responder, the primary pin first.
+
+    A module function rather than an attribute of ``AnchorSpec``, so no name
+    a 0.6.1 subclass may already use (``signers`` included) changes the pins.
+    """
+
+    primary = PinnedSigner(
+        certificate_sha256=anchor.signer_certificate_sha256,
+        spki_sha256=anchor.signer_spki_sha256,
+    )
+    return (primary, *anchor.additional_signers)
 
 
 @dataclass(frozen=True)
@@ -448,16 +535,27 @@ def load_manifest(
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ReleaseChainError(f"manifest is not UTF-8: {path}") from exc
+    # A manifest is read before its filename digest is compared, so these
+    # bytes are unauthenticated.  receipt._bounded_json bounds the nesting
+    # and integer width json.loads let out as RecursionError and ValueError.
     try:
-        parsed = json.loads(
+        parsed = bounded_json.loads(
             text,
             object_pairs_hook=_object_without_duplicates,
             parse_constant=_fail_json_constant,
         )
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, bounded_json.JsonBoundError) as exc:
         raise ReleaseChainError(f"manifest is not valid JSON: {path}: {exc}") from exc
     payload = validate_manifest_schema(parsed, spec)
-    expected = canonical_bytes(payload) + b"\n"
+    # The schema bounds counts below only, so a count past the Number range
+    # reaches the encoder, which has no canonical form for it and said so
+    # with ValueError.  No canonical bytes means these are not them.
+    try:
+        expected = canonical_bytes(payload) + b"\n"
+    except (ValueError, RecursionError) as exc:
+        raise ReleaseChainError(
+            f"manifest bytes are not canonical JSON plus one newline: {path}"
+        ) from exc
     if raw != expected:
         raise ReleaseChainError(
             f"manifest bytes are not canonical JSON plus one newline: {path}"
@@ -818,7 +916,6 @@ def _verify_producer_signature_with_openssl(
             signature,
             public_key_pem,
             public_key_filename=spec.producer_public_key_filename,
-            temporary_public_key_filename=spec.producer_public_key_filename,
             spki_sha256=(
                 spec.producer_spki_sha256 if enforce_production_pin else None
             ),
@@ -843,7 +940,7 @@ def verify_producer_signature_bytes(
     key_spec = _sign.ProducerKeySpec(
         # When observing, normalized once here: the join below,
         # read_producer_public_key's own join, the observer key, and the
-        # fallback's temporary filename all flow from this one value, so no
+        # fallback's diagnostic name all flow from this one value, so no
         # later __fspath__ call exists for a stateful PathLike to answer
         # differently. When not observing, the raw configured value flows
         # exactly as it always has.
@@ -854,6 +951,10 @@ def verify_producer_signature_bytes(
         ),
         spki_sha256=spec.producer_spki_sha256,
     )
+    if not isinstance(key_spec.public_key_filename, (str, os.PathLike)):
+        raise ReleaseChainError(
+            "producer public key filename must be str or os.PathLike"
+        )
     public_key_path = anchor_dir / key_spec.public_key_filename
     try:
         public_key_relative = pathlib.PurePosixPath(
@@ -883,22 +984,14 @@ def verify_producer_signature_bytes(
             anchor_observer, key_spec.public_key_filename, public_key_pem
         )
         if not CRYPTOGRAPHY_AVAILABLE:
-            # When observing, the temporary key file must be a private leaf:
-            # a configured filename that is absolute would survive the
-            # temporary-directory join and hand OpenSSL (and the write
-            # before it) the original path, breaking the snapshot guarantee
-            # the observed digest depends on.
-            temporary_key_name = (
-                "producer-key-snapshot.pem"
-                if anchor_observer is not None
-                else key_spec.public_key_filename
-            )
+            # The fallback writes these exact bytes to a fixed private leaf of
+            # its own, never to a name derived from the configuration, so the
+            # observed digest is the digest of the key OpenSSL reads.
             _sign._verify_producer_signature_with_openssl(
                 manifest,
                 signature,
                 public_key_pem,
                 public_key_filename=str(public_key_path),
-                temporary_public_key_filename=temporary_key_name,
                 spki_sha256=(
                     key_spec.spki_sha256 if enforce_production_pin else None
                 ),
@@ -1047,16 +1140,45 @@ def _verify_production_signer(
         environment=environment,
         label=f"signer SPKI decoding for {receipt.name}",
     )
-    certificate_sha256 = sha256_bytes(certificate_der)
-    spki_sha256 = sha256_bytes(public_key_der)
-    if certificate_sha256 != anchor_spec.signer_certificate_sha256:
+    _check_signer_pins(
+        anchor_spec,
+        receipt.name,
+        certificate_sha256=sha256_bytes(certificate_der),
+        spki_sha256=sha256_bytes(public_key_der),
+    )
+
+
+def _check_signer_pins(
+    anchor_spec: AnchorSpec,
+    receipt_name: str,
+    *,
+    certificate_sha256: str,
+    spki_sha256: str,
+) -> None:
+    """Refuse a responder whose certificate and key are not one pinned entry.
+
+    The digests are SHA-256 over the certificate and SPKI DER that OpenSSL
+    extracted from the certificate that verified the token. Both halves must
+    match one entry of the anchor's pins, read through ``_pinned_signers``.
+    The two refusals keep their 0.6.1 texts and order: an unknown
+    certificate names the certificate, and a known certificate whose entry
+    pins a different key names the key. With no additional signers this is
+    the 0.6.1 comparison exactly.
+    """
+
+    matching = [
+        signer
+        for signer in _pinned_signers(anchor_spec)
+        if signer.certificate_sha256 == certificate_sha256
+    ]
+    if not matching:
         raise ReleaseChainError(
-            f"RFC 3161 signer certificate is not pinned for {receipt.name}: "
+            f"RFC 3161 signer certificate is not pinned for {receipt_name}: "
             f"{certificate_sha256}"
         )
-    if spki_sha256 != anchor_spec.signer_spki_sha256:
+    if not any(signer.spki_sha256 == spki_sha256 for signer in matching):
         raise ReleaseChainError(
-            f"RFC 3161 signer SPKI is not pinned for {receipt.name}: {spki_sha256}"
+            f"RFC 3161 signer SPKI is not pinned for {receipt_name}: {spki_sha256}"
         )
 
 
@@ -1172,7 +1294,10 @@ def verify_receipt(
                 f"RFC 3161 policy is not pinned for {tsa}: {policy_oid!r}"
             )
         current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-        if gen_time > current + timedelta(seconds=MAX_FUTURE_SECONDS):
+        # A difference of two instants is always a representable timedelta;
+        # current + 300 s is not, for a verification time in the last five
+        # minutes of year 9999, and raised OverflowError.
+        if gen_time - current > _allowance(MAX_FUTURE_SECONDS):
             raise ReleaseChainError(
                 f"RFC 3161 genTime {gen_time.isoformat()} for {receipt.name} "
                 f"postdates verifier time {current.isoformat()}"
@@ -1260,21 +1385,22 @@ def verify_release_receipts(
         for tsa, receipt_path in receipt_paths.items()
     }
     created_at = parse_created_at(manifest["createdAtUtc"])
-    earliest_allowed = created_at - timedelta(seconds=clock_skew_seconds)
+    # Both bounds below are differences of instants, as in
+    # receipt.tsa.validate_token_time: `created_at - skew` has no datetime
+    # for a manifest created in the first `skew` seconds of year 1, and a
+    # skew too large for a timedelta raised OverflowError on its own.
+    skew = _allowance(clock_skew_seconds)
     release_index = manifest["releaseIndex"]
     for tsa, gen_time in receipt_times.items():
-        if gen_time < earliest_allowed:
+        if created_at - gen_time > skew:
             raise ReleaseChainError(
                 f"release {release_index} {tsa} genTime "
                 f"{gen_time.isoformat()} impossibly precedes createdAtUtc "
                 f"{created_at.isoformat()}"
             )
     if previous_times is not None:
-        lower_bound = max(previous_times.values()) - timedelta(
-            seconds=clock_skew_seconds
-        )
         current_earliest = min(receipt_times.values())
-        if current_earliest < lower_bound:
+        if max(previous_times.values()) - current_earliest > skew:
             raise ReleaseChainError(
                 f"release {release_index} receipt chronology regresses: "
                 f"earliest current genTime {current_earliest.isoformat()} "
@@ -1283,6 +1409,20 @@ def verify_release_receipts(
                 f"{clock_skew_seconds}s skew"
             )
     return receipt_times
+
+
+def _allowance(seconds: int) -> timedelta:
+    """``timedelta(seconds=seconds)``, saturating where it cannot be held.
+
+    An allowance past ``timedelta.max`` already exceeds the distance between
+    any two datetimes, so saturating decides every comparison exactly as the
+    unbounded value would.
+    """
+
+    try:
+        return timedelta(seconds=seconds)
+    except OverflowError:
+        return timedelta.max if seconds > 0 else timedelta.min
 
 
 def jsonl_line_offsets(payload: bytes, label: str) -> list[int]:
@@ -1943,6 +2083,20 @@ def _combined_anchor_digest(per_file: Mapping[str, str]) -> str:
     return canonical_sha256(dict(per_file))
 
 
+def _normalized_anchor_dir(anchor_dir: Any, *, label: str) -> pathlib.Path | None:
+    """Keep absence distinct from a named path and strip Path subclasses."""
+
+    if anchor_dir is None:
+        return None
+    try:
+        path = os.fspath(anchor_dir)
+        if not isinstance(path, str) or path == "" or "\0" in path:
+            raise ValueError("not a non-empty filesystem path")
+        return pathlib.Path(path)
+    except (TypeError, ValueError) as exc:
+        raise ReleaseChainError(f"{label} must be a non-empty filesystem path") from exc
+
+
 def verify_release_chain(
     root: pathlib.Path,
     *,
@@ -1972,6 +2126,9 @@ def verify_release_chain(
     configured anchor bytes consumed. OpenSSL always receives a private
     byte-for-byte ``-CAfile`` copy.
     Caller-supplied ``state_bytes`` replace the two state-file reads.
+    A named ``anchor_dir`` is normalized to a plain ``pathlib.Path`` and
+    selects that directory independently of its truth value; empty strings
+    and non-path values refuse. Only ``None`` selects the default directory.
     """
 
     if type(clock_skew_seconds) is not int or clock_skew_seconds < 0:
@@ -1991,6 +2148,7 @@ def verify_release_chain(
     except _tsa.TsaError as exc:
         raise ReleaseChainError(str(exc)) from exc
 
+    anchor_dir = _normalized_anchor_dir(anchor_dir, label="anchor_dir")
     root = root.resolve()
     # M1 record, anchor row 1984-2015: physical link precedence excludes caller-owned trust.
     default_anchor_dir = root / spec.anchor_relative
@@ -2010,7 +2168,9 @@ def verify_release_chain(
                 raise ReleaseChainError(
                     f"anchor path component is a symlink or reparse point: {probe}"
                 )
-    selected_anchors = (anchor_dir or default_anchor_dir).resolve()
+    selected_anchors = (
+        default_anchor_dir if anchor_dir is None else anchor_dir
+    ).resolve()
     if enforce_production_pins is None:
         enforce_production_pins = selected_anchors == default_anchor_dir.resolve()
     anchor_observer: dict[str, str] | None = (
@@ -2200,53 +2360,73 @@ def verify_release_history_immutable(
     candidate: TreeSnapshot,
     base: TreeSnapshot,
 ) -> tuple[str, set[str], dict[str, GitEntry]]:
-    """Compare release entries in two entered, authenticated tree snapshots."""
+    """Compare release entries in two entered, authenticated tree snapshots.
+
+    The comparison covers the release root and, when the spec keeps them
+    elsewhere, the manifest directory too: the manifests, producer signatures
+    and receipts are the release objects a rewritten history would replace.
+    The returned new files and base entries stay those under the release
+    root.
+    """
 
     from receipt.protected_tree import POLICY_VERSION, ProtectionPlan, TreePolicy
 
     release_root = spec.release_root_relative.as_posix()
     base_entries = base.entries(release_root).as_dict()
     candidate_entries = candidate.entries(release_root).as_dict()
+    compared_directories = [release_root]
+    manifest_parts = spec.manifest_relative.parts
+    root_parts = spec.release_root_relative.parts
+    if manifest_parts[: len(root_parts)] != root_parts:
+        compared_directories.append(spec.manifest_relative.as_posix())
     candidate_policy = TreePolicy(candidate, policy_version=POLICY_VERSION, work=candidate.work)
     base_policy = TreePolicy(base, policy_version=POLICY_VERSION, work=base.work)
-    candidate_policy.observe_entries(candidate_entries.values())
-    base_policy.observe_entries(base_entries.values())
-    plan = ProtectionPlan(selected_prefixes=(release_root,), listing_scope=(),
-                          obligations=("modes",), use="release-history",
-                          mode_roles=tuple((p, "release-leaf") for p in sorted(candidate_entries)))
-    modes = candidate_policy.evaluate(plan, stage="modes")
 
-    # The old working-directory enumeration refused every candidate link or
-    # non-regular entry before comparing base bytes. Preserve that ordering
-    # over the tree's modes, without opening any blob.
-    modes.require(plan.use, render=_history_mode_error)
+    # Preserve main's authenticated mode decisions. Finish the established
+    # release-root checks before comparing an outside manifest directory.
+    for directory in compared_directories:
+        if directory == release_root:
+            compared_base, compared_candidate = base_entries, candidate_entries
+        else:
+            compared_base = base.entries(directory).as_dict()
+            compared_candidate = candidate.entries(directory).as_dict()
+        candidate_policy.observe_entries(compared_candidate.values())
+        base_policy.observe_entries(compared_base.values())
+        plan = ProtectionPlan(selected_prefixes=(directory,), listing_scope=(),
+                              obligations=("modes",), use="release-history",
+                              mode_roles=tuple((p, "release-leaf") for p in sorted(compared_candidate)))
+        modes = candidate_policy.evaluate(plan, stage="modes")
 
-    # M1 record, history row 2185-2231: comparisons consume facts in the retained order.
-    for relative, prior in sorted(base_entries.items()):
-        prior_plan = ProtectionPlan(listing_scope=(), obligations=("modes",),
-                                   use="base-history", mode_roles=((relative, "release-leaf"),))
-        prior_view = base_policy.evaluate(prior_plan, stage="modes")
-        prior_mode = prior_view.mode_facts[relative, "release-leaf"]
-        if prior_view.finding_for(prior_plan.use) is not None:
-            raise ReleaseChainError(
-                f"base release entry has non-regular git mode {prior.mode}: {relative}"
-            )
-        current = candidate_entries.get(relative)
-        if current is None:
-            raise ReleaseChainError(
-                f"existing release file was deleted relative to "
-                f"{base.commit}: {relative}"
-            )
-        if modes.mode_facts[relative, "release-leaf"].mode != prior_mode.mode:
-            raise ReleaseChainError(
-                f"existing release file mode changed relative to {base.commit}: "
-                f"{relative} ({prior.mode} -> {current.mode})"
-            )
-        if current.object_id != prior.object_id:
-            raise ReleaseChainError(
-                f"existing release file bytes changed relative to "
-                f"{base.commit}: {relative}"
-            )
+        # Candidate links and non-regular entries still precede base bytes
+        # within each directory, without opening any blob.
+        modes.require(plan.use, render=_history_mode_error)
+
+        # M1 record, history row 2185-2231: retain authenticated mode facts.
+        for relative, prior in sorted(compared_base.items()):
+            prior_plan = ProtectionPlan(listing_scope=(), obligations=("modes",),
+                                       use="base-history", mode_roles=((relative, "release-leaf"),))
+            prior_view = base_policy.evaluate(prior_plan, stage="modes")
+            prior_mode = prior_view.mode_facts[relative, "release-leaf"]
+            if prior_view.finding_for(prior_plan.use) is not None:
+                raise ReleaseChainError(
+                    f"base release entry has non-regular git mode {prior.mode}: {relative}"
+                )
+            current = compared_candidate.get(relative)
+            if current is None:
+                raise ReleaseChainError(
+                    f"existing release file was deleted relative to "
+                    f"{base.commit}: {relative}"
+                )
+            if modes.mode_facts[relative, "release-leaf"].mode != prior_mode.mode:
+                raise ReleaseChainError(
+                    f"existing release file mode changed relative to {base.commit}: "
+                    f"{relative} ({prior.mode} -> {current.mode})"
+                )
+            if current.object_id != prior.object_id:
+                raise ReleaseChainError(
+                    f"existing release file bytes changed relative to "
+                    f"{base.commit}: {relative}"
+                )
     return (
         base.commit,
         set(candidate_entries) - set(base_entries),

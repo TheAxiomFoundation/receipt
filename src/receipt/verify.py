@@ -36,9 +36,14 @@ interrupted the run, and that is not a verdict about the corpus.
 
 from __future__ import annotations
 
+import codecs
 import hashlib
+import io
+import marshal
 import pathlib
+import sys
 import tempfile
+import tokenize
 from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -94,18 +99,89 @@ def _custody_state_error(finding) -> ReleaseChainError:
     return ReleaseChainError(f"state file is not a regular file: {finding.path}")
 
 
+def _declared_source_encoding(source: bytes) -> str | None:
+    """Return the codec a PEP 263 declaration in ``source`` names, if any.
+
+    CPython's compiler translates ``\r\n`` and a lone ``\r`` to ``\n``
+    before it looks for the declaration on the first two lines, and
+    :func:`tokenize.detect_encoding` does not, so the same translation is
+    applied first. ``None`` means the declaration is one the compiler itself
+    refuses; compiling the bytes then reports that refusal in its own words.
+    """
+
+    translated = source.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    try:
+        encoding, _lines = tokenize.detect_encoding(io.BytesIO(translated).readline)
+    except SyntaxError:
+        return None
+    return codecs.lookup(encoding).name
+
+
+def _exception_name(exc: BaseException) -> str:
+    """The exception's class name, or a fixed word if reading it raises.
+
+    A spec can define the exception it raises, and a metaclass can make even
+    ``type(exc).__name__`` run spec code. Nothing read here may raise past a
+    fail-closed boundary, so every failure to read it falls back.
+    """
+
+    try:
+        name = type(exc).__name__
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException:  # noqa: BLE001 - a name that cannot be read is unnamed
+        return "exception"
+    return name if type(name) is str else "exception"
+
+
+def _exception_message(exc: BaseException) -> str | None:
+    """``str(exc)`` as an exact ``str``, or ``None`` if producing it raises.
+
+    ``str()`` runs the exception's own ``__str__``. A spec defining
+    ``__str__`` to raise ``SystemExit(0)`` turned the handler that formats a
+    refusal into the exit the boundary exists to stop: the command left with
+    status 0 and printed nothing (0.6.2 review, L5 finding 4). A ``str``
+    subclass is refused as well, because formatting one runs its methods.
+    """
+
+    try:
+        text = str(exc)
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException:  # noqa: BLE001 - an unprintable message is withheld
+        return None
+    return text if type(text) is str else None
+
+
+def _described_exception(exc: BaseException) -> str:
+    """``"<Name>: <message>"`` for any exception, without running away.
+
+    Used wherever a fail-closed boundary quotes what it caught. It never
+    raises (bar the operator's interrupt), so a boundary's own formatting
+    cannot re-open it.
+    """
+
+    name = _exception_name(exc)
+    message = _exception_message(exc)
+    if message is None:
+        return f"{name} (its message could not be rendered)"
+    return f"{name}: {message}"
+
+
 def _exception_detail(exc: BaseException) -> str:
     """Quote a failure, naming anything that is not an ordinary exception.
 
     ``str(SystemExit(0))`` is the bare string ``"0"``, which inside a refusal
     reads as a stray token rather than as a spec that tried to exit the
     interpreter. Ordinary exceptions already carry their own message and are
-    quoted unchanged.
+    quoted unchanged. Both reads are guarded (see :func:`_exception_message`).
     """
 
-    if isinstance(exc, Exception):
-        return str(exc)
-    return f"{type(exc).__name__}: {exc}"
+    if issubclass(type(exc), Exception):
+        message = _exception_message(exc)
+        if message is not None:
+            return message
+    return _described_exception(exc)
 
 
 #: The passes a PASS verdict is made of. A verdict is a claim about custody,
@@ -293,8 +369,9 @@ def load_spec(
 
     Trust direction, stated plainly: a spec committed in the *producer's*
     repository is the producer's proposal, not the auditor's trust root.
-    Verified against a producer-shipped spec as found, a verdict establishes
-    only internal consistency with a policy the producer chose. For independent
+    Verified against a producer-shipped spec as found, a verdict is only as
+    good as that spec: its code runs in this process, so it can change what
+    the verdict reports and the command's exit status. For independent
     custody the auditor reads the spec once, out of band, and pins it — at
     minimum the ``spec_sha256`` this function returns — in the auditor's own
     records, after which every later verdict is against anchors the producer
@@ -322,6 +399,14 @@ def load_spec(
     by construction. When ``expect_sha256`` is supplied, its comparison happens
     immediately after hashing and before either compiling or executing those
     bytes; a mismatched spec therefore has no opportunity to run.
+
+    The bytes must also be the UTF-8 text a reviewer reads: a PEP 263
+    declaration of any other source encoding is refused, as are bytes that
+    are not valid UTF-8. The program executed is the one that text compiles
+    to, so no declaration can turn what reads as a comment into code.
+    Byte-compilation errors retain their original refusal; an encoding refusal
+    precedes execution errors, a missing
+    SPEC, or a SPEC of the wrong type, without executing the module.
     """
 
     import types
@@ -359,11 +444,69 @@ def load_spec(
             f"spec {digest} is not the expected spec {expect_sha256}"
         )
 
-    module = types.ModuleType("_receipt_consumer_spec")
-    module.__file__ = str(spec_path)
+    # The pin binds bytes, and a reviewer reads those bytes as UTF-8 text. A
+    # PEP 263 declaration naming another codec (``raw_unicode_escape``,
+    # ``utf-7``) makes the compiler execute a different program than the one
+    # read: an escaped newline in what reads as a comment becomes code. Such
+    # a declaration is refused, and the program executed must be the one the
+    # UTF-8 text compiles to, which also covers a declaration the check above
+    # does not find where the compiler does.
+    # Compile without executing first: even a non-UTF-8 declaration can have
+    # a syntax error, whose existing refusal does not require running code.
     try:
-        code = compile(source, str(spec_path), "exec")
-        exec(code, module.__dict__)  # noqa: S102 - the audited repo's own pins
+        code = compile(source, str(spec_path), "exec", dont_inherit=True)
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:  # noqa: BLE001 - the same loader boundary
+        raise VerifySpecError(
+            f"spec module raised on load: {spec_path}: {_exception_detail(exc)}"
+        ) from exc
+    declared = _declared_source_encoding(source)
+    if declared is not None and declared not in ("utf-8", "utf-8-sig"):
+        raise VerifySpecError(
+            f"spec declares source encoding {declared}; a spec must be UTF-8 so "
+            f"it executes as the text a reviewer reads: {spec_path}"
+        )
+    try:
+        text = source.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise VerifySpecError(f"spec is not valid UTF-8: {spec_path}") from exc
+
+    # The spec runs the way Python runs the same file as a module (0.6.2
+    # review, L5 finding 5). ``dont_inherit=True``: compile() otherwise
+    # applies this module's own ``from __future__ import annotations`` to the
+    # spec, so its annotations became strings a plain module would not have.
+    # And the module is in ``sys.modules`` while it executes, because
+    # ``dataclasses`` and ``pickle`` look a class's module up there: a spec
+    # defining a dataclass was refused as "raised on load" for the loader's
+    # own execution environment. The entry is removed afterwards and any
+    # earlier holder of the name restored, so loading leaves no trace.
+    module_name = "_receipt_consumer_spec"
+    module = types.ModuleType(module_name)
+    module.__file__ = str(spec_path)
+    absent = object()
+    previous = sys.modules.get(module_name, absent)
+    sys.modules[module_name] = module
+    try:
+        # Compiling the decoded text ignores any declaration. Where the bytes
+        # compiled, their UTF-8 reading must compile to the same program.
+        try:
+            text_code = compile(
+                text, str(spec_path), "exec", dont_inherit=True
+            )
+        except (SyntaxError, ValueError):
+            text_code = None
+        # Code-object equality compares constants by value, so NaN != NaN
+        # falsely rejects identical programs. Marshal preserves float bits
+        # and nested code objects for both compilations in this interpreter.
+        # Format 2 is pinned: formats 3+ also record object sharing and
+        # interning, which differ between two compilations of one program
+        # (a set literal shared by two scopes, or a string interned earlier
+        # in the process), and would refuse a valid, declaration-free spec.
+        if text_code is None or marshal.dumps(text_code, 2) != marshal.dumps(code, 2):
+            code = None
+        else:
+            exec(text_code, module.__dict__)  # noqa: S102 - the audited repo's own pins
     except KeyboardInterrupt:  # the operator's interrupt, never a verdict
         raise
     except BaseException as exc:  # noqa: BLE001 - any failure here is fail-closed
@@ -377,6 +520,16 @@ def load_spec(
         raise VerifySpecError(
             f"spec module raised on load: {spec_path}: {_exception_detail(exc)}"
         ) from exc
+    finally:
+        if previous is absent:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous
+    if code is None:
+        raise VerifySpecError(
+            "spec does not compile to the program its UTF-8 text reads as; "
+            f"a source encoding declaration changed it: {spec_path}"
+        )
 
     candidate = getattr(module, "SPEC", None)
     if candidate is None:
@@ -577,9 +730,11 @@ def run_verification(
         expected: type[Exception] | tuple[type[Exception], ...],
     ) -> str:
         del name
-        if isinstance(exc, expected):
-            return str(exc)
-        return f"{type(exc).__name__}: {exc}"
+        if issubclass(type(exc), expected):
+            message = _exception_message(exc)
+            if message is not None:
+                return message
+        return _described_exception(exc)
 
     # Before any pass runs git: an environment that would redirect git's reads
     # is refused here rather than met by the custody pass after the optional
@@ -611,6 +766,7 @@ def run_verification(
         return result(incomplete="binding")
 
     phase = "custody"
+    snapshots: list[TreeSnapshot] = []
     try:
         # A single normalized ChainSpec instance is shared by the pre-crypto
         # anchor digest and the directory verifier. Stateful PathLike values
@@ -623,6 +779,7 @@ def run_verification(
             expect_commit=expect_commit,
             expect_tree=expect_tree,
         )
+        snapshots.append(selected)
         candidate_commit = selected.commit
         candidate_tree = selected.tree
         object_format = selected.object_format
@@ -632,7 +789,9 @@ def run_verification(
             base: TreeSnapshot | None = None
             if base_ref is not None:
                 phase = "history"
-                base = stack.enter_context(TreeSnapshot.select(root, base_ref))
+                selected_base = TreeSnapshot.select(root, base_ref)
+                snapshots.append(selected_base)
+                base = stack.enter_context(selected_base)
                 base_commit = base.commit
                 base_tree = base.tree
                 candidate.assert_ancestor(base)
@@ -821,6 +980,27 @@ def run_verification(
     except KeyboardInterrupt:  # the operator's interrupt, never a verdict
         raise
     except BaseException as exc:  # noqa: BLE001 - every other raise is a FAIL
+        close_errors = [
+            error
+            for snapshot in snapshots
+            for error in getattr(snapshot, "close_errors", ())
+        ]
+        if close_errors:
+            # A failed closure never leaves an affected claim established.
+            # Check both snapshots independently of the active pass: closure
+            # may only have added notes to an already-unwinding pass error.
+            passes.clear()
+            chain = None
+            corpus = None
+            object_store = None
+            failure = "; ".join(
+                dict.fromkeys(
+                    failed("custody", error, (ReleaseChainError, SnapshotError))
+                    for error in close_errors
+                )
+            )
+            passes.append(PassResult("custody", False, "", failure))
+            return result(incomplete="binding")
         if phase == "history":
             passes.append(
                 PassResult(
@@ -833,9 +1013,14 @@ def run_verification(
             )
             return result(incomplete="custody")
         if phase in {"custody", "finalize"}:
-            # A close-time repository re-audit invalidates every tree-derived
-            # pass even if its body happened to finish first.
-            passes[:] = [item for item in passes if item.name == "history"]
+            # A custody failure with clean closure leaves a completed history
+            # pass standing, as before. A failure after every pass completed
+            # cannot leave any of those passes established.
+            passes[:] = [
+                item
+                for item in passes
+                if item.name == "history" and phase == "custody"
+            ]
             chain = None
             corpus = None
             passes.append(
@@ -921,6 +1106,11 @@ def result_to_dict(result: VerifyResult) -> dict[str, Any]:
         not_established.append("that the anchor set is one the auditor trusts")
     if not result._spec_pinned:
         not_established.append("that the spec's code was trusted")
+        not_established.append(
+            "that this verdict is independent of the spec: an unpinned spec is "
+            "producer code that ran in this process, so the verdict is only as "
+            "good as the spec the producer committed"
+        )
 
     payload: dict[str, Any] = {
         "verdict": "PASS" if result.ok else "FAIL",

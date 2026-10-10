@@ -19,9 +19,10 @@ import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from functools import cached_property
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
+from receipt import _bounded_json as bounded_json
 from receipt.canonical import canonical_sha256
 from receipt.corpus import MAX_JOURNAL_BYTES
 from receipt.release_chain import (
@@ -29,6 +30,7 @@ from receipt.release_chain import (
     ChainVerification,
     MANIFEST_RE,
     ReleaseChainError,
+    _normalized_anchor_dir,
     _screen_protected_tree_names,
     assert_no_redirecting_git_environment,
     verify_base_release_chain,
@@ -108,6 +110,26 @@ class AppendGateVerdict:
     base_tree: str | None
     object_format: str
     name_repertoire: str
+
+
+def _shown(value: Any) -> str:
+    """Row-derived text as a refusal may quote it: unprintable characters
+    escaped, printable text unchanged.
+
+    Refusal texts quoted row ids verbatim, so an id holding a newline could
+    put a forged ``thesis-facts append check OK: ...`` line into the log a
+    reviewer reads beside the real failure (0.6.2 review, L6 finding 12).
+    Printable ids -- every id the differential harness binds -- render
+    exactly as before.
+    """
+
+    text = value if type(value) is str else str(value)
+    if text.isprintable():
+        return text
+    return "".join(
+        character if character.isprintable() else repr(character)[1:-1]
+        for character in text
+    )
 
 
 class AppendError(ValueError):
@@ -215,7 +237,7 @@ def check_surface_separation(
 
 
 def check_gate_only_confinement(
-    unclassified: set[str], candidate: _CandidateTree
+    changed: set[str], candidate: _CandidateTree
 ) -> set[str]:
     """Confine a gate-only proposal to the surfaces its verdict speaks for.
 
@@ -225,24 +247,37 @@ def check_gate_only_confinement(
     covered the changed set, so a proposal that added a gate file AND
     rewrote an unclassified file under the release root — say
     ``releases/README.md`` — was accepted with none of those checks run.
-    An unclassified change on the release surface
+    A changed ledger, prefix manifest or state ancestor is refused across
+    every classification. An unclassified change on the release surface
     is refused here; the rest are returned for the
     caller to name in its success text, so an unclassified change riding a
     gate-only proposal is never silent.
 
-    The surface is ``_is_protected``'s, which is the release root, everything
+    For the release check, the surface is ``_is_protected``'s: the root, everything
     under it, and every proper ancestor of it. The last is what a nested root
     needs: with ``data/releases`` configured, a proposal replacing ``data``
     changes whether the release root exists as a tree. An unclassified change
     everywhere else is still reported
     rather than refused, because everywhere else is ground this verdict makes
     no claim about; on the release surface the verdict claims exactly this
-    confinement. The two surfaces the spec names cannot appear here at all —
-    a path matching either is classified, not unclassified — so the set this
-    refuses is the release root, its subtree, and its ancestors, which is what
-    the sentence names.
+    confinement. The two surfaces the spec names cannot appear in the
+    unclassified set — a path matching either is classified — so the release
+    check refuses the root, its subtree and its ancestors.
     """
 
+    _, _, unclassified = _classify_surfaces(changed, candidate)
+    # Invariant: a gate-classified path never changes ledger state. The
+    # ledger, its frozen-prefix manifest and their ancestors are what the
+    # skipped checks are about, regardless of DATA/GATE classification.
+    # Checking only unclassified paths let a gate surface containing the
+    # state paths admit row rewrites, prefix corruption and mode changes.
+    on_the_state_files = sorted(changed & _state_paths(candidate))
+    if on_the_state_files:
+        qualifier = "unclassified " if set(on_the_state_files) <= unclassified else ""
+        raise AppendError(
+            f"gate-only proposal changes {qualifier}ledger state path(s): "
+            f"{on_the_state_files}"
+        )
     on_the_release_surface = sorted(
         path for path in unclassified if _is_protected(path, candidate)
     )
@@ -252,6 +287,19 @@ def check_gate_only_confinement(
             f"{on_the_release_surface}"
         )
     return set(unclassified)
+
+
+def _state_paths(candidate: _CandidateTree) -> frozenset[str]:
+    """The ledger, its prefix manifest, and every proper ancestor of each."""
+
+    paths: set[str] = set()
+    for relative in (
+        candidate.spec.chain.state_relative,
+        candidate.spec.chain.prefix_relative,
+    ):
+        paths.add(relative.as_posix())
+        paths.update(parent.as_posix() for parent in relative.parents if parent.parts)
+    return frozenset(paths)
 
 
 def _as_text(payload: bytes, relative: str) -> str:
@@ -293,6 +341,25 @@ def reject_non_append_bytes(text: str) -> None:
             )
 
 
+def _reject_carriage_returns(ledger_bytes: bytes) -> None:
+    """Refuse a carriage return anywhere in the ledger bytes.
+
+    ``_as_text`` translates ``\r\n`` and a lone ``\r`` into row breaks, but
+    the release chain frames rows by LF alone and refuses CRLF. With a CR in
+    the ledger the two would disagree about what the rows are: the gate could
+    validate two rows where the signed manifest counts one that no JSON
+    reader can parse. Refusing the byte leaves one framing for both.
+    """
+
+    position = ledger_bytes.find(b"\r")
+    if position != -1:
+        line = ledger_bytes.count(b"\n", 0, position) + 1
+        raise AppendError(
+            f"ledger line {line} contains a carriage return; a JSONL row ends "
+            "with exactly one LF, the framing the release chain verifies"
+        )
+
+
 def expected_assertion_version_id(row: dict[str, Any], spec: AppendGateSpec) -> str:
     """Recompute the content address the resolver must have written.
 
@@ -307,6 +374,16 @@ def expected_assertion_version_id(row: dict[str, Any], spec: AppendGateSpec) -> 
     """
     measure = row.get("measure") or {}
     source = row.get("source") or {}
+    archive = row.get("responseArchive") or {}
+    # A falsy value reads as absent, as it always has; any other value that
+    # is not an object used to reach ``.get`` and raise AttributeError.
+    for label, value in (
+        ("measure", measure),
+        ("source", source),
+        ("responseArchive", archive),
+    ):
+        if not isinstance(value, dict):
+            raise AppendError(f"{label} is not an object")
     projection = {key: row.get(key) for key in spec.assertion_content_keys}
     projection["measure"] = {
         "concept": measure.get("concept"),
@@ -328,10 +405,15 @@ def expected_assertion_version_id(row: dict[str, Any], spec: AppendGateSpec) -> 
         "source_row_keys": row.get("source_row_keys"),
         "source_cell_keys": row.get("source_cell_keys"),
     }
-    projection["responseArchiveSha256"] = (row.get("responseArchive") or {}).get(
-        "sha256"
-    )
-    return f"av2:{canonical_sha256(projection)}"
+    projection["responseArchiveSha256"] = archive.get("sha256")
+    try:
+        digest = canonical_sha256(projection)
+    except (ValueError, TypeError, RecursionError) as exc:
+        # NaN, an infinity or an integer beyond the Number range has no
+        # canonical encoding, so no content address; receipt.canonical says
+        # so with ValueError, and the row is refused here instead.
+        raise AppendError(f"assertion content is not canonical JSON: {exc}") from exc
+    return f"av2:{digest}"
 
 
 def _effective_assertion_id(row: dict[str, Any], spec: AppendGateSpec) -> str:
@@ -373,14 +455,31 @@ def check_prefix(
 ) -> dict[str, Any]:
     # The caller supplies the selected prefix blob once, so the refusals below
     # retain their established order over authenticated bytes.
-    prefix = json.loads(prefix_text)
+    #
+    # The manifest is candidate-controlled, so each step that used to raise
+    # an interpreter exception on a malformed one -- the parse, ``.get`` on a
+    # non-object, ``int()``, ``len()``, indexing, a missing key -- now
+    # refuses by name at the same point. The release's strict integer rule
+    # also refuses coercible noninteger counts; existing parse and conversion
+    # refusal reasons are retained. The decoder additionally refuses JSON
+    # nested more than 128 deep.
+    try:
+        prefix = bounded_json.loads(prefix_text)
+    except (json.JSONDecodeError, bounded_json.JsonBoundError) as exc:
+        raise AppendError(f"prefix manifest is not valid JSON: {exc}") from exc
+    if not isinstance(prefix, dict):
+        raise AppendError("prefix manifest is not a JSON object")
     if prefix.get("schemaVersion") != candidate.spec.prefix_schema_version:
         raise AppendError(
             f"unsupported prefix manifest schema {prefix.get('schemaVersion')!r}"
         )
-    count = int(prefix["prefixLineCount"])
-    hashes = prefix["lineSha256s"]
-    if len(hashes) != count:
+    count = _prefix_line_count(prefix)
+    hashes = _manifest_field(prefix, "lineSha256s")
+    try:
+        declared = len(hashes)
+    except TypeError:
+        raise AppendError("prefix manifest lineSha256s is not a list") from None
+    if declared != count:
         raise AppendError("prefix manifest line hashes disagree with its count")
     if len(lines) < count:
         raise AppendError(
@@ -388,18 +487,86 @@ def check_prefix(
             f"requires at least {count}"
         )
     for index in range(count):
-        digest = hashlib.sha256(lines[index].encode("utf-8")).hexdigest()
-        if digest != hashes[index]:
-            row_id = json.loads(lines[index]).get("source_record_id", "?")
+        digest = hashlib.sha256(_utf8(lines[index], index + 1)).hexdigest()
+        try:
+            expected = hashes[index]
+        except (KeyError, TypeError):
+            # An object whose size matches the count: indexed by position,
+            # it has no entries.
+            raise AppendError("prefix manifest lineSha256s is not a list") from None
+        if digest != expected:
+            row_id = _row_label(lines[index])
             raise AppendError(
-                f"immutable prefix line {index + 1} ({row_id}) was rewritten"
+                f"immutable prefix line {index + 1} ({_shown(row_id)}) was rewritten"
             )
+    # The release checksum always included a final LF, even for zero rows.
     joined = hashlib.sha256(
-        ("\n".join(lines[:count]) + "\n").encode("utf-8")
+        b"".join(
+            _utf8(line, number) + b"\n"
+            for number, line in enumerate(lines[:count], start=1)
+        ) or b"\n"
     ).hexdigest()
-    if joined != prefix["prefixSha256"]:
+    if joined != _manifest_field(prefix, "prefixSha256"):
         raise AppendError("immutable prefix cumulative hash mismatch")
     return prefix
+
+
+def _utf8(line: str, number: int) -> bytes:
+    """A row's UTF-8 bytes, which is what its hash is taken over.
+
+    The gate decodes the ledger as strict UTF-8, so its rows always encode;
+    a direct caller's row may hold a lone surrogate, which has no UTF-8 form
+    and so no hash, and was ``UnicodeEncodeError`` out of ``check_prefix``.
+    """
+
+    try:
+        return line.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise AppendError(f"line {number} is not valid UTF-8") from exc
+
+
+def _manifest_field(prefix: dict[str, Any], field: str) -> Any:
+    try:
+        return prefix[field]
+    except KeyError:
+        raise AppendError(f"prefix manifest lacks {field}") from None
+
+
+def _prefix_line_count(prefix: dict[str, Any], owner: str = "") -> int:
+    """Require a JSON integer, retaining named refusals for invalid counts."""
+
+    value = _manifest_field(prefix, "prefixLineCount")
+    try:
+        int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise AppendError(
+            f"prefix manifest prefixLineCount is not a line count: {value!r}"
+        ) from None
+    # Unconvertible values retain the crash-to-refusal reason above. Values
+    # such as true, 1.0 and "1" convert, but are not JSON integer counts.
+    if type(value) is not int:
+        raise AppendError(
+            f"{owner}immutable prefix manifest prefixLineCount is not a JSON "
+            "integer"
+        )
+    return value
+
+
+def _row_label(line: str) -> Any:
+    """The ``source_record_id`` a refusal names a row by, or ``"?"``.
+
+    Only ever called for a row that is being refused, and the row may be the
+    reason: not JSON, not an object, too deep or too wide for ``json.loads``.
+    Each of those used to raise from inside the refusal's own message.  The
+    label is read with ``json.loads`` itself, not the bounded decoder, so a
+    row ``json.loads`` could read keeps the name it was refused under before.
+    """
+
+    try:
+        row = json.loads(line)
+    except (ValueError, RecursionError):
+        return "?"
+    return row.get("source_record_id", "?") if isinstance(row, dict) else "?"
 
 
 def _is_canonical_rfc3339(value: Any) -> bool:
@@ -450,8 +617,8 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
     active_by_record_id: dict[str, tuple[int, str | None]] = {}
     for number, line in enumerate(lines, start=1):
         try:
-            row = json.loads(line)
-        except json.JSONDecodeError as exc:
+            row = bounded_json.loads(line)
+        except (json.JSONDecodeError, bounded_json.JsonBoundError) as exc:
             raise AppendError(f"line {number} is not valid JSON: {exc}") from exc
         if not isinstance(row, dict):
             raise AppendError(f"line {number} is not a JSON object")
@@ -459,14 +626,26 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
         if not record_id:
             raise AppendError(f"line {number} lacks source_record_id")
         if not isinstance(row.get("value"), (int, float)):
-            raise AppendError(f"line {number} ({record_id}) has no numeric value")
+            raise AppendError(
+                f"line {number} ({_shown(record_id)}) has no numeric value"
+            )
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(row.get("observed_at", ""))):
-            raise AppendError(f"line {number} ({record_id}) has no observed_at date")
-        unit = (row.get("measure") or {}).get("unit")
+            raise AppendError(
+                f"line {number} ({_shown(record_id)}) has no observed_at date"
+            )
+        measure = row.get("measure") or {}
+        if not isinstance(measure, dict):
+            raise AppendError(f"line {number} ({_shown(record_id)}) measure is not an object")
+        unit = measure.get("unit")
         if not unit:
-            raise AppendError(f"line {number} ({record_id}) has no measure unit")
+            raise AppendError(
+                f"line {number} ({_shown(record_id)}) has no measure unit"
+            )
 
-        recomputed = expected_assertion_version_id(row, spec)
+        try:
+            recomputed = expected_assertion_version_id(row, spec)
+        except AppendError as exc:
+            raise AppendError(f"line {number} ({_shown(record_id)}) {exc}") from exc
         version = row.get("assertionVersion")
         supersedes = None
         if version is not None:
@@ -476,8 +655,8 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
             supersedes = version.get("supersedes")
             if version_id != recomputed:
                 raise AppendError(
-                    f"line {number} ({record_id}) assertionVersion.id does not "
-                    f"match its content ({version_id} != {recomputed})"
+                    f"line {number} ({_shown(record_id)}) assertionVersion.id does not "
+                    f"match its content ({_shown(version_id)} != {recomputed})"
                 )
             effective_id = version_id
         else:
@@ -491,7 +670,7 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
         # A->B->A chain trying to restore a superseded value.
         if effective_id in versions:
             raise AppendError(
-                f"line {number} restates assertion version {effective_id} "
+                f"line {number} restates assertion version {_shown(effective_id)} "
                 f"from line {versions[effective_id]}"
             )
         versions[effective_id] = number
@@ -506,7 +685,7 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
             ):
                 if not row.get(field):
                     raise AppendError(
-                        f"appended line {number} ({record_id}) lacks {field}"
+                        f"appended line {number} ({_shown(record_id)}) lacks {field}"
                     )
             archive = row["responseArchive"]
             if not isinstance(archive, dict) or not archive.get("sha256"):
@@ -521,7 +700,7 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
             has_projection = "sourceBindingProjection" in row
             if has_hash != has_projection:
                 raise AppendError(
-                    f"appended line {number} ({record_id}) must carry "
+                    f"appended line {number} ({_shown(record_id)}) must carry "
                     "targetContentHash and sourceBindingProjection together"
                 )
             if has_hash:
@@ -530,13 +709,13 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
                     r"[0-9a-f]{64}", content_hash
                 ):
                     raise AppendError(
-                        f"appended line {number} ({record_id}) "
+                        f"appended line {number} ({_shown(record_id)}) "
                         "targetContentHash is not a SHA-256 hex digest"
                     )
                 projection = row["sourceBindingProjection"]
                 if not isinstance(projection, dict) or not projection:
                     raise AppendError(
-                        f"appended line {number} ({record_id}) "
+                        f"appended line {number} ({_shown(record_id)}) "
                         "sourceBindingProjection must be a non-empty object"
                     )
                 if projection.get("responseSha256") != archive.get("sha256"):
@@ -556,19 +735,19 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
             previous_line, previous_version = previous
             if supersedes is None:
                 raise AppendError(
-                    f"line {number} duplicates {record_id} (line "
+                    f"line {number} duplicates {_shown(record_id)} (line "
                     f"{previous_line}) without superseding an assertion "
                     "version — corrections must be explicit"
                 )
             if supersedes != previous_version:
                 raise AppendError(
-                    f"line {number} supersedes {supersedes} but the active "
-                    f"version of {record_id} is {previous_version}"
+                    f"line {number} supersedes {_shown(supersedes)} but the active "
+                    f"version of {_shown(record_id)} is {_shown(previous_version)}"
                 )
         elif supersedes is not None:
             raise AppendError(
-                f"line {number} supersedes {supersedes} but {record_id} has "
-                "no earlier row"
+                f"line {number} supersedes {_shown(supersedes)} but "
+                f"{_shown(record_id)} has no earlier row"
             )
         active_by_record_id[str(record_id)] = (number, effective_id)
 
@@ -587,9 +766,9 @@ def check_append_only(
         )
     for index, line in enumerate(base_lines):
         if lines[index] != line:
-            row_id = json.loads(line).get("source_record_id", "?")
+            row_id = _row_label(line)
             raise AppendError(
-                f"change rewrites existing line {index + 1} ({row_id}); "
+                f"change rewrites existing line {index + 1} ({_shown(row_id)}); "
                 "the ledger is append-only — supersede instead"
             )
     return len(lines) - len(base_lines)
@@ -612,19 +791,131 @@ def check_prefix_anchored_to_base(
     binding boundary so a candidate-controlled count can never move it.
     """
     entry = base.tree.entry(candidate.prefix_relative)
-    base_prefix = json.loads(
-        _as_text(
-            base.tree.blob(entry, limit=MAX_JOURNAL_BYTES), candidate.prefix_relative
-        )
+    base_text = _as_text(
+        base.tree.blob(entry, limit=MAX_JOURNAL_BYTES), candidate.prefix_relative
     )
+    try:
+        base_prefix = json.loads(base_text)
+    except (ValueError, RecursionError) as exc:
+        raise AppendError(
+            f"base {base.ref} immutable prefix manifest is not valid JSON"
+        ) from exc
+    if type(base_prefix) is not dict:
+        raise AppendError(
+            f"base {base.ref} immutable prefix manifest is not a JSON object"
+        )
+    # "Exactly" means as JSON values, not as Python ones: ``!=`` let ``true``
+    # and ``1.0`` stand for a base ``1``, and the success line then printed
+    # "immutable prefix True" (0.6.2 review, L6 finding 10).
     for field in ("prefixLineCount", "prefixSha256", "lineSha256s"):
-        if candidate_prefix.get(field) != base_prefix.get(field):
+        if not _same_json(candidate_prefix.get(field), base_prefix.get(field)):
             raise AppendError(
                 f"immutable prefix manifest {field} changed vs base {base.ref}; "
                 "the frozen prefix cannot grow through the automated append path "
                 "— growing it is an explicit reviewed migration"
             )
-    return int(base_prefix["prefixLineCount"])
+    return _prefix_line_count(base_prefix, f"base {base.ref} ")
+
+
+def _same_json(left: Any, right: Any) -> bool:
+    """Equality of two parsed JSON values that also compares their types."""
+
+    if type(left) is not type(right):
+        return False
+    if type(left) is dict:
+        return left.keys() == right.keys() and all(
+            _same_json(left[key], right[key]) for key in left
+        )
+    if type(left) is list:
+        return len(left) == len(right) and all(
+            _same_json(item, other) for item, other in zip(left, right)
+        )
+    return bool(left == right)
+
+
+def _is_calendar_date(value: Any) -> bool:
+    """An ASCII ``YYYY-MM-DD`` naming a day that exists."""
+
+    if type(value) is not str or not re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value
+    ):
+        return False
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+class _RepeatedKey(Exception):
+    def __init__(self, key: str) -> None:
+        super().__init__(key)
+        self.key = key
+
+
+def _object_without_repeated_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    seen: set[str] = set()
+    for key, _value in pairs:
+        if key in seen:
+            raise _RepeatedKey(key)
+        seen.add(key)
+    return dict(pairs)
+
+
+def check_appended_row_types(lines: list[str], prefix_count: int) -> None:
+    """Hold appended rows to the types their refusal texts already name.
+
+    The ported row validation reads these fields loosely, and each looseness
+    let a value through that its own refusal says is refused (0.6.2 review,
+    L6 findings 6-8): ``value: true`` passed "has no numeric value" because
+    ``bool`` subclasses ``int``; ``observed_at`` passed "has no observed_at
+    date" with fullwidth or Arabic-Indic digits (``\\d`` is Unicode) or a
+    day that does not exist; and ``source_record_id`` could be any truthy
+    JSON value, keyed through ``str()`` so that ``7`` and ``"7"`` were one
+    record -- one could supersede the other. The rows checked are the ones
+    after the frozen prefix, the post-cutover rows the binding shapes already
+    cover; a prefix row is immutable and cannot be corrected, so it keeps the
+    rule it was admitted under. Runs with the binding shapes, after every
+    pre-existing check, so no earlier refusal is pre-empted.
+
+    A repeated key refuses too, at any depth (L6 finding 9). ``json.loads``
+    keeps the last value, so a row saying ``"value": 3.0`` and then
+    ``"value": 999.0`` was accepted, and its content address bound 999.0
+    while a first-wins or strict reader of the same bytes saw 3.0 or refused.
+    """
+
+    for number, line in enumerate(lines, start=1):
+        if number <= prefix_count:
+            continue
+        try:
+            row = json.loads(line, object_pairs_hook=_object_without_repeated_keys)
+        except _RepeatedKey as repeated:
+            raise AppendError(
+                f"appended line {number} repeats the JSON key "
+                f"{_shown(repeated.key)!r}"
+            ) from None
+        record_id = row.get("source_record_id")
+        if type(record_id) is not str:
+            raise AppendError(
+                f"appended line {number} source_record_id is not a string"
+            )
+        label = _shown(record_id)
+        if type(row.get("value")) not in (int, float):
+            raise AppendError(
+                f"appended line {number} ({label}) value is not a JSON number"
+            )
+        if not _is_calendar_date(row.get("observed_at")):
+            raise AppendError(
+                f"appended line {number} ({label}) observed_at is not an "
+                "ASCII YYYY-MM-DD calendar date"
+            )
+        version = row.get("assertionVersion")
+        supersedes = version.get("supersedes") if isinstance(version, dict) else None
+        if supersedes is not None and type(supersedes) is not str:
+            raise AppendError(
+                f"appended line {number} ({label}) assertionVersion.supersedes "
+                "is not a string"
+            )
 
 
 def check_binding_shapes(lines: list[str], prefix_count: int) -> None:
@@ -652,18 +943,18 @@ def check_binding_shapes(lines: list[str], prefix_count: int) -> None:
         digest = row["responseArchive"]["sha256"]
         if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise AppendError(
-                f"appended line {number} ({record_id}) "
+                f"appended line {number} ({_shown(record_id)}) "
                 "responseArchive.sha256 is not a SHA-256 hex digest"
             )
         repo_sha = row["ledgerRepoSha"]
         if not isinstance(repo_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", repo_sha):
             raise AppendError(
-                f"appended line {number} ({record_id}) ledgerRepoSha is "
+                f"appended line {number} ({_shown(record_id)}) ledgerRepoSha is "
                 "not a full 40-character commit id"
             )
         if not _is_canonical_rfc3339(row["retrievedAt"]):
             raise AppendError(
-                f"appended line {number} ({record_id}) retrievedAt is not "
+                f"appended line {number} ({_shown(record_id)}) retrievedAt is not "
                 "a canonical RFC 3339 timestamp (uppercase T and Z or "
                 "±HH:MM, no leap second)"
             )
@@ -1113,6 +1404,7 @@ def _verify_selected_tree(
     base: _BaseCommit | None,
     trusted_code_root: pathlib.Path,
     release_anchor_dir: pathlib.Path | None,
+    enforce_production_pins: bool,
 ) -> str:
     """Run reader preflights, then retained checks, over entered snapshots."""
 
@@ -1129,12 +1421,14 @@ def _verify_selected_tree(
     attributes = candidate._policy.evaluate_attributes(attribute_plan)
     attributes.require(attribute_plan.use, render=attribute_error)
     if base is not None:
-        _data_changes, gate_changes, unclassified = check_surface_separation(
+        data_changes, gate_changes, unclassified = check_surface_separation(
             base,
             candidate,
         )
         if gate_changes:
-            reported = check_gate_only_confinement(unclassified, candidate)
+            reported = check_gate_only_confinement(
+                data_changes | gate_changes | unclassified, candidate
+            )
             unclassified_suffix = (
                 f"; unclassified changes={sorted(reported)}" if reported else ""
             )
@@ -1165,7 +1459,7 @@ def _verify_selected_tree(
     prefix = check_prefix(
         lines, _as_text(prefix_bytes, candidate.prefix_relative), candidate
     )
-    binding_boundary = int(prefix["prefixLineCount"])
+    binding_boundary = _prefix_line_count(prefix)
     appended = None
     if base is not None:
         binding_boundary = check_prefix_anchored_to_base(
@@ -1175,9 +1469,12 @@ def _verify_selected_tree(
         )
         appended = check_append_only(base, lines, candidate)
     check_rows(lines, binding_boundary, spec)
-
-    production_pins = release_anchor_dir is None
-    anchor_dir = release_anchor_dir or (trusted_code_root / spec.chain.anchor_relative)
+    production_pins = enforce_production_pins
+    anchor_dir = (
+        trusted_code_root / spec.chain.anchor_relative
+        if release_anchor_dir is None
+        else release_anchor_dir
+    )
     release_index = (
         check_release_proposal(
             base,
@@ -1198,6 +1495,7 @@ def _verify_selected_tree(
     )
 
     check_binding_shapes(lines, binding_boundary)
+    check_appended_row_types(lines, binding_boundary)
     if base is not None:
         check_state_modes(
             base,
@@ -1207,6 +1505,9 @@ def _verify_selected_tree(
                 prefix_entry.path: prefix_entry,
             },
         )
+    # Existing chain, binding and mode refusals retain their first-error
+    # order; the byte screen then rejects any CR those checks accepted.
+    _reject_carriage_returns(ledger_bytes)
 
     resolved = (
         f" {base.ref} ({base.commit})"
@@ -1229,8 +1530,22 @@ def verify_append_gate_verdict(
     commit: str = "HEAD",
     trusted_code_root: pathlib.Path = CODE_ROOT,
     release_anchor_dir: pathlib.Path | None = None,
+    enforce_production_pins: bool = True,
 ) -> AppendGateVerdict:
-    """Verify a selected commit and return its immutable object identities."""
+    """Verify a selected commit and return its immutable object identities.
+
+    Anchors are read from ``trusted_code_root / spec.chain.anchor_relative``,
+    or from ``release_anchor_dir`` when one is named. Named paths are
+    normalized to plain ``pathlib.Path`` objects; empty strings and non-path
+    values refuse rather than selecting the trusted code root. Either way
+    the spec's pins apply to what is read there: the producer SPKI, each
+    anchor's PEM digest and policy OID, and its responder certificate and
+    SPKI pairs.
+    A caller whose anchor directory holds authorities of its own, such as a
+    test fixture, says so with ``enforce_production_pins=False``, which is
+    accepted only together with ``release_anchor_dir``; the verdict then
+    speaks for that caller's trust material, not the spec's pins.
+    """
 
     try:
         assert_no_redirecting_git_environment()
@@ -1241,6 +1556,20 @@ def verify_append_gate_verdict(
         type(commit) is not str or re.fullmatch(r"[0-9a-f]{40}", commit) is None
     ):
         raise AppendError("base_ref requires a full commit OID")
+    if type(enforce_production_pins) is not bool:
+        raise AppendError("enforce_production_pins must be a bool")
+    try:
+        release_anchor_dir = _normalized_anchor_dir(
+            release_anchor_dir, label="release_anchor_dir"
+        )
+    except ReleaseChainError as exc:
+        raise AppendError(str(exc)) from exc
+    if not enforce_production_pins and release_anchor_dir is None:
+        raise AppendError(
+            "enforce_production_pins=False requires release_anchor_dir; the "
+            "anchors under the trusted code root are always checked against "
+            "the spec's pins"
+        )
 
     try:
         selected = TreeSnapshot.select(root, commit)
@@ -1257,6 +1586,7 @@ def verify_append_gate_verdict(
                     base=None,
                     trusted_code_root=trusted_code_root,
                     release_anchor_dir=release_anchor_dir,
+                    enforce_production_pins=enforce_production_pins,
                 )
                 return AppendGateVerdict(
                     summary=summary,
@@ -1289,6 +1619,7 @@ def verify_append_gate_verdict(
                     base=base,
                     trusted_code_root=trusted_code_root,
                     release_anchor_dir=release_anchor_dir,
+                    enforce_production_pins=enforce_production_pins,
                 )
                 return AppendGateVerdict(
                     summary=summary,
@@ -1313,8 +1644,12 @@ def verify_append_gate(
     commit: str = "HEAD",
     trusted_code_root: pathlib.Path = CODE_ROOT,
     release_anchor_dir: pathlib.Path | None = None,
+    enforce_production_pins: bool = True,
 ) -> str:
-    """Verify one selected commit and return the baseline success text."""
+    """Verify one selected commit and return the baseline success text.
+
+    The anchor and pin rules are :func:`verify_append_gate_verdict`'s.
+    """
 
     return verify_append_gate_verdict(
         root,
@@ -1323,4 +1658,5 @@ def verify_append_gate(
         commit=commit,
         trusted_code_root=trusted_code_root,
         release_anchor_dir=release_anchor_dir,
+        enforce_production_pins=enforce_production_pins,
     ).summary

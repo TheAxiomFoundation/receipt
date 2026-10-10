@@ -658,8 +658,26 @@ def attribute_comparison(repo, commit, monkeypatch, requests, *, shared=False, c
                     calls.append((result, asdict(first.work), asdict(second.work), tuple(events), tuple(failures)))
                 results.append(calls)
                 costs.append((dict(counts), None if old else policy._attribute_store(first).work))
+    # Folded source discovery reuses exact admission and preserves every hook.
     assert results[0] == results[1]
     return results[1], costs
+
+
+@pytest.mark.parametrize("depth", (0, 1, 3))
+@pytest.mark.parametrize("has_source", (False, True))
+def test_folded_source_discovery_reuses_exact_directory_admission(raw_repo, monkeypatch, depth, has_source):
+    directory = "/".join(["p"] * depth)
+    prefix = directory + "/" if directory else ""
+    entries = [(prefix + "leaf", "100644")]
+    if has_source:
+        entries.append((prefix + ".gitattributes", "100644", b"* -filter\n"))
+    commit = raw_repo.commit(entries)
+    calls, _ = attribute_comparison(raw_repo, commit, monkeypatch,
+                                    ((prefix + "leaf",),) * 3)
+    assert all(call[0] == {"value": None} for call in calls)
+    # Discovery must retain the exact reader's logical tree/path budget and
+    # hook sequence across nested and repeated canonical or absent sources.
+    assert calls[0][1]["tree_entries"] == calls[-1][1]["tree_entries"]
 
 
 @pytest.mark.parametrize("budget,threshold,attributes,paths", (

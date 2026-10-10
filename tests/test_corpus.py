@@ -848,6 +848,276 @@ def test_refuses_a_content_symlink(tmp_path: pathlib.Path) -> None:
         )
 
 
+@pytest.mark.parametrize("name_repertoire", ["portable", "posix-bytes"])
+@pytest.mark.parametrize(
+    ("link", "target"),
+    [
+        # A directory link: a checkout presents staging/*.yaml under the root.
+        (b"rules/ext", b"../staging"),
+        # A link to a content file under a name without the pinned suffix.
+        (b"rules/tax/rate-link", b"rate.yaml"),
+        # A link to a file outside the repository.
+        (b"rules/outside", b"../../outside.yaml"),
+    ],
+)
+def test_refuses_a_symlink_without_a_pinned_suffix_under_a_content_root(
+    tmp_path: pathlib.Path,
+    name_repertoire: str,
+    link: bytes,
+    target: bytes,
+) -> None:
+    """The closed world counts files a checkout presents, not only rows."""
+
+    write_tree(tmp_path)
+    (tmp_path / "staging").mkdir()
+    (tmp_path / "staging/unbound.yaml").write_text("name: rate\nvalue: 0.99\n")
+    _commit_worktree(tmp_path)
+    oid = _commit_index_updates(
+        tmp_path, [("120000", _hash_blob(tmp_path, target), link)]
+    )
+
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(
+            tmp_path,
+            oid,
+            render_journal(journal_rows()),
+            spec=corpus_spec(name_repertoire=name_repertoire),
+        )
+    assert str(caught.value) == (
+        f"content root contains a symlink: '{link.decode('ascii')}'"
+    )
+
+
+def test_refuses_a_symlink_that_keeps_a_tombstoned_path_readable(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A removed row asserts the path no longer survives in any spelling."""
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+    legacy = "rules/legacy/rate.yaml"
+    for state in ("present", "removed"):
+        rows.append(
+            {
+                "schemaVersion": JOURNAL_SCHEMA,
+                "entryIndex": len(rows),
+                "kind": "content",
+                "path": legacy,
+                "sha256": sha256_text(CONTENT["rules/tax/rate.yaml"]),
+                "state": state,
+            }
+        )
+    _commit_worktree(tmp_path)
+    oid = _commit_index_updates(
+        tmp_path, [("120000", _hash_blob(tmp_path, b"tax"), b"rules/legacy")]
+    )
+
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(tmp_path, oid, render_journal(rows), spec=corpus_spec())
+    assert str(caught.value) == "content root contains a symlink: 'rules/legacy'"
+
+
+def test_a_symlink_outside_every_content_root_still_verifies(
+    tmp_path: pathlib.Path,
+) -> None:
+    write_tree(tmp_path)
+    _commit_worktree(tmp_path)
+    oid = _commit_index_updates(
+        tmp_path, [("120000", _hash_blob(tmp_path, b"../rules"), b"misc/rules-link")]
+    )
+
+    verification = _verify_commit(
+        tmp_path, oid, render_journal(journal_rows()), spec=corpus_spec()
+    )
+    assert {entry.path for entry in verification.content} == set(CONTENT)
+
+
+@pytest.mark.parametrize("name_repertoire", ["portable", "posix-bytes"])
+@pytest.mark.parametrize(
+    ("path", "states", "expected"),
+    [
+        (
+            "rules/legacy",
+            ("present",),
+            "bound file is not a regular file: rules/legacy",
+        ),
+        (
+            "rules/legacy/child.txt",
+            ("present",),
+            "bound file is missing or not a regular file: rules/legacy/child.txt",
+        ),
+        (
+            "rules/legacy",
+            ("present", "removed"),
+            "removed path is still present in the tree: rules/legacy",
+        ),
+        (
+            "rules/Legacy",
+            ("present", "removed"),
+            "removed path is still present in the tree under a spelling that "
+            "aliases it on a case- or normalization-insensitive filesystem: "
+            "rules/Legacy ('rules/legacy')",
+        ),
+    ],
+)
+def test_suffixless_symlink_preserves_attestation_and_tombstone_refusals(
+    tmp_path: pathlib.Path,
+    name_repertoire: str,
+    path: str,
+    states: tuple[str, ...],
+    expected: str,
+) -> None:
+    """A new closed-world refusal must not replace existing binding failures."""
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+    for state in states:
+        rows.append(
+            {
+                "schemaVersion": JOURNAL_SCHEMA,
+                "entryIndex": len(rows),
+                "kind": "attested",
+                "path": path,
+                "sha256": sha256_text(CONTENT["rules/tax/rate.yaml"]),
+                "state": state,
+            }
+        )
+    _commit_worktree(tmp_path)
+    oid = _commit_index_updates(
+        tmp_path, [("120000", _hash_blob(tmp_path, b"tax"), b"rules/legacy")]
+    )
+
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(
+            tmp_path,
+            oid,
+            render_journal(rows),
+            spec=corpus_spec(name_repertoire=name_repertoire),
+        )
+    assert str(caught.value) == expected
+
+
+@pytest.mark.parametrize("name_repertoire", ["portable", "posix-bytes"])
+@pytest.mark.parametrize(
+    "old_failure",
+    [
+        "later-root",
+        "unlisted",
+        "absent",
+        "required-attestation",
+        "content-digest",
+        "attested-digest",
+    ],
+)
+def test_suffixless_symlink_preserves_later_binding_refusals(
+    tmp_path: pathlib.Path, name_repertoire: str, old_failure: str
+) -> None:
+    """All old binding checks still run before the added suffixless-link screen."""
+
+    write_tree(tmp_path)
+    rows = journal_rows()
+    overrides: dict[str, object] = {"name_repertoire": name_repertoire}
+    if old_failure == "later-root":
+        overrides["content_roots"] = (
+            pathlib.PurePosixPath("rules"),
+            pathlib.PurePosixPath("missing"),
+        )
+        expected = "pinned content root is absent from the tree: missing"
+    elif old_failure == "unlisted":
+        (tmp_path / "rules/unbound.yaml").write_text("unbound\n")
+        expected = (
+            "1 content file(s) in the tree are not bound by the witnessed "
+            "journal, starting with 'rules/unbound.yaml'"
+        )
+    elif old_failure == "absent":
+        (tmp_path / "rules/tax/rate.yaml").unlink()
+        expected = (
+            "1 content file(s) bound by the journal are missing from the tree, "
+            "starting with 'rules/tax/rate.yaml'"
+        )
+    elif old_failure == "required-attestation":
+        rows = reindex([row for row in rows if row.get("kind") != "attested"])
+        expected = (
+            "the witnessed journal does not attest a path the pinned spec "
+            "requires: '.axiom/toolchain.toml'"
+        )
+    else:
+        kind = "content" if old_failure == "content-digest" else "attested"
+        path = (
+            "rules/tax/rate.yaml" if kind == "content" else ".axiom/toolchain.toml"
+        )
+        for row in rows:
+            if row.get("path") == path:
+                row["sha256"] = "0" * 64
+        body = CONTENT[path] if kind == "content" else ATTESTED[path]
+        expected = (
+            f"{kind} file '{path}' does not match its witnessed digest: tree has "
+            f"{sha256_text(body)}, journal binds {'0' * 64}"
+        )
+    _commit_worktree(tmp_path)
+    oid = _commit_index_updates(
+        tmp_path, [("120000", _hash_blob(tmp_path, b"tax"), b"rules/legacy")]
+    )
+
+    with pytest.raises(CorpusError) as caught:
+        _verify_commit(
+            tmp_path, oid, render_journal(rows), spec=corpus_spec(**overrides)
+        )
+    assert str(caught.value) == expected
+
+
+@pytest.fixture(scope="module")
+def suffixless_link_precedence_tree(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[pathlib.Path, str]:
+    """All examples verify the same immutable tree rather than rebuilding it."""
+
+    root = tmp_path_factory.mktemp("corpus-precedence")
+    write_tree(root)
+    _commit_worktree(root)
+    oid = _commit_index_updates(
+        root, [("120000", _hash_blob(root, b"tax"), b"rules/legacy")]
+    )
+    return root, oid
+
+
+def test_binding_digest_refusals_precede_suffixless_links_for_every_wrong_digest(
+    suffixless_link_precedence_tree: tuple[pathlib.Path, str],
+) -> None:
+    """Any incorrect content or attestation digest keeps its established refusal."""
+
+    from hypothesis import given, settings, strategies as st
+
+    @settings(max_examples=24, deadline=None, derandomize=True)
+    @given(
+        kind=st.sampled_from(["content", "attested"]),
+        name_repertoire=st.sampled_from(["portable", "posix-bytes"]),
+        mutation=st.integers(min_value=1, max_value=(1 << 256) - 1),
+    )
+    def exercise(kind: str, name_repertoire: str, mutation: int) -> None:
+        root, oid = suffixless_link_precedence_tree
+        path = "rules/tax/rate.yaml" if kind == "content" else ".axiom/toolchain.toml"
+        body = CONTENT[path] if kind == "content" else ATTESTED[path]
+        correct_digest = sha256_text(body)
+        wrong_digest = f"{int(correct_digest, 16) ^ mutation:064x}"
+        rows = journal_rows()
+        for row in rows:
+            if row.get("path") == path:
+                row["sha256"] = wrong_digest
+
+        with pytest.raises(CorpusError) as caught:
+            _verify_commit(
+                root, oid, render_journal(rows),
+                spec=corpus_spec(name_repertoire=name_repertoire),
+            )
+        assert str(caught.value) == (
+            f"{kind} file '{path}' does not match its witnessed digest: tree has "
+            f"{correct_digest}, journal binds {wrong_digest}"
+        )
+
+    exercise()
+
+
 def test_refuses_control_characters_in_gate_evidence(tmp_path: pathlib.Path) -> None:
     """Regression: evidence strings are rendered to a terminal, so a producer
     could embed CR/ESC and redraw the verdict line into a false PASS."""
@@ -970,6 +1240,34 @@ def test_refuses_a_required_gate_the_journal_omits(tmp_path: pathlib.Path) -> No
     verification = verify_corpus_binding(tmp_path, render_journal(rows), spec=spec)
     with pytest.raises(CorpusError, match="does not declare a gate the pinned spec"):
         verify_declarations(verification, spec=spec)
+
+
+def test_suffixless_symlink_refusal_precedes_a_missing_gate_declaration(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Binding closes the content root before the later declaration pass."""
+
+    write_tree(tmp_path)
+    rows = reindex(
+        [row for row in journal_rows() if row.get("gateId") != "rulespec/compile"]
+    )
+    spec = corpus_spec()
+    oid = _commit_worktree(tmp_path)
+    verification = _verify_commit(tmp_path, oid, render_journal(rows), spec=spec)
+    with pytest.raises(CorpusError) as caught:
+        verify_declarations(verification, spec=spec)
+    assert str(caught.value) == (
+        "the witnessed journal does not declare a gate the pinned spec "
+        "requires: 'rulespec/compile'"
+    )
+
+    oid = _commit_index_updates(
+        tmp_path, [("120000", _hash_blob(tmp_path, b"tax"), b"rules/legacy")]
+    )
+    with pytest.raises(CorpusError) as caught:
+        verification = _verify_commit(tmp_path, oid, render_journal(rows), spec=spec)
+        verify_declarations(verification, spec=spec)
+    assert str(caught.value) == "content root contains a symlink: 'rules/legacy'"
 
 
 def test_refuses_a_tier_the_spec_does_not_accept(tmp_path: pathlib.Path) -> None:
@@ -2714,7 +3012,14 @@ def test_refuses_removed_paths_over_the_verdict_budget(
     """removedPaths is the other producer list the verdict renders verbatim."""
 
     content = dict(CONTENT)
-    names = [f"rules/tax/{'r' * 900}{index:04d}.yaml" for index in range(300)]
+    # Four 225-byte components rather than one 900-byte one: a portable
+    # component is at most 255 bytes (0.6.2 review, L7 finding 11), and this
+    # test is about the removedPaths budget, not the name rule.
+    segment = "r" * 225
+    names = [
+        f"rules/tax/{segment}/{segment}/{segment}/{segment}{index:04d}.yaml"
+        for index in range(300)
+    ]
     for name in names:
         content[name] = "name: r\n"
     rows = journal_rows(content=content)
@@ -3231,7 +3536,7 @@ def test_short_name_suffix_screen_covers_every_tree_entry_kind_in_portable(
         name_repertoire=name_repertoire,
     )
 
-    if name_repertoire == "posix-bytes":
+    if name_repertoire == "posix-bytes" and shape == "directory":
         verification = _verify_commit(
             tmp_path,
             oid,
@@ -3247,10 +3552,14 @@ def test_short_name_suffix_screen_covers_every_tree_entry_kind_in_portable(
                 render_journal(journal_rows()),
                 spec=spec,
             )
-        assert str(caught.value) == (
-            "content root contains a file whose short-name alias would carry a "
-            f"pinned suffix: {path!r}"
-        )
+        if name_repertoire == "posix-bytes":
+            # No 8.3 screen here, but no symlink under a content root either.
+            assert str(caught.value) == f"content root contains a symlink: {path!r}"
+        else:
+            assert str(caught.value) == (
+                "content root contains a file whose short-name alias would carry a "
+                f"pinned suffix: {path!r}"
+            )
 
 
 def _refuses_short_name_alias(tmp_path: pathlib.Path, name: str) -> None:
@@ -5248,3 +5557,196 @@ def test_alias_capability_is_bounded_at_both_ends() -> None:
     # And ASCII is what makes the written length the folded length.
     for pin in (".y", ".yml", ".YAML", ".t3st"):
         assert len(_path_fold(pin)) == len(pin)
+
+
+# --- 0.6.2 review, L4 finding 3: every journal decode failure is a CorpusError
+
+
+@pytest.mark.parametrize(
+    "row, reason",
+    [
+        pytest.param(
+            b'{"entryIndex":' + b"1" * 4301 + b"}\n", "ValueError", id="wide-integer"
+        ),
+        pytest.param(
+            b"[" * 200_000 + b"]" * 200_000 + b"\n", "RecursionError", id="deep-array"
+        ),
+        pytest.param(
+            b'{"a":' * 100_000 + b"1" + b"}" * 100_000 + b"\n",
+            "RecursionError",
+            id="deep-object",
+        ),
+    ],
+)
+def test_journal_rows_json_cannot_decode_refuse_as_corpus_errors(
+    row: bytes, reason: str
+) -> None:
+    """``json.loads`` refuses an integer literal over the interpreter's digit
+    limit with ``ValueError`` and nesting past its stack with
+    ``RecursionError``. Neither is a ``JSONDecodeError``, so both escaped
+    ``parse_journal`` and ``verify_corpus_binding`` as interpreter exceptions
+    where the module's contract is a ``CorpusError``."""
+
+    from receipt.corpus import parse_journal
+
+    assert len(row) < MAX_JOURNAL_ROW_BYTES
+    with pytest.raises(CorpusError) as caught:
+        parse_journal(row, spec=corpus_spec())
+    assert str(caught.value) == (
+        "journal row 1 cannot be decoded within the interpreter's limits: "
+        f"{reason}"
+    )
+
+
+# --- 0.6.2 review, L4 finding 6: caller and spec arguments refuse, not crash
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        (
+            {"required_gates": frozenset({1})},
+            "CorpusSpec required_gates must contain only strings: found int",
+        ),
+        (
+            {"required_gates": frozenset({b"x"})},
+            "CorpusSpec required_gates must contain only strings: found bytes",
+        ),
+        (
+            {"required_gates": frozenset({1, "a"})},
+            "CorpusSpec required_gates must contain only strings: found int",
+        ),
+        (
+            {"required_attested_paths": frozenset({1, "a"})},
+            "CorpusSpec required_attested_paths must contain only strings: found int",
+        ),
+        (
+            {"accepted_gate_tiers": frozenset({1, "public"})},
+            "CorpusSpec accepted_gate_tiers must contain only strings: found int",
+        ),
+    ],
+)
+def test_corpus_spec_set_members_must_be_strings(
+    overrides: dict[str, object], message: str
+) -> None:
+    with pytest.raises(CorpusError) as caught:
+        corpus_spec(**overrides)
+    assert str(caught.value) == message
+
+
+def test_parse_journal_and_verify_declarations_refuse_wrong_argument_types() -> None:
+    from receipt.corpus import parse_journal
+
+    spec = corpus_spec()
+    with pytest.raises(CorpusError, match="corpus journal must be bytes, not str"):
+        parse_journal("x\n", spec=spec)  # type: ignore[arg-type]
+    with pytest.raises(
+        CorpusError, match="corpus journal must be bytes, not memoryview"
+    ):
+        parse_journal(memoryview(b"x\n"), spec=spec)  # type: ignore[arg-type]
+    with pytest.raises(CorpusError, match="spec must be a CorpusSpec, not NoneType"):
+        parse_journal(b"x\n", spec=None)  # type: ignore[arg-type]
+    with pytest.raises(
+        CorpusError, match="verification must be a CorpusVerification, not NoneType"
+    ):
+        verify_declarations(None, spec=spec)  # type: ignore[arg-type]
+
+
+def test_a_gate_only_journal_is_a_closed_world_of_zero_content_files() -> None:
+    """0.6.2 review, L4 finding 7: "genesis must bind content" never ran.
+
+    The branch carrying that message sat after the trailing-LF check, where
+    splitting always yields at least one row, so a journal of gate rows alone
+    has always parsed as zero content files. The unreachable branch is gone
+    and the docstring states the behaviour that was always there.
+    """
+
+    import receipt.corpus as corpus_module
+    from receipt.corpus import parse_journal
+
+    rows = journal_rows(content={}, attested={})
+    assert {row["kind"] for row in rows} == {"gate"}
+    content, attested, gates, removed = parse_journal(
+        render_journal(rows), spec=corpus_spec(required_attested_paths=frozenset())
+    )
+    assert (content, attested, removed) == ({}, {}, ())
+    assert gates
+    documented = " ".join((corpus_module.parse_journal.__doc__ or "").split())
+    assert "A journal of gate rows alone is a closed world of zero content files" in (
+        documented
+    )
+    with pytest.raises(CorpusError, match="journal row 1 is blank"):
+        parse_journal(b"\n", spec=corpus_spec())
+
+
+def test_a_case_only_rename_cannot_be_journalled(tmp_path: pathlib.Path) -> None:
+    """0.6.2 review, L4 finding 5: the tombstone rule's permanent consequence.
+
+    ``rules/tax/rate.yaml`` renamed to ``rules/tax/Rate.yaml`` with the same
+    bytes, journalled honestly: removing the old spelling refuses because the
+    new spelling aliases it, and keeping both refuses because two declared
+    paths would alias. The rule is intended -- a survivor under a fold-equal
+    spelling answers to the tombstoned name on a case-insensitive checkout --
+    and the module docstring now says what it costs.
+    """
+
+    import receipt.corpus as corpus_module
+
+    body = CONTENT["rules/tax/rate.yaml"]
+    renamed = {
+        ("rules/tax/Rate.yaml" if path == "rules/tax/rate.yaml" else path): text
+        for path, text in CONTENT.items()
+    }
+    write_tree(tmp_path, content=renamed)
+    rows = journal_rows()
+    base = len(rows)
+    rows.append(
+        {
+            "schemaVersion": JOURNAL_SCHEMA,
+            "kind": "content",
+            "path": "rules/tax/rate.yaml",
+            "sha256": sha256_text(body),
+            "state": "removed",
+        }
+    )
+    rows.append(
+        {
+            "schemaVersion": JOURNAL_SCHEMA,
+            "kind": "content",
+            "path": "rules/tax/Rate.yaml",
+            "sha256": sha256_text(body),
+            "state": "present",
+        }
+    )
+    reindex(rows)
+    with pytest.raises(CorpusError, match="still present in the tree"):
+        verify_corpus_binding(tmp_path, render_journal(rows), spec=corpus_spec())
+
+    kept = rows[:base] + rows[base + 1 :]
+    reindex(kept)
+    with pytest.raises(CorpusError, match="two declared paths would alias"):
+        verify_corpus_binding(tmp_path, render_journal(kept), spec=corpus_spec())
+
+    documented = " ".join((corpus_module.__doc__ or "").split())
+    assert "a case-only rename (``rate.yaml`` to ``Rate.yaml``) cannot be journalled" in (
+        documented
+    )
+
+
+
+def test_a_journal_path_with_an_over_long_component_names_the_length(
+    tmp_path: pathlib.Path,
+) -> None:
+    """0.6.2 review, L7 finding 11: the corpus relabelled every name-policy
+    refusal as "not a portable name (ASCII letters, ...)"; a 256-byte
+    component is refused for its length, and says so."""
+
+    from receipt.corpus import parse_journal
+
+    content = dict(CONTENT)
+    long_name = f"rules/tax/{'r' * 251}.yaml"
+    content[long_name] = "name: r\n"
+    with pytest.raises(CorpusError) as caught:
+        parse_journal(render_journal(journal_rows(content=content)), spec=corpus_spec())
+    assert "has a component longer than 255 bytes" in str(caught.value)
+    assert "is not a portable name" not in str(caught.value)

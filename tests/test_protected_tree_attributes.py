@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
+from hypothesis import HealthCheck, example, given, settings, strategies as st
 
 from receipt import protected_tree as policy, snapshot
 from m1_fixture import raw_repo, signed_repo, outcome
@@ -111,9 +112,10 @@ def test_attribute_source_modes(raw_repo, mode):
 
 
 def test_only_exact_committed_sources_are_inputs(raw_repo, tmp_path):
-    commit = raw_repo.commit(((".gitattributes", "100644", b"* -filter\n"),
-                              ("P/.gitattributes", "120000"),
-                              ("p/.GITATTRIBUTES", "160000")))
+    """Directory spellings stay exact; source filenames have a folded reading."""
+    committed = ((".gitattributes", "100644", b"* -filter\n"),
+                 ("P/.gitattributes", "120000"))
+    commit = raw_repo.commit(committed)
     (raw_repo.root / ".gitattributes").write_bytes(b"* filter\n")
     (raw_repo.root / ".git/info/attributes").write_bytes(b"* filter\n")
     global_attributes = tmp_path / "global-attributes"
@@ -123,6 +125,42 @@ def test_only_exact_committed_sources_are_inputs(raw_repo, tmp_path):
         view, result = evaluate(snap, plan("p/missing"))
         assert result == {"value": None}
         assert view.attribute_outcomes[b"p/missing"].sources == (".gitattributes", "p/.gitattributes")
+    commit = raw_repo.commit((*committed, ("p/.GITATTRIBUTES", "160000")))
+    with raw_repo.snapshot(commit) as snap:
+        assert outcome(lambda: snap.refuse_transforming_attributes(("p/missing",))) == {
+            "exception": "receipt.snapshot.SnapshotError",
+            "message": "unsupported .gitattributes entry at p/.GITATTRIBUTES: mode 160000",
+        }
+
+
+@settings(max_examples=12, deadline=None,
+          suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(casing=st.lists(st.booleans(), min_size=len("gitattributes"),
+                      max_size=len("gitattributes")),
+       attribute=st.sampled_from(("filter", "ident", "working-tree-encoding")),
+       depth=st.integers(min_value=0, max_value=2),
+       mode=st.sampled_from(("100644", "100755")))
+@example(casing=[True] * len("gitattributes"), attribute="ident", depth=0, mode="100644")
+def test_every_ascii_casing_of_an_attribute_filename_keeps_the_folded_refusal(
+    raw_repo, casing, attribute, depth, mode,
+):
+    """A committed source applies in the folded reading under every ASCII casing."""
+    filename = "." + "".join(letter.upper() if upper else letter
+                            for letter, upper in zip("gitattributes", casing))
+    directory = "" if depth == 0 else "/".join(("p", "q")[:depth]) + "/"
+    source = directory + filename
+    path = directory + "protected.txt"
+    commit = raw_repo.commit(((source, mode, f"Protected.txt {attribute}\n".encode()),))
+    with raw_repo.snapshot(commit) as snap:
+        view, result = evaluate(snap, plan(path))
+        assert result == {
+            "exception": "receipt.snapshot.SnapshotError",
+            "message": f"transforming attribute {attribute} applies to protected path {path}",
+        }
+        fact = view.attribute_outcomes[path.encode()]
+        assert attribute not in fact.exact
+        assert fact.folded[attribute] == policy.AttributeState("set", source, 1)
+        assert view.findings[0].operation == "folded"
 
 
 @pytest.mark.parametrize("payload,construct", (
@@ -382,7 +420,27 @@ def test_consumers_reach_attribute_policy_after_their_existing_barriers(
             monkeypatch.setattr(append_gate, "_read_state_blob", stop)
             with pytest.raises(RuntimeError, match="after append attributes"):
                 append_gate._verify_selected_tree(candidate, base=None,
-                    trusted_code_root=append_repo.root, release_anchor_dir=None)
+                    trusted_code_root=append_repo.root, release_anchor_dir=None,
+                    enforce_production_pins=True)
         assert calls[0][0] == "append-attributes"
     assert len(calls) == 1 and calls[0][1]
     assert (calls[0][2] > 0) == (consumer != "append")
+
+
+def test_only_committed_sources_are_inputs_and_folded_source_modes_refuse(raw_repo, tmp_path):
+    commit = raw_repo.commit(((".gitattributes", "100644", b"* -filter\n"),
+                              ("P/.gitattributes", "120000"),
+                              ("p/.GITATTRIBUTES", "160000")))
+    (raw_repo.root / ".gitattributes").write_bytes(b"* filter\n")
+    (raw_repo.root / ".git/info/attributes").write_bytes(b"* filter\n")
+    global_attributes = tmp_path / "global-attributes"
+    global_attributes.write_bytes(b"* filter\n")
+    raw_repo.git("config", "core.attributesFile", str(global_attributes))
+    with raw_repo.snapshot(commit) as snap:
+        view, result = evaluate(snap, plan("q/missing"))
+        assert result == {"value": None}
+        assert view.attribute_outcomes[b"q/missing"].sources == (".gitattributes", "q/.gitattributes")
+        # The folded reading discovers the committed alias, including its mode.
+        # Worktree, info/attributes and global attributes remain unused.
+        with pytest.raises(snapshot.SnapshotError, match=r"unsupported \.gitattributes entry at p/\.GITATTRIBUTES: mode 160000"):
+            evaluate(snap, plan("p/missing"))

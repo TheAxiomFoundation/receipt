@@ -3,12 +3,15 @@ from __future__ import annotations
 import builtins
 import hashlib
 import pathlib
+import sys
 import types
+import uuid
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
 from typing import Any
 
 import pytest
+from hypothesis import HealthCheck, given, settings, strategies as st
 
 import receipt.verify as verify_module
 from receipt.corpus import CorpusVerification
@@ -104,6 +107,101 @@ def test_load_spec_without_expectation_is_unpinned(tmp_path: pathlib.Path) -> No
     assert not hasattr(verify_module, "_loaded_spec")
 
 
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "1e400 - 1e400",
+        "1e400j - 1e400j",
+        "(1e400 - 1e400, (1e400j - 1e400j,))",
+    ],
+    ids=["float", "complex", "nested-tuple"],
+)
+@pytest.mark.parametrize("placement", ["module", "function"])
+@pytest.mark.parametrize("pinned", [False, True])
+def test_load_spec_accepts_folded_nan_constants(
+    tmp_path: pathlib.Path, expression: str, placement: str, pinned: bool
+) -> None:
+    """Identical UTF-8 programs accept even with non-reflexive constants.
+
+    Enumerate float/complex NaNs, tuple constants and nested code objects;
+    none changes the VerificationSpec, whether or not its bytes are pinned.
+    """
+
+    prefix = (
+        f"UNUSED_NAN = {expression}\n"
+        if placement == "module"
+        else f"def unused_nan():\n    return {expression}\n"
+    )
+    source = prefix.encode("ascii") + SPEC_SOURCE
+    digest = hashlib.sha256(source).hexdigest()
+
+    loaded = load_spec(
+        _spec_file(tmp_path, source), expect_sha256=digest if pinned else None
+    )
+
+    assert loaded.verification.name == "loaded-spec-test"
+    assert loaded.sha256 == digest
+    assert loaded.pinned is pinned
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+def test_load_spec_preserves_signed_zero_constants(
+    tmp_path: pathlib.Path, pinned: bool
+) -> None:
+    source = (
+        b"import math\n"
+        b"UNUSED_ZERO = (-0.0, 0.0)\n"
+        b"def unused_zero():\n    return -0.0, 0.0\n"
+        b"assert [math.copysign(1.0, x) for x in UNUSED_ZERO] == [-1.0, 1.0]\n"
+        b"assert [math.copysign(1.0, x) for x in unused_zero()] == [-1.0, 1.0]\n"
+        + SPEC_SOURCE
+    )
+
+    loaded = load_spec(
+        _spec_file(tmp_path, source),
+        expect_sha256=hashlib.sha256(source).hexdigest() if pinned else None,
+    )
+
+    assert loaded.verification.name == "loaded-spec-test"
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_load_spec_refuses_a_signed_zero_program_mismatch(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, nested: bool
+) -> None:
+    """Program identity preserves float bits, including in nested code."""
+
+    marker = tmp_path / "spec-executed"
+    prefix = (
+        b"def unused_zero():\n    return -0.0\n"
+        if nested
+        else b"UNUSED_ZERO = -0.0\n"
+    )
+    source = (
+        prefix + f"open({str(marker)!r}, 'w').close()\n".encode() + SPEC_SOURCE
+    )
+    path = _spec_file(tmp_path, source)
+    original_compile = compile
+
+    def changed_text_compile(
+        source: bytes | str, *args: Any, **kwargs: Any
+    ) -> types.CodeType:
+        if isinstance(source, str):
+            source = source.replace("-0.0", "0.0", 1)
+        return original_compile(source, *args, **kwargs)
+
+    monkeypatch.setattr(verify_module, "compile", changed_text_compile, raising=False)
+
+    with pytest.raises(VerifySpecError) as caught:
+        load_spec(path)
+
+    assert str(caught.value) == (
+        "spec does not compile to the program its UTF-8 text reads as; a source "
+        f"encoding declaration changed it: {path.resolve()}"
+    )
+    assert not marker.exists()
+
+
 @pytest.mark.parametrize("expectation", [object(), "A" * 64, "0" * 63, "g" * 64])
 def test_load_spec_refuses_a_non_digest_expectation_without_comparing_it(
     tmp_path: pathlib.Path, expectation: object
@@ -181,6 +279,451 @@ def test_expected_digest_refuses_before_compile_or_exec(
     assert not marker.exists()
 
 
+def _hidden_marker_spec(marker: pathlib.Path, *, cookie: bytes, framing: str) -> bytes:
+    """A spec whose only code a UTF-8 reader sees is SPEC_SOURCE.
+
+    Under the declared codec, what reads as a comment decodes to a second
+    statement that writes ``marker``.
+    """
+
+    statement = f"open({str(marker)!r}, 'w').close()".encode("ascii")
+    if framing == "escaped-newline":
+        hidden = b"# Reviewed: constants only, no logic.\\u000a" + statement + b"\n"
+    else:
+        # UTF-7: "+AAo-" is a newline; the statement follows it in the comment.
+        hidden = b"# sha: +AAo-" + statement + b"\n"
+    return cookie + hidden + SPEC_SOURCE
+
+
+@pytest.mark.parametrize(
+    ("header", "framing", "codec"),
+    [
+        (b"# coding: raw_unicode_escape\n", "escaped-newline", "raw-unicode-escape"),
+        (b"# -*- coding: unicode_escape -*-\n", "escaped-newline", "unicode-escape"),
+        (b"# vim: set fileencoding=utf-7 :\n", "utf-7", "utf-7"),
+        # A lone CR ends the shebang for the compiler. tokenize.detect_encoding
+        # also finds this cookie; the pre-check normalizes CR for other layouts.
+        (b"#!/usr/bin/env python\r# coding: raw_unicode_escape\n", "escaped-newline", "raw-unicode-escape"),
+    ],
+)
+@pytest.mark.parametrize("pinned", [False, True])
+def test_load_spec_refuses_a_source_encoding_other_than_utf8(
+    tmp_path: pathlib.Path,
+    header: bytes,
+    framing: str,
+    codec: str,
+    pinned: bool,
+) -> None:
+    marker = tmp_path / "hidden-code-ran"
+    source = _hidden_marker_spec(marker, cookie=header, framing=framing)
+    path = tmp_path / "spec.py"
+    path.write_bytes(source)
+    digest = hashlib.sha256(source).hexdigest()
+
+    with pytest.raises(VerifySpecError) as caught:
+        load_spec(path, expect_sha256=digest if pinned else None)
+
+    assert str(caught.value) == (
+        f"spec declares source encoding {codec}; a spec must be UTF-8 so it "
+        f"executes as the text a reviewer reads: {path.resolve()}"
+    )
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+def test_load_spec_refuses_bytes_that_compile_to_another_program_than_their_text(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, pinned: bool
+) -> None:
+    """The backstop: a declaration the pre-check misses still cannot run code."""
+
+    marker = tmp_path / "hidden-code-ran"
+    path = tmp_path / "spec.py"
+    path.write_bytes(
+        _hidden_marker_spec(
+            marker,
+            cookie=b"# coding: raw_unicode_escape\n",
+            framing="escaped-newline",
+        )
+    )
+    monkeypatch.setattr(
+        verify_module, "_declared_source_encoding", lambda source: "utf-8"
+    )
+
+    with pytest.raises(VerifySpecError) as caught:
+        load_spec(
+            path,
+            expect_sha256=hashlib.sha256(path.read_bytes()).hexdigest() if pinned else None,
+        )
+
+    assert str(caught.value) == (
+        "spec does not compile to the program its UTF-8 text reads as; a source "
+        f"encoding declaration changed it: {path.resolve()}"
+    )
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [b"raise ValueError('later refusal')\n", b"pass\n", b"SPEC = object()\n", SPEC_SOURCE],
+    ids=["execution-error", "missing-SPEC", "wrong-SPEC-type", "valid-SPEC"],
+)
+@pytest.mark.parametrize("pinned", [False, True])
+def test_load_spec_refuses_invalid_utf8_before_execution_and_spec_validation(
+    tmp_path: pathlib.Path, body: bytes, pinned: bool
+) -> None:
+    """Invalid UTF-8 comments refuse without blaming an absent declaration."""
+
+    marker = tmp_path / "spec-executed"
+    source = (
+        b"# caf\xe9\n"
+        + f"open({str(marker)!r}, 'w').close()\n".encode()
+        + body
+    )
+    path = _spec_file(tmp_path, source)
+    compile(source, str(path.resolve()), "exec", dont_inherit=True)
+
+    with pytest.raises(VerifySpecError) as caught:
+        load_spec(
+            path,
+            expect_sha256=hashlib.sha256(source).hexdigest() if pinned else None,
+        )
+
+    assert str(caught.value) == f"spec is not valid UTF-8: {path.resolve()}"
+    assert not marker.exists()
+
+
+@settings(
+    max_examples=40,
+    deadline=None,
+    derandomize=True,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+@given(
+    invalid_byte=st.integers(min_value=0x80, max_value=0xFF),
+    prefix=st.sampled_from([b"# ", b"# caf", b"# coding: utf-8\n# "]),
+    pinned=st.booleans(),
+    previous_present=st.booleans(),
+)
+def test_invalid_utf8_comments_refuse_without_execution_or_module_state_changes(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_byte: int,
+    prefix: bytes,
+    pinned: bool,
+    previous_present: bool,
+) -> None:
+    """A byte compiler's ignored comment cannot bypass the UTF-8 boundary."""
+
+    marker = tmp_path / "spec-executed"
+    source = (
+        prefix + bytes([invalid_byte]) + b"\n"
+        + f"open({str(marker)!r}, 'w').close()\n".encode()
+        + SPEC_SOURCE
+    )
+    path = _spec_file(tmp_path, source)
+    module_name = "_receipt_consumer_spec"
+    sentinel = types.ModuleType(module_name)
+    with monkeypatch.context() as patch:
+        if previous_present:
+            patch.setitem(sys.modules, module_name, sentinel)
+        else:
+            patch.delitem(sys.modules, module_name, raising=False)
+
+        with pytest.raises(VerifySpecError) as caught:
+            load_spec(
+                path,
+                expect_sha256=hashlib.sha256(source).hexdigest() if pinned else None,
+            )
+
+        assert str(caught.value) == f"spec is not valid UTF-8: {path.resolve()}"
+        assert not marker.exists()
+        if previous_present:
+            assert sys.modules[module_name] is sentinel
+        else:
+            assert module_name not in sys.modules
+
+
+@pytest.mark.parametrize("bypass_declaration_check", [False, True])
+@pytest.mark.parametrize("pinned", [False, True])
+def test_load_spec_refuses_latin1_that_changes_a_string_literal(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bypass_declaration_check: bool,
+    pinned: bool,
+) -> None:
+    marker = tmp_path / "spec-executed"
+    source = (
+        b"# coding: latin-1\n"
+        + f"open({str(marker)!r}, 'w').close()\n".encode()
+        + SPEC_SOURCE.replace(b"loaded-spec-test", "règles".encode("utf-8"))
+    )
+    path = _spec_file(tmp_path, source)
+    if bypass_declaration_check:
+        monkeypatch.setattr(
+            verify_module, "_declared_source_encoding", lambda source: "utf-8"
+        )
+
+    with pytest.raises(VerifySpecError) as caught:
+        load_spec(
+            path,
+            expect_sha256=hashlib.sha256(source).hexdigest() if pinned else None,
+        )
+
+    expected = (
+        "spec does not compile to the program its UTF-8 text reads as; "
+        "a source encoding declaration changed it: "
+        if bypass_declaration_check
+        else "spec declares source encoding iso8859-1; a spec must be UTF-8 so "
+        "it executes as the text a reviewer reads: "
+    )
+    assert str(caught.value) == expected + str(path.resolve())
+    assert not marker.exists()
+
+
+def test_no_declaration_placement_runs_a_hidden_statement(tmp_path: pathlib.Path) -> None:
+    """Property, enumerated: whatever the first two lines look like, a hidden
+    statement never runs. Either the spec refuses, or it executes exactly the
+    UTF-8 text, where the statement is inside a comment."""
+
+    marker = tmp_path / "hidden-code-ran"
+    declarations = (
+        b"coding: raw_unicode_escape",
+        b"coding=unicode_escape",
+        b"-*- coding: raw-unicode-escape -*-",
+        b"vim: set fileencoding=utf-7 :",
+        b"coding:utf-7",
+    )
+    leads = (b"", b" ", b"\t", b"\x0c", b"\r", b"\r\n", b"\xef\xbb\xbf")
+    first_lines = (b"", b"#", b"# note", b"#!/usr/bin/env python", b"x = 0")
+    breaks = (b"\n", b"\r\n", b"\r")
+    statement = f"open({str(marker)!r}, 'w').close()".encode("ascii")
+    hidden = {
+        b"utf-7": b"# sha: +AAo-" + statement + b"\n",
+        b"escape": b"# note\\u000a" + statement + b"\n",
+    }
+    path = tmp_path / "spec.py"
+    cases = 0
+    for declaration in declarations:
+        body = hidden[b"utf-7" if b"utf-7" in declaration else b"escape"]
+        for lead in leads:
+            for line_break in breaks:
+                for first in first_lines:
+                    for header in (
+                        lead + b"# " + declaration + line_break,
+                        first + line_break + lead + b"# " + declaration + line_break,
+                    ):
+                        path.write_bytes(header + body + SPEC_SOURCE)
+                        try:
+                            load_spec(path)
+                        except VerifySpecError:
+                            pass
+                        assert not marker.exists(), header
+                        cases += 1
+    assert cases == 1050
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        b"",
+        b"# -*- coding: utf-8 -*-\n",
+        b"# coding: utf8\n",
+        b"\xef\xbb\xbf",
+        b"\xef\xbb\xbf# coding: utf-8\n",
+    ],
+)
+def test_load_spec_accepts_utf8_declarations_and_a_bom(
+    tmp_path: pathlib.Path, prefix: bytes
+) -> None:
+    source = prefix + SPEC_SOURCE.replace(b"loaded-spec-test", "règles".encode())
+    path = tmp_path / "spec.py"
+    path.write_bytes(source)
+
+    loaded = load_spec(path, expect_sha256=hashlib.sha256(source).hexdigest())
+
+    assert loaded.verification.name == "règles"
+
+
+@settings(
+    max_examples=80,
+    deadline=None,
+    derandomize=True,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+@given(
+    prefix=st.sampled_from(
+        [
+            b"",
+            b"# -*- coding: utf-8 -*-\n",
+            b"# coding: utf8\n",
+            b"\xef\xbb\xbf",
+            b"\xef\xbb\xbf# coding: utf-8\n",
+        ]
+    ),
+    annotation=st.sampled_from(
+        ["int", "str", "list[int]", "dict[str, int]", "tuple[int, ...]"]
+    ),
+    future_annotations=st.booleans(),
+    previous_present=st.booleans(),
+)
+def test_utf8_spec_compilation_preserves_normal_module_semantics(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prefix: bytes,
+    annotation: str,
+    future_annotations: bool,
+    previous_present: bool,
+) -> None:
+    """UTF-8 checks preserve annotations, class module lookup, and module state."""
+
+    future = b"from __future__ import annotations\n" if future_annotations else b""
+    expected = repr(annotation) if future_annotations else annotation
+    source = prefix + future + SPEC_SOURCE + (
+        "\nimport dataclasses, sys\n"
+        "@dataclasses.dataclass(frozen=True)\n"
+        "class Probe:\n"
+        f"    value: {annotation}\n"
+        f"assert Probe.__annotations__['value'] == {expected}\n"
+        "assert sys.modules[__name__].__dict__ is globals()\n"
+    ).encode()
+    module_name = "_receipt_consumer_spec"
+    sentinel = types.ModuleType(module_name)
+    with monkeypatch.context() as patch:
+        if previous_present:
+            patch.setitem(sys.modules, module_name, sentinel)
+        else:
+            patch.delitem(sys.modules, module_name, raising=False)
+
+        loaded = load_spec(
+            _spec_file(tmp_path, source),
+            expect_sha256=hashlib.sha256(source).hexdigest(),
+        )
+
+        assert loaded.verification.name == "loaded-spec-test"
+        if previous_present:
+            assert sys.modules[module_name] is sentinel
+        else:
+            assert module_name not in sys.modules
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        b"# coding: bogus\n" + SPEC_SOURCE,
+        b"x = '\xff'\n" + SPEC_SOURCE,
+        b"# coding: latin-1\nif \n",
+    ],
+)
+def test_load_spec_keeps_unknown_codec_and_invalid_utf8_refusal_details(
+    tmp_path: pathlib.Path, source: bytes
+) -> None:
+    _assert_load_spec_keeps_compiler_refusal(tmp_path, source)
+
+
+def _assert_load_spec_keeps_compiler_refusal(
+    tmp_path: pathlib.Path, source: bytes
+) -> None:
+    path = _spec_file(tmp_path, source)
+    resolved = path.resolve()
+    with pytest.raises(SyntaxError) as compiler_caught:
+        compile(source, str(resolved), "exec", dont_inherit=True)
+
+    with pytest.raises(VerifySpecError) as loader_caught:
+        load_spec(path)
+
+    assert str(loader_caught.value) == (
+        f"spec module raised on load: {resolved}: {compiler_caught.value}"
+    )
+    cause = loader_caught.value.__cause__
+    assert type(cause) is type(compiler_caught.value)
+    assert cause.args == compiler_caught.value.args
+
+
+@settings(
+    max_examples=30,
+    deadline=None,
+    derandomize=True,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+@given(
+    codec=st.sampled_from(["latin-1", "cp1252", "ascii", "iso8859-1"]),
+    comment=st.text(alphabet="abcdefghijklmnopqrstuvwxyz ", max_size=20),
+    broken=st.sampled_from(["if ", "def missing(", "x = (", "class "]),
+)
+def test_non_utf8_syntax_refusals_preserve_the_compilers_diagnostic(
+    tmp_path: pathlib.Path, codec: str, comment: str, broken: str,
+) -> None:
+    """Every syntax-invalid declared encoding keeps the compiler's first error."""
+
+    source = f"# coding: {codec}\n# {comment}\n{broken}\n".encode("ascii")
+    _assert_load_spec_keeps_compiler_refusal(tmp_path, source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [b"(", b"\x00", b"\xff", b"# coding: no-such-encoding\n"],
+    ids=["syntax", "null-byte", "invalid-utf8", "unknown-encoding"],
+)
+def test_load_spec_keeps_the_compilers_own_refusals(
+    tmp_path: pathlib.Path, source: bytes
+) -> None:
+    _assert_load_spec_keeps_compiler_refusal(tmp_path, source)
+
+
+@settings(
+    max_examples=500,
+    deadline=None,
+    derandomize=True,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+@given(
+    prefix=st.text(
+        alphabet=st.characters(min_codepoint=32, max_codepoint=126), max_size=40
+    ),
+    invalid_byte=st.sampled_from([*range(0x80, 0xC0), *range(0xF5, 0x100)]),
+)
+def test_load_spec_preserves_compiler_refusals_for_invalid_utf8(
+    tmp_path: pathlib.Path, prefix: str, invalid_byte: int
+) -> None:
+    """Every invalid UTF-8 byte stays refused with the compiler's own message."""
+
+    source = (
+        b"# coding: utf-8\n# " + prefix.encode() + b"\n" + bytes([invalid_byte]) + b"\n"
+    )
+    _assert_load_spec_keeps_compiler_refusal(tmp_path, source)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [b"raise ValueError('old refusal')\n", b"pass\n", b"SPEC = object()\n"],
+    ids=["execution-error", "missing-SPEC", "wrong-SPEC-type"],
+)
+@pytest.mark.parametrize("pinned", [False, True])
+def test_non_utf8_encoding_refuses_before_execution_and_spec_validation(
+    tmp_path: pathlib.Path, body: bytes, pinned: bool
+) -> None:
+    """Encoding replaces later loader refusals without executing the module."""
+
+    marker = tmp_path / "spec-executed"
+    source = (
+        b"# coding: latin-1\n"
+        + f"open({str(marker)!r}, 'w').close()\n".encode()
+        + body
+    )
+    path = _spec_file(tmp_path, source)
+    with pytest.raises(VerifySpecError) as caught:
+        load_spec(
+            path,
+            expect_sha256=hashlib.sha256(source).hexdigest() if pinned else None,
+        )
+
+    assert str(caught.value) == (
+        "spec declares source encoding iso8859-1; a spec must be UTF-8 so it "
+        f"executes as the text a reviewer reads: {path.resolve()}"
+    )
+    assert not marker.exists()
+
+
 JOURNAL_BYTES = b'{"one":"row"}\n'
 PREFIX_BYTES = b'{"prefix":true}\n'
 CANDIDATE_COMMIT = "c" * 40
@@ -196,6 +739,8 @@ def _install_verification_pipeline(
     materialized_anchor: str = ANCHOR_DIGEST,
     verified_anchor: str | None = None,
     object_failure: str | None = None,
+    close_revision: str | None = None,
+    close_error: BaseException | None = None,
 ) -> dict[str, Any]:
     """Install a recording snapshot around the spanning composition.
 
@@ -237,6 +782,8 @@ def _install_verification_pipeline(
 
     class FakeSnapshot:
         def __init__(self, revision: str) -> None:
+            self.revision = revision
+            self.close_errors: tuple[BaseException, ...] = ()
             if revision == "base-ref":
                 self.commit = BASE_COMMIT
                 self.tree = BASE_TREE
@@ -271,8 +818,18 @@ def _install_verification_pipeline(
         def __enter__(self) -> FakeSnapshot:
             return self
 
-        def __exit__(self, *args: object) -> None:
-            del args
+        def __exit__(
+            self, _type: object, exc: BaseException | None, _tb: object
+        ) -> None:
+            if self.revision == close_revision:
+                failure = close_error if close_error is not None else SnapshotError(
+                    "repository configuration changed during verification"
+                )
+                self.close_errors = (failure,)
+                if exc is not None:
+                    exc.add_note(f"Snapshot close also failed: {failure}")
+                else:
+                    raise failure
 
         def assert_ancestor(self, base: FakeSnapshot) -> str:
             calls["ancestor"] = (self, base)
@@ -782,3 +1339,239 @@ def test_attribute_verdict_is_independent_of_ignorecase(
         "releases/anchors/alpha-root.pem"
     )
     assert results[0]["passesCompleted"] == []
+
+
+# A failed closure never leaves an affected claim established, even when a
+# binding or declaration exception is already unwinding either snapshot.
+@pytest.mark.parametrize("phase", ["binding", "declaration"])
+@pytest.mark.parametrize("close_revision", ["candidate-ref", "base-ref"])
+def test_close_failure_invalidates_claims_during_a_failed_pass(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    close_revision: str,
+) -> None:
+    _install_verification_pipeline(monkeypatch, close_revision=close_revision)
+    loaded = load_spec(
+        _spec_file(tmp_path),
+        expect_sha256=hashlib.sha256(SPEC_SOURCE).hexdigest(),
+    )
+
+    def fail_pass(*_args: object, **_kwargs: object) -> None:
+        raise verify_module.CorpusError(f"{phase} failed before snapshot closure")
+
+    operation = (
+        "verify_corpus_binding" if phase == "binding" else "verify_declarations"
+    )
+    monkeypatch.setattr(verify_module, operation, fail_pass)
+    result = run_verification(
+        tmp_path,
+        loaded,
+        commit="candidate-ref",
+        base_ref="base-ref",
+        expect_commit=CANDIDATE_COMMIT,
+        verify_objects=True,
+    )
+    payload = result_to_dict(result)
+
+    assert payload["verdict"] == "FAIL"
+    assert payload["passesCompleted"] == []
+    assert payload["scope"]["established"] == []
+    assert result.chain is None and result.corpus is None
+    assert result.object_store is None
+    assert payload["objectStore"] == {"requested": True, "report": None}
+    assert [item.name for item in result.passes] == ["custody", "binding"]
+    assert (
+        "repository configuration changed during verification"
+        in result.passes[0].failure
+    )
+
+
+def test_a_pinned_missing_gate_cannot_hide_concurrent_close_failure(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The declaration error is a real absent gate; only the writer is injected."""
+
+    from corpus_fixture import _git, build_corpus
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    build_corpus(root, tmp_path / "keys")
+    commit = _git(root, "rev-parse", "HEAD")
+    spec_path = tmp_path / "auditor-spec.py"
+    spec_path.write_bytes(
+        (root / "verification/spec.py").read_bytes()
+        + b"\nimport dataclasses\n"
+        + b"SPEC = dataclasses.replace(SPEC, corpus=dataclasses.replace(\n"
+        + b"    SPEC.corpus, required_gates=SPEC.corpus.required_gates | "
+        + b"frozenset({'audit/missing'})))\n"
+    )
+    loaded = load_spec(
+        spec_path,
+        expect_sha256=hashlib.sha256(spec_path.read_bytes()).hexdigest(),
+    )
+    control = run_verification(
+        root, loaded, base_ref=commit, expect_commit=commit
+    )
+    control_payload = result_to_dict(control)
+    assert control_payload["spec"]["pinned"] is True
+    assert control_payload["passesCompleted"] == ["history", "custody", "binding"]
+    assert len(control_payload["scope"]["established"]) == 3
+    assert "'audit/missing'" in control.passes[-1].failure
+
+    original = verify_module.verify_declarations
+
+    def declarations_with_concurrent_writer(
+        *args: object, **kwargs: object
+    ) -> object:
+        with open(root / ".git" / "config", "a") as handle:
+            handle.write("[receiptprobe]\n\tconcurrent = 1\n")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        verify_module, "verify_declarations", declarations_with_concurrent_writer
+    )
+    result = run_verification(
+        root, loaded, base_ref=commit, expect_commit=commit
+    )
+    payload = result_to_dict(result)
+    assert payload["spec"]["pinned"] is True
+    assert payload["verdict"] == "FAIL"
+    assert payload["passesCompleted"] == []
+    assert payload["scope"]["established"] == []
+    assert result.chain is None and result.corpus is None
+    assert (
+        "repository configuration changed during verification"
+        in result.passes[0].failure
+    )
+
+
+def test_an_unprintable_close_error_still_invalidates_claims(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnprintableCloseError(BaseException):
+        def __str__(self) -> str:
+            raise SystemExit(0)
+
+    _install_verification_pipeline(
+        monkeypatch,
+        close_revision="candidate-ref",
+        close_error=UnprintableCloseError(),
+    )
+    loaded = load_spec(_spec_file(tmp_path))
+
+    def fail_declaration(*_args: object, **_kwargs: object) -> None:
+        raise verify_module.CorpusError("declaration failed")
+
+    monkeypatch.setattr(verify_module, "verify_declarations", fail_declaration)
+    result = run_verification(tmp_path, loaded, commit="candidate-ref")
+    payload = result_to_dict(result)
+
+    assert payload["passesCompleted"] == []
+    assert payload["scope"]["established"] == []
+    assert result.passes[0].failure == (
+        "UnprintableCloseError (its message could not be rendered)"
+    )
+
+
+@pytest.mark.parametrize("phase", ["custody", "binding", "declaration"])
+def test_a_pass_failure_with_clean_closure_keeps_earlier_claims(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    _install_verification_pipeline(monkeypatch)
+    loaded = load_spec(_spec_file(tmp_path))
+
+    def fail_pass(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError(f"{phase} failed")
+
+    operation = {
+        "custody": "verify_release_chain",
+        "binding": "verify_corpus_binding",
+        "declaration": "verify_declarations",
+    }[phase]
+    monkeypatch.setattr(verify_module, operation, fail_pass)
+    result = run_verification(
+        tmp_path, loaded, base_ref="base-ref", expect_commit=CANDIDATE_COMMIT
+    )
+    payload = result_to_dict(result)
+    expected = ["history", "custody", "binding"][:
+        {"custody": 1, "binding": 2, "declaration": 3}[phase]
+    ]
+    assert payload["passesCompleted"] == expected
+    assert len(payload["scope"]["established"]) == len(expected)
+    assert next(item for item in result.passes if not item.ok).name == phase
+
+
+@settings(
+    max_examples=20,
+    deadline=None,
+    derandomize=True,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+@given(
+    phase=st.sampled_from(["custody", "binding", "declaration"]),
+    close_revision=st.sampled_from(["candidate-ref", "base-ref"]),
+    message=st.text(max_size=30),
+)
+def test_a_close_failure_revokes_all_claims_for_any_pass_failure(
+    tmp_path: pathlib.Path,
+    phase: str,
+    close_revision: str,
+    message: str,
+) -> None:
+    """Every tree-derived claim is revoked when either snapshot fails closure."""
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _install_verification_pipeline(
+            monkeypatch, close_revision=close_revision,
+            close_error=SnapshotError(message),
+        )
+        loaded = load_spec(_spec_file(tmp_path))
+
+        def fail_pass(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError(f"{phase} failed")
+
+        operation = {
+            "custody": "verify_release_chain",
+            "binding": "verify_corpus_binding",
+            "declaration": "verify_declarations",
+        }[phase]
+        monkeypatch.setattr(verify_module, operation, fail_pass)
+        result = run_verification(
+            tmp_path, loaded, commit="candidate-ref", base_ref="base-ref",
+            expect_commit=CANDIDATE_COMMIT, verify_objects=True,
+        )
+    payload = result_to_dict(result)
+    assert payload["verdict"] == "FAIL"
+    assert payload["passesCompleted"] == []
+    assert payload["scope"]["established"] == []
+    assert result.chain is None and result.corpus is None
+    assert result.object_store is None
+
+
+@pytest.mark.parametrize("shape", ["function", "lambda", "for-loop"])
+def test_load_spec_accepts_a_set_literal_shared_by_two_scopes(
+    tmp_path: pathlib.Path, shape: str
+) -> None:
+    """A declaration-free UTF-8 spec loads even when its two compilations
+    share constants differently.
+
+    The strings are built at runtime: literals in this test file are interned
+    when it compiles, which would hide the marshal-format dependence on
+    interning and object sharing.
+    """
+
+    a, b = "zq" + uuid.uuid4().hex, "zq" + uuid.uuid4().hex
+    literal = f'{{"{a}", "{b}"}}'
+    second = {
+        "function": f"def f():\n    return 'q' in {literal}\n",
+        "lambda": f"g = lambda: 'q' in {literal}\n",
+        "for-loop": f"def h():\n    for _v in {literal}:\n        pass\n",
+    }[shape]
+    path = tmp_path / "spec.py"
+    path.write_bytes(f"A = 'q' in {literal}\n{second}".encode("ascii") + SPEC_SOURCE)
+    assert load_spec(path).verification.name == "loaded-spec-test"
