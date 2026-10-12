@@ -2447,6 +2447,179 @@ def test_emission_still_spells_an_integer_the_interpreter_can(
     assert _names(directory) == before
 
 
+#: How a refusal spells what the interpreter will not: an integer by its width,
+#: anything else that holds one by its type.
+WIDE_SPELLED = f"an integer of {WIDE_INT.bit_length()} bits"
+TUPLE_SPELLED = "a value of type tuple the interpreter will not spell"
+WIDE_KEYS = [
+    pytest.param(WIDE_INT, WIDE_SPELLED, id="10^5000"),
+    pytest.param((WIDE_INT,), TUPLE_SPELLED, id="tuple-of-10^5000"),
+]
+
+
+@pytest.mark.parametrize("key, spelled", WIDE_KEYS)
+@pytest.mark.parametrize(
+    "layer, where",
+    [
+        pytest.param("body", "evidence body: the top-level value", id="body"),
+        pytest.param("producer", "evidence record: producer", id="producer"),
+        pytest.param("refs", "refs[0]", id="ref"),
+    ],
+)
+def test_emission_refuses_an_object_key_too_wide_to_spell(
+    tmp_path: pathlib.Path,
+    spec: EvidenceSpec,
+    keys: tuple[bytes, bytes],
+    emitted: pathlib.Path,
+    layer: str,
+    where: str,
+    key: object,
+    spelled: str,
+) -> None:
+    """The value form was routed through the spelling helper, and both key
+    refusals still spelled the key with ``repr``: ``body={10**5000: 0}``,
+    ``producer={**PRODUCER, 10**5000: 0}`` and a ref carrying the key
+    ``10**5000`` each left emission as ``ValueError: Exceeds the limit (4300
+    digits) for integer string conversion`` in place of the refusal — the body
+    and the producer from `_canonical_strict`, the ref from `_exact_keys`,
+    which emission asks first. A tuple key holding the same integer left the
+    same way, from the tuple's ``repr``. The refusal is the module's: the
+    integer described by its width, the tuple by its type."""
+
+    private_pem, _ = keys
+    directory = tmp_path / RECORDS
+    before = _names(directory)
+    body, producer, refs = BODY, PRODUCER, []
+    if layer == "body":
+        body = {**BODY, key: 0}
+    elif layer == "producer":
+        producer = {**PRODUCER, key: 0}
+    else:
+        refs = [{"kind": "record", "sha256": "a" * 64, key: 0}]
+    with pytest.raises(EvidenceRecordError) as exc:
+        emit_evidence_record(
+            tmp_path,
+            spec=spec,
+            private_key_pem=private_pem,
+            body=body,
+            body_schema=BODY_SCHEMA,
+            refs=refs,
+            producer=producer,
+            emitted_at_utc=EMITTED,
+        )
+    assert str(exc.value) == (
+        f"{where} has an object key that is not a string: {spelled}"
+    )
+    assert _names(directory) == before
+
+
+@pytest.mark.parametrize("key, spelled", WIDE_KEYS)
+@pytest.mark.parametrize(
+    "layer, label",
+    [
+        pytest.param(None, "evidence record", id="record"),
+        pytest.param("producer", "producer", id="producer"),
+        pytest.param("body", "body", id="body-block"),
+        pytest.param("refs", "refs[0]", id="ref"),
+    ],
+)
+def test_the_schema_check_refuses_an_object_key_too_wide_to_spell_at_every_layer(
+    spec: EvidenceSpec, layer: str | None, label: str, key: object, spelled: str
+) -> None:
+    """The same keys at each of the four objects `_exact_keys` closes, asked of
+    `validate_evidence_record_schema` directly, as the non-string-key test
+    above asks it. Every layer left as the interpreter's ``ValueError``."""
+
+    payload = _valid_payload()
+    if layer is None:
+        payload[key] = 0
+    elif layer == "refs":
+        payload["refs"].append({"kind": "record", "sha256": "a" * 64, key: 0})
+    else:
+        payload[layer][key] = 0
+    with pytest.raises(EvidenceRecordError) as exc:
+        validate_evidence_record_schema(payload, spec)
+    assert str(exc.value) == (
+        f"{label} has an object key that is not a string: {spelled}"
+    )
+
+
+def _schema_with(field: str, value: object):
+    """A direct schema check of a valid payload with one field replaced."""
+
+    return lambda spec: validate_evidence_record_schema(
+        {**_valid_payload(), field: value}, spec
+    )
+
+
+def _spec_with_schema_version(value: object):
+    return lambda spec: EvidenceSpec(
+        records_relative=RECORDS, producer_spki_sha256=PIN, schema_version=value
+    )
+
+
+@pytest.mark.parametrize(
+    "call, message",
+    [
+        pytest.param(
+            _spec_with_schema_version(WIDE_INT),
+            f"EvidenceSpec schema_version must be a non-empty string: {WIDE_SPELLED}",
+            id="EvidenceSpec.schema_version",
+        ),
+        pytest.param(
+            _spec_with_schema_version((WIDE_INT,)),
+            f"EvidenceSpec schema_version must be a non-empty string: {TUPLE_SPELLED}",
+            id="EvidenceSpec.schema_version-tuple",
+        ),
+        pytest.param(
+            _schema_with("schemaVersion", WIDE_INT),
+            f"unsupported evidence-record schema {WIDE_SPELLED}",
+            id="schemaVersion",
+        ),
+        pytest.param(
+            _schema_with("schemaVersion", (WIDE_INT,)),
+            f"unsupported evidence-record schema {TUPLE_SPELLED}",
+            id="schemaVersion-tuple",
+        ),
+        pytest.param(
+            _schema_with("standing", WIDE_INT),
+            f"standing must be exactly {STANDING!r}, not {WIDE_SPELLED}",
+            id="standing",
+        ),
+        pytest.param(
+            _schema_with("standing", (WIDE_INT,)),
+            f"standing must be exactly {STANDING!r}, not {TUPLE_SPELLED}",
+            id="standing-tuple",
+        ),
+        pytest.param(
+            _schema_with("recordIndex", WIDE_INT),
+            f"recordIndex {WIDE_SPELLED} exceeds the four-digit filename limit",
+            id="recordIndex",
+        ),
+        pytest.param(
+            lambda spec: record_filename(WIDE_INT, b""),
+            f"recordIndex {WIDE_SPELLED} exceeds the four-digit filename limit",
+            id="record_filename",
+        ),
+    ],
+)
+def test_a_value_too_wide_to_spell_is_refused_in_the_modules_words(
+    spec: EvidenceSpec, call, message: str
+) -> None:
+    """Five refusals of the key refusals' class, each spelling the value it
+    refused with ``repr`` or an f-string, so each left as the interpreter's
+    ``ValueError`` on ``10**5000``: the spec's ``schema_version``; the schema
+    check's ``schemaVersion``, ``standing`` and ``recordIndex``; and
+    `record_filename`. None is reachable through emission, which builds these
+    fields itself, or through verification, whose parser refuses so wide a
+    literal first; each is reachable by a direct call to a public function this
+    suite already calls. They spell through the same helpers as a key now."""
+
+    with pytest.raises(EvidenceRecordError) as exc:
+        call(spec)
+    assert str(exc.value) == message
+
+
 # --------------------------------------------------------------------------
 # Spec construction.
 # --------------------------------------------------------------------------

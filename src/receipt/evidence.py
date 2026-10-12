@@ -268,7 +268,7 @@ class EvidenceSpec:
         if type(self.schema_version) is not str or not self.schema_version:
             raise EvidenceRecordError(
                 "EvidenceSpec schema_version must be a non-empty string: "
-                f"{self.schema_version!r}"
+                f"{_spell_value(self.schema_version)}"
             )
         root = self.release_root_relative
         if root is not None and (records == root or root in records.parents):
@@ -310,6 +310,42 @@ def sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _spell(item: int) -> str:
+    """An integer for a refusal, spelled when the interpreter will spell it.
+
+    Past ``sys.get_int_max_str_digits()`` (4300 digits by default) CPython
+    raises a ``ValueError`` of its own from ``str()`` and from an f-string
+    alike; that limit is the bound, and past it the width is stated instead of
+    the value.
+    """
+
+    try:
+        return str(item)
+    except ValueError:
+        return f"an integer of {item.bit_length()} bits"
+
+
+def _spell_value(value: Any) -> str:
+    """Any caller's value for a refusal — an object key that is not a string,
+    or a field that is not the one it must be — spelled when the interpreter
+    will spell it.
+
+    An ``int`` goes through `_spell`, as an integer value does, so a key and a
+    value are spelled alike. Anything else is spelled by its ``repr``; where
+    that raises the interpreter's ``ValueError`` — a tuple holding an integer
+    past the limit — the value is stated by its type instead. Only that
+    ``ValueError`` is caught: a ``RecursionError`` from a value nested past the
+    recursion limit is left as raised, as `_canonical_strict` leaves depth.
+    """
+
+    if isinstance(value, int):
+        return _spell(value)
+    try:
+        return repr(value)
+    except ValueError:
+        return f"a value of type {type(value).__name__} the interpreter will not spell"
+
+
 # The closed-world helpers below are deliberate near-copies of release_chain's
 # private ones rather than imports of them. An evidence record is defined by its
 # shape and its schema id and by nothing else, so this module stays liftable
@@ -343,7 +379,10 @@ def _exact_keys(value: Any, expected: set[str], label: str) -> dict[str, Any]:
     empty, because emission checks every ref here ahead of the payload's
     strict guard. The same refusal now stands at each of the four objects this
     closes — the record, ``producer``, ``body`` and every ref — so every
-    caller gets it, whichever layer is asked first.
+    caller gets it, whichever layer is asked first. The key is spelled through
+    `_spell_value`, so one the interpreter will not spell — ``10**5000``, or a
+    tuple holding it — is described in the refusal rather than letting the
+    interpreter's own ``ValueError`` out in its place.
     """
 
     if type(value) is not dict:
@@ -351,7 +390,8 @@ def _exact_keys(value: Any, expected: set[str], label: str) -> dict[str, Any]:
     for key in value:
         if not isinstance(key, str):
             raise EvidenceRecordError(
-                f"{label} has an object key that is not a string: {key!r}"
+                f"{label} has an object key that is not a string: "
+                f"{_spell_value(key)}"
             )
     actual = set(value)
     if actual != expected:
@@ -446,16 +486,18 @@ def validate_evidence_record_schema(
     )
     if payload["schemaVersion"] != spec.schema_version:
         raise EvidenceRecordError(
-            f"unsupported evidence-record schema {payload['schemaVersion']!r}"
+            "unsupported evidence-record schema "
+            f"{_spell_value(payload['schemaVersion'])}"
         )
     if payload["standing"] != STANDING:
         raise EvidenceRecordError(
-            f"standing must be exactly {STANDING!r}, not {payload['standing']!r}"
+            f"standing must be exactly {STANDING!r}, "
+            f"not {_spell_value(payload['standing'])}"
         )
     index = _strict_int(payload["recordIndex"], "recordIndex")
     if index > MAX_RECORD_INDEX:
         raise EvidenceRecordError(
-            f"recordIndex {index} exceeds the four-digit filename limit"
+            f"recordIndex {_spell(index)} exceeds the four-digit filename limit"
         )
 
     previous = payload["previousRecordSha256"]
@@ -497,7 +539,7 @@ def record_filename(index: int, raw: bytes) -> str:
     _strict_int(index, "recordIndex")
     if index > MAX_RECORD_INDEX:
         raise EvidenceRecordError(
-            f"recordIndex {index} exceeds the four-digit filename limit"
+            f"recordIndex {_spell(index)} exceeds the four-digit filename limit"
         )
     return f"{index:04d}-{sha256_bytes(raw)[:16]}.json"
 
@@ -567,9 +609,14 @@ def _canonical_strict(value: Any, label: str) -> None:
     ``RecursionError`` — fail-closed, stated here, and not translated. And no
     refusal here asks the interpreter to spell an integer it will not: past
     ``sys.get_int_max_str_digits()`` (4300 digits by default) CPython raises
-    a ``ValueError`` of its own from ``str()`` and from an f-string alike,
-    which is how ``10**5000`` left emission in place of its refusal; such an
-    integer is described by its width instead.
+    a ``ValueError`` of its own from ``str()``, from ``repr()`` and from an
+    f-string alike, which is how ``10**5000`` left emission in place of its
+    refusal: first as a value, whose refusal spelled it with an f-string, and
+    then as an object key, whose refusal still spelled it with ``repr`` after
+    the value's had moved to a helper. Values and keys are now spelled through
+    the same helpers (`_spell`, `_spell_value`): such an integer is described
+    by its width instead, and a key of another type the interpreter will not
+    spell — a tuple holding one — by its type.
 
     Module-local until the package's ``canonical_strict`` exists; then imported.
     """
@@ -577,17 +624,6 @@ def _canonical_strict(value: Any, label: str) -> None:
     def refuse(path: str, reason: str) -> NoReturn:
         where = path if path else "the top-level value"
         raise EvidenceRecordError(f"{label}: {where} {reason}")
-
-    def spell(item: int) -> str:
-        """An integer for a refusal, spelled when the interpreter will spell
-        it. Past ``sys.get_int_max_str_digits()`` (4300 digits by default)
-        CPython raises a ``ValueError`` of its own from ``str()`` and from an
-        f-string alike; that limit is the bound, and past it the width is
-        stated instead of the value."""
-        try:
-            return str(item)
-        except ValueError:
-            return f"an integer of {item.bit_length()} bits"
 
     def out_of_range_token(item: int | float) -> str | None:
         """The fact about a number whose canonical token is an integer token
@@ -622,7 +658,7 @@ def _canonical_strict(value: Any, label: str) -> None:
                 refuse(
                     path,
                     "is an integer outside ±(2**53 - 1), which canonical JSON "
-                    f"cannot carry exactly: {spell(item)}",
+                    f"cannot carry exactly: {_spell(item)}",
                 )
             # Reached only within ±(2**53 - 1): the rule above has refused
             # every wider int, so canonical_stringify is never handed one it
@@ -653,7 +689,11 @@ def _canonical_strict(value: Any, label: str) -> None:
         if isinstance(item, dict):
             for key, entry in item.items():
                 if not isinstance(key, str):
-                    refuse(path, f"has an object key that is not a string: {key!r}")
+                    refuse(
+                        path,
+                        "has an object key that is not a string: "
+                        f"{_spell_value(key)}",
+                    )
                 # The key first, through the same check as a value: the path
                 # the refusal names is the container's, and the key is named
                 # in it, since a surrogate cannot be spelled into a path.
