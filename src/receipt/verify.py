@@ -301,6 +301,12 @@ class VerifyResult:
     #: pin. Private because it qualifies a claim rather than adding another
     #: public datum to the result contract.
     _anchor_set_pinned: bool = field(default=False, repr=False)
+    #: Whether the history pass failed because ``base_ref`` names no commit
+    #: in the repository, so nothing was compared. ``receipt verify`` exits 2
+    #: for that and 1 for a history the comparison refused, which is what
+    #: lets a CI job tell an unfetched base from a rewrite (#36). Private for
+    #: the reason ``_anchor_set_pinned`` is.
+    _base_unresolved: bool = field(default=False, repr=False)
 
     @property
     def ok(self) -> bool:
@@ -684,6 +690,7 @@ def run_verification(
     base_commit: str | None = None
     base_tree: str | None = None
     object_store: ObjectStoreReport | None = None
+    base_unresolved = False
 
     def result(*, incomplete: str | None = None) -> VerifyResult:
         items = list(passes)
@@ -709,6 +716,7 @@ def run_verification(
             _spec_pinned=spec.pinned,
             _object_store_requested=verify_objects,
             _anchor_set_pinned=anchor_pin is not None,
+            _base_unresolved=base_unresolved,
         )
 
     # Every pass — the verification call AND the detail builder that reports
@@ -789,7 +797,16 @@ def run_verification(
             base: TreeSnapshot | None = None
             if base_ref is not None:
                 phase = "history"
-                selected_base = TreeSnapshot.select(root, base_ref)
+                try:
+                    selected_base = TreeSnapshot.select(root, base_ref)
+                except SnapshotError as exc:
+                    # Only the reader's own refusal for a revision that
+                    # resolves to no commit, in its exact words. Anything
+                    # else selection refuses keeps its history failure.
+                    base_unresolved = (
+                        str(exc) == f"cannot resolve commit '{base_ref}'"
+                    )
+                    raise
                 snapshots.append(selected_base)
                 base = stack.enter_context(selected_base)
                 base_commit = base.commit

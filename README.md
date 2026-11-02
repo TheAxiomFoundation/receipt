@@ -51,12 +51,41 @@ anchor-set pin instead. The anchor bytes are compared before custody
 verification invokes OpenSSL. Without an effective anchor pin, the claim is
 "custody under the anchor set {digest} the verified tree carries"; without a
 spec pin, the verdict also does not establish that the spec's code was trusted.
-The command performs verification offline; its trust configuration is
-executable Python, and the command runs it in its own process. Without
-`--expect-spec-sha256`, that code is whatever the producer committed. It can
-change what the command prints and the exit status it returns, so the verdict
-is only as good as the spec the producer committed. Read the spec once, out of
-band, and pin its digest.
+
+### What `--spec` is
+
+`--spec` names a Python module that defines
+`SPEC = receipt.verify.VerificationSpec(...)`. The command executes that module
+in its own process to build the configuration every pass uses; it is not read
+as data. Verification itself is offline. Without `--expect-spec-sha256`, the
+code that runs is whatever the producer committed. It can change what the
+command prints and the exit status it returns, so the verdict is only as good
+as the spec the producer committed. Read the spec once, out of band, and pin
+its digest. A mismatch refuses with status 2 before the spec's code runs.
+
+## Exit status
+
+`receipt verify --help` prints the same list.
+
+| Status | Meaning |
+| --- | --- |
+| `0` | PASS: every pass the spec configures ran and succeeded. |
+| `1` | FAIL: verification ran and refused, or could not finish. That covers a failed custody, binding, declaration or history pass (a release object changed or deleted since `--base-ref`, or a base that is not an ancestor of the commit), an `--expect-commit` or `--expect-tree` that is malformed or does not match, an aborted run, and a verdict the command could not print. |
+| `2` | USAGE: the command refused before any pass ran, so nothing was verified. That covers an argument argparse rejects, `--base-ref` without `--expect-commit`, `--expect-anchor-set` without `--expect-spec-sha256`, an `--expect-spec-sha256` or `--expect-anchor-set` that is not a SHA-256 digest, a spec that cannot be loaded or does not match `--expect-spec-sha256`, an unusable `--root`, and a `--base-ref` that names no commit in this repository. |
+
+With `--json`, every exit after argument parsing prints at most one JSON object
+with a `verdict` key. A status-2 refusal names the `stage` that refused:
+`arguments`, `spec`, `root` or `base-ref`. A status-1 run that aborted or could
+not be rendered names `verification` or `render`; every other status-1 run
+prints the full verdict. Errors argparse raises itself print its usage message
+to stderr and no JSON.
+
+A CI job should fail on any status other than 0. Status 1 means the evidence
+did not verify; status 2 means nothing was verified. For `--base-ref`, status 2
+usually means the job did not fetch the base (use `fetch-depth: 0`) or the
+recorded ref is wrong. It can also mean the history that held the base is gone,
+so fetch the base and run again before drawing a conclusion. A base that is in
+the clone but not an ancestor of the commit is a failed history pass, status 1.
 
 ## What this verdict speaks for
 

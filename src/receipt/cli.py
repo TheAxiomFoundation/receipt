@@ -8,6 +8,13 @@ Those bytes become auditor-owned trust only when the auditor supplies
 in this process: the verdict treats the anchor set it proposes as untrusted
 and says the verdict is only as good as the spec the producer committed.
 
+The command exits with one of three statuses, :data:`EXIT_OK`,
+:data:`EXIT_FAIL` and :data:`EXIT_USAGE`, and :data:`EXIT_STATUS_HELP` lists
+which paths take which; ``--help`` prints it and the README repeats it. Status
+2 means nothing was verified. That includes a ``--base-ref`` naming no commit
+in the repository, which used to exit 1 like a rewritten history, so a CI job
+could not tell an unfetched base from a rewrite (#36).
+
 The output is deliberately two-part. What the command *established* is stated
 without hedging. What it *did not* establish — that any declared gate actually
 passed, that the encoded rules read the law correctly — is stated just as
@@ -284,6 +291,32 @@ EXIT_OK = 0
 EXIT_FAIL = 1
 EXIT_USAGE = 2
 
+#: What each exit status means, printed verbatim at the end of
+#: ``receipt verify --help``. The README's "Exit status" section says the
+#: same, and tests read both back and compare them with the constants above.
+EXIT_STATUS_HELP = f"""\
+exit status:
+  {EXIT_OK}  PASS: every pass the spec configures ran and succeeded.
+  {EXIT_FAIL}  FAIL: verification ran and refused, or could not finish: a failed
+     custody, binding, declaration or history pass (a release object changed
+     or deleted since --base-ref, or a base that is not an ancestor), an
+     --expect-commit or --expect-tree that is malformed or does not match, an
+     aborted run, or a verdict the command could not print.
+  {EXIT_USAGE}  USAGE: refused before any pass ran, so nothing was verified: an
+     argument argparse rejects, --base-ref without --expect-commit,
+     --expect-anchor-set without --expect-spec-sha256, an --expect-spec-sha256
+     or --expect-anchor-set that is not a SHA-256 digest, a spec that cannot
+     be loaded or does not match --expect-spec-sha256, an unusable --root, or
+     a --base-ref that names no commit in this repository.
+
+--spec is executed. It is a Python module, and this command runs it in its
+own process to build the configuration every pass uses. Without
+--expect-spec-sha256 that code is whatever the producer committed, and it can
+change what this command prints and the status it exits with. Read the spec
+once, out of band, and pin its digest: a mismatch refuses with status {EXIT_USAGE}
+before the spec runs.
+"""
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -298,18 +331,23 @@ def _build_parser() -> argparse.ArgumentParser:
     verify = subparsers.add_parser(
         "verify",
         help="verify a published corpus against its configured anchors",
+        # Line-broken by hand: the raw formatter that keeps the epilog's
+        # layout keeps this text's as well.
         description=(
-            "Run every offline pass the loaded spec configures and print one "
+            "Run every offline pass the loaded spec configures and print one\n"
             "fail-closed verdict; auditor pins are supplied explicitly."
         ),
+        epilog=EXIT_STATUS_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     verify.add_argument(
         "--spec",
         required=True,
         type=pathlib.Path,
         help=(
-            "path to the verification spec (a short "
-            "Python module defining SPEC = receipt.verify.VerificationSpec(...))"
+            "path to the verification spec, a Python module defining "
+            "SPEC = receipt.verify.VerificationSpec(...); this command executes "
+            "it in its own process, so pin it with --expect-spec-sha256"
         ),
     )
     verify.add_argument(
@@ -1862,6 +1900,31 @@ def main(argv: Sequence[str] | None = None) -> int:
             "verification aborted, refusing to return a verdict: "
             f"{_described_exception(exc)}",
             EXIT_FAIL,
+        )
+
+    # A base this repository does not hold was never compared, so the run
+    # verified nothing and is a usage refusal rather than the history failure
+    # the library records. Exit 1 used to cover both, and a CI job that did
+    # not fetch its base read exactly like a rewritten history (#36). Only the
+    # library's own flag decides it, read defensively because a substituted
+    # result need not carry it, and inside a boundary because this is the
+    # first read of the result: if it raises, the render boundary below meets
+    # the same result and refuses it.
+    try:
+        base_unresolved = (
+            not result.ok and getattr(result, "_base_unresolved", False) is True
+        )
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException:  # noqa: BLE001 - the render boundary reports it
+        base_unresolved = False
+    if base_unresolved:
+        return _refuse(
+            as_json,
+            "base-ref",
+            f"--base-ref names no commit in this repository: {args.base_ref!r}; "
+            "no history was compared, so this is not a history verdict",
+            EXIT_USAGE,
         )
 
     # A verdict that cannot be rendered is not a deliverable PASS: refuse,
