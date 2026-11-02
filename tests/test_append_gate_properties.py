@@ -14,13 +14,14 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
+from pathlib import PurePosixPath
 from types import SimpleNamespace
 
 import pytest
 from hypothesis import HealthCheck, example, given, settings, strategies as st
 
 import test_append_gate as fixture
-from receipt import _bounded_json as bounded_json
+from receipt import _bounded_json as bounded_json, append_gate
 from receipt.append_gate import (
     AppendError,
     check_gate_only_confinement,
@@ -333,3 +334,134 @@ def test_gate_only_refuses_every_state_change_under_every_classification(
     with pytest.raises(AppendError) as caught:
         check_gate_only_confinement(changed, SimpleNamespace(spec=spec))
     assert "ledger state path(s)" in str(caught.value)
+
+
+# The protection rule before #87, kept as the oracle the current rule is
+# measured against: the two configured surfaces, and the release root with
+# everything under it and every proper ancestor of it.
+def release_root_rule(path: str, spec) -> bool:
+    root = spec.chain.release_root_relative
+    return (
+        append_gate._matches_surface(path, spec.data_surface)
+        or append_gate._matches_surface(path, spec.gate_surface)
+        or on_or_above(path, root)
+    )
+
+
+def on_or_above(path: str, directory: PurePosixPath) -> bool:
+    """``directory`` itself, anything under it, or one of its proper ancestors."""
+
+    name = directory.as_posix()
+    parts = directory.parts
+    return (
+        path == name
+        or path.startswith(f"{name}/")
+        or path in {"/".join(parts[:depth]) for depth in range(1, len(parts))}
+    )
+
+
+def inside(directory: PurePosixPath, root: PurePosixPath) -> bool:
+    """The history pass's own test for a manifest directory it need not add."""
+
+    return directory.parts[: len(root.parts)] == root.parts
+
+
+def layout(release_root: str, manifest: str, placement: str = "unclassified"):
+    pattern = f"{manifest}/**"
+    return replace(
+        SPEC,
+        chain=replace(
+            SPEC.chain,
+            release_root_relative=PurePosixPath(release_root),
+            manifest_relative=PurePosixPath(manifest),
+        ),
+        release_manifest_prefix=f"{manifest}/",
+        data_surface=frozenset({"ledger/**", *([pattern] if placement == "data" else [])}),
+        gate_surface=frozenset(
+            {fixture.GATE_FILE, "releases/anchors/**", *([pattern] if placement == "gate" else [])}
+        ),
+    )
+
+
+directories = st.lists(
+    st.sampled_from(["releases", "manifests", "journal", "a", "b"]), min_size=1, max_size=3
+).map("/".join)
+tree_paths = st.lists(
+    st.sampled_from(["releases", "manifests", "journal", "a", "b", "0000.json"]),
+    min_size=1,
+    max_size=4,
+).map("/".join)
+
+
+@PROPERTY
+@given(release_root=directories, manifest=directories, path=tree_paths)
+@example(release_root="releases", manifest="manifests", path="manifests/0000.json")
+@example(release_root="releases", manifest="journal/manifests", path="journal")
+@example(release_root="releases", manifest="journal/manifests", path="journal/a")
+@example(release_root="releases", manifest="releases/manifests", path="manifests")
+@example(release_root="a/releases", manifest="a", path="a/b")
+def test_the_protection_rule_adds_only_an_outside_manifest_directory(
+    release_root: str, manifest: str, path: str
+) -> None:
+    """A differential against the release-root rule (#87).
+
+    Where the manifest directory is at or under the release root, the rule is
+    unchanged, path for path. Where it is outside, the rule adds exactly that
+    directory, everything under it and its proper ancestors, and nothing else.
+    """
+
+    spec = layout(release_root, manifest)
+    protected = append_gate._is_protected(path, SimpleNamespace(spec=spec))
+    before = release_root_rule(path, spec)
+    directory = spec.chain.manifest_relative
+    if inside(directory, spec.chain.release_root_relative):
+        assert protected == before
+    else:
+        assert protected == (before or on_or_above(path, directory))
+
+
+OUTSIDE_LEAVES = [
+    "0000-0000000000000000.json",
+    "0000-0000000000000000.producer.sig",
+    "0000-0000000000000000.alpha.tsr",
+    "notes.txt",
+]
+
+
+@PROPERTY
+@given(
+    outside=st.sampled_from(["manifests", "journal/manifests", "a/b/manifests"]),
+    placement=st.sampled_from(["data", "gate", "unclassified"]),
+    leaves=st.sets(st.sampled_from(OUTSIDE_LEAVES), min_size=1),
+    unrelated=st.sets(st.sampled_from(["NOTES.md", "docs/a.md", "journal/README.md"])),
+)
+def test_gate_only_confinement_treats_both_manifest_layouts_alike(
+    outside: str, placement: str, leaves: set[str], unrelated: set[str]
+) -> None:
+    """A parity property: an outside manifest directory gets the in-root answer.
+
+    For every placement of the directory on the configured surfaces and every
+    set of changed release objects beside unrelated changes, confinement
+    refuses or reports exactly what it does for ``releases/manifests``, with
+    the directory renamed.
+    """
+
+    def verdict(directory: str) -> tuple[str, str]:
+        changed = {fixture.GATE_FILE, *unrelated, *(f"{directory}/{leaf}" for leaf in leaves)}
+        try:
+            reported = check_gate_only_confinement(
+                changed, SimpleNamespace(spec=layout("releases", directory, placement))
+            )
+        except AppendError as exc:
+            return "refused", str(exc)
+        return "reported", repr(sorted(reported))
+
+    in_root = verdict("releases/manifests")
+    renamed = tuple(text.replace("releases/manifests/", f"{outside}/") for text in in_root)
+    assert verdict(outside) == renamed
+    if placement == "unclassified":
+        assert verdict(outside) == (
+            "refused",
+            "gate-only proposal changes unclassified release path(s): "
+            f"{sorted(f'{outside}/{leaf}' for leaf in leaves)}",
+        )
