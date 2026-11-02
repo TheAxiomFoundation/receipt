@@ -3287,6 +3287,48 @@ def test_an_outside_manifest_directory_gets_the_in_root_verdict_for_each_placeme
     )
 
 
+@pytest.mark.parametrize("ledger", ["data", "gate", "unclassified"])
+@pytest.mark.parametrize("manifest_relative", ["manifests", "releases/manifests"])
+def test_a_release_proposal_cannot_pass_with_its_manifests_on_the_gate_surface(
+    tmp_path: pathlib.Path, manifest_relative: str, ledger: str
+) -> None:
+    """Why ``AppendGateSpec`` says to keep the manifests off the gate surface.
+
+    A release proposal changes the manifest directory beside the ledger. With
+    the manifests on the gate surface it is either mixed or gate-only, and a
+    gate-only proposal may not change ledger state under any classification,
+    so no release can land, in either layout.
+    """
+
+    spec = spec_with_outside_manifests(manifest_relative, placement="gate")
+    spec = replace(
+        spec,
+        data_surface=frozenset({"ledger/**"} if ledger == "data" else set()),
+        gate_surface=spec.gate_surface | ({"ledger/**"} if ledger == "gate" else set()),
+    )
+    candidate = base_repository(tmp_path)
+    append_one_row(candidate)
+    manifests = candidate.root / manifest_relative
+    manifests.mkdir(parents=True, exist_ok=True)
+    for name in OUTSIDE_RELEASE_OBJECTS:
+        (manifests / name).write_text("{}\n", encoding="utf-8")
+    state = CHAIN_SPEC.state_relative.as_posix()
+    added = sorted(f"{manifest_relative}/{name}" for name in OUTSIDE_RELEASE_OBJECTS)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate, spec=spec)
+    assert str(refusal.value) == {
+        "data": (
+            f"mixed data/gate proposal is forbidden: DATA_SURFACE changes=['{state}']; "
+            f"GATE_SURFACE changes={added}; split them into separate pull requests"
+        ),
+        "gate": f"gate-only proposal changes ledger state path(s): ['{state}']",
+        "unclassified": (
+            f"gate-only proposal changes unclassified ledger state path(s): ['{state}']"
+        ),
+    }[ledger]
+
+
 def test_an_unrelated_sibling_of_an_outside_manifest_directory_is_still_named(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -3319,6 +3361,28 @@ def test_a_clean_gate_only_proposal_with_outside_manifests_keeps_its_verdict(
     assert run_gate(candidate, spec=spec_with_outside_manifests()) == (
         "thesis-facts append check OK: gate-only proposal; DATA_SURFACE "
         f"unchanged; GATE_SURFACE changes=['{GATE_FILE}']"
+    )
+
+
+def test_the_attribute_screen_precedes_an_outside_manifest_refusal(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The outside directory was already an attribute target; it still is."""
+
+    candidate = base_with_outside_release_objects(tmp_path)
+    add_gate_file(candidate)
+    change_outside_release_object(
+        candidate, "manifests", OUTSIDE_RELEASE_OBJECTS[0], "rewrite"
+    )
+    (candidate.root / ".gitattributes").write_text(
+        "manifests/** filter=evil\n", encoding="utf-8"
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate, spec=spec_with_outside_manifests())
+    assert str(refusal.value) == (
+        "transforming attribute filter applies to protected path "
+        f"manifests/{OUTSIDE_STEM}.alpha.tsr"
     )
 
 

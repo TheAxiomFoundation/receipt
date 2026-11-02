@@ -45,7 +45,20 @@ CODE_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 @dataclass(frozen=True)
 class AppendGateSpec:
-    """Repo-specific gate constants pinned by the consuming repository."""
+    """Repo-specific gate constants pinned by the consuming repository.
+
+    ``chain.manifest_relative`` may name a directory outside
+    ``chain.release_root_relative``. The gate then treats that directory, its
+    subtree and its proper ancestors as release surface, as it treats the
+    release root: a gate-only proposal may not change them unless the spec
+    puts them on a surface, and a data proposal finds the base chain, and
+    the release objects it adds, in that directory. Whichever directory holds
+    the manifests, keep it off ``gate_surface``. A gate-only proposal returns
+    before any history or chain check, so a gate surface over the manifests
+    lets one change release objects unchecked, and a release proposal, which
+    changes them beside the ledger, is then refused whatever surface the
+    ledger is on.
+    """
 
     chain: ChainSpec
     prefix_schema_version: str
@@ -195,6 +208,36 @@ def _release_root_ancestors(candidate: _CandidateTree) -> tuple[str, ...]:
     return tuple("/".join(parts[:depth]) for depth in range(1, len(parts)))
 
 
+def _outside_manifest_directory(spec: AppendGateSpec) -> pathlib.PurePosixPath | None:
+    """The manifest directory, when the spec keeps it outside the release root.
+
+    ``None`` for a manifest directory at or under the release root, which the
+    release-root rules already cover. "Outside" is measured the way
+    ``verify_release_history_immutable`` decides which directories it
+    compares, so the gate and the history pass agree on which layout this is.
+    """
+
+    manifest = spec.chain.manifest_relative
+    root = spec.chain.release_root_relative
+    if manifest.parts[: len(root.parts)] == root.parts:
+        return None
+    return manifest
+
+
+def _manifest_directory_ancestors(candidate: _CandidateTree) -> tuple[str, ...]:
+    """Every proper ancestor of an outside manifest directory, shallowest first.
+
+    Empty when the manifest directory is under the release root, and for an
+    outside directory of one component.
+    """
+
+    directory = _outside_manifest_directory(candidate.spec)
+    if directory is None:
+        return ()
+    parts = directory.parts
+    return tuple("/".join(parts[:depth]) for depth in range(1, len(parts)))
+
+
 # M1 record, _is_protected row 149-170: one selector feeds confinement and attributes.
 def _is_protected(path: str, candidate: _CandidateTree) -> bool:
     """Whether one path lies on a surface this verdict speaks for.
@@ -208,15 +251,32 @@ def _is_protected(path: str, candidate: _CandidateTree) -> bool:
     determine whether the configured subtree exists. For a root of
     ``data/releases``, changing ``data`` changes the release surface even
     though that shorter path matches neither configured surface pattern.
+
+    A manifest directory the spec keeps outside the release root is release
+    surface on the same terms: the directory, everything under it, and its
+    proper ancestors. It holds the manifests, producer signatures and
+    receipts the release verification reads, so a change there is a release
+    change whichever directory holds them (#87). Under the release root the
+    rule is unchanged, since that directory is already part of the root's
+    subtree.
     """
 
     release_root = candidate.spec.chain.release_root_relative.as_posix()
+    manifest_directory = _outside_manifest_directory(candidate.spec)
     return (
         _matches_surface(path, candidate.spec.data_surface)
         or _matches_surface(path, candidate.spec.gate_surface)
         or path == release_root
         or path.startswith(f"{release_root}/")
         or path in _release_root_ancestors(candidate)
+        or (
+            manifest_directory is not None
+            and (
+                path == manifest_directory.as_posix()
+                or path.startswith(f"{manifest_directory.as_posix()}/")
+                or path in _manifest_directory_ancestors(candidate)
+            )
+        )
     )
 
 
@@ -256,7 +316,10 @@ def check_gate_only_confinement(
     For the release check, the surface is ``_is_protected``'s: the root, everything
     under it, and every proper ancestor of it. The last is what a nested root
     needs: with ``data/releases`` configured, a proposal replacing ``data``
-    changes whether the release root exists as a tree. An unclassified change
+    changes whether the release root exists as a tree. A manifest directory
+    kept outside the release root is on that surface too, with its subtree
+    and its ancestors, because the gate-only route skips the history check
+    that would otherwise compare it (#87). An unclassified change
     everywhere else is still reported
     rather than refused, because everywhere else is ground this verdict makes
     no claim about; on the release surface the verdict claims exactly this
@@ -1259,7 +1322,17 @@ def check_release_proposal(
     anchor_dir: pathlib.Path,
     enforce_production_pins: bool,
 ) -> int | None:
-    """Verify base custody and the one transition the candidate may add."""
+    """Verify base custody and the one transition the candidate may add.
+
+    The history pass compares an outside manifest directory but returns new
+    files and base entries for the release root only, by design. So for that
+    layout the directory's own entries are read here, from the same two
+    snapshots, and join both: the base chain is found where the spec keeps
+    it, and the release objects a proposal adds there are the ones the
+    triple and pre-genesis rules count (#87). Nothing is added for a manifest
+    directory under the release root, which the returned entries already
+    hold.
+    """
 
     try:
         _commit, new_files, base_release_entries = verify_release_history_immutable(
@@ -1269,6 +1342,22 @@ def check_release_proposal(
         )
     except ReleaseChainError as exc:
         raise AppendError(str(exc)) from exc
+
+    outside_manifests = _outside_manifest_directory(candidate.spec)
+    if outside_manifests is not None:
+        # The history pass has just listed this directory in both trees and
+        # refused any deleted or changed entry, so what the candidate holds
+        # beyond the base is additions only.
+        base_manifest_entries = base.tree.entries(
+            outside_manifests.as_posix()
+        ).as_dict()
+        candidate_manifest_entries = candidate.snapshot.entries(
+            outside_manifests.as_posix()
+        ).as_dict()
+        new_files = new_files | (
+            set(candidate_manifest_entries) - set(base_manifest_entries)
+        )
+        base_release_entries = {**base_release_entries, **base_manifest_entries}
 
     base_has_chain = any(
         relative.startswith(candidate.spec.release_manifest_prefix)

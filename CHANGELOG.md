@@ -6,6 +6,46 @@ input the package used to accept, or accept for the wrong reason.
 
 ## 0.7.0 (unreleased)
 
+### The append gate protects a manifest directory outside the release root (#87)
+
+An auditor can now conclude that an append-gate verdict speaks for the
+manifests, producer signatures and receipts of a chain whose spec keeps them
+outside `release_root_relative`. `ChainSpec` accepts that layout, and the
+history pass has compared it since 0.6.3, but the gate protected only the
+release root.
+
+- A gate-only proposal that changes the outside manifest directory, anything
+  under it, or one of its proper ancestors is refused with `gate-only
+  proposal changes unclassified release path(s): [...]` when neither
+  configured surface names the path. Before, it passed as gate-only and
+  listed the change under `unclassified changes`. The gate-only route runs no
+  history check, so an existing manifest, signature or receipt could be
+  rewritten or deleted under cover of a gate change. The ledger-state
+  refusal, the attribute screen and the tree screens still run first.
+- A data proposal reads the base chain, and the release objects it adds,
+  from the outside directory. Before, the gate looked for the base chain only
+  among release-root entries, so an initialized outside chain read as
+  pre-genesis and its custody was never verified. Its next release, and a
+  genesis release written there, were refused with `release proposal must
+  add exactly one manifest for index 0; found []`. The base is now verified
+  as the existing chain, and an invalid base is refused with `base release
+  chain is invalid: ...`.
+- A pre-genesis data proposal that adds a file to the outside directory
+  without a complete genesis release is refused with `legacy pre-genesis
+  proposal must not change releases/; ...`, as the same file under the
+  release root always was. Before, it was accepted.
+- Nothing changes for a manifest directory at or under the release root. A
+  property test checks the protection rule against the old one, path for
+  path, and the gate reads no extra tree listing for that layout.
+- The layout is protected rather than refused at spec load because it was
+  already a working chain where no base is named: `verify_append_gate`
+  without `base_ref` verifies it. A refusal would have turned that verdict
+  into a configuration error.
+- `AppendGateSpec` now documents the contract, and says to keep the manifest
+  directory off `gate_surface` in either layout. A gate-only proposal skips
+  every history and chain check, so a gate surface over the manifests lets
+  one change release objects unchecked, and no release proposal can pass.
+
 ### One protected-tree policy (M1 of #62; #64 to #71)
 
 An auditor can now conclude that the protected-tree screens every pass applies
