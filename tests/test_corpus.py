@@ -85,6 +85,15 @@ def _commit_worktree(root: pathlib.Path) -> str:
 
     if not (root / ".git").exists():
         _git(root, "init", "-q")
+        # Two tests unlink a loose object to simulate a lost one, so nothing
+        # may pack the fixture's objects first (#88). Automatic gc after the
+        # commit, in the foreground or detached into the background, would
+        # move them into a pack and prune the loose files; turn it off here so
+        # the object layout does not depend on git's defaults or on the
+        # runner's global config.
+        _git(root, "config", "gc.auto", "0")
+        _git(root, "config", "gc.autoDetach", "false")
+        _git(root, "config", "maintenance.auto", "false")
         _git(root, "config", "user.name", "Receipt Tests")
         _git(root, "config", "user.email", "receipt-tests@example.invalid")
         _git(root, "config", "commit.gpgSign", "false")
@@ -598,6 +607,52 @@ def test_binding_materializes_each_listing_path_once(tmp_path: pathlib.Path) -> 
     expected_listing = sum(len(path.encode()) for path in tree_paths)
     expected_attested_lookups = sum(len(path.encode()) for path in ATTESTED)
     assert charged == expected_listing + expected_attested_lookups
+
+
+def test_fixture_objects_stay_loose_when_git_would_auto_pack(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#88: the fixture keeps its objects loose whatever git's config says.
+
+    The two translation tests below unlink one loose object, and one CI job
+    found it already packed. This forces the packing they raced: a global
+    config whose ``init.templateDir`` seeds every new repository with two
+    packs and whose ``gc.autoPackLimit`` is 1, so ``git commit``'s automatic
+    gc repacks in the foreground and prunes every loose object. With all of
+    the fixture's gc and maintenance settings removed, the assertion below
+    fails every time.
+    """
+
+    seed = tmp_path / "seed"
+    _git(tmp_path, "init", "-q", str(seed))
+    template = tmp_path / "template"
+    (template / "objects" / "pack").mkdir(parents=True)
+    for index in range(2):
+        blob = _hash_blob(seed, f"seed {index}\n".encode())
+        _git(
+            seed,
+            "pack-objects",
+            "-q",
+            str(template / "objects" / "pack" / "pack"),
+            input_bytes=f"{blob}\n".encode(),
+        )
+    config = tmp_path / "eager-gc.gitconfig"
+    config.write_text(
+        "[init]\n"
+        f"\ttemplateDir = {template}\n"
+        "[gc]\n"
+        "\tautoPackLimit = 1\n"
+        "\tautoDetach = false\n"
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+
+    root = tmp_path / "fixture"
+    root.mkdir()
+    write_tree(root)
+    oid = _commit_worktree(root)
+    for spec in (oid, f"{oid}:rules", f"{oid}:rules/tax/rate.yaml"):
+        object_id = _git(root, "rev-parse", spec).decode("ascii").strip()
+        _loose_object_path(root, object_id)
 
 
 def test_translates_a_snapshot_error_from_the_tree_listing(
