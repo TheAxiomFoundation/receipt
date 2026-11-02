@@ -3793,15 +3793,23 @@ def _pending_class_collision_message(
     )
 
 
-def _require_bundle_reference(value: Any, label: str) -> None:
-    """Refuse a caller's bundle reference that cannot be ordered or compared."""
+def _require_bundle_reference(value: Any, label: str, *, require_path: bool) -> None:
+    """Refuse a caller's bundle reference that cannot be ordered or compared.
 
-    if not isinstance(value, Mapping) or "path" not in value:
+    ``require_path`` is set for a pending update only.  Main read a pending
+    update's ``path`` by subscript and raised ``KeyError`` without one, so a
+    refusal there pre-empts nothing.  An active bundle's ``path`` was read
+    with ``.get``, and one without it went on to ``_load_trust_bundle``,
+    which refuses it in its own words; requiring it here would move that
+    text.
+    """
+
+    if not isinstance(value, Mapping) or (require_path and "path" not in value):
         raise TsaError(
             f"{label} is not a bundle reference: {_display(value, as_repr=True)}"
         )
     try:
-        str(value["path"])
+        str(value.get("path", ""))
     except ValueError as exc:
         raise TsaError(f"{label} path is too large to compare") from exc
 
@@ -3846,13 +3854,14 @@ def _build_authority_history(
     three).
     """
 
-    # Both collections are the caller's, and are sorted below by a key read
-    # out of each entry: an entry that is not a mapping with a ``path``
-    # raised AttributeError or KeyError there (#90).
+    # Each collection is the caller's, and is sorted below by a key read out
+    # of each entry: an entry that is not a mapping raised AttributeError
+    # there on main, and a pending update without ``path`` raised KeyError
+    # (#90).  Each is checked where main crashed and no earlier: the pending
+    # updates only after every active bundle has loaded, so an active
+    # bundle's refusal still answers first.
     for reference in trusted_bundles.values():
-        _require_bundle_reference(reference, "trusted TSA bundle")
-    for reference in transition_bundle_updates:
-        _require_bundle_reference(reference, "pending TSA bundle update")
+        _require_bundle_reference(reference, "trusted TSA bundle", require_path=False)
     active_occurrences: list[_AnchorOccurrence] = []
     for reference in sorted(
         trusted_bundles.values(),
@@ -3862,6 +3871,10 @@ def _build_authority_history(
             _anchor_occurrences(records, reference, active=True, spec=spec)
         )
 
+    for reference in transition_bundle_updates:
+        _require_bundle_reference(
+            reference, "pending TSA bundle update", require_path=True
+        )
     pending_batches: list[tuple[_AnchorOccurrence, ...]] = []
     for reference in sorted(
         transition_bundle_updates,
@@ -3878,7 +3891,7 @@ def _build_authority_history(
     for occurrence in active_occurrences:
         history.add(occurrence)
 
-    errors: list[tuple[tuple[int, str, str, str], str]] = []
+    errors: list[tuple[tuple[tuple[int, str], str, str, str], str]] = []
     for batch in pending_batches:
         for occurrence in batch:
             already_known = history.contains(occurrence.authority)
@@ -4792,7 +4805,7 @@ def _verify_witness_with_updates(
                     label = update["path"]
                 raise TsaError(
                     f"stale transition bundle update supplied for {path}: "
-                    f"{label!r}"
+                    f"{_display(label, as_repr=True)}"
                 )
         # The compatibility argument has now established equality with the
         # snapshot-derived set.  It contributes no transition entry itself;

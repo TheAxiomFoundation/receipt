@@ -56,8 +56,10 @@ through its own words and exception classes.
 
 ### Witness refusals: bounded cost, and named errors for caller mistakes (#89, #90)
 
-No input the verifier refused before is accepted now. What changes is what a
-refusal costs and which exception reports it.
+No input the verifier refused before is accepted now, and every existing
+refusal keeps its text. What changes is what a refusal costs, which exception
+reports a caller's mistake, and one narrowing for callers that pass a
+non-mapping object, described below.
 
 - A witness `tokenPath` whose path under the records root is 4,096 bytes or
   longer is refused before any path resolution. No supported platform can
@@ -76,6 +78,7 @@ refusal costs and which exception reports it.
   took 81 s of CPU before; it now takes about 1 s. A differential property
   checks that the walk returns exactly what the old walk returned.
 - `verify_timestamp_token`, `verify_witness(trusted_bundles=...)`,
+  `verify_witness(transition_bundle_updates=...)`,
   `verify_witness_step(prior_pending_updates=...)` and
   `preferred_active_trust_bundle` refuse malformed caller arguments with
   `TsaError` instead of `KeyError`, `TypeError`, `AttributeError` or
@@ -85,13 +88,28 @@ refusal costs and which exception reports it.
   `timestamp token bundle reference path is too large to compare`,
   `timestamp token claim is not an object`,
   `trusted TSA bundle <path> is not a bundle reference`,
-  `trusted TSA bundle is not a bundle reference: <value>`,
+  `trusted TSA bundle is not a bundle reference: <value>` (a value that is
+  not a mapping; a mapping without `path` keeps main's
+  `TSA trust bundle path is not immutable/versioned: None`),
+  `trusted TSA bundle path is too large to compare`,
   `pending TSA bundle update is not a bundle reference: <value>`,
+  `pending TSA bundle update path is too large to compare`,
   `newest active TSA trust bundle is not a bundle reference: <value>` and
   `newest active TSA trust bundle reference lacks <key>`. A caller value too
   large for `str()` appears in an existing message as
   `<int too large to display>`. Bundle versions of any length now order
-  numerically, without `int()`.
+  numerically, without `int()`. So a `trusted_bundles` key with a
+  5,000-digit version, which raised `ValueError`, now gets the verdict the
+  same entries get under a representable version: accepted where main
+  accepts that shape.
+- The bundle reference given to `verify_timestamp_token`, and each value of
+  `trusted_bundles` that a witness selects, must now be a
+  `collections.abc.Mapping`. Main read them with `[...]` and `.get`, so a
+  non-mapping object that answered those was accepted; it is now refused
+  (`timestamp token bundle reference is not an object`,
+  `trusted TSA bundle <path> is not a bundle reference`). The parameters
+  are typed as mappings, and no caller in this repository passes anything
+  else.
 - `-attime` is genTime floored to whole seconds, in the TSA verifier and the
   release-chain verifier. `int(gen_time.timestamp())` truncated toward zero
   and rounded through a float, so it was one second late before 1970

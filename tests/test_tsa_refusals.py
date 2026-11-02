@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
-from hypothesis import HealthCheck, given, settings, strategies as st
+from hypothesis import HealthCheck, example, given, settings, strategies as st
 
 from receipt import release_chain
 from receipt import tsa as tsa_module
@@ -159,6 +159,55 @@ def test_a_long_spelling_of_a_short_path_is_still_read(
     rewrite_witness(
         tree,
         lambda payload: payload["anchorOutcomes"][0].update({"tokenPath": spelled}),
+    )
+    assert verify_tree(tree).status == "available"
+
+
+def test_a_token_just_under_the_bound_is_still_read(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """Review of #92, P2: pins the bound's value, not just its existence.
+
+    A token moved into real directories so that its path joined under the
+    records root is 4,095 bytes, the longest pathname Linux opens, verified
+    on main and must verify here. A bound below 4,096 bytes -- macOS's 1,024,
+    say -- would refuse it as missing.
+    """
+
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    records = tree.records.resolve()
+    path_max = os.pathconf(records, "PC_PATH_MAX")
+    if path_max < 4096:
+        pytest.skip(f"PATH_MAX here is {path_max}; a 4,095-byte path cannot be opened")
+    target = 4095
+    remaining = target - len(os.fsencode(str(records))) - 1
+    directory = "d" * 200
+    depth = (remaining - 5) // (len(directory) + 1)
+    name_length = remaining - depth * (len(directory) + 1)
+    name = "t" * (name_length - 4) + ".tsr"
+    alpha = local_anchors[0]
+    token = tree.tokens[alpha.anchor_id]
+    data = token.read_bytes()
+    descriptor = os.open(records, os.O_RDONLY)
+    try:
+        for _ in range(depth):
+            os.mkdir(directory, dir_fd=descriptor)
+            child = os.open(directory, os.O_RDONLY, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        written = os.open(name, os.O_CREAT | os.O_WRONLY, 0o644, dir_fd=descriptor)
+        try:
+            os.write(written, data)
+        finally:
+            os.close(written)
+    finally:
+        os.close(descriptor)
+    token.unlink()
+    declared = "records/" + f"{directory}/" * depth + name
+    assert len(os.fsencode(str(records / declared.removeprefix("records/")))) == target
+    rewrite_witness(
+        tree,
+        lambda payload: payload["anchorOutcomes"][0].update({"tokenPath": declared}),
     )
     assert verify_tree(tree).status == "available"
 
@@ -395,6 +444,67 @@ def test_a_malformed_prior_pending_update_is_refused(
         )
 
 
+def test_a_trusted_bundle_without_a_path_keeps_mains_refusal(tree: WitnessTree) -> None:
+    """Review of #92, P2: an active bundle's ``path`` was read with ``.get``.
+
+    On main a second ``trusted_bundles`` entry without ``path`` reached
+    ``_load_trust_bundle`` and refused there. The #90 shape check must not
+    answer first with its own words.
+    """
+
+    trusted = {BUNDLE_LOGICAL: tree.reference, "records/trust/extra": {"bundleId": "x"}}
+    with pytest.raises(TsaError) as refused:
+        verify_tree(tree, trusted_bundles=trusted)
+    assert str(refused.value) == "TSA trust bundle path is not immutable/versioned: None"
+
+
+def test_a_sole_trusted_bundle_without_a_path_is_a_named_refusal(
+    tree: WitnessTree,
+) -> None:
+    """The sole entry is the newest active bundle, whose ``path`` main read by
+    subscript: ``KeyError: 'path'``. It is now a ``TsaError`` naming the key."""
+
+    reference = {key: value for key, value in tree.reference.items() if key != "path"}
+    with pytest.raises(TsaError) as refused:
+        verify_tree(tree, trusted_bundles={BUNDLE_LOGICAL: reference})
+    assert str(refused.value) == "newest active TSA trust bundle reference lacks path"
+
+
+def test_an_active_bundle_refusal_still_answers_before_a_pending_shape_refusal(
+    tree: WitnessTree,
+) -> None:
+    """Main loaded every active bundle before it read any pending update, so
+    an active bundle that refuses keeps its text when a pending update beside
+    it is malformed as well."""
+
+    extra = {**tree.reference, "path": "records/trust/extra"}
+    trusted = {BUNDLE_LOGICAL: tree.reference, "records/trust/extra": extra}
+    for malformed in (None, {"bundleId": "x"}):
+        with pytest.raises(TsaError) as refused:
+            verify_step(
+                tree.record,
+                spec=tree.spec,
+                records=tree.records,
+                trusted_bundles=trusted,
+                prior_pending_updates=[malformed],
+            )
+        # 7561ee01 checked the pending updates first and answered
+        # "pending TSA bundle update is not a bundle reference" here.
+        assert str(refused.value) == (
+            "TSA trust bundle path is not immutable/versioned: 'records/trust/extra'"
+        )
+    with pytest.raises(TsaError) as pending:
+        verify_step(
+            tree.record,
+            spec=tree.spec,
+            records=tree.records,
+            prior_pending_updates=[{"bundleId": "x"}],
+        )
+    assert str(pending.value) == (
+        "pending TSA bundle update is not a bundle reference: {'bundleId': 'x'}"
+    )
+
+
 def test_a_pending_update_with_a_huge_version_is_refused(tree: WitnessTree) -> None:
     update = {**tree.reference, "path": HUGE_VERSION_PATH}
     with pytest.raises(TsaError):
@@ -519,6 +629,37 @@ def test_verify_witness_step_is_total_over_prior_pending_updates(
     check()
 
 
+def test_verify_witness_is_total_over_transition_bundle_updates(
+    tree: WitnessTree,
+) -> None:
+    """The stale-update refusal formatted a caller's value with ``!r``, so a
+    huge int in ``transition_bundle_updates`` raised ValueError on main and at
+    7561ee01; the main-against-head differential on the review found it."""
+
+    references = mutated(dict(tree.reference), REFERENCE_KEYS)
+
+    @PROPERTY
+    @given(st.lists(references, max_size=3))
+    def check(supplied: Any) -> None:
+        refuses_or_returns(
+            lambda: verify_tree(tree, transition_bundle_updates=supplied),
+            WitnessEvidence,
+        )
+
+    check()
+
+
+def test_a_stale_transition_update_too_large_to_display_is_refused(
+    tree: WitnessTree,
+) -> None:
+    with pytest.raises(TsaError) as refused:
+        verify_tree(tree, transition_bundle_updates=[HUGE])
+    assert str(refused.value) == (
+        f"stale transition bundle update supplied for {tree.record}: "
+        "<int too large to display>"
+    )
+
+
 # ---------------------------------------------------------------------------
 # #90: -attime is the floor of genTime in whole seconds, at both range edges.
 
@@ -631,6 +772,13 @@ spellings = st.lists(st.sampled_from([*NAMES, "..", "x"]), min_size=1, max_size=
 
 @PROPERTY
 @given(entries, spellings, st.sampled_from(["resolved", "named-link", "none"]))
+# A link to the root, reached past a missing component and a lexical "..".
+# Each @example is the falsifying case Hypothesis found for one mutation of
+# _PrefixResolutions._step that the committed 120 derandomized examples did
+# not reach (review of #92, P3): dropping the symlink fallback, and looking
+# up the spelled prefix instead of its parent's resolution.
+@example(layout=[(0, "a", "link:.")], spelling=["b", "..", "a", "a"], naming="resolved")
+@example(layout=[(0, "l", "link:.")], spelling=["a", "..", "l", "a"], naming="resolved")
 def test_the_symlink_walk_matches_the_released_walk(
     layout: list[tuple[int, str, str]], spelling: list[str], naming: str
 ) -> None:
