@@ -563,6 +563,49 @@ class TsaError(ValueError):
     """A timestamp token, witness, or trust transition is invalid."""
 
 
+#: The Unix epoch, which ``-attime`` counts whole seconds from.
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def _attime(gen_time: datetime) -> str:
+    """The ``-attime`` argument for ``gen_time``: whole seconds, floored.
+
+    ``int(gen_time.timestamp())`` truncated toward zero, so a fractional
+    genTime before 1970 named the second after it, and the float behind
+    ``timestamp()`` rounded ``9999-12-31T23:59:58.999999Z`` up a whole
+    second (#90).  Integer division of the exact ``timedelta`` floors.
+    """
+
+    return str((gen_time - _EPOCH) // timedelta(seconds=1))
+
+
+def _display(value: Any, *, as_repr: bool = False) -> str:
+    """``str`` or ``repr`` of a caller's value, for a refusal message.
+
+    A Python ``int`` past the interpreter's 4,300-digit conversion limit
+    makes both raise ``ValueError``, and so does any container holding one.
+    The bounded JSON readers cannot produce such a value, but a caller can
+    pass one, and a refusal must not turn into an interpreter exception while
+    it is being worded (#90).  Every other value is shown exactly as before.
+    """
+
+    try:
+        return repr(value) if as_repr else str(value)
+    except ValueError:
+        return f"<{type(value).__name__} too large to display>"
+
+
+def _version_key(digits: str) -> tuple[int, str]:
+    """Order bundle version digits numerically without converting them.
+
+    The bundle path patterns admit no leading zero, so the longer string is
+    the larger number and equal lengths compare digit by digit.  ``int()``
+    raised ``ValueError`` on a caller's 5,000-digit version (#90).
+    """
+
+    return len(digits), digits
+
+
 def _spec_string(value: Any, label: str) -> str:
     if type(value) is not str or not value:
         raise TsaError(f"{label} must be a non-empty string")
@@ -885,6 +928,59 @@ def logical_path(records: Path, path: Path) -> str:
     return str(Path("records") / path.relative_to(records))
 
 
+#: The shortest pathname no supported platform can open whole: Linux's
+#: PATH_MAX is 4096 bytes including the terminating NUL, so a 4096-byte
+#: pathname already fails with ENAMETOOLONG, and macOS's PATH_MAX is 1024.
+_UNOPENABLE_PATH_BYTES = 4096
+
+
+class _UnopenableRecordPath(TsaError):
+    """A record path too long for any supported platform to open whole.
+
+    ``path`` is the lexical join :func:`physical_path` would have returned.
+    Each caller turns this into the refusal it already gives a file it cannot
+    find, so the bound moves no message (#89).
+    """
+
+    def __init__(self, value: str, path: Path) -> None:
+        super().__init__(
+            f"record path is longer than any filesystem can open: {path}"
+        )
+        self.value = value
+        self.path = path
+
+
+def _encoded_length(text: str) -> int:
+    """The bytes ``text`` occupies as a pathname handed to the kernel.
+
+    ``os.fsencode`` is what every ``os`` call applies.  A string it cannot
+    encode never reaches the kernel at all, so its length decides nothing
+    about what is openable; it is counted at three bytes per surrogate.
+    """
+
+    try:
+        return len(os.fsencode(text))
+    except UnicodeEncodeError:
+        return len(text.encode("utf-8", "surrogatepass"))
+
+
+def _is_regular_file(path: Path) -> bool:
+    """``Path.is_file``, with a pathname too long to look up counted as absent.
+
+    ``Path.is_file`` swallows ENOENT, ENOTDIR, EBADF and ELOOP but, before
+    Python 3.14, not ENAMETOOLONG: a token path with one component longer
+    than NAME_MAX raised ``OSError`` out of the verifier rather than the
+    "missing" refusal every other unopenable path gets (#89).
+    """
+
+    try:
+        return path.is_file()
+    except OSError as exc:
+        if exc.errno == errno.ENAMETOOLONG:
+            return False
+        raise
+
+
 def physical_path(records: Path, value: str) -> Path:
     logical = Path(value)
     if (
@@ -897,6 +993,18 @@ def physical_path(records: Path, value: str) -> Path:
     if logical.parts[0] == "records":
         logical = Path(*logical.parts[1:])
     path = records / logical
+    # Bounded before ``resolve`` and ``relative_to``, which both cost time
+    # quadratic in the component count: a producer-written ``tokenPath`` of
+    # 100k components took 46 s here before its refusal (#89).  Measured on
+    # the join, not on ``value``: ``Path`` drops ``.`` components and repeated
+    # separators, so a long spelling can name a short, openable path, and
+    # refusing that would refuse a file the verifier used to read.  Past the
+    # bound the whole pathname cannot be opened on any supported platform, so
+    # every caller's "missing" check already refused it, or raised OSError;
+    # ``_UnopenableRecordPath`` lets each caller keep its "missing" wording.
+    # Everything above this line is linear in the length of ``value``.
+    if _encoded_length(str(path)) >= _UNOPENABLE_PATH_BYTES:
+        raise _UnopenableRecordPath(value, path)
     try:
         path.resolve().relative_to(records.resolve())
     except ValueError as exc:
@@ -941,6 +1049,52 @@ def _path_fold(path: Path) -> tuple[str, ...]:
         unicodedata.normalize("NFC", unicodedata.normalize("NFD", part).casefold())
         for part in path.parts
     )
+
+
+class _PrefixResolutions:
+    """``Path.resolve`` for the prefixes of one path, each computed once.
+
+    ``os.path.realpath`` reads a path left to right, and what it holds after
+    the components of a prefix is that prefix's own resolution.  So a prefix
+    whose last component is an ordinary name -- not ``..`` and not a symlink
+    -- resolves to its parent's resolution joined with that name, at the cost
+    of one ``lstat``.  A symlink or a ``..`` falls back to ``Path.resolve``
+    itself.  The kernel follows at most 40 links in one lookup, so a path
+    whose parents carry more than that cannot be opened at all, and the
+    fallback runs at most that many times for any path a caller gets as far
+    as walking.
+    """
+
+    def __init__(self) -> None:
+        self._known: dict[Path, Path] = {}
+
+    def of(self, path: Path) -> Path:
+        pending: list[Path] = []
+        probe = path
+        while probe not in self._known:
+            pending.append(probe)
+            if probe.parent == probe:
+                break
+            probe = probe.parent
+        for prefix in reversed(pending):
+            self._known[prefix] = self._step(prefix)
+        return self._known[path]
+
+    def _step(self, prefix: Path) -> Path:
+        if prefix.parent == prefix or prefix.name == "..":
+            return prefix.resolve()
+        # What realpath looks up is the parent's resolution joined with the
+        # name, not the spelling: after a missing component it has dropped a
+        # ``..`` lexically that the kernel cannot walk through.
+        candidate = self._known[prefix.parent] / prefix.name
+        try:
+            linked = stat.S_ISLNK(os.lstat(candidate).st_mode)
+        except OSError:
+            # realpath carries a name it cannot look up over unchanged.
+            linked = False
+        if linked:
+            return prefix.resolve()
+        return candidate
 
 
 def _components_below(
@@ -988,6 +1142,12 @@ def _components_below(
     relative spelling, so for those the first comparison always succeeds.
     """
 
+    # Every parent and every ancestor the walk resolves is a prefix of
+    # ``path``, so each is resolved once, from its own parent's resolution,
+    # rather than from scratch.  Resolving each from scratch walked every
+    # component above it again: a 2,000-level token path under the
+    # pathname bound took 81 s of CPU here before its refusal (#89).
+    resolved = _PrefixResolutions()
     chain: list[Path] = []
     probe = path
     while True:
@@ -998,7 +1158,7 @@ def _components_below(
         if (
             parent == root
             or parent == named_root
-            or (not parent.is_symlink() and parent.resolve() == root)
+            or (not parent.is_symlink() and resolved.of(parent) == root)
             # A link that *is* the records root under another spelling --
             # the caller resolved the root and spelled the record through
             # the link, so ``named_root`` cannot name it -- ends the walk
@@ -1010,9 +1170,9 @@ def _components_below(
             # it (peer review, second Opus round).
             or (
                 parent.is_symlink()
-                and parent.resolve() == root
+                and resolved.of(parent) == root
                 and not any(
-                    ancestor.resolve() == root for ancestor in parent.parents
+                    resolved.of(ancestor) == root for ancestor in parent.parents
                 )
             )
         ):
@@ -1677,12 +1837,18 @@ def _load_trust_bundle(
     _require_supported_openssl()
     logical = reference.get("path")
     if not isinstance(logical, str) or not TRUST_BUNDLE_RE.fullmatch(logical):
-        raise TsaError(f"TSA trust bundle path is not immutable/versioned: {logical!r}")
+        raise TsaError(
+            "TSA trust bundle path is not immutable/versioned: "
+            f"{_display(logical, as_repr=True)}"
+        )
     if spec.bundle_reference(logical) != reference:
         raise TsaError(
             f"TSA trust bundle is not independently pinned by verifier code: {logical}"
         )
-    path = physical_path(records, logical)
+    try:
+        path = physical_path(records, logical)
+    except _UnopenableRecordPath as exc:
+        raise TsaError(f"TSA trust bundle is missing or not regular: {exc.path}") from exc
     # One read, and every question the load asks about this file is asked of
     # these bytes: the payload it parses to, whether they are the canonical
     # encoding of that payload, their SHA-256 and their length. Each used to
@@ -1970,14 +2136,30 @@ def preferred_active_trust_bundle(
 ) -> dict[str, Any]:
     """Select the highest immutable bundle version already authorized."""
 
-    candidates: list[tuple[int, dict[str, Any]]] = []
+    candidates: list[tuple[tuple[int, str], dict[str, Any]]] = []
     for path, reference in active.items():
         match = re.fullmatch(r"records/trust/tsa-anchors-v([1-9][0-9]*)\.json", path)
         if match:
-            candidates.append((int(match.group(1)), reference))
+            candidates.append((_version_key(match.group(1)), reference))
     if not candidates:
         raise TsaError("verified chain has no active versioned TSA trust bundle")
-    return dict(max(candidates, key=lambda item: item[0])[1])
+    selected = max(candidates, key=lambda item: item[0])[1]
+    try:
+        return dict(selected)
+    except (TypeError, ValueError) as exc:
+        # A caller's ``trusted_bundles`` value that is not a mapping (#90).
+        raise TsaError(
+            "newest active TSA trust bundle is not a bundle reference: "
+            f"{_display(selected, as_repr=True)}"
+        ) from exc
+
+
+def _preferred_field(preferred: Mapping[str, Any], key: str) -> Any:
+    """``preferred[key]``, refusing a caller's reference that lacks it (#90)."""
+
+    if key not in preferred:
+        raise TsaError(f"newest active TSA trust bundle reference lacks {key}")
+    return preferred[key]
 
 
 #: The line ``openssl storeutl`` ends a listing with.
@@ -2537,8 +2719,13 @@ def _root_material(
     root = anchor.get("rootCertificate")
     if not isinstance(root, dict):
         raise TsaError(f"TSA anchor {anchor.get('id')!r} lacks rootCertificate")
-    root_path = physical_path(records, str(root.get("path", "")))
-    if not root_path.is_file() or root_path.is_symlink():
+    try:
+        root_path = physical_path(records, str(root.get("path", "")))
+    except _UnopenableRecordPath as exc:
+        raise TsaError(
+            f"pinned TSA root is missing or not a regular file: {exc.path}"
+        ) from exc
+    if not _is_regular_file(root_path) or root_path.is_symlink():
         raise TsaError(f"pinned TSA root is missing or not a regular file: {root_path}")
     components = _refuse_a_linked_component(
         records, root_path, subject="pinned TSA root path"
@@ -2632,7 +2819,8 @@ def _select_anchor(
     if len(candidates) != 1:
         raise TsaError(
             "witness does not select exactly one pinned TSA anchor: "
-            f"id={anchor_id!r}, endpoint={endpoint!r}"
+            f"id={_display(anchor_id, as_repr=True)}, "
+            f"endpoint={_display(endpoint, as_repr=True)}"
         )
     anchor = candidates[0]
     if anchor_id and endpoint != anchor.get("endpoint"):
@@ -2678,6 +2866,11 @@ def _bundle_for_claim(
         bundle_reference = trusted_bundles.get(bundle_path)
         if bundle_reference is None:
             raise TsaError(f"witness selects an untrusted TSA bundle: {bundle_path!r}")
+        if not isinstance(bundle_reference, Mapping):
+            # A caller's ``trusted_bundles`` value of the wrong shape (#90).
+            raise TsaError(
+                f"trusted TSA bundle {bundle_path!r} is not a bundle reference"
+            )
     else:
         bundle_reference = spec.bundle_reference(bundle_path)
         if bundle_reference is None:
@@ -2778,7 +2971,23 @@ def _verify_timestamp_token(
     is how it does that, so this must not swallow one.
     """
 
-    bundle_path = str(bundle_reference["path"])
+    # Caller arguments, and the only ones this reads before comparing them:
+    # a reference or claim of the wrong shape raised KeyError, TypeError or
+    # AttributeError here rather than a refusal (#90).  Every well-formed
+    # pair reaches the comparisons below exactly as it did.
+    if not isinstance(bundle_reference, Mapping):
+        raise TsaError("timestamp token bundle reference is not an object")
+    for key in ("path", "bundleId", "sha256"):
+        if key not in bundle_reference:
+            raise TsaError(f"timestamp token bundle reference lacks {key}")
+    if not isinstance(token_claim, Mapping):
+        raise TsaError("timestamp token claim is not an object")
+    try:
+        bundle_path = str(bundle_reference["path"])
+    except ValueError as exc:
+        raise TsaError(
+            "timestamp token bundle reference path is too large to compare"
+        ) from exc
     expected_bundle_claims = {
         "trustBundleId": bundle_reference["bundleId"],
         "trustBundlePath": bundle_path,
@@ -2802,7 +3011,12 @@ def _verify_timestamp_token(
         token_logical = token_claim.get("tokenPath")
         if not isinstance(token_logical, str):
             raise TsaError("witness token lacks tokenPath")
-        token_path = physical_path(records, token_logical)
+        try:
+            token_path = physical_path(records, token_logical)
+        except _UnopenableRecordPath as exc:
+            raise TsaError(
+                f"witness token is missing for {path}: {exc.path}"
+            ) from exc
         # One read of the claimed response, and both OpenSSL invocations that
         # want it are given a private copy of those bytes.  The declared
         # digest was taken from one open of the pathname and `openssl ts
@@ -2811,7 +3025,7 @@ def _verify_timestamp_token(
         # something else (peer review, fourth gate round four).  The
         # path-level check keeps its ported wording and stays in front.
         token_missing = f"witness token is missing for {path}: {token_path}"
-        if not token_path.is_file() or token_path.is_symlink():
+        if not _is_regular_file(token_path) or token_path.is_symlink():
             raise TsaError(token_missing)
         # And no component above that one may be a link either, or two
         # outcomes reach one entry by two names that every identity rule
@@ -2912,7 +3126,7 @@ def _verify_timestamp_token(
             "SSL_CERT_DIR": str(empty_ca_dir),
             "SSL_CERT_FILE": "/dev/null",
         }
-        verification_time = str(int(gen_time.timestamp()))
+        verification_time = _attime(gen_time)
         # The -CAfile below is _root_material's private snapshot of the
         # pinned root: a byte-for-byte copy, in a directory only this process
         # can reach, of the one read whose bytes it hashed, had OpenSSL count
@@ -3012,7 +3226,7 @@ def _verify_timestamp_token(
         if key in token_claim and token_claim[key] != actual:
             raise TsaError(
                 f"witness {key} mismatch for {path}: expected {actual}, "
-                f"got {token_claim[key]}"
+                f"got {_display(token_claim[key])}"
             )
     evidence = TokenEvidence(
         anchor_id=str(anchor["id"]),
@@ -3232,8 +3446,11 @@ def _anchor_signer_fingerprints(anchor: dict[str, Any]) -> set[str]:
     }
 
 
-def _pending_bundle_version(reference: Mapping[str, Any]) -> int:
-    """The version a pending bundle reference's path carries, or ``0``.
+def _pending_bundle_version(reference: Mapping[str, Any]) -> tuple[int, str]:
+    """The version a pending bundle reference's path carries, as a sort key.
+
+    ``(0, "")`` for a path that carries none, which sorts first; otherwise
+    :func:`_version_key` of the digits, which orders as the number does.
 
     Pending bundles are walked in this order, because succession between two
     of them is a question about which came later.  A reference whose path is
@@ -3245,7 +3462,7 @@ def _pending_bundle_version(reference: Mapping[str, Any]) -> int:
 
     path = reference.get("path")
     match = _BUNDLE_VERSION_RE.fullmatch(path) if isinstance(path, str) else None
-    return int(match.group(1)) if match else 0
+    return _version_key(match.group(1)) if match else (0, "")
 
 
 _Authority = tuple[str, str]
@@ -3258,7 +3475,7 @@ class _AnchorOccurrence:
     reference: dict[str, Any]
     anchor: dict[str, Any]
     path: str
-    version: int
+    version: tuple[int, str]
     authority: _Authority
     signers: frozenset[str]
     active: bool
@@ -3274,7 +3491,7 @@ class _AnchorOccurrence:
         return f"{self.path}/{self.anchor['id']}"
 
     @property
-    def order(self) -> tuple[int, str, str, str]:
+    def order(self) -> tuple[tuple[int, str], str, str, str]:
         return self.version, self.path, *self.authority
 
 
@@ -3576,6 +3793,19 @@ def _pending_class_collision_message(
     )
 
 
+def _require_bundle_reference(value: Any, label: str) -> None:
+    """Refuse a caller's bundle reference that cannot be ordered or compared."""
+
+    if not isinstance(value, Mapping) or "path" not in value:
+        raise TsaError(
+            f"{label} is not a bundle reference: {_display(value, as_repr=True)}"
+        )
+    try:
+        str(value["path"])
+    except ValueError as exc:
+        raise TsaError(f"{label} path is too large to compare") from exc
+
+
 def _build_authority_history(
     records: Path,
     trusted_bundles: Mapping[str, dict[str, Any]],
@@ -3616,6 +3846,13 @@ def _build_authority_history(
     three).
     """
 
+    # Both collections are the caller's, and are sorted below by a key read
+    # out of each entry: an entry that is not a mapping with a ``path``
+    # raised AttributeError or KeyError there (#90).
+    for reference in trusted_bundles.values():
+        _require_bundle_reference(reference, "trusted TSA bundle")
+    for reference in transition_bundle_updates:
+        _require_bundle_reference(reference, "pending TSA bundle update")
     active_occurrences: list[_AnchorOccurrence] = []
     for reference in sorted(
         trusted_bundles.values(),
@@ -3997,7 +4234,7 @@ def _v2_witness_evidence(
     if status not in ("available", "unavailable"):
         raise TsaError(f"invalid witness status for {path}: {status!r}")
     preferred = preferred_active_trust_bundle(trusted_bundles)
-    if witness.get("trustBundlePath") != preferred["path"]:
+    if witness.get("trustBundlePath") != _preferred_field(preferred, "path"):
         raise TsaError("multi-token witness does not use the newest active TSA trust bundle")
     bundle_reference, trust = _bundle_for_claim(
         records,
@@ -4586,7 +4823,8 @@ def _verify_witness_with_updates(
         )
         if transition_bundle_updates or (
             preferred is not None
-            and preferred["bundleId"] != spec.legacy_witness_bundle_id
+            and _preferred_field(preferred, "bundleId")
+            != spec.legacy_witness_bundle_id
         ):
             raise TsaError(
                 "legacy witness schema cannot cover a TSA trust transition "
