@@ -618,8 +618,9 @@ def test_fixture_objects_stay_loose_when_git_would_auto_pack(
     found it already packed. This forces the packing they raced: a global
     config whose ``init.templateDir`` seeds every new repository with two
     packs and whose ``gc.autoPackLimit`` is 1, so ``git commit``'s automatic
-    gc repacks in the foreground and prunes every loose object. Without the
-    fixture's own ``gc.auto=0`` the assertion below fails every time.
+    gc repacks in the foreground and prunes every loose object. With all of
+    the fixture's gc and maintenance settings removed, the assertion below
+    fails every time.
     """
 
     seed = tmp_path / "seed"
