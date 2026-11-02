@@ -17,6 +17,25 @@ CANONICAL_SOURCE_SHA256 = (
 )
 
 
+def test_receipt_is_imported_from_this_checkout() -> None:
+    """#42: the source under test is this tree's ``src``, not another one.
+
+    A venv shared between worktrees holds one editable pointer, and ``uv run``
+    rewrites it to whichever worktree ran last. ``pythonpath = ["src"]`` in
+    ``pyproject.toml`` makes pytest import this tree's source ahead of that
+    pointer. This test fails if the pin is dropped or overridden and
+    ``import receipt`` resolves anywhere else, so a green run cannot have
+    tested another worktree's code.
+    """
+
+    source = (pathlib.Path(__file__).resolve().parents[1] / "src").resolve()
+    for location in (receipt.__file__, *receipt.__path__):
+        resolved = pathlib.Path(location).resolve()
+        assert resolved.is_relative_to(source), (
+            f"receipt imported from {resolved}, outside this checkout's {source}"
+        )
+
+
 def test_version() -> None:
     assert receipt.__version__ == "0.6.2"
 
