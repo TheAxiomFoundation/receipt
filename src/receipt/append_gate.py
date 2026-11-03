@@ -51,8 +51,8 @@ class AppendGateSpec:
     ``chain.release_root_relative``. The gate then treats that directory, its
     subtree and its proper ancestors as release surface, as it treats the
     release root: a gate-only proposal may not change them unless the spec
-    puts them on a surface, and a data proposal finds the base chain, and
-    the release objects it adds, in that directory. Whichever directory holds
+    puts them on the gate surface, and a data proposal finds the base chain,
+    and the release objects it adds, in that directory. Whichever directory holds
     the manifests, keep it off ``gate_surface``. A gate-only proposal returns
     before any history or chain check, so a gate surface over the manifests
     lets one change release objects unchecked, and a release proposal, which
@@ -1327,9 +1327,9 @@ def check_release_proposal(
     The history pass compares an outside manifest directory but returns new
     files and base entries for the release root only, by design. So for that
     layout the directory's own entries are read here, from the same two
-    snapshots, and join both: the base chain is found where the spec keeps
-    it, and the release objects a proposal adds there are the ones the
-    triple and pre-genesis rules count (#87). Nothing is added for a manifest
+    snapshots, and added to both: the base chain is found where the spec
+    keeps it, and the release objects a proposal adds there are counted by
+    the triple and pre-genesis rules (#87). Nothing is added for a manifest
     directory under the release root, which the returned entries already
     hold.
     """
