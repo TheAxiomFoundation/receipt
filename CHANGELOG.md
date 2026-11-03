@@ -6,6 +6,49 @@ input the package used to accept, or accept for the wrong reason.
 
 ## 0.7.0 (unreleased)
 
+### What the pending-class election settles, stated in `receipt.tsa` (#50)
+
+Claims corrected, with no change in behavior. An auditor can now read in
+`receipt.tsa`'s own reference that the single supplemental candidate a
+pending-only class contributes settles which occurrence answers for the
+class, not which of its keys a token showed. The reference also says what
+bounds the gap.
+
+- The module docstring said the newest occurrence is elected "because that
+  is the anchor a witness will answer for once the transition activates".
+  That holds for a v2 witness, which must name the newest active bundle. A
+  legacy witness may name any active single-anchor bundle while
+  `legacy_witness_bundle_id` names the newest one, so it can answer under an
+  occurrence the election passed over. The docstring now says so.
+- `TsaSpec` said a superseded signer stops vouching for new records once the
+  new bundle is active. That is the v2 schema's rule, and the docstring now
+  names the legacy schema's exception. A test shows that exception with no
+  pending class involved.
+- The module docstring counts among its refusals "a pending bundle anchor
+  reusing an active anchor ID under a different code-pinned root", which
+  "must carry a supplemental outcome". That outcome is its pending-only
+  class's. When a later bundle of the same transition files the class under
+  another name, the newer name carries it, the reused-ID anchor activates on
+  it, and an outcome offered for the reused ID is refused as not introduced.
+  The docstring now says so, and tests pin both version orders.
+- `_supplemental_candidates` states the property with the reviewer's shapes,
+  `[C{S3}@v2, D{S3,S4}@v3, E{S3}@v4]` and `[C{S3}@v2, C{S4}@v3]`. The elected
+  occurrence need not allow every key the others declare, and the passed-over
+  occurrences activate all the same. What bounds it is the code-pinning rule:
+  every anchor's allowed signers must equal the identity the consumer's spec
+  pins, so no key the consumer did not pin can activate this way.
+- The docstring also records why one candidate per distinct key set was not
+  adopted. An outcome is met by any one allowed signer, or by an unavailable
+  declaration, so that rule would not prove every key either. It would bring
+  back one authority counted twice, cost a producer that renames and rotates
+  in one transition an extra outcome per key set, and leave no witness that
+  satisfies both rules.
+- Tests pin both shapes with real tokens, and what can reach a passed-over
+  occurrence after activation. A Hypothesis property checks the election
+  against an independent oracle for every shape the classifier admits: each
+  class nothing trusts yet contributes exactly its newest occurrence, in any
+  update order.
+
 ### One protected-tree policy (M1 of #62; #64 to #71)
 
 An auditor can now conclude that the protected-tree screens every pass applies
