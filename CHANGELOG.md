@@ -8,27 +8,33 @@ input the package used to accept, or accept for the wrong reason.
 
 ### `receipt verify` documents its exit statuses, and an unresolvable `--base-ref` exits 2 (#36)
 
-From the exit status alone, a CI job can now tell a rewritten history from a
-`--base-ref` that does not resolve. Before, the three statuses were documented
-nowhere user-facing, and such a base exited 1 with `release history is not
-immutable: cannot resolve commit '...'`, which reads exactly like a rewrite.
+From the exit status alone, a CI job can now tell a history the comparison
+refused, status 1, from a `--base-ref` it could not compare, status 2. Before,
+the three statuses were documented nowhere user-facing, and such a base exited
+1 with `release history is not immutable: cannot resolve commit '...'`, which
+reads exactly like a history the comparison found changed. Status 2 does not
+clear the history: a force-push that drops the recorded base leaves it
+unresolvable too, even in a full clone, so a base that cannot be fetched may
+mean the history was rewritten.
 
-- `receipt verify --help` now ends with an exit-status list, and the README
-  has an "Exit status" section that says the same: 0 PASS, 1 FAIL
-  (verification ran and refused, or could not finish), 2 USAGE (refused
-  before any pass ran, so nothing was verified). Each lists the paths that
-  take it. Tests read both lists back and compare them with `EXIT_OK`,
-  `EXIT_FAIL` and `EXIT_USAGE`.
+- `receipt verify --help` now ends with an exit-status list, followed by a
+  note that the spec is executed, and the README has an "Exit status" section
+  that says the same: 0 PASS, 1 FAIL (verification ran and refused, or could
+  not finish), 2 USAGE (refused before any pass ran, so nothing was
+  verified). Each lists the paths that take it. Tests read both lists back,
+  compare their labels with `EXIT_OK`, `EXIT_FAIL` and `EXIT_USAGE`, and
+  require each tested path to be listed under the status it takes.
 - A `--base-ref` that does not resolve to a commit refuses with status 2:
   `--base-ref did not resolve to a commit: <the ref, quoted>; no history was
-  compared, so this is not a history verdict`. That includes an empty ref,
-  which is what an unset CI variable expands to. With `--json` the refusal is
-  the abort object every other status-2 path prints, with `"stage":
-  "base-ref"`. A base that resolves but is not an ancestor of the commit, and
-  a release object changed or deleted since the base, are still failed
-  history passes with status 1. `run_verification` still returns the failed
-  history pass, and records in a private field that the base never resolved;
-  the command reads that field.
+  compared. Check the ref, fetch the base and run again: a base that cannot be
+  fetched may mean the history that held it was rewritten`. That includes an
+  empty ref, which is what an unset CI variable expands to. With `--json` the
+  refusal is the abort object every other status-2 path prints, with
+  `"stage": "base-ref"`. A base that resolves but is not an ancestor of the
+  commit, and a release object changed or deleted since the base, are still
+  failed history passes with status 1. `run_verification` still returns the
+  failed history pass, and records in a private field that the base never
+  resolved; the command reads that field.
 - Other runs that compare nothing keep status 1, as custody failures named in
   the verdict, and the lists say so: a shallow clone (which `actions/checkout`
   makes by default, refused before the base is read), a `--commit` the clone
@@ -52,11 +58,12 @@ unaffected. A caller that branches on the status now routes a base ref that
 does not resolve to its status-2 branch, beside the spec, root and argument
 refusals that already exit 2. If that branch means "fix the invocation",
 remember that a base that does not resolve can also mean the history that
-held it is gone. A base missing from a shallow clone does not reach that
-branch: the reader refuses every shallow clone first, a custody failure with
-status 1, as before. A caller that parsed the history failure text for `cannot resolve
-commit`, or for the reader's refusal of an empty revision, should read status
-2 and `"stage": "base-ref"` instead.
+held it is gone: a force-push that drops the recorded base leaves it
+unresolvable even in a full clone. A base missing from a shallow clone does
+not reach that branch: the reader refuses every shallow clone first, a
+custody failure with status 1, as before. A caller that parsed the history
+failure text for `cannot resolve commit`, or for the reader's refusal of an
+empty revision, should read status 2 and `"stage": "base-ref"` instead.
 
 ### One protected-tree policy (M1 of #62; #64 to #71)
 

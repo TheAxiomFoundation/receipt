@@ -12,9 +12,11 @@ The command exits with one of three statuses, :data:`EXIT_OK`,
 :data:`EXIT_FAIL` and :data:`EXIT_USAGE`, and :data:`EXIT_STATUS_HELP` lists
 which paths take which; ``--help`` prints it and the README repeats it. Status
 2 means the command refused before any pass ran. That includes a
-``--base-ref`` that does not resolve to a commit, which used to exit 1 like a
-rewritten history, so a CI job could not tell such a base from a rewrite
-(#36).
+``--base-ref`` that does not resolve to a commit. It used to exit 1, exactly
+as a history the comparison refused, so a CI job could not tell a base it
+never compared from a history it compared and found changed (#36). Status 2
+does not clear the history, though: a base that cannot be fetched may mean
+the history that held it was rewritten.
 
 The output is deliberately two-part. What the command *established* is stated
 without hedging. What it *did not* establish — that any declared gate actually
@@ -1936,7 +1938,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             as_json,
             "base-ref",
             f"--base-ref did not resolve to a commit: {args.base_ref!r}; no "
-            "history was compared, so this is not a history verdict",
+            "history was compared. Check the ref, fetch the base and run "
+            "again: a base that cannot be fetched may mean the history that "
+            "held it was rewritten",
             EXIT_USAGE,
         )
 

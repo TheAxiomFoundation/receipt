@@ -86,14 +86,16 @@ A CI job should fail on any status other than 0. Status 2 means the command
 refused before any pass ran. A status-1 verdict names the pass that failed:
 `history` for a rewritten release object or a base that is not an ancestor of
 the commit, and `custody` for a repository refused before anything was
-compared. For `--base-ref`, status 2 means this clone does not hold the base:
-the job did not fetch the ref it names, or the recorded ref is wrong, or the
-history that held it is gone. Fetch it and run again before drawing a
-conclusion. The base is resolved as `<ref>^{commit}`, so pass a commit ID or a
-ref, not a `:/<text>` search. A shallow clone, which `actions/checkout` makes
-by default, is refused before the base is read, with status 1 and
-`shallow repositories are unsupported`; use `fetch-depth: 0`. `--help` and
-`--version` exit 0.
+compared. A status-2 refusal with `"stage": "base-ref"` means this clone does
+not resolve the base: the job did not fetch the ref it names, the recorded ref
+is wrong, or the history that held it is gone. The last is what a force-push
+that rewrote the history leaves behind, even in a full clone, so status 2 does
+not clear the history. Fetch the base and run again before drawing a
+conclusion, and treat a base that cannot be fetched as a possible rewrite. The
+base is resolved as `<ref>^{commit}`, so pass a commit ID or a ref, not a
+`:/<text>` search. A shallow clone, which `actions/checkout` makes by default,
+is refused before the base is read, with status 1 and `shallow repositories
+are unsupported`; use `fetch-depth: 0`. `--help` and `--version` exit 0.
 
 ## What this verdict speaks for
 

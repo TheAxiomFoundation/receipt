@@ -5535,9 +5535,9 @@ def test_a_close_time_repository_change_invalidates_the_history_pass(
 # --- the exit-status contract (#36) -----------------------------------------
 #
 # Each status is a promise a CI integrator scripts against. The epilog and the
-# README say what the codes mean, and both are read back here and compared
-# with the constants, so neither can drift from the code. The table further
-# down runs one path for each meaning through main() itself.
+# README say what the codes mean, and both are read back here: their labels
+# are compared with the constants, and each path in the table further down,
+# which runs through main() itself, must be listed under the status it takes.
 
 README = pathlib.Path(__file__).resolve().parents[1] / "README.md"
 DOCUMENTED = {EXIT_OK: "PASS", EXIT_FAIL: "FAIL", EXIT_USAGE: "USAGE"}
@@ -5614,7 +5614,8 @@ def test_a_mismatched_spec_pin_refuses_before_the_spec_runs(
 def base_ref_refusal(ref: str) -> str:
     return (
         f"--base-ref did not resolve to a commit: {ref!r}; no history was "
-        "compared, so this is not a history verdict"
+        "compared. Check the ref, fetch the base and run again: a base that "
+        "cannot be fetched may mean the history that held it was rewritten"
     )
 
 
