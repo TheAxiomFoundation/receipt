@@ -9,10 +9,11 @@ CI explores the same examples every time and a failure is reproducible.
 
 from __future__ import annotations
 
+import random
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from hypothesis import HealthCheck, given, settings, strategies as st
+from hypothesis import HealthCheck, example, given, settings, strategies as st
 
 from receipt import tsa
 
@@ -354,3 +355,154 @@ def test_validate_token_time_refuses_every_instant_outside_utc_range(
             max_token_lead_seconds=10**40,
         )
     assert str(caught.value) == f"{label} is outside the representable UTC range: {value!r}"
+
+
+# ---------------------------------------------------------------------------
+# The pending-only election (#50). For every shape the classifier admits, a
+# class nothing trusts yet contributes exactly one candidate, its newest
+# occurrence, whatever keys its other occurrences carry; and the candidates
+# do not depend on the order the pending updates arrive in. Bundles are
+# synthetic: ``_anchor_occurrences`` is the one place they are read, so
+# replacing it runs the real graph, classification and election on any
+# layout. The oracle below rebuilds the classes independently.
+
+ANCHOR_IDS = ("A", "B", "C", "D")
+ROOTS = ("r1", "r2")
+
+
+def bundle_layouts(signers: tuple[str, ...]):
+    """One bundle's anchors: distinct ids, no signer shared between two of
+    them, which ``_load_trust_bundle`` already refuses within a bundle."""
+
+    anchor = st.tuples(
+        st.sampled_from(ANCHOR_IDS),
+        st.sampled_from(ROOTS),
+        st.frozensets(st.sampled_from(signers), min_size=1, max_size=3),
+    )
+    return st.lists(
+        anchor, min_size=1, max_size=2, unique_by=lambda layout: layout[0]
+    ).filter(
+        lambda anchors: all(
+            not first[2] & second[2]
+            for index, first in enumerate(anchors)
+            for second in anchors[index + 1:]
+        )
+    )
+
+
+# Active and pending bundles overlap in one key only, so most draws leave some
+# class with no active member, and pending bundles share keys among
+# themselves often enough to give such a class several occurrences.
+active_layouts = bundle_layouts(("s1", "s2"))
+pending_layouts = bundle_layouts(("s2", "s3", "s4", "s5"))
+REVIEWER_ACTIVE = [[("A", "r1", frozenset({"s1"}))]]
+SHAPE_ONE = [
+    [("C", "r2", frozenset({"s3"}))],
+    [("D", "r2", frozenset({"s3", "s4"}))],
+    [("E", "r2", frozenset({"s3"}))],
+]
+ROTATION = [[("C", "r2", frozenset({"s3"}))], [("C", "r2", frozenset({"s4"}))]]
+
+
+def bundle_reference(version: int) -> dict[str, str]:
+    return {
+        "bundleId": f"tsa-anchors-v{version}",
+        "path": f"records/trust/tsa-anchors-v{version}.json",
+    }
+
+
+def elected_by_oracle(
+    bundles: list[tuple[int, bool, list[tuple[str, str, frozenset[str]]]]],
+) -> set[tuple[str, str]]:
+    """Connected authorities through shared keys; newest of each untrusted class."""
+
+    parent: dict[tuple[str, str], tuple[str, str]] = {}
+
+    def find(node: tuple[str, str]) -> tuple[str, str]:
+        parent.setdefault(node, node)
+        while parent[node] != node:
+            node = parent[node]
+        return node
+
+    owner: dict[str, tuple[str, str]] = {}
+    occurrences = []
+    for version, active, anchors in bundles:
+        for anchor_id, root, signers in anchors:
+            node = (anchor_id, root)
+            find(node)
+            for signer in signers:
+                if signer in owner:
+                    parent[find(node)] = find(owner[signer])
+                else:
+                    owner[signer] = node
+            occurrences.append((version, anchor_id, root, active))
+    classes: dict[tuple[str, str], list[tuple[int, str, str, bool]]] = {}
+    for occurrence in occurrences:
+        classes.setdefault(find(occurrence[1:3]), []).append(occurrence)
+    elected = set()
+    for members in classes.values():
+        if any(active for *_rest, active in members):
+            continue
+        version, anchor_id, _root, _active = max(members)
+        elected.add((bundle_reference(version)["path"], anchor_id))
+    return elected
+
+
+@settings(PROPERTY, max_examples=300)
+@given(
+    active=st.lists(active_layouts, min_size=1, max_size=2),
+    pending=st.lists(pending_layouts, min_size=2, max_size=4),
+    order=st.randoms(use_true_random=False),
+)
+@example(active=REVIEWER_ACTIVE, pending=SHAPE_ONE, order=random.Random(0))
+@example(active=REVIEWER_ACTIVE, pending=ROTATION, order=random.Random(0))
+def test_a_pending_only_class_elects_exactly_its_newest_occurrence(
+    active: list, pending: list, order
+) -> None:
+    """The reviewer's two shapes are examples: E@v4 alone, then C@v3 alone."""
+
+    from unittest import mock
+
+    layouts = {}
+    bundles = []
+    for version, anchors in enumerate([*active, *pending], start=1):
+        layouts[bundle_reference(version)["path"]] = anchors
+        bundles.append((version, version <= len(active), anchors))
+    trusted = {
+        bundle_reference(version)["path"]: bundle_reference(version)
+        for version in range(1, len(active) + 1)
+    }
+    updates = [
+        bundle_reference(version)
+        for version in range(len(active) + 1, len(active) + len(pending) + 1)
+    ]
+
+    def occurrences(_records, reference, *, active, spec):
+        del spec
+        built = [
+            tsa._AnchorOccurrence(
+                reference=reference,
+                anchor={"id": anchor_id},
+                path=reference["path"],
+                version=tsa._pending_bundle_version(reference),
+                authority=(anchor_id, root),
+                signers=signers,
+                active=active,
+            )
+            for anchor_id, root, signers in layouts[reference["path"]]
+        ]
+        return tuple(sorted(built, key=lambda occurrence: occurrence.order))
+
+    def elected(walked: list[dict[str, str]]) -> set[tuple[str, str]] | str:
+        try:
+            return set(tsa._supplemental_candidates(None, trusted, walked, spec=None))
+        except tsa.TsaError as exc:
+            return str(exc)
+
+    with mock.patch.object(tsa, "_anchor_occurrences", occurrences):
+        result = elected(updates)
+        shuffled = list(updates)
+        order.shuffle(shuffled)
+        assert elected(shuffled) == result
+    if isinstance(result, set):
+        assert result == elected_by_oracle(bundles)
