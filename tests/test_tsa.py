@@ -7554,12 +7554,15 @@ def test_a_passed_over_occurrence_answers_only_a_legacy_witness_the_spec_allows(
     """Which witness can reach an occurrence the election passed over (#50).
 
     After activation a v2 witness must name the newest active bundle, so it
-    cannot name the passed-over occurrence's. A legacy witness may name any
-    active single-anchor bundle, but only while ``legacy_witness_bundle_id``
-    names the newest one: refused under the genesis id, it is accepted under
-    the newest bundle's, and the key the transition never showed -- S4 in
-    D@v3, or S3 in C@v2 -- vouches. The bound is the pinning rule: that key is
-    one the consumer's spec pins for that slot.
+    cannot name the passed-over occurrence's. A legacy witness, with nothing
+    pending, may name any active single-anchor bundle, but only while
+    ``legacy_witness_bundle_id`` names the newest active bundle and that
+    bundle configures a single anchor. Refused under the genesis id, it is
+    accepted under the newest bundle's, and the key the transition never
+    showed -- S4 in D@v3, or S3 in C@v2 -- vouches. That key is one the slot
+    allows, and a slot's allowed keys are the consumer's pins (the load rule,
+    tested where bundles load); a key the slot does not allow is refused on
+    the same route, here S4 offered for C@v2.
     """
 
     shape = reviewer_shape(tmp_path, local_anchors, rotated_beta, rotation=rotation)
@@ -7570,6 +7573,8 @@ def test_a_passed_over_occurrence_answers_only_a_legacy_witness_the_spec_allows(
         (local_anchors[1].tsa, shape.s3) if rotation else (rotated_beta, shape.s4)
     )
     passed_over = shape.pending[version]
+    # The premise: the election did pass this occurrence over.
+    assert (passed_over["path"], anchor_id) not in shape.candidates(*sorted(shape.pending))
     token = shape.stamp(anchor_id, authority, "after-activation")
     claim = supplemental_outcome(
         shape.tree, passed_over, shape.anchors[anchor_id], token, signer=signer
@@ -7614,14 +7619,26 @@ def test_a_passed_over_occurrence_answers_only_a_legacy_witness_the_spec_allows(
         verify(shape.spec)
     assert str(caught.value) == LEGACY_REFUSED_ONCE_V2_IS_ACTIVE
 
-    evidence = verify(dataclasses.replace(shape.spec, legacy_witness_bundle_id=newest))
+    permissive = dataclasses.replace(shape.spec, legacy_witness_bundle_id=newest)
+    evidence = verify(permissive)
     assert [
         (token.trust_bundle_path, token.anchor_id, token.tsa_spki_sha256)
         for token in evidence.tokens
     ] == [(passed_over["path"], anchor_id, signer["spkiSha256"])]
-    identity = shape.spec.identity(str(passed_over["bundleId"]), anchor_id)
-    assert identity is not None
-    assert signer["spkiSha256"] in identity.signer_spki_sha256
+
+    unpinned = shape.stamp("C", rotated_beta, "unpinned")
+    offered = supplemental_outcome(
+        shape.tree, shape.pending[2], shape.anchors["C"], unpinned, signer=shape.s4
+    )
+    del offered["role"]
+    shape.tree.witness.write_bytes(
+        canonical_bytes({**legacy, **offered}) + b"\n"
+    )
+    with pytest.raises(TsaError) as caught:
+        verify(permissive)
+    assert str(caught.value) == (
+        f"RFC 3161 token signer is not pinned for TSA anchor 'C': {shape.s4}"
+    )
 
 
 def test_a_legacy_witness_lets_a_superseded_signer_vouch_where_the_spec_allows_it(
@@ -7632,10 +7649,11 @@ def test_a_legacy_witness_lets_a_superseded_signer_vouch_where_the_spec_allows_i
     """The legacy route above is the legacy schema's rule, not the election's.
 
     No pending-only class here: an active rotation of alpha from S1 in v1 to
-    S2 in v2. A v2 witness naming v1 is refused once v2 is active, which is
-    the retirement ``TsaSpec`` describes. A legacy witness naming v1 is
-    accepted whenever ``legacy_witness_bundle_id`` names v2, so S1 still
-    vouches for a record written then.
+    S2 in v2. A legacy witness naming v1 is refused under the genesis id and
+    accepted once ``legacy_witness_bundle_id`` names v2, so S1 still vouches
+    for a record written then. The same token in a v2 witness naming v1 is
+    refused once v2 is active, which is the retirement ``TsaSpec``
+    describes, and accepted while v1 is the only active bundle.
     """
 
     alpha = local_anchors[0]
@@ -7658,6 +7676,28 @@ def test_a_legacy_witness_lets_a_superseded_signer_vouch_where_the_spec_allows_i
     assert [
         (token.trust_bundle_path, token.tsa_spki_sha256) for token in evidence.tokens
     ] == [(BUNDLE_LOGICAL, alpha.signer_pins["spkiSha256"])]
+
+    def as_v2_witness(payload: dict[str, Any]) -> None:
+        outcome = {"status": "available"}
+        for key in (
+            "tsaAnchorId", "tsa", "tokenPath", "tokenSha256", "tsaPolicyOid",
+            "tsaImprintAlgorithmOid", "tsaSignerCertificateSha256",
+            "tsaSignerSpkiSha256",
+        ):
+            outcome[key] = payload.pop(key)
+        payload["schemaVersion"] = "thesis_rfc3161_witness_v2"
+        payload["anchorOutcomes"] = [outcome]
+
+    rewrite_witness(tree, as_v2_witness)
+    with pytest.raises(TsaError) as caught:
+        verify_witness(tree.record, spec=spec, records=tree.records, trusted_bundles=active)
+    assert str(caught.value) == (
+        "multi-token witness does not use the newest active TSA trust bundle"
+    )
+    assert verify_witness(
+        tree.record, spec=spec, records=tree.records,
+        trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+    ).status == "available"
 
 
 def test_one_supplemental_outcome_shows_at_most_one_of_its_anchors_keys(

@@ -66,9 +66,9 @@ new authority and so must carry a supplemental outcome -- available, or
 declared unavailable with a reason, which the ported rule accepts exactly as
 the baseline does -- before the transition can activate it (the outcome must
 be present; that the new key answered is shown only when it is available; and
-it is the outcome of the anchor's pending-only class, so where a later bundle
-of the same transition files that class under another name, the newer name
-carries it, #50) --
+where the anchor's keys are new, so that it belongs to a pending-only class,
+the outcome is that class's, so where a later bundle of the same transition
+files the class under another name, the newer name carries it, #50) --
 the ported supplemental-outcome refusal, reaching a case
 the baseline let through because it took the ID alone for the identity,
 while a pending anchor carrying every signer one active authority's
@@ -243,10 +243,11 @@ set was not (peer review, sixth gate round two).  Both of the class's names do
 activate, and neither can be credited beside the other: a v2 witness must name
 the newest active bundle, and an outcome may only select an anchor that bundle
 configures, so the other name is refused as an anchor the named bundle does
-not pin.  A legacy witness is the exception: while
-``legacy_witness_bundle_id`` names the newest active bundle it may name any
-active single-anchor bundle, and so answer under a name the election passed
-over, whose keys the transition need not have shown.  The election settles
+not pin.  A legacy witness is the exception: once no transition is pending,
+and while ``legacy_witness_bundle_id`` names the newest active bundle and that
+bundle configures a single anchor, it may name any active single-anchor
+bundle, and so answer under a name the election passed over, whose keys the
+transition need not have shown.  The election settles
 which occurrence answers for the class, then, and not which of its keys are
 proven; ``_supplemental_candidates`` says what bounds the difference (#50).
 One bundle carrying both names at once is the one shape that could
@@ -684,10 +685,11 @@ class TsaSpec:
     order does the retiring: a v2-schema witness must use the newest active
     bundle, so the superseded signer stops vouching for new records once the
     new bundle is active, while records that named the old bundle keep
-    verifying under it.  A legacy-schema witness is the exception: while
-    :attr:`legacy_witness_bundle_id` names the newest active bundle it may
-    name any active single-anchor bundle, so there a superseded signer still
-    vouches for new records.  Verification therefore splits into eras by bundle
+    verifying under it.  A legacy-schema witness is the exception: once no
+    transition is pending, and while :attr:`legacy_witness_bundle_id` names
+    the newest active bundle and that bundle configures a single anchor, it
+    may name any active single-anchor bundle, so there a superseded signer
+    still vouches for new records.  Verification therefore splits into eras by bundle
     version, each carried explicitly in the consumer spec.  Within one
     bundle several signers may be allowed at once -- the set has no
     singleton constraint -- which is concurrent authorization, not
@@ -3940,9 +3942,10 @@ def _supplemental_candidates(
     S3 is never shown at v2.  Every passed-over occurrence still activates
     with the transition, so D at v3 becomes an active anchor allowing S4,
     which no token of the transition showed.  A v2 witness cannot reach it,
-    since it must name the newest active bundle.  A legacy witness can, since
-    it may name any active single-anchor bundle while
-    ``legacy_witness_bundle_id`` names the newest one.  What bounds this is
+    since it must name the newest active bundle.  A legacy witness can once
+    no transition is pending, since it may then name any active single-anchor
+    bundle, provided ``legacy_witness_bundle_id`` names the newest active
+    bundle and that bundle configures a single anchor.  What bounds this is
     the code-pinning rule: ``_load_trust_bundle`` requires every anchor's
     allowed signers to equal the identity the consumer's own spec pins for
     it, so a key that activates this way is one the consumer pinned for that
@@ -3950,11 +3953,13 @@ def _supplemental_candidates(
     occurrence elected: it is satisfied by a token from any one of the
     anchor's allowed signers, or by an unavailable outcome with a reason.
     The reused-ID rule above is per class in the same way.  An anchor reusing
-    an active ID under a new root is a candidate when it is its class's
-    newest occurrence; filed again under another name by a later bundle of
-    the same transition, as in ``[alpha-id over beta's root {S3}@v2,
-    E{S3}@v3]``, it activates on the outcome E carries, and an outcome
-    offered for it is refused as not introduced.
+    an active ID under a new root, with keys no active authority holds, is a
+    pending-only class's occurrence and a candidate when it is the class's
+    newest; filed again under another name by a later bundle of the same
+    transition, as in ``[alpha-id over beta's root {S3}@v2, E{S3}@v3]``, it
+    activates on the outcome E carries, and an outcome offered for it is
+    refused as not introduced.  (One whose keys make it an active authority
+    under a new name, by the rename rule above, needs no outcome at all.)
 
     One candidate per distinct key set was considered instead, so that each
     key set a pending occurrence introduced would need a token of its own, and

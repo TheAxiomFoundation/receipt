@@ -13,7 +13,7 @@ import random
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from hypothesis import HealthCheck, example, given, settings, strategies as st
+from hypothesis import HealthCheck, event, example, given, settings, strategies as st
 
 from receipt import tsa
 
@@ -370,29 +370,33 @@ ANCHOR_IDS = ("A", "B", "C", "D")
 ROOTS = ("r1", "r2")
 
 
-def bundle_layouts(signers: tuple[str, ...]):
-    """One bundle's anchors: distinct ids, no signer shared between two of
-    them, which ``_load_trust_bundle`` already refuses within a bundle."""
+@st.composite
+def bundle_layouts(draw, signers: tuple[str, ...]):
+    """One bundle's anchors: distinct ids, and disjoint signer sets, since
+    ``_load_trust_bundle`` already refuses two anchors of one bundle that
+    allow one signer. Built disjoint rather than filtered, so no draw is
+    thrown away."""
 
-    anchor = st.tuples(
-        st.sampled_from(ANCHOR_IDS),
-        st.sampled_from(ROOTS),
-        st.frozensets(st.sampled_from(signers), min_size=1, max_size=3),
+    count = draw(st.integers(min_value=1, max_value=2))
+    anchor_ids = draw(
+        st.lists(st.sampled_from(ANCHOR_IDS), min_size=count, max_size=count, unique=True)
     )
-    return st.lists(
-        anchor, min_size=1, max_size=2, unique_by=lambda layout: layout[0]
-    ).filter(
-        lambda anchors: all(
-            not first[2] & second[2]
-            for index, first in enumerate(anchors)
-            for second in anchors[index + 1:]
-        )
-    )
+    pool = list(draw(st.permutations(signers)))
+    anchors = []
+    for index, anchor_id in enumerate(anchor_ids):
+        left_for_the_rest = count - index - 1
+        size = draw(st.integers(min_value=1, max_value=min(3, len(pool) - left_for_the_rest)))
+        taken, pool = pool[:size], pool[size:]
+        anchors.append((anchor_id, draw(st.sampled_from(ROOTS)), frozenset(taken)))
+    return anchors
 
 
-# Active and pending bundles overlap in one key only, so most draws leave some
-# class with no active member, and pending bundles share keys among
-# themselves often enough to give such a class several occurrences.
+# Active and pending bundles share one key only, which leaves most pending keys
+# unowned by any active class, and pending bundles share keys among themselves
+# often enough to give an untrusted class several occurrences. What a run
+# actually reached is reported as Hypothesis events
+# (``--hypothesis-show-statistics``), and the reviewer's two shapes are pinned
+# by a separate test, so a refusal cannot stand in for an election.
 active_layouts = bundle_layouts(("s1", "s2"))
 pending_layouts = bundle_layouts(("s2", "s3", "s4", "s5"))
 REVIEWER_ACTIVE = [[("A", "r1", frozenset({"s1"}))]]
@@ -402,6 +406,9 @@ SHAPE_ONE = [
     [("E", "r2", frozenset({"s3"}))],
 ]
 ROTATION = [[("C", "r2", frozenset({"s3"}))], [("C", "r2", frozenset({"s4"}))]]
+# Version numbers start at 1, 7, 8 or 9, so runs cross from one digit to two
+# and the bundle path that sorts last as a string is not always the newest.
+FIRST_VERSIONS = (1, 7, 8, 9)
 
 
 def bundle_reference(version: int) -> dict[str, str]:
@@ -413,8 +420,13 @@ def bundle_reference(version: int) -> dict[str, str]:
 
 def elected_by_oracle(
     bundles: list[tuple[int, bool, list[tuple[str, str, frozenset[str]]]]],
-) -> set[tuple[str, str]]:
-    """Connected authorities through shared keys; newest of each untrusted class."""
+) -> dict[tuple[str, str], tuple[dict[str, str], dict[str, str]]]:
+    """Connected authorities through shared keys; newest of each untrusted class.
+
+    Returns what ``_supplemental_candidates`` returns: for each candidate's
+    ``(bundle path, anchor ID)``, that occurrence's own bundle reference and
+    anchor, which is what a supplemental outcome is then verified against.
+    """
 
     parent: dict[tuple[str, str], tuple[str, str]] = {}
 
@@ -439,42 +451,40 @@ def elected_by_oracle(
     classes: dict[tuple[str, str], list[tuple[int, str, str, bool]]] = {}
     for occurrence in occurrences:
         classes.setdefault(find(occurrence[1:3]), []).append(occurrence)
-    elected = set()
+    elected = {}
     for members in classes.values():
         if any(active for *_rest, active in members):
             continue
         version, anchor_id, _root, _active = max(members)
-        elected.add((bundle_reference(version)["path"], anchor_id))
+        reference = bundle_reference(version)
+        elected[(reference["path"], anchor_id)] = (reference, {"id": anchor_id})
     return elected
 
 
-@settings(PROPERTY, max_examples=300)
-@given(
-    active=st.lists(active_layouts, min_size=1, max_size=2),
-    pending=st.lists(pending_layouts, min_size=2, max_size=4),
-    order=st.randoms(use_true_random=False),
-)
-@example(active=REVIEWER_ACTIVE, pending=SHAPE_ONE, order=random.Random(0))
-@example(active=REVIEWER_ACTIVE, pending=ROTATION, order=random.Random(0))
-def test_a_pending_only_class_elects_exactly_its_newest_occurrence(
-    active: list, pending: list, order
-) -> None:
-    """The reviewer's two shapes are examples: E@v4 alone, then C@v3 alone."""
+def run_election(active: list, pending: list, *, first_version: int, order=None):
+    """The real graph, classification and election over synthetic bundles.
+
+    Returns the candidates (or the refusal text), the same for the pending
+    updates in shuffled order when ``order`` is given, and the layout the
+    oracle reads.
+    """
 
     from unittest import mock
 
     layouts = {}
     bundles = []
-    for version, anchors in enumerate([*active, *pending], start=1):
+    for version, anchors in enumerate([*active, *pending], start=first_version):
         layouts[bundle_reference(version)["path"]] = anchors
-        bundles.append((version, version <= len(active), anchors))
+        bundles.append((version, version < first_version + len(active), anchors))
     trusted = {
         bundle_reference(version)["path"]: bundle_reference(version)
-        for version in range(1, len(active) + 1)
+        for version in range(first_version, first_version + len(active))
     }
     updates = [
         bundle_reference(version)
-        for version in range(len(active) + 1, len(active) + len(pending) + 1)
+        for version in range(
+            first_version + len(active), first_version + len(active) + len(pending)
+        )
     ]
 
     def occurrences(_records, reference, *, active, spec):
@@ -493,16 +503,69 @@ def test_a_pending_only_class_elects_exactly_its_newest_occurrence(
         ]
         return tuple(sorted(built, key=lambda occurrence: occurrence.order))
 
-    def elected(walked: list[dict[str, str]]) -> set[tuple[str, str]] | str:
+    def elected(walked: list[dict[str, str]]) -> dict | str:
         try:
-            return set(tsa._supplemental_candidates(None, trusted, walked, spec=None))
+            return dict(tsa._supplemental_candidates(None, trusted, walked, spec=None))
         except tsa.TsaError as exc:
             return str(exc)
 
     with mock.patch.object(tsa, "_anchor_occurrences", occurrences):
         result = elected(updates)
-        shuffled = list(updates)
-        order.shuffle(shuffled)
-        assert elected(shuffled) == result
-    if isinstance(result, set):
-        assert result == elected_by_oracle(bundles)
+        reordered = None
+        if order is not None:
+            shuffled = list(updates)
+            order.shuffle(shuffled)
+            reordered = elected(shuffled)
+    return result, reordered, bundles
+
+
+@settings(PROPERTY, max_examples=300)
+@given(
+    active=st.lists(active_layouts, min_size=1, max_size=2),
+    pending=st.lists(pending_layouts, min_size=2, max_size=4),
+    first_version=st.sampled_from(FIRST_VERSIONS),
+    order=st.randoms(use_true_random=False),
+)
+def test_a_pending_only_class_elects_exactly_its_newest_occurrence(
+    active: list, pending: list, first_version: int, order
+) -> None:
+    """Each untrusted class's one candidate is its newest occurrence, whole.
+
+    The key, and the bundle and anchor it carries, agree with the oracle for
+    every shape the classification admits; a shape it refuses is refused in
+    the same words in any update order.
+    """
+
+    result, reordered, bundles = run_election(
+        active, pending, first_version=first_version, order=order
+    )
+    assert reordered == result
+    if isinstance(result, str):
+        event("refused by the classification")
+        return
+    expected = elected_by_oracle(bundles)
+    event(f"admitted with {len(expected)} candidate(s)")
+    assert result == expected
+
+
+@pytest.mark.parametrize("first_version", FIRST_VERSIONS)
+@pytest.mark.parametrize(
+    ("pending", "newest"),
+    [(SHAPE_ONE, "E"), (ROTATION, "C")],
+    ids=["three-bundle-class", "rotation"],
+)
+def test_the_reviewer_shapes_are_admitted_and_elect_their_newest_occurrence(
+    pending: list, newest: str, first_version: int
+) -> None:
+    """#50's two shapes: E alone, then C at its newest version alone.
+
+    Asserted outright, so the property's admitted-shapes-only comparison
+    cannot hide a classification that refuses them.
+    """
+
+    result, _reordered, bundles = run_election(
+        REVIEWER_ACTIVE, pending, first_version=first_version
+    )
+    reference = bundle_reference(first_version + len(REVIEWER_ACTIVE) + len(pending) - 1)
+    assert result == {(reference["path"], newest): (reference, {"id": newest})}
+    assert result == elected_by_oracle(bundles)
