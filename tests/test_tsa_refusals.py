@@ -505,6 +505,67 @@ def test_an_active_bundle_refusal_still_answers_before_a_pending_shape_refusal(
     )
 
 
+def without_path(reference: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in reference.items() if key != "path"}
+
+
+def test_an_earlier_pending_update_refusal_answers_before_a_later_missing_path(
+    tree: WitnessTree,
+) -> None:
+    """Delta review of #92: main walked the sorted pending updates one at a
+    time, loading each before it read the next one's ``path``. Both of these
+    sort to the same key, so input order holds, and main refused the first in
+    ``_load_trust_bundle``. 042cfcb checked every update's ``path`` before
+    the walk and answered with the second one's shape refusal instead."""
+
+    with pytest.raises(TsaError) as refused:
+        verify_step(
+            tree.record,
+            spec=tree.spec,
+            records=tree.records,
+            prior_pending_updates=[{**tree.reference, "path": ""}, without_path(tree.reference)],
+        )
+    assert str(refused.value) == "TSA trust bundle path is not immutable/versioned: ''"
+
+
+def test_a_pending_update_without_a_path_is_refused_where_main_raised_key_error(
+    tree: WitnessTree,
+) -> None:
+    """The reversed order raised ``KeyError: 'path'`` on main, at the first
+    update; it is now the named refusal, at that same update."""
+
+    update = without_path(tree.reference)
+    with pytest.raises(TsaError) as refused:
+        verify_step(
+            tree.record,
+            spec=tree.spec,
+            records=tree.records,
+            prior_pending_updates=[update, {**tree.reference, "path": ""}],
+        )
+    assert str(refused.value) == (
+        f"pending TSA bundle update is not a bundle reference: {update!r}"
+    )
+
+
+@pytest.mark.parametrize("reverse", [False, True], ids=["empty-path-first", "pathless-first"])
+def test_the_same_transition_updates_keep_mains_stale_refusal(
+    tree: WitnessTree, reverse: bool
+) -> None:
+    """``transition_bundle_updates`` must equal the updates the record
+    carries before any of them is walked, so on main and here this record,
+    which carries none, refuses the first supplied entry as stale."""
+
+    updates = [{**tree.reference, "path": ""}, without_path(tree.reference)]
+    if reverse:
+        updates.reverse()
+    with pytest.raises(TsaError) as refused:
+        verify_tree(tree, transition_bundle_updates=updates)
+    first = updates[0].get("path", updates[0])
+    assert str(refused.value) == (
+        f"stale transition bundle update supplied for {tree.record}: {first!r}"
+    )
+
+
 def test_a_pending_update_with_a_huge_version_is_refused(tree: WitnessTree) -> None:
     update = {**tree.reference, "path": HUGE_VERSION_PATH}
     with pytest.raises(TsaError):

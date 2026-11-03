@@ -3796,9 +3796,9 @@ def _pending_class_collision_message(
 def _require_bundle_reference(value: Any, label: str, *, require_path: bool) -> None:
     """Refuse a caller's bundle reference that cannot be ordered or compared.
 
-    ``require_path`` is set for a pending update only.  Main read a pending
-    update's ``path`` by subscript and raised ``KeyError`` without one, so a
-    refusal there pre-empts nothing.  An active bundle's ``path`` was read
+    ``require_path`` is set for a pending update only, and only inside the
+    sorted loop, where main read that update's ``path`` by subscript and
+    raised ``KeyError`` without one, so a refusal there pre-empts nothing.  An active bundle's ``path`` was read
     with ``.get``, and one without it went on to ``_load_trust_bundle``,
     which refuses it in its own words; requiring it here would move that
     text.
@@ -3855,11 +3855,13 @@ def _build_authority_history(
     """
 
     # Each collection is the caller's, and is sorted below by a key read out
-    # of each entry: an entry that is not a mapping raised AttributeError
-    # there on main, and a pending update without ``path`` raised KeyError
-    # (#90).  Each is checked where main crashed and no earlier: the pending
-    # updates only after every active bundle has loaded, so an active
-    # bundle's refusal still answers first.
+    # of each entry.  On main an entry that was not a mapping raised
+    # AttributeError in that key, and one whose ``path`` was too large for
+    # ``str()`` raised ValueError, before anything in the collection loaded;
+    # this checks those two things at that point (#90).  The pending updates
+    # are checked only after every active bundle has loaded, as main sorted
+    # them only then, and a pending update without ``path`` is refused in
+    # the sorted loop, where main raised KeyError.
     for reference in trusted_bundles.values():
         _require_bundle_reference(reference, "trusted TSA bundle", require_path=False)
     active_occurrences: list[_AnchorOccurrence] = []
@@ -3873,13 +3875,20 @@ def _build_authority_history(
 
     for reference in transition_bundle_updates:
         _require_bundle_reference(
-            reference, "pending TSA bundle update", require_path=True
+            reference, "pending TSA bundle update", require_path=False
         )
     pending_batches: list[tuple[_AnchorOccurrence, ...]] = []
     for reference in sorted(
         transition_bundle_updates,
         key=lambda value: (_pending_bundle_version(value), str(value.get("path", ""))),
     ):
+        # Main subscripted each update's ``path`` here, in sorted order and
+        # after loading every earlier one, so a missing ``path`` is refused
+        # at this element and no sooner: an earlier update that refuses in
+        # ``_load_trust_bundle`` still answers first.
+        _require_bundle_reference(
+            reference, "pending TSA bundle update", require_path=True
+        )
         bundle_path = str(reference["path"])
         if bundle_path in trusted_bundles:
             continue

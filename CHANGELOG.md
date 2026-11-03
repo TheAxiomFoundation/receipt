@@ -56,33 +56,40 @@ through its own words and exception classes.
 
 ### Witness refusals: bounded cost, and named errors for caller mistakes (#89, #90)
 
-No input the verifier refused before is accepted now, and every existing
-refusal keeps its text. What changes is what a refusal costs, which exception
-reports a caller's mistake, and one narrowing for callers that pass a
-non-mapping object, described below.
+The verifier accepts no input it refused before. What changes is what a
+refusal costs, which exception reports a caller's mistake, and one narrowing
+for callers that pass a non-mapping object, described below. A differential
+of 1,055 malformed-argument cases against main found no refusal whose text
+moved.
 
-- A witness `tokenPath` whose path under the records root is 4,096 bytes or
-  longer is refused before any path resolution. No supported platform can
-  open such a pathname whole, so the verifier never read one. Before, the
-  refusal cost time quadratic in the component count (46 s at 100,000
-  components), and on Python 3.11 to 3.13 it then raised `OSError` instead of
-  refusing. It now gets the refusal a missing token always had: `witness token
-  is missing for <record>: <path>`. The bound applies to the path the spelling
-  names, so a long spelling of a short path (`records/./././...`) is read as
-  before. The pinned root and trust-bundle loads use the same bound and keep
-  their own "missing" wording.
+- The verifier refuses a witness `tokenPath` whose path under the records
+  root is 4,096 bytes or longer before it resolves any path. No supported
+  platform can open such a pathname whole, so the verifier never read one.
+  Before, the refusal cost time quadratic in the component count (#89
+  measured 46 s at 100,000 components), and on Python 3.11 to 3.13 it then
+  raised `OSError` instead of refusing. It now gives the refusal a missing
+  token always had: `witness token is missing for <record>: <path>`. The
+  bound measures the path the spelling names, so the verifier still reads a
+  long spelling of a short path (`records/./././...`). The pinned-root and
+  trust-bundle loads apply the same bound and keep their own "missing"
+  wording.
 - A token path with one component longer than NAME_MAX gets that refusal too,
   instead of `OSError` from `Path.is_file`.
-- The symlink walk over a path's components resolves each prefix once, instead
-  of resolving every parent from scratch. A 2,032-level tree under the bound
-  took 81 s of CPU before; it now takes about 1 s. A differential property
+- The symlink walk over a path's components resolves each prefix once,
+  instead of resolving every parent from scratch. Between depths 100 and 400
+  the old walk's `stat`/`lstat` calls grew 14-fold; the new walk's grow
+  linearly, and a test holds them to at most 5-fold. A differential property
   checks that the walk returns exactly what the old walk returned.
 - `verify_timestamp_token`, `verify_witness(trusted_bundles=...)`,
   `verify_witness(transition_bundle_updates=...)`,
   `verify_witness_step(prior_pending_updates=...)` and
   `preferred_active_trust_bundle` refuse malformed caller arguments with
   `TsaError` instead of `KeyError`, `TypeError`, `AttributeError` or
-  `ValueError`. New refusal texts:
+  `ValueError`. Each check sits where main raised. The verifier checks every
+  `trusted_bundles` value before it loads any of them; it checks pending
+  updates only after it has loaded every active bundle, and it checks each
+  pending update's `path` in sorted order, after loading the updates before
+  it. New refusal texts:
   `timestamp token bundle reference is not an object`,
   `timestamp token bundle reference lacks <key>`,
   `timestamp token bundle reference path is too large to compare`,
@@ -95,21 +102,21 @@ non-mapping object, described below.
   `pending TSA bundle update is not a bundle reference: <value>`,
   `pending TSA bundle update path is too large to compare`,
   `newest active TSA trust bundle is not a bundle reference: <value>` and
-  `newest active TSA trust bundle reference lacks <key>`. A caller value too
-  large for `str()` appears in an existing message as
+  `newest active TSA trust bundle reference lacks <key>`. Where an existing
+  message names a caller value too large for `str()`, it shows
   `<int too large to display>`. Bundle versions of any length now order
   numerically, without `int()`. So a `trusted_bundles` key with a
-  5,000-digit version, which raised `ValueError`, now gets the verdict the
-  same entries get under a representable version: accepted where main
-  accepts that shape.
-- The bundle reference given to `verify_timestamp_token`, and each value of
-  `trusted_bundles` that a witness selects, must now be a
-  `collections.abc.Mapping`. Main read them with `[...]` and `.get`, so a
-  non-mapping object that answered those was accepted; it is now refused
-  (`timestamp token bundle reference is not an object`,
-  `trusted TSA bundle <path> is not a bundle reference`). The parameters
-  are typed as mappings, and no caller in this repository passes anything
-  else.
+  5,000-digit version, which raised `ValueError`, now gets the verdict main
+  gives the same entries under a representable version: acceptance where
+  main accepts that shape.
+- `verify_timestamp_token` now requires its bundle reference and claim to be
+  `collections.abc.Mapping` objects, and so does `_bundle_for_claim` for each
+  `trusted_bundles` value a witness selects. Main read them with `[...]` and
+  `.get`, so it accepted a non-mapping object that answered those calls; the
+  verifier now refuses one (`timestamp token bundle reference is not an
+  object`, `timestamp token claim is not an object`, `trusted TSA bundle
+  <path> is not a bundle reference`). The signatures declare mappings, and no
+  caller in this repository passes anything else.
 - `-attime` is genTime floored to whole seconds, in the TSA verifier and the
   release-chain verifier. `int(gen_time.timestamp())` truncated toward zero
   and rounded through a float, so it was one second late before 1970
