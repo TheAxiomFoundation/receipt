@@ -5692,6 +5692,25 @@ def _raising_spec(repo: pathlib.Path) -> str:
     return str(path)
 
 
+def _a_base_that_is_not_an_ancestor(repo: pathlib.Path) -> list[str]:
+    tree = _git(repo, "rev-parse", "HEAD^{tree}")
+    orphan = _git(repo, "commit-tree", tree, "-m", "not an ancestor")
+    return ["--base-ref", orphan, "--expect-commit", head_oid(repo)]
+
+
+def _a_shallow_clone(repo: pathlib.Path, tmp: pathlib.Path) -> list[str]:
+    # One commit deep, as actions/checkout clones by default; a second commit
+    # in the origin is what makes the clone shallow rather than complete.
+    _git(repo, "commit", "--quiet", "--allow-empty", "-m", "a second commit")
+    shallow = tmp / "shallow"
+    _git(tmp, "clone", "--quiet", "--depth", "1", f"file://{repo}", str(shallow))
+    return ["--spec", str(shallow / "verification/spec.py"), "--root", str(shallow)]
+
+
+def _spec_digest(repo: pathlib.Path) -> str:
+    return hashlib.sha256((repo / "verification/spec.py").read_bytes()).hexdigest()
+
+
 # One case per meaning the epilog and README list, each through --json so the
 # machine half of the contract is checked too: (status, stage or failed pass).
 EXIT_PATHS = {
@@ -5708,7 +5727,11 @@ EXIT_PATHS = {
         EXIT_FAIL,
         "history",
     ),
+    "non-ancestor-base": (
+        lambda repo, tmp: _a_base_that_is_not_an_ancestor(repo), EXIT_FAIL, "history"
+    ),
     "expect-commit": (lambda repo, tmp: ["--expect-commit", "0" * 40], EXIT_FAIL, "custody"),
+    "shallow-clone": (lambda repo, tmp: _a_shallow_clone(repo, tmp), EXIT_FAIL, "custody"),
     "unheld-commit": (lambda repo, tmp: ["--commit", "0" * 40], EXIT_FAIL, "custody"),
     "root-not-top-level": (
         lambda repo, tmp: ["--root", str(repo / "rules")], EXIT_FAIL, "custody"
@@ -5720,6 +5743,16 @@ EXIT_PATHS = {
         "arguments",
     ),
     "spec-pin": (lambda repo, tmp: ["--expect-spec-sha256", "0" * 64], EXIT_USAGE, "spec"),
+    "non-digest-spec-pin": (
+        lambda repo, tmp: ["--expect-spec-sha256", "not-a-digest"], EXIT_USAGE, "spec"
+    ),
+    "non-digest-anchor-pin": (
+        lambda repo, tmp: [
+            "--expect-spec-sha256", _spec_digest(repo), "--expect-anchor-set", "not-a-digest",
+        ],
+        EXIT_USAGE,
+        "spec",
+    ),
     "spec-raises": (lambda repo, tmp: ["--spec", _raising_spec(repo)], EXIT_USAGE, "spec"),
     "root": (lambda repo, tmp: ["--root", str(tmp / "absent")], EXIT_USAGE, "root"),
     "base-ref": (
@@ -5766,6 +5799,8 @@ EXIT_PATH_DOCS = {
     "pass": "every pass the spec configures ran and succeeded",
     "custody": "a failed custody, binding, declaration or history pass",
     "history-rewrite": "a release object changed or deleted since --base-ref",
+    "non-ancestor-base": "a base that is not an ancestor",
+    "shallow-clone": "a shallow clone",
     "expect-commit": (
         "an --expect-commit or --expect-tree that is malformed or does not match"
     ),
@@ -5774,6 +5809,12 @@ EXIT_PATH_DOCS = {
     "dependency": "--base-ref without --expect-commit",
     "anchor-pin-dependency": "--expect-anchor-set without --expect-spec-sha256",
     "spec-pin": "does not match --expect-spec-sha256",
+    "non-digest-spec-pin": (
+        "an --expect-spec-sha256 or --expect-anchor-set that is not a SHA-256 digest"
+    ),
+    "non-digest-anchor-pin": (
+        "an --expect-spec-sha256 or --expect-anchor-set that is not a SHA-256 digest"
+    ),
     "spec-raises": "a spec that cannot be loaded",
     "root": "a --root that does not exist or is not a directory",
     "base-ref": "a --base-ref that does not resolve to a commit",
@@ -5828,6 +5869,55 @@ def test_each_exit_path_is_documented_under_the_status_it_takes(path: str) -> No
         assert set(lists) == set(DOCUMENTED), document
         listed_under = sorted(code for code, text in lists.items() if words in text)
         assert listed_under == [status], (document, words, listed_under)
+
+
+#: Listed paths the table cannot run, because they need argparse's own exit,
+#: the environment, a substituted function or no --root at all: the words each
+#: is listed under, the status it takes, and the test here that runs it.
+EXIT_PATHS_TESTED_ELSEWHERE = {
+    "an argument argparse rejects": (
+        EXIT_USAGE, "test_argparse_refusals_exit_with_the_usage_status"
+    ),
+    "a --spec path that, without --root, goes through a symlink and so leaves "
+    "the repository ambiguous": (
+        EXIT_USAGE, "test_default_root_refuses_a_spec_named_through_a_committed_symlink"
+    ),
+    "a redirecting GIT_* variable": (
+        EXIT_FAIL, "test_a_redirecting_git_variable_refuses_the_command_as_a_verdict"
+    ),
+    "an aborted run": (EXIT_FAIL, "test_an_aborted_run_exits_with_the_fail_status"),
+    "a verdict the command could not print": (
+        EXIT_FAIL, "test_a_result_whose_verdict_cannot_be_read_is_a_render_refusal"
+    ),
+}
+
+
+@pytest.mark.parametrize("words", sorted(EXIT_PATHS_TESTED_ELSEWHERE))
+def test_each_path_tested_elsewhere_is_documented_under_the_status_it_takes(
+    words: str,
+) -> None:
+    status, test_name = EXIT_PATHS_TESTED_ELSEWHERE[words]
+    assert callable(globals().get(test_name)), test_name
+    for document, lists in (("epilog", epilog_lists()), ("README", readme_lists())):
+        listed_under = sorted(code for code, text in lists.items() if words in text)
+        assert listed_under == [status], (document, words, listed_under)
+
+
+def test_no_listed_option_is_left_without_a_tested_path() -> None:
+    """A clause the lists gain must come with a path that is tested.
+
+    Once every mapped clause is taken out, what is left of each list is the
+    framing around them. An option or variable left there is a clause no
+    test runs, so it fails here until it gets a row.
+    """
+
+    clauses = set(EXIT_PATH_DOCS.values()) | set(EXIT_PATHS_TESTED_ELSEWHERE)
+    for document, lists in (("epilog", epilog_lists()), ("README", readme_lists())):
+        for status, text in lists.items():
+            for words in sorted(clauses, key=len, reverse=True):
+                text = text.replace(words, "")
+            unmapped = re.findall(r"--[a-z0-9-]+|GIT_\S*", text)
+            assert unmapped == [], (document, status, unmapped, text)
 
 
 def test_a_shallow_clone_is_refused_with_status_1_before_the_base_is_read(
