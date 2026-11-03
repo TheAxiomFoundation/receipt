@@ -3883,7 +3883,7 @@ def _build_authority_history(
         key=lambda value: (_pending_bundle_version(value), str(value.get("path", ""))),
     ):
         # Main subscripted each update's ``path`` here, in sorted order and
-        # after loading every earlier one, so a missing ``path`` is refused
+        # after processing every earlier one, so a missing ``path`` is refused
         # at this element and no sooner: an earlier update that refuses in
         # ``_load_trust_bundle`` still answers first.
         _require_bundle_reference(
