@@ -383,11 +383,14 @@ def layout(release_root: str, manifest: str, placement: str = "unclassified"):
     )
 
 
+# Each name beside one that begins with it, so a rule that compared spellings
+# rather than path components would disagree with the oracle somewhere.
+COMPONENTS = ["releases", "releases-old", "manifests", "manifests-archive", "journal", "a"]
 directories = st.lists(
-    st.sampled_from(["releases", "manifests", "journal", "a", "b"]), min_size=1, max_size=3
+    st.sampled_from(COMPONENTS), min_size=1, max_size=3
 ).map("/".join)
 tree_paths = st.lists(
-    st.sampled_from(["releases", "manifests", "journal", "a", "b", "0000.json"]),
+    st.sampled_from([*COMPONENTS, "0000.json"]),
     min_size=1,
     max_size=4,
 ).map("/".join)
@@ -400,6 +403,8 @@ tree_paths = st.lists(
 @example(release_root="releases", manifest="journal/manifests", path="journal/a")
 @example(release_root="releases", manifest="releases/manifests", path="manifests")
 @example(release_root="a/releases", manifest="a", path="a/b")
+@example(release_root="releases", manifest="releases-old/manifests", path="releases-old/manifests/0000.json")
+@example(release_root="releases", manifest="manifests", path="manifests-archive/0000.json")
 def test_the_protection_rule_adds_only_an_outside_manifest_directory(
     release_root: str, manifest: str, path: str
 ) -> None:
@@ -430,10 +435,17 @@ OUTSIDE_LEAVES = [
 
 @PROPERTY
 @given(
-    outside=st.sampled_from(["manifests", "journal/manifests", "a/b/manifests"]),
+    outside=st.sampled_from(
+        ["manifests", "journal/manifests", "a/b/manifests", "releases-manifests",
+         "releases-old/manifests"]
+    ),
     placement=st.sampled_from(["data", "gate", "unclassified"]),
     leaves=st.sets(st.sampled_from(OUTSIDE_LEAVES), min_size=1),
-    unrelated=st.sets(st.sampled_from(["NOTES.md", "docs/a.md", "journal/README.md"])),
+    unrelated=st.sets(
+        st.sampled_from(
+            ["NOTES.md", "docs/a.md", "journal/README.md", "manifests-archive/notes.md"]
+        )
+    ),
 )
 def test_gate_only_confinement_treats_both_manifest_layouts_alike(
     outside: str, placement: str, leaves: set[str], unrelated: set[str]

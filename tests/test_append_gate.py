@@ -3294,10 +3294,11 @@ def test_a_release_proposal_cannot_pass_with_its_manifests_on_the_gate_surface(
 ) -> None:
     """Why ``AppendGateSpec`` says to keep the manifests off the gate surface.
 
-    A release proposal changes the manifest directory beside the ledger. With
-    the manifests on the gate surface it is either mixed or gate-only, and a
-    gate-only proposal may not change ledger state under any classification,
-    so no release can land, in either layout.
+    A release that appends to the ledger changes the manifest directory beside
+    it. With the manifests on the gate surface that proposal is either mixed
+    or gate-only, and a gate-only proposal may not change ledger state under
+    any classification, so it is refused in either layout. The companion test
+    below shows the other half: a release that leaves the ledger alone lands.
     """
 
     spec = spec_with_outside_manifests(manifest_relative, placement="gate")
@@ -3327,6 +3328,110 @@ def test_a_release_proposal_cannot_pass_with_its_manifests_on_the_gate_surface(
             f"gate-only proposal changes unclassified ledger state path(s): ['{state}']"
         ),
     }[ledger]
+
+
+@pytest.mark.parametrize("manifest_relative", ["manifests", "releases/manifests"])
+def test_a_release_that_leaves_the_ledger_alone_lands_unchecked_on_the_gate_surface(
+    tmp_path: pathlib.Path, manifest_relative: str
+) -> None:
+    """The hazard ``AppendGateSpec`` names, pinned in both layouts.
+
+    A genesis release seals the ledger already there, so it changes no ledger
+    byte. With the manifests on the gate surface every file it adds is a gate
+    change, the proposal is gate-only, and no chain check runs: placeholder
+    bytes in place of a manifest, receipts and a signature land. The spec's
+    own surfaces admit this, in-root as well as outside.
+    """
+
+    spec = spec_with_outside_manifests(manifest_relative, placement="gate")
+    spec = replace(spec, data_surface=frozenset({"ledger/**"}))
+    candidate = base_repository(tmp_path)
+    manifests = candidate.root / manifest_relative
+    manifests.mkdir(parents=True, exist_ok=True)
+    names = [
+        f"{OUTSIDE_STEM}.json",
+        f"{OUTSIDE_STEM}.alpha.tsr",
+        f"{OUTSIDE_STEM}.beta.tsr",
+        f"{OUTSIDE_STEM}.producer.sig",
+    ]
+    for name in names:
+        (manifests / name).write_bytes(bytes(64))
+
+    assert run_gate(candidate, spec=spec) == (
+        "thesis-facts append check OK: gate-only proposal; DATA_SURFACE "
+        "unchanged; GATE_SURFACE changes="
+        f"{sorted(f'{manifest_relative}/{name}' for name in names)}"
+    )
+
+
+@pytest.mark.parametrize("manifest_relative", ["releases-manifests", "releases-old/manifests"])
+def test_a_manifest_directory_named_after_the_release_root_is_still_outside(
+    tmp_path: pathlib.Path, manifest_relative: str
+) -> None:
+    """Outside is a question about path components, not spelling (#87).
+
+    ``releases-manifests`` begins with the release root's name, and
+    ``releases-old/manifests`` sits beside it, but neither is under it, so
+    each is an outside directory the gate has to protect. Reading "outside"
+    as a string prefix would take both for the release root's subtree and
+    reopen the gate-only bypass.
+    """
+
+    candidate = base_with_outside_release_objects(tmp_path, manifest_relative)
+    add_gate_file(candidate)
+    changed = change_outside_release_object(
+        candidate, manifest_relative, OUTSIDE_RELEASE_OBJECTS[0], "rewrite"
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate, spec=spec_with_outside_manifests(manifest_relative))
+    assert str(refusal.value) == (
+        f"gate-only proposal changes unclassified release path(s): ['{changed}']"
+    )
+
+
+def test_a_sibling_sharing_the_directory_name_as_a_prefix_is_only_named(
+    tmp_path: pathlib.Path,
+) -> None:
+    """``manifests-archive`` is not under ``manifests``: named, not refused."""
+
+    candidate = base_with_outside_release_objects(tmp_path)
+    add_gate_file(candidate)
+    archive = candidate.root / "manifests-archive" / "notes.md"
+    archive.parent.mkdir()
+    archive.write_text("old\n", encoding="utf-8")
+
+    assert run_gate(candidate, spec=spec_with_outside_manifests()) == (
+        "thesis-facts append check OK: gate-only proposal; DATA_SURFACE "
+        f"unchanged; GATE_SURFACE changes=['{GATE_FILE}']; "
+        "unclassified changes=['manifests-archive/notes.md']"
+    )
+
+
+@pytest.mark.parametrize("manifest_relative", ["manifests", "releases/manifests"])
+def test_an_append_over_a_manifest_directory_holding_no_chain_is_an_invalid_base(
+    tmp_path: pathlib.Path, manifest_relative: str
+) -> None:
+    """A stray file in the base's manifest directory is not a pre-genesis base.
+
+    The push path refuses such a tree, and so does an in-root base. An outside
+    directory now reads the same way; it used to be skipped as pre-genesis,
+    and the append was accepted.
+    """
+
+    candidate = base_repository(tmp_path)
+    keep = candidate.root / manifest_relative / ".gitkeep"
+    keep.parent.mkdir(parents=True, exist_ok=True)
+    keep.write_text("", encoding="utf-8")
+    candidate = replace(candidate, base=commit_candidate(candidate, "a stray file"))
+    append_one_row(candidate)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(candidate, spec=spec_with_outside_manifests(manifest_relative))
+    assert str(refusal.value) == (
+        "base release chain is invalid: unknown file in closed release manifest "
+        "directory: .gitkeep"
+    )
 
 
 def test_an_unrelated_sibling_of_an_outside_manifest_directory_is_still_named(
@@ -3585,6 +3690,61 @@ def test_an_outside_base_chain_is_verified_as_the_existing_chain(
     assert str(refusal.value) == (
         "base release chain is invalid: producer Ed25519 signature "
         f"verification failed for {stem}.producer.sig"
+    )
+
+
+def prefix_left_in_root(spec: AppendGateSpec) -> AppendGateSpec:
+    """The outside spec with ``release_manifest_prefix`` still spelling the root's."""
+
+    return replace(spec, release_manifest_prefix=GATE_SPEC.release_manifest_prefix)
+
+
+def test_the_base_chain_is_read_from_the_outside_directory_whatever_the_prefix_says(
+    tmp_path: pathlib.Path, witnesses: Witnesses
+) -> None:
+    """``release_manifest_prefix`` is not checked against the manifest directory.
+
+    With the prefix left at its in-root value, the gate still finds the base
+    chain where the chain verifier reads it. So a release-only proposal after
+    genesis is refused as one, even when its files sit under the prefix and
+    form a genesis triple there; read from the prefix, the base looked
+    pre-genesis and the triple was accepted as release 0.
+    """
+
+    candidate, anchors, spec, _stem = outside_genesis(tmp_path, witnesses)
+    spec = prefix_left_in_root(spec)
+    settled = replace(
+        candidate, base=commit_candidate(candidate, "genesis outside releases/")
+    )
+    junk = settled.root / "releases" / "manifests"
+    junk.mkdir()
+    for suffix in (".json", ".alpha.tsr", ".beta.tsr", ".producer.sig"):
+        (junk / f"0000-{'a' * 16}{suffix}").write_text("junk\n", encoding="utf-8")
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate_with_anchors(settled, anchors, spec=spec)
+    assert str(refusal.value) == (
+        "release-only proposal is forbidden after genesis; a next release must "
+        "witness an actual ledger byte append"
+    )
+
+
+def test_a_prefix_that_does_not_spell_the_manifest_directory_refuses_a_release(
+    tmp_path: pathlib.Path, witnesses: Witnesses
+) -> None:
+    """The new release is still found by the prefix, so the gate fails closed."""
+
+    candidate, anchors, spec, _stem = outside_genesis(tmp_path, witnesses)
+    spec = prefix_left_in_root(spec)
+    settled = replace(
+        candidate, base=commit_candidate(candidate, "genesis outside releases/")
+    )
+    propose_the_next_outside_release(settled, witnesses, spec)
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate_with_anchors(settled, anchors, spec=spec)
+    assert str(refusal.value) == (
+        "release proposal must add exactly one manifest for index 1; found []"
     )
 
 

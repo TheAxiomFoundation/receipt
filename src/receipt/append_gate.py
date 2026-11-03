@@ -54,10 +54,10 @@ class AppendGateSpec:
     puts them on the gate surface, and a data proposal finds the base chain,
     and the release objects it adds, in that directory. Whichever directory holds
     the manifests, keep it off ``gate_surface``. A gate-only proposal returns
-    before any history or chain check, so a gate surface over the manifests
-    lets one change release objects unchecked, and a release proposal, which
-    changes them beside the ledger, is then refused whatever surface the
-    ledger is on.
+    before any history or chain check, so with a gate surface over the
+    manifests a proposal that leaves the ledger alone can add or change
+    release objects unchecked, a whole release included, while a release
+    that appends to the ledger is refused whatever surface the ledger is on.
     """
 
     chain: ChainSpec
@@ -244,8 +244,8 @@ def _is_protected(path: str, candidate: _CandidateTree) -> bool:
 
     The two surfaces the spec names, plus the release root and everything
     under it, which is neither but is read by the release verification all the
-    same and is the one place ``check_gate_only_confinement`` refuses an
-    unclassified change.
+    same. ``check_gate_only_confinement`` refuses an unclassified change there,
+    as it does under an outside manifest directory, below.
 
     The release root's proper ancestors are included because their entry modes
     determine whether the configured subtree exists. For a root of
@@ -1327,11 +1327,14 @@ def check_release_proposal(
     The history pass compares an outside manifest directory but returns new
     files and base entries for the release root only, by design. So for that
     layout the directory's own entries are read here, from the same two
-    snapshots, and added to both: the base chain is found where the spec
-    keeps it, and the release objects a proposal adds there are counted by
-    the triple and pre-genesis rules (#87). Nothing is added for a manifest
-    directory under the release root, which the returned entries already
-    hold.
+    snapshots (#87). A base holding anything there has a chain to verify,
+    as the push path already decides, whatever ``release_manifest_prefix``
+    says; and the release objects a proposal adds there are counted by the
+    triple and pre-genesis rules. The triple still finds the new manifest
+    by ``release_manifest_prefix``, so a prefix that does not spell the
+    manifest directory refuses every release proposal. Nothing is added for
+    a manifest directory under the release root, which the returned entries
+    already hold.
     """
 
     try:
@@ -1344,6 +1347,7 @@ def check_release_proposal(
         raise AppendError(str(exc)) from exc
 
     outside_manifests = _outside_manifest_directory(candidate.spec)
+    base_holds_outside_entries = False
     if outside_manifests is not None:
         # The history pass has just listed this directory in both trees and
         # refused any deleted or changed entry, so what the candidate holds
@@ -1357,9 +1361,12 @@ def check_release_proposal(
         new_files = new_files | (
             set(candidate_manifest_entries) - set(base_manifest_entries)
         )
-        base_release_entries = {**base_release_entries, **base_manifest_entries}
+        # Read from the directory the chain verifier reads, so the answer
+        # does not depend on ``release_manifest_prefix`` spelling the same
+        # directory: nothing checks that the two agree.
+        base_holds_outside_entries = bool(base_manifest_entries)
 
-    base_has_chain = any(
+    base_has_chain = base_holds_outside_entries or any(
         relative.startswith(candidate.spec.release_manifest_prefix)
         for relative in base_release_entries
     )
