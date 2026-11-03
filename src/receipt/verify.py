@@ -1006,6 +1006,9 @@ def run_verification(
             # A failed closure never leaves an affected claim established.
             # Check both snapshots independently of the active pass: closure
             # may only have added notes to an already-unwinding pass error.
+            # The verdict reported is this custody failure, so an unresolved
+            # base is no longer what the result says went wrong.
+            base_unresolved = False
             passes.clear()
             chain = None
             corpus = None

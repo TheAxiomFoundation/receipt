@@ -5783,3 +5783,39 @@ def test_argparse_refusals_exit_with_the_usage_status(
     assert captured.out == ""
     assert captured.err.startswith("usage: receipt ")
     assert ": error: " in captured.err
+
+
+def test_a_close_time_repository_change_beside_an_unresolvable_base_stays_a_custody_failure(
+    committed_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The base-ref status is for a run whose only failure is the base.
+
+    Here the base does not resolve, and the candidate snapshot then reports
+    on close that the repository changed during the run. That close failure
+    is what the verdict reports, as a custody failure with status 1. It is
+    not a base this clone lacks.
+    """
+
+    real_select = TreeSnapshot.select.__func__
+
+    def select_writing_the_config_for_the_base(cls, root, revision, **keywords):
+        if revision == "no-such-ref":
+            with open(committed_repo / ".git" / "config", "a") as handle:
+                handle.write("[receiptprobe]\n\tconcurrent = 1\n")
+        return real_select(cls, root, revision, **keywords)
+
+    monkeypatch.setattr(
+        TreeSnapshot, "select", classmethod(select_writing_the_config_for_the_base)
+    )
+    candidate = head_oid(committed_repo)
+
+    assert run(
+        committed_repo, "--base-ref", "no-such-ref", "--expect-commit", candidate, "--json"
+    ) == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
+    failure = next(item for item in payload["passes"] if not item["ok"])
+    assert failure["name"] == "custody"
+    assert "configuration changed during verification" in failure["failure"]
