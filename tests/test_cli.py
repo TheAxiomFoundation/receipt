@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import codecs
 import contextlib
+import dataclasses
 import hashlib
 import io
 import itertools
@@ -32,7 +33,7 @@ import pytest
 from receipt.cli import EXIT_FAIL, EXIT_OK, EXIT_USAGE, main
 from receipt.sign import generate_signing_keypair, sign_payload
 from receipt.snapshot import TreeSnapshot
-from receipt.verify import VerifySpecError, load_spec
+from receipt.verify import VerifyResult, VerifySpecError, load_spec
 
 from corpus_fixture import CONTENT, append_release, build_corpus
 
@@ -66,7 +67,7 @@ def manifest_stem(repo: pathlib.Path) -> pathlib.Path:
     return manifests[0]
 
 
-def _git(repo: pathlib.Path, *args: str) -> str:
+def _git(repo: pathlib.Path, *args: str, input: str | None = None) -> str:
     """Run fixture Git without consulting ambient configuration or redirects."""
 
     environment = os.environ.copy()
@@ -89,6 +90,7 @@ def _git(repo: pathlib.Path, *args: str) -> str:
         capture_output=True,
         text=True,
         env=environment,
+        input=input,
     )
     return completed.stdout.strip()
 
@@ -5788,6 +5790,83 @@ def test_a_shallow_clone_is_refused_with_status_1_before_the_base_is_read(
         "custody",
         "shallow repositories are unsupported",
     )
+
+
+def test_a_base_the_reader_refuses_for_another_reason_is_still_a_history_failure(
+    committed_repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Only a ref that does not resolve moves to status 2.
+
+    This base resolves to a commit, but its tree names a blob the repository
+    does not hold, so the reader refuses it for another reason. That stays the
+    failed history pass it always was, with status 1 and the reader's words.
+    """
+
+    missing = "1" * 40
+    tree = _git(
+        committed_repo, "mktree", "--missing", input=f"100644 blob {missing}\tghost\n"
+    )
+    base = _git(committed_repo, "commit-tree", tree, "-m", "a tree naming a missing blob")
+
+    assert run(
+        committed_repo, "--base-ref", base, "--expect-commit", head_oid(committed_repo), "--json"
+    ) == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    assert "stage" not in payload
+    history = payload["passes"][0]
+    assert (history["name"], history["ok"], history["failure"]) == (
+        "history",
+        False,
+        f"release history is not immutable: object {missing} is unavailable",
+    )
+
+
+@pytest.mark.parametrize("raises", ["every-read", "first-read-only"])
+@pytest.mark.parametrize("as_json", [True, False], ids=["json", "text"])
+def test_a_result_whose_verdict_cannot_be_read_is_a_render_refusal(
+    committed_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    raises: str,
+    as_json: bool,
+) -> None:
+    """The base-ref check is now the first read of the result.
+
+    A raise there is the render refusal, status 1, that the render boundary
+    gave when it read first. Swallowing it let a passing result whose ``ok``
+    raised once print PASS on the second read and exit 0.
+    """
+
+    import receipt.cli as cli_module
+
+    real = cli_module.run_verification
+    reads: list[None] = []
+
+    class Unreadable(VerifyResult):
+        @property
+        def ok(self) -> bool:  # type: ignore[override]
+            reads.append(None)
+            if raises == "every-read" or len(reads) == 1:
+                raise RuntimeError("the verdict cannot be read")
+            return VerifyResult.ok.fget(self)
+
+    def substituted(*args: object, **kwargs: object) -> VerifyResult:
+        result = real(*args, **kwargs)
+        return Unreadable(
+            **{item.name: getattr(result, item.name) for item in dataclasses.fields(result)}
+        )
+
+    monkeypatch.setattr(cli_module, "run_verification", substituted)
+    assert run(committed_repo, *(["--json"] if as_json else [])) == EXIT_FAIL
+    captured = capsys.readouterr()
+    if as_json:
+        payload = json.loads(captured.out)
+        assert (payload["verdict"], payload["stage"]) == ("FAIL", "render")
+        assert "RuntimeError: the verdict cannot be read" in payload["failure"]
+    else:
+        assert "PASS" not in captured.out
+        assert "verdict could not be rendered" in captured.err
+        assert "RuntimeError: the verdict cannot be read" in captured.err
 
 
 def test_an_aborted_run_exits_with_the_fail_status(

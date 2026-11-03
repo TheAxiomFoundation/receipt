@@ -311,8 +311,9 @@ exit status:
      --expect-anchor-set without --expect-spec-sha256, an --expect-spec-sha256
      or --expect-anchor-set that is not a SHA-256 digest, a spec that cannot
      be loaded or does not match --expect-spec-sha256, a --root that does not
-     exist or is not a directory, or a --base-ref that does not resolve to a
-     commit.
+     exist or is not a directory, a --spec path that, without --root, goes
+     through a symlink and so leaves the repository ambiguous, or a
+     --base-ref that does not resolve to a commit.
 
 --spec is executed. It is a Python module, and this command runs it in its
 own process to build the configuration every pass uses. Without
@@ -1912,17 +1913,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     # the library records. Exit 1 used to cover both, and a base ref that did
     # not resolve read exactly like a rewritten history (#36). Only the
     # library's own flag decides it, read defensively because a substituted
-    # result need not carry it, and inside a boundary because this is the
-    # first read of the result: if it raises, the render boundary below meets
-    # the same result and refuses it.
+    # result need not carry it. This is now the first read of the result, so
+    # a raise here is the render refusal the boundary below made when it read
+    # first. Swallowing it let a result whose ``ok`` raised once and then
+    # answered print PASS.
     try:
         base_unresolved = (
             not result.ok and getattr(result, "_base_unresolved", False) is True
         )
     except KeyboardInterrupt:  # the operator's interrupt, never a verdict
         raise
-    except BaseException:  # noqa: BLE001 - the render boundary reports it
-        base_unresolved = False
+    except BaseException as exc:  # noqa: BLE001 - reading the result is in the contract
+        return _refuse(
+            as_json,
+            "render",
+            "verdict could not be rendered; treat the run as unverified: "
+            f"{_described_exception(exc)}",
+            EXIT_FAIL,
+        )
     if base_unresolved:
         return _refuse(
             as_json,
