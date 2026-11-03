@@ -58,9 +58,7 @@ through its own words and exception classes.
 
 The verifier accepts no input it refused before. What changes is what a
 refusal costs, which exception reports a caller's mistake, and one narrowing
-for callers that pass a non-mapping object, described below. A differential
-of 1,055 malformed-argument cases against main found no refusal whose text
-moved.
+for callers that pass a non-mapping object, described below.
 
 - The verifier refuses a witness `tokenPath` whose path under the records
   root is 4,096 bytes or longer before it resolves any path. No supported
@@ -88,8 +86,8 @@ moved.
   `ValueError`. Each check sits where main raised. The verifier checks every
   `trusted_bundles` value before it loads any of them; it checks pending
   updates only after it has loaded every active bundle, and it checks each
-  pending update's `path` in sorted order, after loading the updates before
-  it. New refusal texts:
+  pending update's `path` in sorted order, after it has processed the updates
+  before it. New refusal texts:
   `timestamp token bundle reference is not an object`,
   `timestamp token bundle reference lacks <key>`,
   `timestamp token bundle reference path is too large to compare`,

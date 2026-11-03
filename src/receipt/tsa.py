@@ -3798,10 +3798,10 @@ def _require_bundle_reference(value: Any, label: str, *, require_path: bool) -> 
 
     ``require_path`` is set for a pending update only, and only inside the
     sorted loop, where main read that update's ``path`` by subscript and
-    raised ``KeyError`` without one, so a refusal there pre-empts nothing.  An active bundle's ``path`` was read
-    with ``.get``, and one without it went on to ``_load_trust_bundle``,
-    which refuses it in its own words; requiring it here would move that
-    text.
+    raised ``KeyError`` without one, so a refusal there pre-empts nothing.
+    An active bundle's ``path`` was read with ``.get``, and one without it
+    went on to ``_load_trust_bundle``, which refuses it in its own words;
+    requiring it here would move that text.
     """
 
     if not isinstance(value, Mapping) or (require_path and "path" not in value):
