@@ -1913,9 +1913,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     # the library records. Exit 1 used to cover both, and a base ref that did
     # not resolve read exactly like a rewritten history (#36). Only the
     # library's own flag decides it, read defensively because a substituted
-    # result need not carry it. This is now the first read of the result, so
-    # a raise here is the render refusal the boundary below made when it read
-    # first. Swallowing it let a result whose ``ok`` raised once and then
+    # result need not carry it. This is the first read of the result, so a
+    # raise here is the render refusal the boundary below would make. Leaving
+    # it to that boundary would let a result whose ``ok`` raised once and then
     # answered print PASS.
     try:
         base_unresolved = (

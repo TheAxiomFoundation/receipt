@@ -5759,6 +5759,76 @@ def test_each_documented_exit_path(
         assert failed["failure"] != "not reached"
 
 
+#: The words each path in the table above is listed under, in the epilog and
+#: in the README alike, once backticks and line breaks are set aside.
+EXIT_PATH_DOCS = {
+    "pass": "every pass the spec configures ran and succeeded",
+    "custody": "a failed custody, binding, declaration or history pass",
+    "history-rewrite": "a release object changed or deleted since --base-ref",
+    "expect-commit": (
+        "an --expect-commit or --expect-tree that is malformed or does not match"
+    ),
+    "unheld-commit": "a --commit it does not hold",
+    "root-not-top-level": "a --root that is not a repository's top level",
+    "dependency": "--base-ref without --expect-commit",
+    "anchor-pin-dependency": "--expect-anchor-set without --expect-spec-sha256",
+    "spec-pin": "does not match --expect-spec-sha256",
+    "spec-raises": "a spec that cannot be loaded",
+    "root": "a --root that does not exist or is not a directory",
+    "base-ref": "a --base-ref that does not resolve to a commit",
+    "empty-base-ref": "a --base-ref that does not resolve to a commit",
+}
+
+
+def _listed_text(text: str) -> str:
+    return " ".join(text.replace("`", "").split())
+
+
+def epilog_lists() -> dict[int, str]:
+    from receipt.cli import EXIT_STATUS_HELP
+
+    lists: dict[int, list[str]] = {}
+    status = None
+    for line in EXIT_STATUS_HELP.splitlines():
+        heading = re.match(r"^  ([0-9]+)  [A-Z]+: (.*)$", line)
+        if heading:
+            status = int(heading.group(1))
+            lists[status] = [heading.group(2)]
+        elif status is not None and line.startswith("     "):
+            lists[status].append(line)
+        else:
+            status = None
+    return {code: _listed_text(" ".join(lines)) for code, lines in lists.items()}
+
+
+def readme_lists() -> dict[int, str]:
+    section = README.read_text(encoding="utf-8").split("\n## Exit status\n", 1)[1]
+    section = section.split("\n## ", 1)[0]
+    rows = re.finditer(r"^\| `([0-9]+)` \| [A-Z]+: (.*) \|$", section, re.M)
+    return {int(row.group(1)): _listed_text(row.group(2)) for row in rows}
+
+
+def test_every_exit_path_has_its_documented_words() -> None:
+    assert set(EXIT_PATH_DOCS) == set(EXIT_PATHS)
+
+
+@pytest.mark.parametrize("path", sorted(EXIT_PATHS))
+def test_each_exit_path_is_documented_under_the_status_it_takes(path: str) -> None:
+    """The lists say which paths take which status, so that is tested too.
+
+    The table above runs each path and checks its status. This checks that
+    the epilog and the README list that path under that status and no other,
+    so a list that moved a path, or dropped it, fails here.
+    """
+
+    _arguments, status, _where = EXIT_PATHS[path]
+    words = EXIT_PATH_DOCS[path]
+    for document, lists in (("epilog", epilog_lists()), ("README", readme_lists())):
+        assert set(lists) == set(DOCUMENTED), document
+        listed_under = sorted(code for code, text in lists.items() if words in text)
+        assert listed_under == [status], (document, words, listed_under)
+
+
 def test_a_shallow_clone_is_refused_with_status_1_before_the_base_is_read(
     committed_repo: pathlib.Path,
     tmp_path: pathlib.Path,
