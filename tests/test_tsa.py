@@ -7484,6 +7484,66 @@ def test_a_pending_rotation_elects_its_newest_era_and_never_shows_the_first(
     )
 
 
+@pytest.mark.parametrize("reused_first", [True, False], ids=["reused-id-older", "reused-id-newest"])
+def test_a_reused_id_under_a_new_root_answers_through_its_class(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    reused_first: bool,
+) -> None:
+    """The reused-ID rule is per class once a later name joins the class (#50).
+
+    Alone, an anchor reusing alpha's active ID over beta's root is a new
+    authority and a candidate, and must carry its own supplemental outcome
+    (``test_requires_a_supplemental_outcome_for_a_reused_id_under_a_new_root``).
+    Filed again as E in a later bundle of the same transition, through the
+    shared S3, it is one pending-only class with E, and only the class's
+    newest occurrence carries the outcome: the reused-ID anchor activates on
+    E's, and an outcome offered for it is refused as not introduced. In the
+    opposite version order the reused ID is the newest occurrence and the
+    candidate itself.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    tree = build_witness_tree(tmp_path, [alpha])
+    reused = alias_of(beta, anchor_id=alpha.anchor_id)
+    renamed = alias_of(beta, anchor_id="E")
+    older, newer = (reused, renamed) if reused_first else (renamed, reused)
+    first, spec = pending_authority(tree, older, version=2)
+    second, spec = add_bundle_version(tree, [newer], version=3, base=spec)
+    assert set(
+        tsa_module._supplemental_candidates(
+            tree.records, {BUNDLE_LOGICAL: tree.reference}, [first, second], spec=spec
+        )
+    ) == {(PENDING_V3, newer.anchor_id)}
+
+    digest = sha256_bytes(tree.record.read_bytes())
+    outcomes = {}
+    for reference, anchor in ((first, older), (second, newer)):
+        token = tree.records / RECORD_DAY / f"record-0001.{reference['bundleId']}.tsr"
+        beta.tsa.stamp(digest, token)
+        outcomes[anchor.anchor_id] = supplemental_outcome(tree, reference, anchor, token)
+
+    def transition(supplemental: list[dict[str, Any]]) -> WitnessEvidence:
+        rewrite_witness(
+            tree, lambda payload: payload.__setitem__("supplementalOutcomes", supplemental)
+        )
+        return verify_step(
+            tree.record,
+            spec=spec,
+            records=tree.records,
+            trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+            prior_pending_updates=[first, second],
+        )
+
+    evidence = transition([outcomes[newer.anchor_id]])
+    assert supplemental_signers(evidence) == [
+        (PENDING_V3, newer.anchor_id, beta.signer_pins["spkiSha256"])
+    ]
+    with pytest.raises(TsaError) as caught:
+        transition([outcomes[newer.anchor_id], outcomes[older.anchor_id]])
+    assert str(caught.value) == f"{NOT_INTRODUCED}('{PENDING_V2}', '{older.anchor_id}')"
+
+
 @pytest.mark.parametrize("rotation", [False, True], ids=["three-bundle-class", "rotation"])
 def test_a_passed_over_occurrence_answers_only_a_legacy_witness_the_spec_allows(
     tmp_path: pathlib.Path,
