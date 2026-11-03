@@ -304,8 +304,8 @@ class VerifyResult:
     #: Whether the history pass failed because ``base_ref`` does not resolve
     #: to a commit in the repository, so nothing was compared. ``receipt
     #: verify`` exits 2 for that and 1 for a history the comparison refused,
-    #: which is what lets a CI job tell an unfetched base from a rewrite
-    #: (#36). Private for the reason ``_anchor_set_pinned`` is.
+    #: which is what lets a CI job tell a base ref that does not resolve
+    #: from a rewrite (#36). Private for the reason ``_anchor_set_pinned`` is.
     _base_unresolved: bool = field(default=False, repr=False)
 
     @property

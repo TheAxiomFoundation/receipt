@@ -13,8 +13,8 @@ The command exits with one of three statuses, :data:`EXIT_OK`,
 which paths take which; ``--help`` prints it and the README repeats it. Status
 2 means the command refused before any pass ran. That includes a
 ``--base-ref`` that does not resolve to a commit, which used to exit 1 like a
-rewritten history, so a CI job could not tell an unfetched base from a
-rewrite (#36).
+rewritten history, so a CI job could not tell such a base from a rewrite
+(#36).
 
 The output is deliberately two-part. What the command *established* is stated
 without hedging. What it *did not* establish — that any declared gate actually
@@ -1909,8 +1909,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # A base that does not resolve to a commit was never compared, so the run
     # verified nothing and is a usage refusal rather than the history failure
-    # the library records. Exit 1 used to cover both, and a CI job that did
-    # not fetch its base read exactly like a rewritten history (#36). Only the
+    # the library records. Exit 1 used to cover both, and a base ref that did
+    # not resolve read exactly like a rewritten history (#36). Only the
     # library's own flag decides it, read defensively because a substituted
     # result need not carry it, and inside a boundary because this is the
     # first read of the result: if it raises, the render boundary below meets

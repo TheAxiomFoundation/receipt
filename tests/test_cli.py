@@ -5622,7 +5622,7 @@ def test_an_unresolvable_base_ref_is_a_usage_refusal_not_a_history_failure(
 ) -> None:
     """#36: exit 1 used to mean either a rewrite or a base this clone lacks.
 
-    A CI job that did not fetch its base, or a ref recorded wrongly, read
+    A ref that a full clone did not fetch, or one recorded wrongly, read
     exactly like a rewritten history. The base is not in the repository, so
     nothing was compared: that is a refusal to verify, status 2, and its
     JSON names the stage that refused. The empty ref is what an unset CI

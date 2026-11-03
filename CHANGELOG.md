@@ -48,11 +48,13 @@ immutable: cannot resolve commit '...'`, which reads exactly like a rewrite.
 resolve now exits 2 instead of 1, and with `--json` prints the abort object
 (`stage`, `failure`, `passesCompleted: []`) instead of a full verdict with a
 failed history pass. A caller that fails on any nonzero status is
-unaffected. A caller that branches on the status now routes an unfetched or
-wrongly recorded base to its status-2 branch, beside the spec, root and
-argument refusals that already exit 2. If that branch means "fix the
-invocation", remember that a missing base can also mean the history that held
-it is gone. A caller that parsed the history failure text for `cannot resolve
+unaffected. A caller that branches on the status now routes a base ref that
+does not resolve to its status-2 branch, beside the spec, root and argument
+refusals that already exit 2. If that branch means "fix the invocation",
+remember that a base that does not resolve can also mean the history that
+held it is gone. A base missing from a shallow clone does not reach that
+branch: the reader refuses every shallow clone first, a custody failure with
+status 1, as before. A caller that parsed the history failure text for `cannot resolve
 commit`, or for the reader's refusal of an empty revision, should read status
 2 and `"stage": "base-ref"` instead.
 
