@@ -73,8 +73,10 @@ its digest. A mismatch refuses with status 2 before the spec's code runs.
 | `1` | FAIL: verification ran and refused, or could not finish. That covers a failed custody, binding, declaration or history pass (a release object changed or deleted since `--base-ref`, or a base that is not an ancestor of the commit), an `--expect-commit` or `--expect-tree` that is malformed or does not match, an aborted run, and a verdict the command could not print. |
 | `2` | USAGE: the command refused before any pass ran, so nothing was verified. That covers an argument argparse rejects, `--base-ref` without `--expect-commit`, `--expect-anchor-set` without `--expect-spec-sha256`, an `--expect-spec-sha256` or `--expect-anchor-set` that is not a SHA-256 digest, a spec that cannot be loaded or does not match `--expect-spec-sha256`, an unusable `--root`, and a `--base-ref` that names no commit in this repository. |
 
-With `--json`, every exit after argument parsing prints at most one JSON object
-with a `verdict` key. A status-2 refusal names the `stage` that refused:
+With `--json`, every exit after argument parsing prints one JSON object with a
+`verdict` key, unless writing to stdout itself fails; the `receipt.cli`
+reference says what is printed then. A status-2 refusal names the `stage` that
+refused:
 `arguments`, `spec`, `root` or `base-ref`. A status-1 run that aborted or could
 not be rendered names `verification` or `render`; every other status-1 run
 prints the full verdict. Errors argparse raises itself print its usage message
