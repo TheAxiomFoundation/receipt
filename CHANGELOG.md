@@ -8,26 +8,33 @@ input the package used to accept, or accept for the wrong reason.
 
 ### `receipt verify` documents its exit statuses, and an unresolvable `--base-ref` exits 2 (#36)
 
-A CI job can now tell from the exit status alone whether the evidence failed
-to verify or nothing was verified. Before, the three statuses were documented
-nowhere user-facing. A `--base-ref` that named no commit in the clone exited 1
-with `release history is not immutable: cannot resolve commit '...'`, which
-reads exactly like a rewritten history.
+From the exit status alone, a CI job can now tell a rewritten history from a
+`--base-ref` that does not resolve. Before, the three statuses were documented
+nowhere user-facing, and such a base exited 1 with `release history is not
+immutable: cannot resolve commit '...'`, which reads exactly like a rewrite.
 
 - `receipt verify --help` now ends with an exit-status list, and the README
   has an "Exit status" section that says the same: 0 PASS, 1 FAIL
   (verification ran and refused, or could not finish), 2 USAGE (refused
-  before any pass ran, so nothing was verified). Tests read both lists back
-  and compare them with `EXIT_OK`, `EXIT_FAIL` and `EXIT_USAGE`.
-- A `--base-ref` that names no commit in the repository refuses with status 2
-  and `--base-ref names no commit in this repository: '<ref>'; no history was
-  compared, so this is not a history verdict`. With `--json` the refusal is
+  before any pass ran, so nothing was verified). Each lists the paths that
+  take it. Tests read both lists back and compare them with `EXIT_OK`,
+  `EXIT_FAIL` and `EXIT_USAGE`.
+- A `--base-ref` that does not resolve to a commit refuses with status 2:
+  `--base-ref did not resolve to a commit: <the ref, quoted>; no history was
+  compared, so this is not a history verdict`. That includes an empty ref,
+  which is what an unset CI variable expands to. With `--json` the refusal is
   the abort object every other status-2 path prints, with `"stage":
   "base-ref"`. A base that resolves but is not an ancestor of the commit, and
   a release object changed or deleted since the base, are still failed
   history passes with status 1. `run_verification` still returns the failed
   history pass, and records in a private field that the base never resolved;
   the command reads that field.
+- Other runs that compare nothing keep status 1, as custody failures named in
+  the verdict, and the lists say so: a shallow clone (which `actions/checkout`
+  makes by default, refused before the base is read), a `--commit` the clone
+  does not hold, a `--root` that is not a repository's top level, and a
+  redirecting `GIT_*` variable. Moving them too would be a further contract
+  change, which this entry does not make.
 - `--help` now says the spec is executed. The `--spec` help calls it a
   Python module this command executes in its own process, and the epilog
   repeats the trust direction the README and the API reference already state.
@@ -42,11 +49,12 @@ resolve now exits 2 instead of 1, and with `--json` prints the abort object
 (`stage`, `failure`, `passesCompleted: []`) instead of a full verdict with a
 failed history pass. A caller that fails on any nonzero status is
 unaffected. A caller that branches on the status now routes an unfetched or
-wrongly recorded base to its status-2 branch. If that branch means "fix the
+wrongly recorded base to its status-2 branch, beside the spec, root and
+argument refusals that already exit 2. If that branch means "fix the
 invocation", remember that a missing base can also mean the history that held
 it is gone. A caller that parsed the history failure text for `cannot resolve
-commit` should read status 2 and `"stage": "base-ref"` instead, and one that
-handled only 0 and 1 once arguments parsed must now handle 2 as well.
+commit`, or for the reader's refusal of an empty revision, should read status
+2 and `"stage": "base-ref"` instead.
 
 ### One protected-tree policy (M1 of #62; #64 to #71)
 

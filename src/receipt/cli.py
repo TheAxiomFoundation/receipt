@@ -11,9 +11,10 @@ and says the verdict is only as good as the spec the producer committed.
 The command exits with one of three statuses, :data:`EXIT_OK`,
 :data:`EXIT_FAIL` and :data:`EXIT_USAGE`, and :data:`EXIT_STATUS_HELP` lists
 which paths take which; ``--help`` prints it and the README repeats it. Status
-2 means nothing was verified. That includes a ``--base-ref`` naming no commit
-in the repository, which used to exit 1 like a rewritten history, so a CI job
-could not tell an unfetched base from a rewrite (#36).
+2 means the command refused before any pass ran. That includes a
+``--base-ref`` that does not resolve to a commit, which used to exit 1 like a
+rewritten history, so a CI job could not tell an unfetched base from a
+rewrite (#36).
 
 The output is deliberately two-part. What the command *established* is stated
 without hedging. What it *did not* establish — that any declared gate actually
@@ -297,17 +298,21 @@ EXIT_USAGE = 2
 EXIT_STATUS_HELP = f"""\
 exit status:
   {EXIT_OK}  PASS: every pass the spec configures ran and succeeded.
-  {EXIT_FAIL}  FAIL: verification ran and refused, or could not finish: a failed
-     custody, binding, declaration or history pass (a release object changed
-     or deleted since --base-ref, or a base that is not an ancestor), an
-     --expect-commit or --expect-tree that is malformed or does not match, an
-     aborted run, or a verdict the command could not print.
+  {EXIT_FAIL}  FAIL: verification ran and refused, or could not finish. That covers
+     a failed custody, binding, declaration or history pass: a release object
+     changed or deleted since --base-ref, a base that is not an ancestor, an
+     --expect-commit or --expect-tree that is malformed or does not match,
+     and a repository the reader refuses before comparing anything (a shallow
+     clone, a --commit it does not hold, a --root that is not a repository's
+     top level, a redirecting GIT_* variable). It also covers an aborted run
+     and a verdict the command could not print.
   {EXIT_USAGE}  USAGE: refused before any pass ran, so nothing was verified: an
      argument argparse rejects, --base-ref without --expect-commit,
      --expect-anchor-set without --expect-spec-sha256, an --expect-spec-sha256
      or --expect-anchor-set that is not a SHA-256 digest, a spec that cannot
-     be loaded or does not match --expect-spec-sha256, an unusable --root, or
-     a --base-ref that names no commit in this repository.
+     be loaded or does not match --expect-spec-sha256, a --root that does not
+     exist or is not a directory, or a --base-ref that does not resolve to a
+     commit.
 
 --spec is executed. It is a Python module, and this command runs it in its
 own process to build the configuration every pass uses. Without
@@ -1902,7 +1907,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             EXIT_FAIL,
         )
 
-    # A base this repository does not hold was never compared, so the run
+    # A base that does not resolve to a commit was never compared, so the run
     # verified nothing and is a usage refusal rather than the history failure
     # the library records. Exit 1 used to cover both, and a CI job that did
     # not fetch its base read exactly like a rewritten history (#36). Only the
@@ -1922,8 +1927,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _refuse(
             as_json,
             "base-ref",
-            f"--base-ref names no commit in this repository: {args.base_ref!r}; "
-            "no history was compared, so this is not a history verdict",
+            f"--base-ref did not resolve to a commit: {args.base_ref!r}; no "
+            "history was compared, so this is not a history verdict",
             EXIT_USAGE,
         )
 

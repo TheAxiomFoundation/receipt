@@ -5611,12 +5611,12 @@ def test_a_mismatched_spec_pin_refuses_before_the_spec_runs(
 
 def base_ref_refusal(ref: str) -> str:
     return (
-        f"--base-ref names no commit in this repository: {ref!r}; no history "
-        "was compared, so this is not a history verdict"
+        f"--base-ref did not resolve to a commit: {ref!r}; no history was "
+        "compared, so this is not a history verdict"
     )
 
 
-@pytest.mark.parametrize("ref", ["no-such-ref", "0" * 40, "HEAD~5"])
+@pytest.mark.parametrize("ref", ["no-such-ref", "0" * 40, "HEAD~5", ""])
 def test_an_unresolvable_base_ref_is_a_usage_refusal_not_a_history_failure(
     committed_repo: pathlib.Path, capsys: pytest.CaptureFixture[str], ref: str
 ) -> None:
@@ -5625,7 +5625,8 @@ def test_an_unresolvable_base_ref_is_a_usage_refusal_not_a_history_failure(
     A CI job that did not fetch its base, or a ref recorded wrongly, read
     exactly like a rewritten history. The base is not in the repository, so
     nothing was compared: that is a refusal to verify, status 2, and its
-    JSON names the stage that refused.
+    JSON names the stage that refused. The empty ref is what an unset CI
+    variable expands to; the reader refuses it as no revision at all.
     """
 
     candidate = head_oid(committed_repo)
@@ -5705,6 +5706,10 @@ EXIT_PATHS = {
         "history",
     ),
     "expect-commit": (lambda repo, tmp: ["--expect-commit", "0" * 40], EXIT_FAIL, "custody"),
+    "unheld-commit": (lambda repo, tmp: ["--commit", "0" * 40], EXIT_FAIL, "custody"),
+    "root-not-top-level": (
+        lambda repo, tmp: ["--root", str(repo / "rules")], EXIT_FAIL, "custody"
+    ),
     "dependency": (lambda repo, tmp: ["--base-ref", "HEAD"], EXIT_USAGE, "arguments"),
     "anchor-pin-dependency": (
         lambda repo, tmp: ["--expect-anchor-set", "0" * 64],
@@ -5716,6 +5721,11 @@ EXIT_PATHS = {
     "root": (lambda repo, tmp: ["--root", str(tmp / "absent")], EXIT_USAGE, "root"),
     "base-ref": (
         lambda repo, tmp: ["--base-ref", "no-such-ref", "--expect-commit", head_oid(repo)],
+        EXIT_USAGE,
+        "base-ref",
+    ),
+    "empty-base-ref": (
+        lambda repo, tmp: ["--base-ref", "", "--expect-commit", head_oid(repo)],
         EXIT_USAGE,
         "base-ref",
     ),
@@ -5745,6 +5755,39 @@ def test_each_documented_exit_path(
         failed = next(item for item in payload["passes"] if not item["ok"])
         assert failed["name"] == where
         assert failed["failure"] != "not reached"
+
+
+def test_a_shallow_clone_is_refused_with_status_1_before_the_base_is_read(
+    committed_repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """What the README says to a job that skipped ``fetch-depth: 0``.
+
+    ``actions/checkout`` clones one commit deep by default. The reader refuses
+    a shallow repository when it selects the candidate, before any base is
+    read, so the run is a custody failure with status 1 and names the cause,
+    whatever ``--base-ref`` says.
+    """
+
+    _git(committed_repo, "commit", "--quiet", "--allow-empty", "-m", "a second commit")
+    shallow = tmp_path / "shallow"
+    _git(tmp_path, "clone", "--quiet", "--depth", "1", f"file://{committed_repo}", str(shallow))
+    assert (shallow / ".git" / "shallow").is_file()
+
+    assert main(
+        [
+            "verify", "--spec", str(shallow / "verification/spec.py"),
+            "--root", str(shallow), "--base-ref", "no-such-ref",
+            "--expect-commit", head_oid(shallow), "--json",
+        ]
+    ) == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    failure = next(item for item in payload["passes"] if not item["ok"])
+    assert (failure["name"], failure["failure"]) == (
+        "custody",
+        "shallow repositories are unsupported",
+    )
 
 
 def test_an_aborted_run_exits_with_the_fail_status(

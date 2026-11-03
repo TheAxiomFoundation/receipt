@@ -301,11 +301,11 @@ class VerifyResult:
     #: pin. Private because it qualifies a claim rather than adding another
     #: public datum to the result contract.
     _anchor_set_pinned: bool = field(default=False, repr=False)
-    #: Whether the history pass failed because ``base_ref`` names no commit
-    #: in the repository, so nothing was compared. ``receipt verify`` exits 2
-    #: for that and 1 for a history the comparison refused, which is what
-    #: lets a CI job tell an unfetched base from a rewrite (#36). Private for
-    #: the reason ``_anchor_set_pinned`` is.
+    #: Whether the history pass failed because ``base_ref`` does not resolve
+    #: to a commit in the repository, so nothing was compared. ``receipt
+    #: verify`` exits 2 for that and 1 for a history the comparison refused,
+    #: which is what lets a CI job tell an unfetched base from a rewrite
+    #: (#36). Private for the reason ``_anchor_set_pinned`` is.
     _base_unresolved: bool = field(default=False, repr=False)
 
     @property
@@ -800,12 +800,16 @@ def run_verification(
                 try:
                     selected_base = TreeSnapshot.select(root, base_ref)
                 except SnapshotError as exc:
-                    # Only the reader's own refusal for a revision that
-                    # resolves to no commit, in its exact words. Anything
+                    # Only the reader's own refusals of the revision itself,
+                    # in their exact words: one that resolves to no commit,
+                    # and one that is not a revision at all, such as the
+                    # empty ref an unset CI variable expands to. Anything
                     # else selection refuses keeps its history failure.
-                    base_unresolved = (
-                        str(exc) == f"cannot resolve commit '{base_ref}'"
-                    )
+                    base_unresolved = str(exc) in {
+                        f"cannot resolve commit '{base_ref}'",
+                        "snapshot revision must be a non-empty string without NUL",
+                        "snapshot revision cannot be encoded as a command argument",
+                    }
                     raise
                 snapshots.append(selected_base)
                 base = stack.enter_context(selected_base)

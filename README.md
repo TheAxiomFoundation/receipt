@@ -70,8 +70,8 @@ its digest. A mismatch refuses with status 2 before the spec's code runs.
 | Status | Meaning |
 | --- | --- |
 | `0` | PASS: every pass the spec configures ran and succeeded. |
-| `1` | FAIL: verification ran and refused, or could not finish. That covers a failed custody, binding, declaration or history pass (a release object changed or deleted since `--base-ref`, or a base that is not an ancestor of the commit), an `--expect-commit` or `--expect-tree` that is malformed or does not match, an aborted run, and a verdict the command could not print. |
-| `2` | USAGE: the command refused before any pass ran, so nothing was verified. That covers an argument argparse rejects, `--base-ref` without `--expect-commit`, `--expect-anchor-set` without `--expect-spec-sha256`, an `--expect-spec-sha256` or `--expect-anchor-set` that is not a SHA-256 digest, a spec that cannot be loaded or does not match `--expect-spec-sha256`, an unusable `--root`, and a `--base-ref` that names no commit in this repository. |
+| `1` | FAIL: verification ran and refused, or could not finish. That covers a failed custody, binding, declaration or history pass: a release object changed or deleted since `--base-ref`, a base that is not an ancestor of the commit, an `--expect-commit` or `--expect-tree` that is malformed or does not match, and a repository the reader refuses before comparing anything (a shallow clone, a `--commit` it does not hold, a `--root` that is not a repository's top level, a redirecting `GIT_*` variable). It also covers an aborted run and a verdict the command could not print. |
+| `2` | USAGE: the command refused before any pass ran, so nothing was verified. That covers an argument argparse rejects, `--base-ref` without `--expect-commit`, `--expect-anchor-set` without `--expect-spec-sha256`, an `--expect-spec-sha256` or `--expect-anchor-set` that is not a SHA-256 digest, a spec that cannot be loaded or does not match `--expect-spec-sha256`, a `--root` that does not exist or is not a directory, and a `--base-ref` that does not resolve to a commit. |
 
 With `--json`, every exit after argument parsing prints one JSON object with a
 `verdict` key, unless writing to stdout itself fails; the `receipt.cli`
@@ -82,12 +82,18 @@ not be rendered names `verification` or `render`; every other status-1 run
 prints the full verdict. Errors argparse raises itself print its usage message
 to stderr and no JSON.
 
-A CI job should fail on any status other than 0. Status 1 means the evidence
-did not verify; status 2 means nothing was verified. For `--base-ref`, status 2
-usually means the job did not fetch the base (use `fetch-depth: 0`) or the
-recorded ref is wrong. It can also mean the history that held the base is gone,
-so fetch the base and run again before drawing a conclusion. A base that is in
-the clone but not an ancestor of the commit is a failed history pass, status 1.
+A CI job should fail on any status other than 0. Status 2 means the command
+refused before any pass ran. A status-1 verdict names the pass that failed:
+`history` for a rewritten release object or a base that is not an ancestor of
+the commit, and `custody` for a repository refused before anything was
+compared. For `--base-ref`, status 2 means this clone does not hold the base:
+the job did not fetch the ref it names, or the recorded ref is wrong, or the
+history that held it is gone. Fetch it and run again before drawing a
+conclusion. The base is resolved as `<ref>^{commit}`, so pass a commit ID or a
+ref, not a `:/<text>` search. A shallow clone, which `actions/checkout` makes
+by default, is refused before the base is read, with status 1 and
+`shallow repositories are unsupported`; use `fetch-depth: 0`. `--help` and
+`--version` exit 0.
 
 ## What this verdict speaks for
 
