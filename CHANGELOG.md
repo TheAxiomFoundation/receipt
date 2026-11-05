@@ -63,7 +63,9 @@ unresolvable even in a full clone. A base missing from a shallow clone does
 not reach that branch: the reader refuses every shallow clone first, a
 custody failure with status 1, as before. A caller that parsed the history
 failure text for `cannot resolve commit`, or for the reader's refusal of an
-empty revision, should read status 2 and `"stage": "base-ref"` instead.
+empty revision, should read status 2 and `"stage": "base-ref"` instead. A
+caller that read `commit`, `tree`, `root` or `spec` from the JSON of such a
+run no longer gets them: the abort object carries none of them.
 
 ### The append gate protects a manifest directory outside the release root (#87)
 

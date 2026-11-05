@@ -5674,6 +5674,51 @@ def test_a_base_that_is_not_an_ancestor_is_still_a_history_failure(
     )
 
 
+@pytest.mark.parametrize(
+    ("flag", "status"),
+    [(True, EXIT_USAGE), (1, EXIT_FAIL), ("yes", EXIT_FAIL), (["set"], EXIT_FAIL)],
+    ids=["true", "one", "text", "list"],
+)
+def test_only_the_librarys_own_true_flag_makes_a_failure_a_base_ref_refusal(
+    committed_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    flag: object,
+    status: int,
+) -> None:
+    """``_base_unresolved`` must be ``True`` itself, not merely truthy.
+
+    A substituted result can carry any value in the field. Status 2 says no
+    history was compared, so a truthy value the library never sets must not
+    turn a history the comparison refused into that refusal: the run keeps
+    status 1 and its full verdict. The control shows the field is read.
+    """
+
+    import receipt.cli as cli_module
+
+    real = cli_module.run_verification
+
+    def substituted(*args: object, **kwargs: object) -> VerifyResult:
+        return dataclasses.replace(real(*args, **kwargs), _base_unresolved=flag)
+
+    monkeypatch.setattr(cli_module, "run_verification", substituted)
+    candidate = head_oid(committed_repo)
+    tree = _git(committed_repo, "rev-parse", "HEAD^{tree}")
+    orphan = _git(committed_repo, "commit-tree", tree, "-m", "not an ancestor")
+
+    assert run(
+        committed_repo, "--base-ref", orphan, "--expect-commit", candidate, "--json"
+    ) == status
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
+    if status == EXIT_USAGE:
+        assert payload["stage"] == "base-ref"
+        return
+    assert "stage" not in payload
+    (history,) = [item for item in payload["passes"] if item["name"] == "history"]
+    assert "is not an ancestor of HEAD" in history["failure"]
+
+
 def _corrupt_the_producer_signature(repo: pathlib.Path) -> str:
     manifest_stem(repo).with_suffix(".producer.sig").write_bytes(bytes(64))
     return commit_candidate(repo, "corrupt the producer signature")
