@@ -539,6 +539,23 @@ def run_election(active: list, pending: list, *, first_version: int, order=None)
     first_version=st.sampled_from(FIRST_VERSIONS),
     order=st.randoms(use_true_random=False),
 )
+# Shapes run first on every Hypothesis version, so the mutants they catch do
+# not depend on what a derandomized run happens to draw. The first is a
+# pending-only class spanning two roots: a reused ID under a new root, then a
+# rename onto the old root. The second is one class in two pending bundles,
+# versions 9 and 10, where the bundle path that sorts last is not the newest.
+@example(
+    active=[[("A", "r1", frozenset({"s1"}))]],
+    pending=[[("A", "r2", frozenset({"s2"}))], [("B", "r1", frozenset({"s2"}))]],
+    first_version=1,
+    order=random.Random(0),
+)
+@example(
+    active=[[("A", "r2", frozenset({"s1"}))], [("A", "r2", frozenset({"s1"}))]],
+    pending=[[("A", "r1", frozenset({"s2"}))], [("A", "r1", frozenset({"s2"}))]],
+    first_version=7,
+    order=random.Random(0),
+)
 def test_a_pending_only_class_elects_exactly_its_newest_occurrence(
     active: list, pending: list, first_version: int, order
 ) -> None:
