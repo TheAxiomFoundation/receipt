@@ -465,8 +465,13 @@ def run_election(active: list, pending: list, *, first_version: int, order=None)
     """The real graph, classification and election over synthetic bundles.
 
     Returns the candidates (or the refusal text), the same for the pending
-    updates in shuffled order when ``order`` is given, and the layout the
-    oracle reads.
+    updates in shuffled order when ``order`` is given, the classification's
+    own answer (``None`` when it admits the layout, else its refusal text),
+    and the layout the oracle reads.
+
+    The classification is run on its own so a caller decides admission from
+    it, never from the election: an election that refuses a layout the
+    classification admits is a broken election, not a refused shape.
     """
 
     from unittest import mock
@@ -509,14 +514,22 @@ def run_election(active: list, pending: list, *, first_version: int, order=None)
         except tsa.TsaError as exc:
             return str(exc)
 
+    def classified(walked: list[dict[str, str]]) -> str | None:
+        try:
+            tsa._build_authority_history(None, trusted, walked, spec=None)
+        except tsa.TsaError as exc:
+            return str(exc)
+        return None
+
     with mock.patch.object(tsa, "_anchor_occurrences", occurrences):
         result = elected(updates)
+        refusal = classified(updates)
         reordered = None
         if order is not None:
             shuffled = list(updates)
             order.shuffle(shuffled)
             reordered = elected(shuffled)
-    return result, reordered, bundles
+    return result, reordered, refusal, bundles
 
 
 @settings(PROPERTY, max_examples=300)
@@ -534,15 +547,22 @@ def test_a_pending_only_class_elects_exactly_its_newest_occurrence(
     The key, and the bundle and anchor it carries, agree with the oracle for
     every shape the classification admits; a shape it refuses is refused in
     the same words in any update order.
+
+    Admission is the classification's answer, asked separately. The election
+    may refuse only with the classification's own refusal, so an election
+    that wrongly refuses an admitted shape fails here rather than being
+    counted as a refused shape.
     """
 
-    result, reordered, bundles = run_election(
+    result, reordered, refusal, bundles = run_election(
         active, pending, first_version=first_version, order=order
     )
     assert reordered == result
-    if isinstance(result, str):
+    if refusal is not None:
         event("refused by the classification")
+        assert result == refusal
         return
+    assert isinstance(result, dict), f"election refused an admitted shape: {result}"
     expected = elected_by_oracle(bundles)
     event(f"admitted with {len(expected)} candidate(s)")
     assert result == expected
@@ -563,9 +583,10 @@ def test_the_reviewer_shapes_are_admitted_and_elect_their_newest_occurrence(
     cannot hide a classification that refuses them.
     """
 
-    result, _reordered, bundles = run_election(
+    result, _reordered, refusal, bundles = run_election(
         REVIEWER_ACTIVE, pending, first_version=first_version
     )
+    assert refusal is None
     reference = bundle_reference(first_version + len(REVIEWER_ACTIVE) + len(pending) - 1)
     assert result == {(reference["path"], newest): (reference, {"id": newest})}
     assert result == elected_by_oracle(bundles)

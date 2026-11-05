@@ -49,13 +49,20 @@ bounds the gap.
   back one authority counted twice, and cost a producer that renames and
   rotates in one transition one extra outcome for each further key set. And
   where the two rules differ, no witness satisfies both.
+- The same docstring said a skipped anchor is "already active, so it has
+  nothing new to prove". That holds for the authority, not its keys: an
+  active class that rotates to a key no anchor held before contributes no
+  candidate either, bounded by the same code-pinning rule. It now says so.
 - Tests pin both shapes with real tokens, and what can reach a passed-over
   occurrence after activation. A Hypothesis property checks the election
   against an independent oracle for every shape the classifier admits: each
   class nothing trusts yet contributes exactly its newest occurrence, with
   that occurrence's own bundle and anchor, in any update order and across
-  version numbers of two digits. A separate test requires the reviewer's two
-  shapes to be admitted, so a refusal cannot pass for an election.
+  version numbers of two digits. The property asks the classifier, not the
+  election, which shapes are admitted, and the election may refuse only with
+  the classifier's own refusal, so an election that wrongly refuses an
+  admitted shape fails it. A separate test requires the reviewer's two
+  shapes to be admitted.
 
 ### The append gate protects a manifest directory outside the release root (#87)
 

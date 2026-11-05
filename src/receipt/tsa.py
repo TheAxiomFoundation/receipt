@@ -4032,9 +4032,13 @@ def _supplemental_candidates(
 
     An anchor is skipped -- already active, so it has nothing new to prove --
     when either half of its identity says it is one the chain already trusts,
-    and both halves are needed.  Within a class nothing trusts yet, every
-    occurrence but the newest is passed over for a different reason, given
-    below: the class answers once.
+    and both halves are needed.  "Nothing new" is about the authority, not
+    its keys: an active class that rotates to a key no anchor held before
+    (``A{S1}`` active, ``A{S9}`` pending, same root) is skipped too, so S9
+    activates with no supplemental outcome showing it, bounded, like the
+    pending-only case below, by the code-pinning rule.  Within a class
+    nothing trusts yet, every occurrence but the newest is passed over for a
+    different reason, given below: the class answers once.
 
     By ``(id, root SPKI)``, because an ID alone names a slot.  A pending
     bundle that reuses an active anchor ID under a different code-pinned root
