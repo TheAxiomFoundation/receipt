@@ -57,6 +57,59 @@ bounds the gap.
   version numbers of two digits. A separate test requires the reviewer's two
   shapes to be admitted, so a refusal cannot pass for an election.
 
+### The append gate protects a manifest directory outside the release root (#87)
+
+An auditor can now conclude that an append-gate verdict speaks for the
+manifests, producer signatures and receipts of a chain whose spec keeps them
+outside `release_root_relative`. `ChainSpec` accepts that layout, and the
+history pass has compared it since 0.6.3, but the gate protected only the
+release root.
+
+- A gate-only proposal that changes the outside manifest directory, anything
+  under it, or one of its proper ancestors is refused with `gate-only
+  proposal changes unclassified release path(s): [...]` when neither
+  configured surface names the path. Before, it passed as gate-only and
+  listed the change under `unclassified changes`. The gate-only route runs no
+  history check, so an existing manifest, signature or receipt could be
+  rewritten or deleted under cover of a gate change. The ledger-state
+  refusal, the attribute screen and the tree screens still run first.
+- A data proposal reads the base chain, and the release objects it adds,
+  from the outside directory. Before, the gate looked for the base chain only
+  among release-root entries, so an initialized outside chain read as
+  pre-genesis and its custody was never verified. Its next release, and a
+  genesis release written there, were refused with `release proposal must
+  add exactly one manifest for index 0; found []`. The base is now verified
+  as the existing chain, and an invalid base is refused with `base release
+  chain is invalid: ...`.
+- Whether the base has a chain is read from the outside directory itself, as
+  the push path already decided, and not from `release_manifest_prefix`,
+  which nothing checks against that directory. So one more input is newly
+  refused: an ordinary append over a base whose
+  outside directory holds anything that is not a valid chain, such as a
+  `.gitkeep`. It is refused with `base release chain is invalid: unknown file
+  in closed release manifest directory: .gitkeep`, as in-root and on the push
+  path. Before, it was accepted as pre-genesis. The new release itself is
+  still found by `release_manifest_prefix`, so a prefix that does not spell
+  the manifest directory refuses every release proposal.
+- A pre-genesis data proposal that adds files to the outside directory but no
+  manifest is refused with `legacy pre-genesis proposal must not change
+  releases/; ...`, as the same files under the release root always were.
+  Before, it was accepted. One that adds a manifest without the rest of its
+  release was refused before and still is, now by the triple rule.
+- Nothing changes for a manifest directory at or under the release root. A
+  property test checks the protection rule against the old one, path for
+  path, and the gate reads no extra tree listing for that layout.
+- The layout is protected rather than refused at spec load because it was
+  already a working chain where no base is named: `verify_append_gate`
+  without `base_ref` verifies it. A refusal would have turned that verdict
+  into a configuration error.
+- `AppendGateSpec` now documents the contract, and says to keep the manifest
+  directory off `gate_surface` in either layout. A gate-only proposal skips
+  every history and chain check. So with a gate surface over the manifests,
+  a proposal that leaves the ledger alone can add or change release objects
+  unchecked, a whole release included, while a release that appends to the
+  ledger is refused. Nothing in this entry changes that; tests pin it.
+
 ### One protected-tree policy (M1 of #62; #64 to #71)
 
 An auditor can now conclude that the protected-tree screens every pass applies
@@ -104,6 +157,73 @@ through its own words and exception classes.
   the forwarding names needs a separately agreed compatibility policy.
 - Design record: `docs/design/0.7-m1-protected-tree-policy.md`, with the two
   review rounds beside it.
+
+### Witness refusals: bounded cost, and named errors for caller mistakes (#89, #90)
+
+The verifier accepts no input it refused before. What changes is what a
+refusal costs, which exception reports a caller's mistake, and one narrowing
+for callers that pass a non-mapping object, described below.
+
+- The verifier refuses a witness `tokenPath` whose path under the records
+  root is 4,096 bytes or longer before it resolves any path. No supported
+  platform can open such a pathname whole, so the verifier never read one.
+  Before, the refusal cost time quadratic in the component count (#89
+  measured 46 s at 100,000 components), and on Python 3.11 to 3.13 it then
+  raised `OSError` instead of refusing. It now gives the refusal a missing
+  token always had: `witness token is missing for <record>: <path>`. The
+  bound measures the path the spelling names, so the verifier still reads a
+  long spelling of a short path (`records/./././...`). The pinned-root and
+  trust-bundle loads apply the same bound and keep their own "missing"
+  wording.
+- A token path with one component longer than NAME_MAX gets that refusal too,
+  instead of `OSError` from `Path.is_file`.
+- The symlink walk over a path's components resolves each prefix once,
+  instead of resolving every parent from scratch. Between depths 100 and 400
+  the old walk's `stat`/`lstat` calls grew 14-fold; the new walk's grow
+  linearly, and a test holds them to at most 5-fold. A differential property
+  checks that the walk returns exactly what the old walk returned.
+- `verify_timestamp_token`, `verify_witness(trusted_bundles=...)`,
+  `verify_witness(transition_bundle_updates=...)`,
+  `verify_witness_step(prior_pending_updates=...)` and
+  `preferred_active_trust_bundle` refuse malformed caller arguments with
+  `TsaError` instead of `KeyError`, `TypeError`, `AttributeError` or
+  `ValueError`. Each check sits where main raised. The verifier checks every
+  `trusted_bundles` value before it loads any of them; it checks pending
+  updates only after it has loaded every active bundle, and it checks each
+  pending update's `path` in sorted order, after it has processed the updates
+  before it. New refusal texts:
+  `timestamp token bundle reference is not an object`,
+  `timestamp token bundle reference lacks <key>`,
+  `timestamp token bundle reference path is too large to compare`,
+  `timestamp token claim is not an object`,
+  `trusted TSA bundle <path> is not a bundle reference`,
+  `trusted TSA bundle is not a bundle reference: <value>` (a value that is
+  not a mapping; a mapping without `path` keeps main's
+  `TSA trust bundle path is not immutable/versioned: None`),
+  `trusted TSA bundle path is too large to compare`,
+  `pending TSA bundle update is not a bundle reference: <value>`,
+  `pending TSA bundle update path is too large to compare`,
+  `newest active TSA trust bundle is not a bundle reference: <value>` and
+  `newest active TSA trust bundle reference lacks <key>`. Where an existing
+  message names a caller value too large for `str()`, it shows
+  `<int too large to display>`. Bundle versions of any length now order
+  numerically, without `int()`. So a `trusted_bundles` key with a
+  5,000-digit version, which raised `ValueError`, now gets the verdict main
+  gives the same entries under a representable version: acceptance where
+  main accepts that shape.
+- `verify_timestamp_token` now requires its bundle reference and claim to be
+  `collections.abc.Mapping` objects, and so does `_bundle_for_claim` for each
+  `trusted_bundles` value a witness selects. Main read them with `[...]` and
+  `.get`, so it accepted a non-mapping object that answered those calls; the
+  verifier now refuses one (`timestamp token bundle reference is not an
+  object`, `timestamp token claim is not an object`, `trusted TSA bundle
+  <path> is not a bundle reference`). The signatures declare mappings, and no
+  caller in this repository passes anything else.
+- `-attime` is genTime floored to whole seconds, in the TSA verifier and the
+  release-chain verifier. `int(gen_time.timestamp())` truncated toward zero
+  and rounded through a float, so it was one second late before 1970
+  (`19691231235959.5Z` gave 0, not -1) and at the top of the range
+  (`99991231235958.999999Z` gave 253402300799, not 253402300798).
 
 ## 0.6.3 (unreleased)
 
