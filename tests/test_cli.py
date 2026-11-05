@@ -5619,7 +5619,10 @@ def base_ref_refusal(ref: str) -> str:
     )
 
 
-@pytest.mark.parametrize("ref", ["no-such-ref", "0" * 40, "HEAD~5", ""])
+@pytest.mark.parametrize(
+    "ref",
+    ["no-such-ref", "0" * 40, "HEAD~5", "", pytest.param("a\ud800b", id="unencodable")],
+)
 def test_an_unresolvable_base_ref_is_a_usage_refusal_not_a_history_failure(
     committed_repo: pathlib.Path, capsys: pytest.CaptureFixture[str], ref: str
 ) -> None:
@@ -5629,7 +5632,9 @@ def test_an_unresolvable_base_ref_is_a_usage_refusal_not_a_history_failure(
     exactly like a rewritten history. The base is not in the repository, so
     nothing was compared: that is a refusal to verify, status 2, and its
     JSON names the stage that refused. The empty ref is what an unset CI
-    variable expands to; the reader refuses it as no revision at all.
+    variable expands to; the reader refuses it as no revision at all. A ref
+    holding a lone surrogate, which only an in-process caller can pass, is
+    refused as one that cannot be encoded as a command argument.
     """
 
     candidate = head_oid(committed_repo)
@@ -5776,6 +5781,13 @@ EXIT_PATHS = {
         lambda repo, tmp: _a_base_that_is_not_an_ancestor(repo), EXIT_FAIL, "history"
     ),
     "expect-commit": (lambda repo, tmp: ["--expect-commit", "0" * 40], EXIT_FAIL, "custody"),
+    "malformed-expect-commit": (
+        lambda repo, tmp: ["--expect-commit", "abc1234"], EXIT_FAIL, "custody"
+    ),
+    "expect-tree": (lambda repo, tmp: ["--expect-tree", "1" * 40], EXIT_FAIL, "custody"),
+    "malformed-expect-tree": (
+        lambda repo, tmp: ["--expect-tree", "not-a-tree"], EXIT_FAIL, "custody"
+    ),
     "shallow-clone": (lambda repo, tmp: _a_shallow_clone(repo, tmp), EXIT_FAIL, "custody"),
     "unheld-commit": (lambda repo, tmp: ["--commit", "0" * 40], EXIT_FAIL, "custody"),
     "root-not-top-level": (
@@ -5847,6 +5859,15 @@ EXIT_PATH_DOCS = {
     "non-ancestor-base": "a base that is not an ancestor",
     "shallow-clone": "a shallow clone",
     "expect-commit": (
+        "an --expect-commit or --expect-tree that is malformed or does not match"
+    ),
+    "malformed-expect-commit": (
+        "an --expect-commit or --expect-tree that is malformed or does not match"
+    ),
+    "expect-tree": (
+        "an --expect-commit or --expect-tree that is malformed or does not match"
+    ),
+    "malformed-expect-tree": (
         "an --expect-commit or --expect-tree that is malformed or does not match"
     ),
     "unheld-commit": "a --commit it does not hold",
