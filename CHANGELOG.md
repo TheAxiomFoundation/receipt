@@ -67,6 +67,70 @@ empty revision, should read status 2 and `"stage": "base-ref"` instead. A
 caller that read `commit`, `tree`, `root` or `spec` from the JSON of such a
 run no longer gets them: the abort object carries none of them.
 
+### `receipt.tsa` states what the pending-class election settles (#50)
+
+The docstrings correct claims that overstated the election, and tests pin the
+behavior; the package behaves as before. An auditor can now read in
+`receipt.tsa`'s own reference that the election, in picking one supplemental
+candidate for each pending-only class, settles which occurrence answers for the
+class, not which of its keys a token showed. The reference also says what
+bounds the gap.
+
+- The module docstring said the election picks the newest occurrence
+  "because that is the anchor a witness will answer for once the transition
+  activates". For a v2 witness, only that occurrence can answer, since a v2
+  witness must name the newest active bundle; if that bundle drops the class,
+  none can. A legacy witness, with no transition pending, may name any active
+  single-anchor bundle, but only while `legacy_witness_bundle_id` names the
+  newest active bundle and that bundle configures a single anchor. So it can
+  answer under an occurrence the election passed over. The docstring now says
+  so.
+- `TsaSpec` said a signer that a new bundle replaces stops vouching for new
+  records once that bundle activates. The package enforces that rule by
+  requiring a v2-schema witness to name the newest active bundle, and the
+  docstring now names the legacy schema's exception. A test shows that
+  exception without any pending class.
+- The module docstring counts among its refusals "a pending bundle anchor
+  reusing an active anchor ID under a different code-pinned root", and says
+  such an anchor "must carry a supplemental outcome". Where no active
+  authority holds the anchor's keys, the anchor belongs to a pending-only
+  class, and the class's newest occurrence carries that outcome. When a later
+  bundle of the same transition files the class under another name, the newer
+  name carries it and the reused-ID anchor activates on it. If a producer also
+  offers an outcome for the reused ID, the package refuses it as not
+  introduced. (An anchor whose keys make it an active authority under a new
+  name needs no outcome, as before.) The docstring now says so, and tests pin
+  both version orders.
+- The docstring of `_supplemental_candidates` states the property and walks
+  through the two shapes from #50, `[C{S3}@v2, D{S3,S4}@v3, E{S3}@v4]` and
+  `[C{S3}@v2, C{S4}@v3]`. The occurrence the election picks need not allow
+  every key the others declare, and the occurrences it passes over activate
+  all the same. `_load_trust_bundle` bounds that gap: it refuses any bundle in
+  which an anchor's allowed signers differ from the identity the consumer's
+  spec pins, so no key the consumer did not pin can activate this way.
+- The docstring also records why the election doesn't take one candidate per
+  distinct key set. Any one allowed signer, or an unavailable declaration,
+  satisfies an outcome, so with one candidate per key set the outcomes still
+  wouldn't show every key. Under that rule, the package would again count one
+  authority twice, and a producer that renames and rotates in one transition
+  would owe one extra outcome for each further key set. Where the two rules
+  differ, no witness satisfies both.
+- The same docstring gave "already active, so it has nothing new to prove" as
+  the reason `_supplemental_candidates` skips an anchor. That holds for the
+  authority, not its keys: an active class that rotates to a key no anchor
+  held before contributes no candidate either, and `_load_trust_bundle` bounds
+  that gap the same way. The docstring now says so.
+- Tests pin both shapes with real tokens and, after activation, what can
+  reach an occurrence the election passed over. A Hypothesis property checks
+  the election against an independent oracle for every shape the classifier
+  admits. Each class nothing trusts yet contributes its newest occurrence and
+  no other, with that occurrence's own bundle and anchor, in any update order
+  and across version numbers of two digits. The property asks the classifier,
+  not the election, which shapes to admit. The election may refuse only with
+  the classifier's own refusal, so an election that wrongly refuses a shape
+  the classifier admits fails the property. A separate test requires the
+  classifier to admit both shapes.
+
 ### The append gate protects a manifest directory outside the release root (#87)
 
 An auditor can now conclude that an append-gate verdict speaks for the
