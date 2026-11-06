@@ -7282,6 +7282,469 @@ def test_an_elected_class_survivor_cannot_be_credited_twice_once_active(
     )
 
 
+# ---------------------------------------------------------------------------
+# #50: the election settles which occurrence answers for a pending-only class,
+# not which of the class's keys are proven. The reviewer's two shapes, with
+# real tokens: [C{S3}@v2, D{S3,S4}@v3, E{S3}@v4], one class through the shared
+# S3, and the plain rotation [C{S3}@v2, C{S4}@v3]. S3 is beta's signing key and
+# S4 a second signing certificate under beta's root.
+
+PENDING_V2 = "records/trust/tsa-anchors-v2.json"
+PENDING_V3 = "records/trust/tsa-anchors-v3.json"
+PENDING_V4 = "records/trust/tsa-anchors-v4.json"
+NOT_INTRODUCED = (
+    "supplemental TSA outcome is not introduced by a pending trust transition: "
+)
+LEGACY_REFUSED_ONCE_V2_IS_ACTIVE = (
+    "legacy witness schema cannot cover a TSA trust transition "
+    "or a chain with v2 active"
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class ReviewerShape:
+    """A records tree with v1 active and the pending bundles of one shape."""
+
+    tree: WitnessTree
+    spec: TsaSpec
+    pending: dict[int, dict[str, Any]]
+    anchors: dict[str, LocalAnchor]
+    s3: dict[str, str]
+    s4: dict[str, str]
+
+    def candidates(self, *versions: int) -> set[tuple[str, str]]:
+        return set(
+            tsa_module._supplemental_candidates(
+                self.tree.records,
+                {BUNDLE_LOGICAL: self.tree.reference},
+                [self.pending[version] for version in versions],
+                spec=self.spec,
+            )
+        )
+
+    def stamp(self, anchor_id: str, authority: LocalTsa, label: str) -> pathlib.Path:
+        token = self.tree.records / RECORD_DAY / f"record-0001.{anchor_id}.{label}.tsr"
+        authority.stamp(sha256_bytes(self.tree.record.read_bytes()), token)
+        return token
+
+    def transition(self, supplemental: list[dict[str, Any]]) -> WitnessEvidence:
+        """The record with v1 active and every bundle of the shape pending."""
+
+        rewrite_witness(
+            self.tree,
+            lambda payload: payload.__setitem__("supplementalOutcomes", supplemental),
+        )
+        return verify_step(
+            self.tree.record,
+            spec=self.spec,
+            records=self.tree.records,
+            trusted_bundles={BUNDLE_LOGICAL: self.tree.reference},
+            prior_pending_updates=[self.pending[v] for v in sorted(self.pending)],
+        )
+
+    def activated(self) -> dict[str, dict[str, Any]]:
+        active = {BUNDLE_LOGICAL: self.tree.reference}
+        activate_trust_bundles(active, [self.pending[v] for v in sorted(self.pending)])
+        return active
+
+
+def reviewer_shape(
+    root: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_beta: LocalTsa,
+    *,
+    rotation: bool,
+    with_v4: bool = True,
+) -> ReviewerShape:
+    """``[C{S3}@v2, D{S3,S4}@v3, E{S3}@v4]``, or ``[C{S3}@v2, C{S4}@v3]``.
+
+    v1, the active genesis bundle, holds alpha alone. Every pending anchor is
+    filed over beta's root, and every bundle has the identity a consumer pins
+    for it, so S4 in D@v3 or C@v3 is a key the consumer's own spec names.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    s3, s4 = dict(beta.signer_pins), certificate_pins(rotated_beta.signer_pem)
+    assert s3["spkiSha256"] != s4["spkiSha256"]
+    tree = build_witness_tree(root, [alpha])
+    anchors = {"C": alias_of(beta, anchor_id="C")}
+    v2, spec = pending_authority(tree, anchors["C"], version=2)
+    pending = {2: v2}
+    if rotation:
+        pending[3], spec = add_bundle_version(
+            tree, [anchors["C"]], version=3, signers={"C": s4}, base=spec
+        )
+    else:
+        anchors["D"] = alias_of(beta, anchor_id="D")
+        anchors["E"] = alias_of(beta, anchor_id="E")
+        pending[3], spec = add_bundle_version(
+            tree, [anchors["D"]], version=3, extra_signers={"D": [s4]}, base=spec
+        )
+        if with_v4:
+            pending[4], spec = add_bundle_version(
+                tree, [anchors["E"]], version=4, base=spec
+            )
+    return ReviewerShape(tree, spec, pending, anchors, s3, s4)
+
+
+def supplemental_signers(evidence: WitnessEvidence) -> list[tuple[str, str, str]]:
+    return [
+        (token.trust_bundle_path, token.anchor_id, token.tsa_spki_sha256)
+        for token in evidence.supplemental_tokens
+    ]
+
+
+def test_a_pending_only_class_elects_one_occurrence_whatever_keys_the_others_carry(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_beta: LocalTsa,
+) -> None:
+    """#50, the reviewer's first shape: one candidate, E@v4, allowing S3 alone.
+
+    C, D and E are one pending-only class through the shared S3, so only the
+    newest occurrence is a candidate, in either input order. One token from S3
+    satisfies the transition. An outcome for D, the one occurrence allowing
+    S4, is refused as not introduced. D@v3 activates with the transition all
+    the same, allowing S4, though no token of the transition showed S4.
+    """
+
+    shape = reviewer_shape(tmp_path, local_anchors, rotated_beta, rotation=False)
+    assert shape.candidates(2, 3, 4) == {(PENDING_V4, "E")}
+    assert shape.candidates(4, 3, 2) == {(PENDING_V4, "E")}
+    by_s3 = shape.stamp("E", local_anchors[1].tsa, "s3")
+    by_s4 = shape.stamp("D", rotated_beta, "s4")
+    for_e = supplemental_outcome(shape.tree, shape.pending[4], shape.anchors["E"], by_s3)
+    for_d = supplemental_outcome(
+        shape.tree, shape.pending[3], shape.anchors["D"], by_s4, signer=shape.s4
+    )
+
+    evidence = shape.transition([for_e])
+    assert evidence.status == "available"
+    assert supplemental_signers(evidence) == [
+        (PENDING_V4, "E", shape.s3["spkiSha256"])
+    ]
+
+    with pytest.raises(TsaError) as caught:
+        shape.transition([for_e, for_d])
+    assert str(caught.value) == f"{NOT_INTRODUCED}('{PENDING_V3}', 'D')"
+
+    _history, active, _pending = tsa_module._build_authority_history(
+        shape.tree.records, shape.activated(), [], spec=shape.spec
+    )
+    allowed = {
+        (occurrence.path, occurrence.anchor["id"]): occurrence.signers
+        for occurrence in active
+    }
+    assert allowed[(PENDING_V3, "D")] == {
+        shape.s3["spkiSha256"],
+        shape.s4["spkiSha256"],
+    }
+    assert allowed[(PENDING_V4, "E")] == {shape.s3["spkiSha256"]}
+
+
+def test_a_pending_rotation_elects_its_newest_era_and_never_shows_the_first(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_beta: LocalTsa,
+) -> None:
+    """#50, the reviewer's second shape: C{S3}@v2 then C{S4}@v3, one authority.
+
+    C@v3 is the candidate and S4 answers it. S3 cannot be offered at all:
+    C@v2 is not a candidate, and C@v3 does not allow S3.
+    """
+
+    shape = reviewer_shape(tmp_path, local_anchors, rotated_beta, rotation=True)
+    assert shape.candidates(2, 3) == {(PENDING_V3, "C")}
+    assert shape.candidates(3, 2) == {(PENDING_V3, "C")}
+    anchor = shape.anchors["C"]
+    by_s4 = shape.stamp("C", rotated_beta, "s4")
+    by_s3 = shape.stamp("C", local_anchors[1].tsa, "s3")
+    v3_by_s4 = supplemental_outcome(
+        shape.tree, shape.pending[3], anchor, by_s4, signer=shape.s4
+    )
+
+    evidence = shape.transition([v3_by_s4])
+    assert supplemental_signers(evidence) == [
+        (PENDING_V3, "C", shape.s4["spkiSha256"])
+    ]
+
+    v2_by_s3 = supplemental_outcome(
+        shape.tree, shape.pending[2], anchor, by_s3, signer=shape.s3
+    )
+    with pytest.raises(TsaError) as caught:
+        shape.transition([v3_by_s4, v2_by_s3])
+    assert str(caught.value) == f"{NOT_INTRODUCED}('{PENDING_V2}', 'C')"
+    v3_by_s3 = supplemental_outcome(
+        shape.tree, shape.pending[3], anchor, by_s3, signer=shape.s3
+    )
+    with pytest.raises(TsaError) as caught:
+        shape.transition([v3_by_s3])
+    assert str(caught.value) == (
+        f"RFC 3161 token signer is not pinned for TSA anchor 'C': {shape.s3}"
+    )
+
+
+@pytest.mark.parametrize("reused_first", [True, False], ids=["reused-id-older", "reused-id-newest"])
+def test_a_reused_id_under_a_new_root_answers_through_its_class(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    reused_first: bool,
+) -> None:
+    """The reused-ID rule is per class once a later name joins the class (#50).
+
+    Alone, an anchor reusing alpha's active ID over beta's root is a new
+    authority and a candidate, and must carry its own supplemental outcome
+    (``test_requires_a_supplemental_outcome_for_a_reused_id_under_a_new_root``).
+    Filed again as E in a later bundle of the same transition, through the
+    shared S3, it is one pending-only class with E, and only the class's
+    newest occurrence carries the outcome: the reused-ID anchor activates on
+    E's, and an outcome offered for it is refused as not introduced. In the
+    opposite version order the reused ID is the newest occurrence and the
+    candidate itself.
+    """
+
+    alpha, beta = local_anchors[0], local_anchors[1]
+    tree = build_witness_tree(tmp_path, [alpha])
+    reused = alias_of(beta, anchor_id=alpha.anchor_id)
+    renamed = alias_of(beta, anchor_id="E")
+    older, newer = (reused, renamed) if reused_first else (renamed, reused)
+    first, spec = pending_authority(tree, older, version=2)
+    second, spec = add_bundle_version(tree, [newer], version=3, base=spec)
+    assert set(
+        tsa_module._supplemental_candidates(
+            tree.records, {BUNDLE_LOGICAL: tree.reference}, [first, second], spec=spec
+        )
+    ) == {(PENDING_V3, newer.anchor_id)}
+
+    digest = sha256_bytes(tree.record.read_bytes())
+    outcomes = {}
+    for reference, anchor in ((first, older), (second, newer)):
+        token = tree.records / RECORD_DAY / f"record-0001.{reference['bundleId']}.tsr"
+        beta.tsa.stamp(digest, token)
+        outcomes[anchor.anchor_id] = supplemental_outcome(tree, reference, anchor, token)
+
+    def transition(supplemental: list[dict[str, Any]]) -> WitnessEvidence:
+        rewrite_witness(
+            tree, lambda payload: payload.__setitem__("supplementalOutcomes", supplemental)
+        )
+        return verify_step(
+            tree.record,
+            spec=spec,
+            records=tree.records,
+            trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+            prior_pending_updates=[first, second],
+        )
+
+    evidence = transition([outcomes[newer.anchor_id]])
+    assert supplemental_signers(evidence) == [
+        (PENDING_V3, newer.anchor_id, beta.signer_pins["spkiSha256"])
+    ]
+    with pytest.raises(TsaError) as caught:
+        transition([outcomes[newer.anchor_id], outcomes[older.anchor_id]])
+    assert str(caught.value) == f"{NOT_INTRODUCED}('{PENDING_V2}', '{older.anchor_id}')"
+
+
+@pytest.mark.parametrize("rotation", [False, True], ids=["three-bundle-class", "rotation"])
+def test_a_passed_over_occurrence_answers_only_a_legacy_witness_the_spec_allows(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_beta: LocalTsa,
+    rotation: bool,
+) -> None:
+    """Which witness can reach an occurrence the election passed over (#50).
+
+    After activation a v2 witness must name the newest active bundle, so it
+    cannot name the passed-over occurrence's. A legacy witness, with nothing
+    pending, may name any active single-anchor bundle, but only while
+    ``legacy_witness_bundle_id`` names the newest active bundle and that
+    bundle configures a single anchor. Refused under the genesis id, it is
+    accepted under the newest bundle's, and the key the transition never
+    showed -- S4 in D@v3, or S3 in C@v2 -- vouches. That key is one the slot
+    allows, and a slot's allowed keys are the consumer's pins (the load rule,
+    tested where bundles load); a key the slot does not allow is refused on
+    the same route, here S4 offered for C@v2.
+    """
+
+    shape = reviewer_shape(tmp_path, local_anchors, rotated_beta, rotation=rotation)
+    version, anchor_id, newest = (2, "C", "tsa-anchors-v3") if rotation else (
+        3, "D", "tsa-anchors-v4"
+    )
+    authority, signer = (
+        (local_anchors[1].tsa, shape.s3) if rotation else (rotated_beta, shape.s4)
+    )
+    passed_over = shape.pending[version]
+    # The premise: the election did pass this occurrence over.
+    assert (passed_over["path"], anchor_id) not in shape.candidates(*sorted(shape.pending))
+    token = shape.stamp(anchor_id, authority, "after-activation")
+    claim = supplemental_outcome(
+        shape.tree, passed_over, shape.anchors[anchor_id], token, signer=signer
+    )
+    del claim["role"]
+    active = shape.activated()
+
+    def verify(spec: TsaSpec) -> WitnessEvidence:
+        return verify_witness(
+            shape.tree.record, spec=spec, records=shape.tree.records,
+            trusted_bundles=dict(active),
+        )
+
+    outcome = {
+        key: value for key, value in claim.items() if not key.startswith("trustBundle")
+    }
+    rewrite_witness(
+        shape.tree,
+        lambda payload: payload.update(
+            {
+                "trustBundleId": passed_over["bundleId"],
+                "trustBundlePath": passed_over["path"],
+                "trustBundleSha256": passed_over["sha256"],
+                "anchorOutcomes": [outcome],
+                "supplementalOutcomes": [],
+            }
+        ),
+    )
+    with pytest.raises(TsaError) as caught:
+        verify(shape.spec)
+    assert str(caught.value) == (
+        "multi-token witness does not use the newest active TSA trust bundle"
+    )
+
+    legacy = {
+        "schemaVersion": "thesis_rfc3161_witness_v1",
+        "digestSha256": sha256_bytes(shape.tree.record.read_bytes()),
+        **claim,
+    }
+    shape.tree.witness.write_bytes(canonical_bytes(legacy) + b"\n")
+    with pytest.raises(TsaError) as caught:
+        verify(shape.spec)
+    assert str(caught.value) == LEGACY_REFUSED_ONCE_V2_IS_ACTIVE
+
+    permissive = dataclasses.replace(shape.spec, legacy_witness_bundle_id=newest)
+    evidence = verify(permissive)
+    assert [
+        (token.trust_bundle_path, token.anchor_id, token.tsa_spki_sha256)
+        for token in evidence.tokens
+    ] == [(passed_over["path"], anchor_id, signer["spkiSha256"])]
+
+    unpinned = shape.stamp("C", rotated_beta, "unpinned")
+    offered = supplemental_outcome(
+        shape.tree, shape.pending[2], shape.anchors["C"], unpinned, signer=shape.s4
+    )
+    del offered["role"]
+    shape.tree.witness.write_bytes(
+        canonical_bytes({**legacy, **offered}) + b"\n"
+    )
+    with pytest.raises(TsaError) as caught:
+        verify(permissive)
+    assert str(caught.value) == (
+        f"RFC 3161 token signer is not pinned for TSA anchor 'C': {shape.s4}"
+    )
+
+
+def test_a_legacy_witness_lets_a_superseded_signer_vouch_where_the_spec_allows_it(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_alpha: LocalTsa,
+) -> None:
+    """The legacy route above is the legacy schema's rule, not the election's.
+
+    No pending-only class here: an active rotation of alpha from S1 in v1 to
+    S2 in v2. A legacy witness naming v1 is refused under the genesis id and
+    accepted once ``legacy_witness_bundle_id`` names v2, so S1 still vouches
+    for a record written then. The same token in a v2 witness naming v1 is
+    refused once v2 is active, which is the retirement ``TsaSpec``
+    describes, and accepted while v1 is the only active bundle.
+    """
+
+    alpha = local_anchors[0]
+    tree = build_witness_tree(tmp_path, [alpha], schema="thesis_rfc3161_witness_v1")
+    rotated = certificate_pins(rotated_alpha.signer_pem)
+    reference, spec = add_bundle_version(
+        tree, [alpha], version=2, signers={alpha.anchor_id: rotated}
+    )
+    active = {BUNDLE_LOGICAL: tree.reference, str(reference["path"]): reference}
+
+    with pytest.raises(TsaError) as caught:
+        verify_witness(tree.record, spec=spec, records=tree.records, trusted_bundles=active)
+    assert str(caught.value) == LEGACY_REFUSED_ONCE_V2_IS_ACTIVE
+    evidence = verify_witness(
+        tree.record,
+        spec=dataclasses.replace(spec, legacy_witness_bundle_id="tsa-anchors-v2"),
+        records=tree.records,
+        trusted_bundles=active,
+    )
+    assert [
+        (token.trust_bundle_path, token.tsa_spki_sha256) for token in evidence.tokens
+    ] == [(BUNDLE_LOGICAL, alpha.signer_pins["spkiSha256"])]
+
+    def as_v2_witness(payload: dict[str, Any]) -> None:
+        outcome = {"status": "available"}
+        for key in (
+            "tsaAnchorId", "tsa", "tokenPath", "tokenSha256", "tsaPolicyOid",
+            "tsaImprintAlgorithmOid", "tsaSignerCertificateSha256",
+            "tsaSignerSpkiSha256",
+        ):
+            outcome[key] = payload.pop(key)
+        payload["schemaVersion"] = "thesis_rfc3161_witness_v2"
+        payload["anchorOutcomes"] = [outcome]
+
+    rewrite_witness(tree, as_v2_witness)
+    with pytest.raises(TsaError) as caught:
+        verify_witness(tree.record, spec=spec, records=tree.records, trusted_bundles=active)
+    assert str(caught.value) == (
+        "multi-token witness does not use the newest active TSA trust bundle"
+    )
+    assert verify_witness(
+        tree.record, spec=spec, records=tree.records,
+        trusted_bundles={BUNDLE_LOGICAL: tree.reference},
+    ).status == "available"
+
+
+def test_one_supplemental_outcome_shows_at_most_one_of_its_anchors_keys(
+    tmp_path: pathlib.Path,
+    local_anchors: tuple[LocalAnchor, ...],
+    rotated_beta: LocalTsa,
+) -> None:
+    """Why one candidate per distinct key set would not prove every key (#50).
+
+    In ``[C{S3}@v2, D{S3,S4}@v3]`` the newest occurrence is D itself, so D is
+    the candidate. Its outcome is satisfied by a token from S3, by one from
+    S4, and by an unavailable outcome with a reason. The allowed-signer check
+    is membership, so an outcome shows at most one key of the anchor it
+    answers for, whichever occurrences are candidates.
+    """
+
+    shape = reviewer_shape(
+        tmp_path, local_anchors, rotated_beta, rotation=False, with_v4=False
+    )
+    assert shape.candidates(2, 3) == {(PENDING_V3, "D")}
+    anchor = shape.anchors["D"]
+    for authority, signer, label in (
+        (local_anchors[1].tsa, shape.s3, "s3"),
+        (rotated_beta, shape.s4, "s4"),
+    ):
+        token = shape.stamp("D", authority, label)
+        evidence = shape.transition(
+            [supplemental_outcome(shape.tree, shape.pending[3], anchor, token, signer=signer)]
+        )
+        assert supplemental_signers(evidence) == [
+            (PENDING_V3, "D", signer["spkiSha256"])
+        ]
+    unavailable = {
+        "role": "pending_trust_bundle",
+        "status": "unavailable",
+        "reason": "D did not answer",
+        "trustBundleId": shape.pending[3]["bundleId"],
+        "trustBundlePath": shape.pending[3]["path"],
+        "trustBundleSha256": shape.pending[3]["sha256"],
+        "tsaAnchorId": "D",
+        "tsa": anchor.endpoint,
+    }
+    evidence = shape.transition([unavailable])
+    assert evidence.status == "available"
+    assert evidence.supplemental_tokens == ()
+
+
 def test_two_pending_bundles_may_introduce_two_authorities(
     tmp_path: pathlib.Path,
     local_anchors: tuple[LocalAnchor, ...],
