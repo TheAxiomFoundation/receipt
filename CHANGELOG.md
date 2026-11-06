@@ -6,6 +6,69 @@ input the package used to accept, or accept for the wrong reason.
 
 ## 0.7.0 (unreleased)
 
+### `receipt verify` documents its exit statuses, and an unresolvable `--base-ref` exits 2 (#36)
+
+From the exit status alone, a CI job can now tell a history the comparison
+refused, status 1, from a `--base-ref` it could not compare, status 2. Before,
+we documented the three statuses nowhere user-facing, and such a base exited 1
+with `release history is not immutable: cannot resolve commit '...'`, a message
+no reader could tell from a history the comparison found changed. Status 2 does
+not clear the history: after a force-push drops the recorded base, a full clone
+that does not hold that commit cannot resolve it either, so a base the job
+cannot fetch may mean someone rewrote the history. A clone that still holds the
+old commit resolves it, and the history pass refuses it as a non-ancestor with
+status 1.
+
+- `receipt verify --help` now ends with an exit-status list, followed by a
+  note that the command executes the spec, and the README has an "Exit status"
+  section with the same list: 0 PASS, 1 FAIL (verification ran and refused, or
+  could not finish), 2 USAGE (the command refused before any pass ran, so it
+  verified nothing). Both name the paths that take each status. Tests read both
+  lists back, compare their labels with `EXIT_OK`, `EXIT_FAIL` and `EXIT_USAGE`,
+  and require each list to name each tested path under the status it takes.
+- A `--base-ref` that does not resolve to a commit refuses with status 2:
+  `--base-ref did not resolve to a commit: <the ref, quoted>; no history was
+  compared. Check the ref, fetch the base and run again: a base that cannot be
+  fetched may mean the history that held it was rewritten`. That includes the
+  empty ref an unset CI variable expands to. With `--json` the command prints
+  the abort object every other status-2 path prints, with
+  `"stage": "base-ref"`. A base that resolves but is not an ancestor of the
+  commit, and a release object changed or deleted since the base, still fail
+  the history pass with status 1. `run_verification` still returns the
+  failed history pass, and records in a private field that the base never
+  resolved; the command reads that field.
+- Other runs that compare nothing keep status 1, as custody failures named in
+  the verdict, and the lists say so: a shallow clone (`actions/checkout` makes
+  one by default, and the reader refuses it before it reads the base), a
+  `--commit` the clone does not hold, a `--root` that is not a repository's top
+  level, and a redirecting `GIT_*` variable. We left them there, since moving
+  them would change the contract again.
+- `--help` now says the command executes the spec. The `--spec` help calls it a
+  Python module this command executes in its own process, and the epilog
+  repeats the trust direction the README and the API reference already state.
+  The README gains a "What `--spec` is" section.
+- `--expect-spec-sha256` has existed since `076f27c`. `--help` now documents
+  its pre-execution refusal, and a test shows it runs before the spec's code:
+  a spec with a side effect leaves none behind
+  under a mismatched pin.
+
+**Compatibility:** one exit status moves. A `--base-ref` that does not
+resolve now exits 2 instead of 1, and with `--json` prints the abort object
+(`stage`, `failure`, `passesCompleted: []`) instead of a full verdict with a
+failed history pass. A caller that fails on any nonzero status sees no
+change. A caller that branches on the status now routes a base ref that
+does not resolve to its status-2 branch, beside the spec, root and argument
+refusals that already exit 2. If that branch means "fix the invocation",
+remember that a base that does not resolve can also mean the history that
+held it is gone: after a force-push drops the recorded base, a full clone that
+does not hold it cannot resolve it. A base missing from a shallow clone does
+not reach that branch: the reader refuses every shallow clone first, a
+custody failure with status 1, as before. A caller that parsed the history
+failure text for `cannot resolve commit`, or for the reader's refusal of an
+empty revision, should read status 2 and `"stage": "base-ref"` instead. A
+caller that read `commit`, `tree`, `root` or `spec` from the JSON of such a
+run no longer gets them: the abort object carries none of them.
+
 ### `receipt.tsa` states what the pending-class election settles (#50)
 
 The docstrings correct claims that overstated the election, and tests pin the

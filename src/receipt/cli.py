@@ -8,6 +8,16 @@ Those bytes become auditor-owned trust only when the auditor supplies
 in this process: the verdict treats the anchor set it proposes as untrusted
 and says the verdict is only as good as the spec the producer committed.
 
+The command exits with one of three statuses, :data:`EXIT_OK`,
+:data:`EXIT_FAIL` and :data:`EXIT_USAGE`, and :data:`EXIT_STATUS_HELP` lists
+which paths take which; ``--help`` prints it and the README repeats it. Status
+2 means the command refused before any pass ran. That includes a
+``--base-ref`` that does not resolve to a commit. It used to exit 1, exactly
+as a history the comparison refused, so a CI job could not tell a base it
+never compared from a history it compared and found changed (#36). Status 2
+does not clear the history, though: a base that cannot be fetched may mean
+the history that held it was rewritten.
+
 The output is deliberately two-part. What the command *established* is stated
 without hedging. What it *did not* establish — that any declared gate actually
 passed, that the encoded rules read the law correctly — is stated just as
@@ -284,6 +294,37 @@ EXIT_OK = 0
 EXIT_FAIL = 1
 EXIT_USAGE = 2
 
+#: What each exit status means, printed verbatim at the end of
+#: ``receipt verify --help``. The README's "Exit status" section says the
+#: same, and tests read both back and compare them with the constants above.
+EXIT_STATUS_HELP = f"""\
+exit status:
+  {EXIT_OK}  PASS: every pass the spec configures ran and succeeded.
+  {EXIT_FAIL}  FAIL: verification ran and refused, or could not finish. That covers
+     a failed custody, binding, declaration or history pass: a release object
+     changed or deleted since --base-ref, a base that is not an ancestor, an
+     --expect-commit or --expect-tree that is malformed or does not match,
+     and a repository the reader refuses before comparing anything (a shallow
+     clone, a --commit it does not hold, a --root that is not a repository's
+     top level, a redirecting GIT_* variable). It also covers an aborted run
+     and a verdict the command could not print.
+  {EXIT_USAGE}  USAGE: refused before any pass ran, so nothing was verified: an
+     argument argparse rejects, --base-ref without --expect-commit,
+     --expect-anchor-set without --expect-spec-sha256, an --expect-spec-sha256
+     or --expect-anchor-set that is not a SHA-256 digest, a spec that cannot
+     be loaded or does not match --expect-spec-sha256, a --root that does not
+     exist or is not a directory, a --spec path that, without --root, goes
+     through a symlink and so leaves the repository ambiguous, or a
+     --base-ref that does not resolve to a commit.
+
+--spec is executed. It is a Python module, and this command runs it in its
+own process to build the configuration every pass uses. Without
+--expect-spec-sha256 that code is whatever the producer committed, and it can
+change what this command prints and the status it exits with. Read the spec
+once, out of band, and pin its digest: a mismatch refuses with status {EXIT_USAGE}
+before the spec runs.
+"""
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -298,18 +339,23 @@ def _build_parser() -> argparse.ArgumentParser:
     verify = subparsers.add_parser(
         "verify",
         help="verify a published corpus against its configured anchors",
+        # Line-broken by hand: the raw formatter that keeps the epilog's
+        # layout keeps this text's as well.
         description=(
-            "Run every offline pass the loaded spec configures and print one "
+            "Run every offline pass the loaded spec configures and print one\n"
             "fail-closed verdict; auditor pins are supplied explicitly."
         ),
+        epilog=EXIT_STATUS_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     verify.add_argument(
         "--spec",
         required=True,
         type=pathlib.Path,
         help=(
-            "path to the verification spec (a short "
-            "Python module defining SPEC = receipt.verify.VerificationSpec(...))"
+            "path to the verification spec, a Python module defining "
+            "SPEC = receipt.verify.VerificationSpec(...); this command executes "
+            "it in its own process, so pin it with --expect-spec-sha256"
         ),
     )
     verify.add_argument(
@@ -1862,6 +1908,40 @@ def main(argv: Sequence[str] | None = None) -> int:
             "verification aborted, refusing to return a verdict: "
             f"{_described_exception(exc)}",
             EXIT_FAIL,
+        )
+
+    # A base that does not resolve to a commit was never compared, so the run
+    # verified nothing and is a usage refusal rather than the history failure
+    # the library records. Exit 1 used to cover both, and a base ref that did
+    # not resolve read exactly like a rewritten history (#36). Only the
+    # library's own flag decides it, read defensively because a substituted
+    # result need not carry it. This is the first read of the result, so a
+    # raise here is the render refusal the boundary below would make. Leaving
+    # it to that boundary would let a result whose ``ok`` raised once and then
+    # answered print PASS.
+    try:
+        base_unresolved = (
+            not result.ok and getattr(result, "_base_unresolved", False) is True
+        )
+    except KeyboardInterrupt:  # the operator's interrupt, never a verdict
+        raise
+    except BaseException as exc:  # noqa: BLE001 - reading the result is in the contract
+        return _refuse(
+            as_json,
+            "render",
+            "verdict could not be rendered; treat the run as unverified: "
+            f"{_described_exception(exc)}",
+            EXIT_FAIL,
+        )
+    if base_unresolved:
+        return _refuse(
+            as_json,
+            "base-ref",
+            f"--base-ref did not resolve to a commit: {args.base_ref!r}; no "
+            "history was compared. Check the ref, fetch the base and run "
+            "again: a base that cannot be fetched may mean the history that "
+            "held it was rewritten",
+            EXIT_USAGE,
         )
 
     # A verdict that cannot be rendered is not a deliverable PASS: refuse,

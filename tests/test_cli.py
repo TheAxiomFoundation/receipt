@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import codecs
 import contextlib
+import dataclasses
 import hashlib
 import io
 import itertools
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -31,7 +33,7 @@ import pytest
 from receipt.cli import EXIT_FAIL, EXIT_OK, EXIT_USAGE, main
 from receipt.sign import generate_signing_keypair, sign_payload
 from receipt.snapshot import TreeSnapshot
-from receipt.verify import VerifySpecError, load_spec
+from receipt.verify import VerifyResult, VerifySpecError, load_spec
 
 from corpus_fixture import CONTENT, append_release, build_corpus
 
@@ -65,7 +67,7 @@ def manifest_stem(repo: pathlib.Path) -> pathlib.Path:
     return manifests[0]
 
 
-def _git(repo: pathlib.Path, *args: str) -> str:
+def _git(repo: pathlib.Path, *args: str, input: str | None = None) -> str:
     """Run fixture Git without consulting ambient configuration or redirects."""
 
     environment = os.environ.copy()
@@ -88,6 +90,7 @@ def _git(repo: pathlib.Path, *args: str) -> str:
         capture_output=True,
         text=True,
         env=environment,
+        input=input,
     )
     return completed.stdout.strip()
 
@@ -5524,6 +5527,644 @@ def test_a_close_time_repository_change_invalidates_the_history_pass(
     assert payload["passesCompleted"] == []
     assert payload["scope"]["established"] == []
     assert [item["name"] for item in payload["passes"]] == ["custody", "binding"]
+    failure = next(item for item in payload["passes"] if not item["ok"])
+    assert failure["name"] == "custody"
+    assert "configuration changed during verification" in failure["failure"]
+
+
+# --- the exit-status contract (#36) -----------------------------------------
+#
+# Each status is a promise a CI integrator scripts against. The epilog and the
+# README say what the codes mean, and both are read back here: their labels
+# are compared with the constants, and each path in the table further down,
+# which runs through main() itself, must be listed under the status it takes.
+
+README = pathlib.Path(__file__).resolve().parents[1] / "README.md"
+DOCUMENTED = {EXIT_OK: "PASS", EXIT_FAIL: "FAIL", EXIT_USAGE: "USAGE"}
+
+
+def verify_help(capsys: pytest.CaptureFixture[str]) -> str:
+    with pytest.raises(SystemExit) as exited:
+        main(["verify", "--help"])
+    assert exited.value.code == EXIT_OK
+    return capsys.readouterr().out
+
+
+def test_the_verify_help_lists_every_exit_status(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from receipt.cli import EXIT_STATUS_HELP
+
+    assert EXIT_STATUS_HELP in verify_help(capsys)
+    listed = re.findall(r"^  ([0-9]+)  ([A-Z]+): ", EXIT_STATUS_HELP, re.M)
+    assert {int(code): label for code, label in listed} == DOCUMENTED
+    assert len(listed) == len(DOCUMENTED)
+
+
+def test_the_readme_lists_the_same_exit_statuses() -> None:
+    section = README.read_text(encoding="utf-8").split("\n## Exit status\n", 1)[1]
+    section = section.split("\n## ", 1)[0]
+    listed = re.findall(r"^\| `([0-9]+)` \| ([A-Z]+): ", section, re.M)
+    assert {int(code): label for code, label in listed} == DOCUMENTED
+    assert len(listed) == len(DOCUMENTED)
+
+
+def test_the_help_says_the_spec_is_executed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The trust direction belongs where an auditor first reads the option."""
+
+    text = " ".join(verify_help(capsys).split())
+    assert (
+        "--spec SPEC path to the verification spec, a Python module defining "
+        "SPEC = receipt.verify.VerificationSpec(...); this command executes it "
+        "in its own process"
+    ) in text
+    assert "--spec is executed." in text
+
+
+def test_a_mismatched_spec_pin_refuses_before_the_spec_runs(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The pin is compared before compiling, so a mismatched spec never runs.
+
+    The same file without the pin does run, which is what the pin is for.
+    """
+
+    marker = tmp_path / "executed"
+    spec_path = tmp_path / "spec.py"
+    spec_path.write_text(
+        f"import pathlib\npathlib.Path({str(marker)!r}).write_text('ran')\n",
+        encoding="utf-8",
+    )
+    digest = hashlib.sha256(spec_path.read_bytes()).hexdigest()
+    arguments = ["verify", "--spec", str(spec_path), "--root", str(tmp_path)]
+
+    assert main([*arguments, "--expect-spec-sha256", "0" * 64]) == EXIT_USAGE
+    assert not marker.exists()
+    assert f"spec {digest} is not the expected spec {'0' * 64}" in (
+        capsys.readouterr().err
+    )
+
+    assert main(arguments) == EXIT_USAGE
+    assert marker.read_text(encoding="utf-8") == "ran"
+    assert "spec module does not define SPEC" in capsys.readouterr().err
+
+
+def base_ref_refusal(ref: str) -> str:
+    return (
+        f"--base-ref did not resolve to a commit: {ref!r}; no history was "
+        "compared. Check the ref, fetch the base and run again: a base that "
+        "cannot be fetched may mean the history that held it was rewritten"
+    )
+
+
+@pytest.mark.parametrize(
+    "ref",
+    ["no-such-ref", "0" * 40, "HEAD~5", "", pytest.param("a\ud800b", id="unencodable")],
+)
+def test_an_unresolvable_base_ref_is_a_usage_refusal_not_a_history_failure(
+    committed_repo: pathlib.Path, capsys: pytest.CaptureFixture[str], ref: str
+) -> None:
+    """#36: exit 1 used to mean either a rewrite or a base this clone lacks.
+
+    A ref that a full clone did not fetch, or one recorded wrongly, read
+    exactly like a rewritten history. The base is not in the repository, so
+    nothing was compared: that is a refusal to verify, status 2, and its
+    JSON names the stage that refused. The empty ref is what an unset CI
+    variable expands to; the reader refuses it as no revision at all. A ref
+    holding a lone surrogate, which only an in-process caller can pass, is
+    refused as one that cannot be encoded as a command argument.
+    """
+
+    candidate = head_oid(committed_repo)
+    arguments = ("--base-ref", ref, "--expect-commit", candidate)
+
+    assert run(committed_repo, *arguments) == EXIT_USAGE
+    assert capsys.readouterr().err == (
+        f"receipt verify: {base_ref_refusal(ref)}\nreceipt verify: FAIL\n"
+    )
+
+    assert run(committed_repo, *arguments, "--json") == EXIT_USAGE
+    assert json.loads(capsys.readouterr().out) == {
+        "failure": base_ref_refusal(ref),
+        "passesCompleted": [],
+        "stage": "base-ref",
+        "verdict": "FAIL",
+    }
+
+
+def test_a_base_that_is_not_an_ancestor_is_still_a_history_failure(
+    committed_repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A base that resolves but is not in the history is evidence, status 1.
+
+    That is what a force-push leaves behind when the old head is still in
+    the clone, so it stays a failed history pass rather than a usage error.
+    """
+
+    candidate = head_oid(committed_repo)
+    tree = _git(committed_repo, "rev-parse", "HEAD^{tree}")
+    orphan = _git(committed_repo, "commit-tree", tree, "-m", "not an ancestor")
+
+    assert run(
+        committed_repo, "--base-ref", orphan, "--expect-commit", candidate, "--json"
+    ) == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
+    (history,) = [item for item in payload["passes"] if item["name"] == "history"]
+    assert history["failure"] == (
+        f"release history is not immutable: base commit {orphan} is not an "
+        "ancestor of HEAD"
+    )
+
+
+@pytest.mark.parametrize(
+    ("flag", "status"),
+    [(True, EXIT_USAGE), (1, EXIT_FAIL), ("yes", EXIT_FAIL), (["set"], EXIT_FAIL)],
+    ids=["true", "one", "text", "list"],
+)
+def test_only_the_librarys_own_true_flag_makes_a_failure_a_base_ref_refusal(
+    committed_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    flag: object,
+    status: int,
+) -> None:
+    """``_base_unresolved`` must be ``True`` itself, not merely truthy.
+
+    A substituted result can carry any value in the field. Status 2 says no
+    history was compared, so a truthy value the library never sets must not
+    turn a history the comparison refused into that refusal: the run keeps
+    status 1 and its full verdict. The control shows the field is read.
+    """
+
+    import receipt.cli as cli_module
+
+    real = cli_module.run_verification
+
+    def substituted(*args: object, **kwargs: object) -> VerifyResult:
+        return dataclasses.replace(real(*args, **kwargs), _base_unresolved=flag)
+
+    monkeypatch.setattr(cli_module, "run_verification", substituted)
+    candidate = head_oid(committed_repo)
+    tree = _git(committed_repo, "rev-parse", "HEAD^{tree}")
+    orphan = _git(committed_repo, "commit-tree", tree, "-m", "not an ancestor")
+
+    assert run(
+        committed_repo, "--base-ref", orphan, "--expect-commit", candidate, "--json"
+    ) == status
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
+    if status == EXIT_USAGE:
+        assert payload["stage"] == "base-ref"
+        return
+    assert "stage" not in payload
+    (history,) = [item for item in payload["passes"] if item["name"] == "history"]
+    assert "is not an ancestor of HEAD" in history["failure"]
+
+
+def _corrupt_the_producer_signature(repo: pathlib.Path) -> str:
+    manifest_stem(repo).with_suffix(".producer.sig").write_bytes(bytes(64))
+    return commit_candidate(repo, "corrupt the producer signature")
+
+
+def _rewrite_a_release_object(repo: pathlib.Path) -> tuple[str, str]:
+    base = head_oid(repo)
+    manifest = manifest_stem(repo)
+    manifest.write_bytes(manifest.read_bytes() + b"\n")
+    return base, commit_candidate(repo, "rewrite a release object")
+
+
+def _raising_spec(repo: pathlib.Path) -> str:
+    path = repo / "raising-spec.py"
+    path.write_text("raise RuntimeError('spec refuses to load')\n", encoding="utf-8")
+    return str(path)
+
+
+def _a_base_that_is_not_an_ancestor(repo: pathlib.Path) -> list[str]:
+    tree = _git(repo, "rev-parse", "HEAD^{tree}")
+    orphan = _git(repo, "commit-tree", tree, "-m", "not an ancestor")
+    return ["--base-ref", orphan, "--expect-commit", head_oid(repo)]
+
+
+def _a_shallow_clone(repo: pathlib.Path, tmp: pathlib.Path) -> list[str]:
+    # One commit deep, as actions/checkout clones by default; a second commit
+    # in the origin is what makes the clone shallow rather than complete.
+    _git(repo, "commit", "--quiet", "--allow-empty", "-m", "a second commit")
+    shallow = tmp / "shallow"
+    _git(tmp, "clone", "--quiet", "--depth", "1", f"file://{repo}", str(shallow))
+    return ["--spec", str(shallow / "verification/spec.py"), "--root", str(shallow)]
+
+
+def _spec_digest(repo: pathlib.Path) -> str:
+    return hashlib.sha256((repo / "verification/spec.py").read_bytes()).hexdigest()
+
+
+# One case per meaning the epilog and README list, each through --json so the
+# machine half of the contract is checked too: (status, stage or failed pass).
+EXIT_PATHS = {
+    "pass": (lambda repo, tmp: [], EXIT_OK, None),
+    "custody": (
+        lambda repo, tmp: ["--commit", _corrupt_the_producer_signature(repo)],
+        EXIT_FAIL,
+        "custody",
+    ),
+    "history-rewrite": (
+        lambda repo, tmp: (lambda base, head: [
+            "--base-ref", base, "--expect-commit", head,
+        ])(*_rewrite_a_release_object(repo)),
+        EXIT_FAIL,
+        "history",
+    ),
+    "non-ancestor-base": (
+        lambda repo, tmp: _a_base_that_is_not_an_ancestor(repo), EXIT_FAIL, "history"
+    ),
+    "expect-commit": (lambda repo, tmp: ["--expect-commit", "0" * 40], EXIT_FAIL, "custody"),
+    "malformed-expect-commit": (
+        lambda repo, tmp: ["--expect-commit", "abc1234"], EXIT_FAIL, "custody"
+    ),
+    "expect-tree": (lambda repo, tmp: ["--expect-tree", "1" * 40], EXIT_FAIL, "custody"),
+    "malformed-expect-tree": (
+        lambda repo, tmp: ["--expect-tree", "not-a-tree"], EXIT_FAIL, "custody"
+    ),
+    "shallow-clone": (lambda repo, tmp: _a_shallow_clone(repo, tmp), EXIT_FAIL, "custody"),
+    "unheld-commit": (lambda repo, tmp: ["--commit", "0" * 40], EXIT_FAIL, "custody"),
+    "root-not-top-level": (
+        lambda repo, tmp: ["--root", str(repo / "rules")], EXIT_FAIL, "custody"
+    ),
+    "dependency": (lambda repo, tmp: ["--base-ref", "HEAD"], EXIT_USAGE, "arguments"),
+    "anchor-pin-dependency": (
+        lambda repo, tmp: ["--expect-anchor-set", "0" * 64],
+        EXIT_USAGE,
+        "arguments",
+    ),
+    "spec-pin": (lambda repo, tmp: ["--expect-spec-sha256", "0" * 64], EXIT_USAGE, "spec"),
+    "non-digest-spec-pin": (
+        lambda repo, tmp: ["--expect-spec-sha256", "not-a-digest"], EXIT_USAGE, "spec"
+    ),
+    "non-digest-anchor-pin": (
+        lambda repo, tmp: [
+            "--expect-spec-sha256", _spec_digest(repo), "--expect-anchor-set", "not-a-digest",
+        ],
+        EXIT_USAGE,
+        "spec",
+    ),
+    "spec-raises": (lambda repo, tmp: ["--spec", _raising_spec(repo)], EXIT_USAGE, "spec"),
+    "root": (lambda repo, tmp: ["--root", str(tmp / "absent")], EXIT_USAGE, "root"),
+    "base-ref": (
+        lambda repo, tmp: ["--base-ref", "no-such-ref", "--expect-commit", head_oid(repo)],
+        EXIT_USAGE,
+        "base-ref",
+    ),
+    "empty-base-ref": (
+        lambda repo, tmp: ["--base-ref", "", "--expect-commit", head_oid(repo)],
+        EXIT_USAGE,
+        "base-ref",
+    ),
+}
+
+
+@pytest.mark.parametrize("path", sorted(EXIT_PATHS))
+def test_each_documented_exit_path(
+    committed_repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    path: str,
+) -> None:
+    arguments, status, where = EXIT_PATHS[path]
+    argv = ["verify", "--spec", str(committed_repo / "verification/spec.py"),
+            "--root", str(committed_repo), *arguments(committed_repo, tmp_path),
+            "--json"]
+
+    assert main(argv) == status
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == ("PASS" if status == EXIT_OK else "FAIL")
+    if status == EXIT_USAGE:
+        assert payload["stage"] == where
+        assert payload["passesCompleted"] == []
+    elif status == EXIT_FAIL:
+        # The pass that refused comes first; the next one is "not reached".
+        failed = next(item for item in payload["passes"] if not item["ok"])
+        assert failed["name"] == where
+        assert failed["failure"] != "not reached"
+
+
+#: The words each path in the table above is listed under, in the epilog and
+#: in the README alike, once backticks and line breaks are set aside.
+EXIT_PATH_DOCS = {
+    "pass": "every pass the spec configures ran and succeeded",
+    "custody": "a failed custody, binding, declaration or history pass",
+    "history-rewrite": "a release object changed or deleted since --base-ref",
+    "non-ancestor-base": "a base that is not an ancestor",
+    "shallow-clone": "a shallow clone",
+    "expect-commit": (
+        "an --expect-commit or --expect-tree that is malformed or does not match"
+    ),
+    "malformed-expect-commit": (
+        "an --expect-commit or --expect-tree that is malformed or does not match"
+    ),
+    "expect-tree": (
+        "an --expect-commit or --expect-tree that is malformed or does not match"
+    ),
+    "malformed-expect-tree": (
+        "an --expect-commit or --expect-tree that is malformed or does not match"
+    ),
+    "unheld-commit": "a --commit it does not hold",
+    "root-not-top-level": "a --root that is not a repository's top level",
+    "dependency": "--base-ref without --expect-commit",
+    "anchor-pin-dependency": "--expect-anchor-set without --expect-spec-sha256",
+    "spec-pin": "does not match --expect-spec-sha256",
+    "non-digest-spec-pin": (
+        "an --expect-spec-sha256 or --expect-anchor-set that is not a SHA-256 digest"
+    ),
+    "non-digest-anchor-pin": (
+        "an --expect-spec-sha256 or --expect-anchor-set that is not a SHA-256 digest"
+    ),
+    "spec-raises": "a spec that cannot be loaded",
+    "root": "a --root that does not exist or is not a directory",
+    "base-ref": "a --base-ref that does not resolve to a commit",
+    "empty-base-ref": "a --base-ref that does not resolve to a commit",
+}
+
+
+def _listed_text(text: str) -> str:
+    return " ".join(text.replace("`", "").split())
+
+
+def epilog_lists() -> dict[int, str]:
+    from receipt.cli import EXIT_STATUS_HELP
+
+    lists: dict[int, list[str]] = {}
+    status = None
+    for line in EXIT_STATUS_HELP.splitlines():
+        heading = re.match(r"^  ([0-9]+)  [A-Z]+: (.*)$", line)
+        if heading:
+            status = int(heading.group(1))
+            lists[status] = [heading.group(2)]
+        elif status is not None and line.startswith("     "):
+            lists[status].append(line)
+        else:
+            status = None
+    return {code: _listed_text(" ".join(lines)) for code, lines in lists.items()}
+
+
+def readme_lists() -> dict[int, str]:
+    section = README.read_text(encoding="utf-8").split("\n## Exit status\n", 1)[1]
+    section = section.split("\n## ", 1)[0]
+    rows = re.finditer(r"^\| `([0-9]+)` \| [A-Z]+: (.*) \|$", section, re.M)
+    return {int(row.group(1)): _listed_text(row.group(2)) for row in rows}
+
+
+def test_every_exit_path_has_its_documented_words() -> None:
+    assert set(EXIT_PATH_DOCS) == set(EXIT_PATHS)
+
+
+@pytest.mark.parametrize("path", sorted(EXIT_PATHS))
+def test_each_exit_path_is_documented_under_the_status_it_takes(path: str) -> None:
+    """The lists say which paths take which status, so that is tested too.
+
+    The table above runs each path and checks its status. This checks that
+    the epilog and the README list that path under that status and no other,
+    so a list that moved a path, or dropped it, fails here.
+    """
+
+    _arguments, status, _where = EXIT_PATHS[path]
+    words = EXIT_PATH_DOCS[path]
+    for document, lists in (("epilog", epilog_lists()), ("README", readme_lists())):
+        assert set(lists) == set(DOCUMENTED), document
+        listed_under = sorted(code for code, text in lists.items() if words in text)
+        assert listed_under == [status], (document, words, listed_under)
+
+
+#: Listed paths the table cannot run, because they need argparse's own exit,
+#: the environment, a substituted function or no --root at all: the words each
+#: is listed under, the status it takes, and the test here that runs it.
+EXIT_PATHS_TESTED_ELSEWHERE = {
+    "an argument argparse rejects": (
+        EXIT_USAGE, "test_argparse_refusals_exit_with_the_usage_status"
+    ),
+    "a --spec path that, without --root, goes through a symlink and so leaves "
+    "the repository ambiguous": (
+        EXIT_USAGE, "test_default_root_refuses_a_spec_named_through_a_committed_symlink"
+    ),
+    "a redirecting GIT_* variable": (
+        EXIT_FAIL, "test_a_redirecting_git_variable_refuses_the_command_as_a_verdict"
+    ),
+    "an aborted run": (EXIT_FAIL, "test_an_aborted_run_exits_with_the_fail_status"),
+    "a verdict the command could not print": (
+        EXIT_FAIL, "test_a_result_whose_verdict_cannot_be_read_is_a_render_refusal"
+    ),
+}
+
+
+@pytest.mark.parametrize("words", sorted(EXIT_PATHS_TESTED_ELSEWHERE))
+def test_each_path_tested_elsewhere_is_documented_under_the_status_it_takes(
+    words: str,
+) -> None:
+    status, test_name = EXIT_PATHS_TESTED_ELSEWHERE[words]
+    assert callable(globals().get(test_name)), test_name
+    for document, lists in (("epilog", epilog_lists()), ("README", readme_lists())):
+        listed_under = sorted(code for code, text in lists.items() if words in text)
+        assert listed_under == [status], (document, words, listed_under)
+
+
+def test_no_listed_option_is_left_without_a_tested_path() -> None:
+    """A clause the lists gain must come with a path that is tested.
+
+    Once every mapped clause is taken out, what is left of each list is the
+    framing around them. An option or variable left there is a clause no
+    test runs, so it fails here until it gets a row.
+    """
+
+    clauses = set(EXIT_PATH_DOCS.values()) | set(EXIT_PATHS_TESTED_ELSEWHERE)
+    for document, lists in (("epilog", epilog_lists()), ("README", readme_lists())):
+        for status, text in lists.items():
+            for words in sorted(clauses, key=len, reverse=True):
+                text = text.replace(words, "")
+            unmapped = re.findall(r"--[a-z0-9-]+|GIT_\S*", text)
+            assert unmapped == [], (document, status, unmapped, text)
+
+
+def test_a_shallow_clone_is_refused_with_status_1_before_the_base_is_read(
+    committed_repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """What the README says to a job that skipped ``fetch-depth: 0``.
+
+    ``actions/checkout`` clones one commit deep by default. The reader refuses
+    a shallow repository when it selects the candidate, before any base is
+    read, so the run is a custody failure with status 1 and names the cause,
+    whatever ``--base-ref`` says.
+    """
+
+    _git(committed_repo, "commit", "--quiet", "--allow-empty", "-m", "a second commit")
+    shallow = tmp_path / "shallow"
+    _git(tmp_path, "clone", "--quiet", "--depth", "1", f"file://{committed_repo}", str(shallow))
+    assert (shallow / ".git" / "shallow").is_file()
+
+    assert main(
+        [
+            "verify", "--spec", str(shallow / "verification/spec.py"),
+            "--root", str(shallow), "--base-ref", "no-such-ref",
+            "--expect-commit", head_oid(shallow), "--json",
+        ]
+    ) == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    failure = next(item for item in payload["passes"] if not item["ok"])
+    assert (failure["name"], failure["failure"]) == (
+        "custody",
+        "shallow repositories are unsupported",
+    )
+
+
+def test_a_base_the_reader_refuses_for_another_reason_is_still_a_history_failure(
+    committed_repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Only a ref that does not resolve moves to status 2.
+
+    This base resolves to a commit, but its tree names a blob the repository
+    does not hold, so the reader refuses it for another reason. That stays the
+    failed history pass it always was, with status 1 and the reader's words.
+    """
+
+    missing = "1" * 40
+    tree = _git(
+        committed_repo, "mktree", "--missing", input=f"100644 blob {missing}\tghost\n"
+    )
+    base = _git(committed_repo, "commit-tree", tree, "-m", "a tree naming a missing blob")
+
+    assert run(
+        committed_repo, "--base-ref", base, "--expect-commit", head_oid(committed_repo), "--json"
+    ) == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    assert "stage" not in payload
+    history = payload["passes"][0]
+    assert (history["name"], history["ok"], history["failure"]) == (
+        "history",
+        False,
+        f"release history is not immutable: object {missing} is unavailable",
+    )
+
+
+@pytest.mark.parametrize("raises", ["every-read", "first-read-only"])
+@pytest.mark.parametrize("as_json", [True, False], ids=["json", "text"])
+def test_a_result_whose_verdict_cannot_be_read_is_a_render_refusal(
+    committed_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    raises: str,
+    as_json: bool,
+) -> None:
+    """The base-ref check is now the first read of the result.
+
+    A raise there is the render refusal, status 1, that the render boundary
+    gave when it read first. Swallowing it let a passing result whose ``ok``
+    raised once print PASS on the second read and exit 0.
+    """
+
+    import receipt.cli as cli_module
+
+    real = cli_module.run_verification
+    reads: list[None] = []
+
+    class Unreadable(VerifyResult):
+        @property
+        def ok(self) -> bool:  # type: ignore[override]
+            reads.append(None)
+            if raises == "every-read" or len(reads) == 1:
+                raise RuntimeError("the verdict cannot be read")
+            return VerifyResult.ok.fget(self)
+
+    def substituted(*args: object, **kwargs: object) -> VerifyResult:
+        result = real(*args, **kwargs)
+        return Unreadable(
+            **{item.name: getattr(result, item.name) for item in dataclasses.fields(result)}
+        )
+
+    monkeypatch.setattr(cli_module, "run_verification", substituted)
+    assert run(committed_repo, *(["--json"] if as_json else [])) == EXIT_FAIL
+    captured = capsys.readouterr()
+    if as_json:
+        payload = json.loads(captured.out)
+        assert (payload["verdict"], payload["stage"]) == ("FAIL", "render")
+        assert "RuntimeError: the verdict cannot be read" in payload["failure"]
+    else:
+        assert "PASS" not in captured.out
+        assert "verdict could not be rendered" in captured.err
+        assert "RuntimeError: the verdict cannot be read" in captured.err
+
+
+def test_an_aborted_run_exits_with_the_fail_status(
+    repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def boom(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("injected abort")
+
+    monkeypatch.setattr("receipt.cli.run_verification", boom)
+    assert run(repo, "--json") == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["stage"] == "verification"
+    assert "RuntimeError: injected abort" in payload["failure"]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["verify"], ["verify", "--spec"], ["verify", "--spec", "x", "--no-such-option"]],
+    ids=["missing-spec", "missing-value", "unknown-option"],
+)
+def test_argparse_refusals_exit_with_the_usage_status(
+    argv: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """argparse's own errors exit 2 before --json is known, so no JSON.
+
+    An unrecognized option is reported by the top-level parser, so its usage
+    line is ``usage: receipt``; the other two come from ``verify``'s.
+    """
+
+    with pytest.raises(SystemExit) as exited:
+        main(argv)
+    assert exited.value.code == EXIT_USAGE
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("usage: receipt ")
+    assert ": error: " in captured.err
+
+
+def test_a_close_time_repository_change_beside_an_unresolvable_base_stays_a_custody_failure(
+    committed_repo: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The base-ref status is for a run whose only failure is the base.
+
+    Here the base does not resolve, and the candidate snapshot then reports
+    on close that the repository changed during the run. That close failure
+    is what the verdict reports, as a custody failure with status 1. It is
+    not a base this clone lacks.
+    """
+
+    real_select = TreeSnapshot.select.__func__
+
+    def select_writing_the_config_for_the_base(cls, root, revision, **keywords):
+        if revision == "no-such-ref":
+            with open(committed_repo / ".git" / "config", "a") as handle:
+                handle.write("[receiptprobe]\n\tconcurrent = 1\n")
+        return real_select(cls, root, revision, **keywords)
+
+    monkeypatch.setattr(
+        TreeSnapshot, "select", classmethod(select_writing_the_config_for_the_base)
+    )
+    candidate = head_oid(committed_repo)
+
+    assert run(
+        committed_repo, "--base-ref", "no-such-ref", "--expect-commit", candidate, "--json"
+    ) == EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "FAIL"
     failure = next(item for item in payload["passes"] if not item["ok"])
     assert failure["name"] == "custody"
     assert "configuration changed during verification" in failure["failure"]

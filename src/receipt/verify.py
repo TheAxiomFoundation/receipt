@@ -301,6 +301,13 @@ class VerifyResult:
     #: pin. Private because it qualifies a claim rather than adding another
     #: public datum to the result contract.
     _anchor_set_pinned: bool = field(default=False, repr=False)
+    #: Whether the history pass failed because ``base_ref`` does not resolve
+    #: to a commit in the repository, so nothing was compared. ``receipt
+    #: verify`` exits 2 for that and 1 for a history the comparison refused,
+    #: which is what lets a CI job tell a base it never compared from a
+    #: history the comparison refused (#36). Private for the reason
+    #: ``_anchor_set_pinned`` is.
+    _base_unresolved: bool = field(default=False, repr=False)
 
     @property
     def ok(self) -> bool:
@@ -684,6 +691,7 @@ def run_verification(
     base_commit: str | None = None
     base_tree: str | None = None
     object_store: ObjectStoreReport | None = None
+    base_unresolved = False
 
     def result(*, incomplete: str | None = None) -> VerifyResult:
         items = list(passes)
@@ -709,6 +717,7 @@ def run_verification(
             _spec_pinned=spec.pinned,
             _object_store_requested=verify_objects,
             _anchor_set_pinned=anchor_pin is not None,
+            _base_unresolved=base_unresolved,
         )
 
     # Every pass — the verification call AND the detail builder that reports
@@ -789,7 +798,20 @@ def run_verification(
             base: TreeSnapshot | None = None
             if base_ref is not None:
                 phase = "history"
-                selected_base = TreeSnapshot.select(root, base_ref)
+                try:
+                    selected_base = TreeSnapshot.select(root, base_ref)
+                except SnapshotError as exc:
+                    # Only the reader's own refusals of the revision itself,
+                    # in their exact words: one that resolves to no commit,
+                    # and one that is not a revision at all, such as the
+                    # empty ref an unset CI variable expands to. Anything
+                    # else selection refuses keeps its history failure.
+                    base_unresolved = str(exc) in {
+                        f"cannot resolve commit '{base_ref}'",
+                        "snapshot revision must be a non-empty string without NUL",
+                        "snapshot revision cannot be encoded as a command argument",
+                    }
+                    raise
                 snapshots.append(selected_base)
                 base = stack.enter_context(selected_base)
                 base_commit = base.commit
@@ -989,6 +1011,9 @@ def run_verification(
             # A failed closure never leaves an affected claim established.
             # Check both snapshots independently of the active pass: closure
             # may only have added notes to an already-unwinding pass error.
+            # The verdict reported is this custody failure, so an unresolved
+            # base is no longer what the result says went wrong.
+            base_unresolved = False
             passes.clear()
             chain = None
             corpus = None

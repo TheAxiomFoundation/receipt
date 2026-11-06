@@ -51,12 +51,53 @@ anchor-set pin instead. The anchor bytes are compared before custody
 verification invokes OpenSSL. Without an effective anchor pin, the claim is
 "custody under the anchor set {digest} the verified tree carries"; without a
 spec pin, the verdict also does not establish that the spec's code was trusted.
-The command performs verification offline; its trust configuration is
-executable Python, and the command runs it in its own process. Without
-`--expect-spec-sha256`, that code is whatever the producer committed. It can
-change what the command prints and the exit status it returns, so the verdict
-is only as good as the spec the producer committed. Read the spec once, out of
-band, and pin its digest.
+
+### What `--spec` is
+
+`--spec` names a Python module that defines
+`SPEC = receipt.verify.VerificationSpec(...)`. The command executes that module
+in its own process to build the configuration every pass uses; it does not read
+it as data. Verification itself runs offline. Without `--expect-spec-sha256`, the
+code that runs is whatever the producer committed. It can change what the
+command prints and the exit status it returns, so the verdict is only as good
+as the spec the producer committed. Read the spec once, out of band, and pin
+its digest. A mismatch refuses with status 2 before the spec's code runs.
+
+## Exit status
+
+`receipt verify --help` prints the same list.
+
+| Status | Meaning |
+| --- | --- |
+| `0` | PASS: every pass the spec configures ran and succeeded. |
+| `1` | FAIL: verification ran and refused, or could not finish. That covers a failed custody, binding, declaration or history pass: a release object changed or deleted since `--base-ref`, a base that is not an ancestor of the commit, an `--expect-commit` or `--expect-tree` that is malformed or does not match, and a repository the reader refuses before comparing anything (a shallow clone, a `--commit` it does not hold, a `--root` that is not a repository's top level, a redirecting `GIT_*` variable). It also covers an aborted run and a verdict the command could not print. |
+| `2` | USAGE: the command refused before any pass ran, so nothing was verified. That covers an argument argparse rejects, `--base-ref` without `--expect-commit`, `--expect-anchor-set` without `--expect-spec-sha256`, an `--expect-spec-sha256` or `--expect-anchor-set` that is not a SHA-256 digest, a spec that cannot be loaded or does not match `--expect-spec-sha256`, a `--root` that does not exist or is not a directory, a `--spec` path that, without `--root`, goes through a symlink and so leaves the repository ambiguous, and a `--base-ref` that does not resolve to a commit. |
+
+With `--json`, every exit after argument parsing prints one JSON object with a
+`verdict` key, unless writing to stdout itself fails; the `receipt.cli`
+reference says what is printed then. A status-2 refusal names the `stage` that
+refused:
+`arguments`, `spec`, `root` or `base-ref`. A status-1 run that aborted or could
+not be rendered names `verification` or `render`; every other status-1 run
+prints the full verdict. Errors argparse raises itself print its usage message
+to stderr and no JSON.
+
+A CI job should fail on any status other than 0. Status 2 means the command
+refused before any pass ran. A status-1 verdict names the pass that failed:
+`history` for a rewritten release object or a base that is not an ancestor of
+the commit, and `custody` for a repository the reader refused before it compared
+anything. A status-2 refusal with `"stage": "base-ref"` means this clone does
+not resolve the base: the job did not fetch the ref it names, the recorded ref
+is wrong, or the history that held it is gone. After a force-push drops that
+history, a full clone that does not hold the base cannot resolve it, so status 2
+does not clear the history. A clone that still holds the old commit resolves it,
+and the history pass refuses it as a non-ancestor with status 1. Fetch the base
+and run again before drawing a conclusion, and treat a base you cannot fetch as
+a possible rewrite. The command resolves the base as `<ref>^{commit}`, so pass a
+commit ID or a ref, not a `:/<text>` search. The reader refuses a shallow clone,
+which `actions/checkout` makes by default, before it reads the base, with status
+1 and `shallow repositories are unsupported`; use `fetch-depth: 0`. `--help` and
+`--version` exit 0.
 
 ## What this verdict speaks for
 
