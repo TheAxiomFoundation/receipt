@@ -6,63 +6,65 @@ input the package used to accept, or accept for the wrong reason.
 
 ## 0.7.0 (unreleased)
 
-### What the pending-class election settles, stated in `receipt.tsa` (#50)
+### `receipt.tsa` states what the pending-class election settles (#50)
 
-Claims corrected, with no change in behavior. An auditor can now read in
-`receipt.tsa`'s own reference that the single supplemental candidate a
-pending-only class contributes settles which occurrence answers for the
-class, not which of its keys a token showed. The reference also says what
-bounds the gap.
+Only docstrings and tests change; the package behaves as before. An auditor
+can now read in `receipt.tsa`'s own reference that the single supplemental
+candidate a pending-only class contributes settles which occurrence answers
+for the class, not which of its keys a token showed. The reference also says
+what bounds the gap.
 
-- The module docstring said the newest occurrence is elected "because that
-  is the anchor a witness will answer for once the transition activates".
-  For a v2 witness it is the only occurrence that can answer, since a v2
+- The module docstring said the election picks the newest occurrence
+  "because that is the anchor a witness will answer for once the transition
+  activates". For a v2 witness, only that occurrence can answer, since a v2
   witness must name the newest active bundle; if that bundle drops the class,
-  none can. A legacy witness, once no transition is pending, may name any
-  active single-anchor bundle while `legacy_witness_bundle_id` names the
-  newest active bundle and that bundle configures a single anchor. So it can
-  answer under an occurrence the election passed over. The docstring now says
-  so.
-- `TsaSpec` said a superseded signer stops vouching for new records once the
-  new bundle is active. That is the v2 schema's rule, and the docstring now
-  names the legacy schema's exception. A test shows that exception with no
-  pending class involved.
+  none can. A legacy witness, with no transition pending, may name any active
+  single-anchor bundle while `legacy_witness_bundle_id` names the newest
+  active bundle and that bundle configures a single anchor. So it can answer
+  under an occurrence the election passed over. The docstring now says so.
+- `TsaSpec` said a signer that a new bundle replaces stops vouching for new
+  records once that bundle activates. The v2 schema sets that rule, and the
+  docstring now names the legacy schema's exception. A test shows that
+  exception without any pending class.
 - The module docstring counts among its refusals "a pending bundle anchor
-  reusing an active anchor ID under a different code-pinned root", which
-  "must carry a supplemental outcome". Where the anchor's keys are new, so
-  that it belongs to a pending-only class, that outcome is the class's. When
-  a later bundle of the same transition files the class under another name,
-  the newer name carries it, the reused-ID anchor activates on it, and an
-  outcome offered for the reused ID is refused as not introduced. (An anchor
-  whose keys make it an active authority under a new name needs no outcome
-  at all, as before.) The docstring now says so, and tests pin both version
+  reusing an active anchor ID under a different code-pinned root", and says
+  such an anchor "must carry a supplemental outcome". Where no active
+  authority holds the anchor's keys, so that it belongs to a pending-only
+  class, it must carry the class's outcome. When a later bundle of the same
+  transition files the class under another name, the newer name carries the
+  outcome and the reused-ID anchor activates on it. If a producer then offers
+  an outcome for the reused ID, the package refuses it as not introduced. (An
+  anchor whose keys make it an active authority under a new name needs no
+  outcome, as before.) The docstring now says so, and tests pin both version
   orders.
-- `_supplemental_candidates` states the property with the reviewer's shapes,
-  `[C{S3}@v2, D{S3,S4}@v3, E{S3}@v4]` and `[C{S3}@v2, C{S4}@v3]`. The elected
-  occurrence need not allow every key the others declare, and the passed-over
-  occurrences activate all the same. What bounds it is the code-pinning rule:
-  every anchor's allowed signers must equal the identity the consumer's spec
-  pins, so no key the consumer did not pin can activate this way.
-- The docstring also records why one candidate per distinct key set was not
-  adopted. An outcome is met by any one allowed signer, or by an unavailable
-  declaration, so that rule would not prove every key either. It would bring
-  back one authority counted twice, and cost a producer that renames and
+- The docstring of `_supplemental_candidates` states the property and walks
+  through the two shapes from #50, `[C{S3}@v2, D{S3,S4}@v3, E{S3}@v4]` and
+  `[C{S3}@v2, C{S4}@v3]`. The occurrence the election picks need not allow
+  every key the others declare, and the occurrences it passes over activate
+  all the same. The code-pinning rule bounds that gap: every anchor's allowed
+  signers must equal the identity the consumer's spec pins, so no key the
+  consumer did not pin can activate this way.
+- The docstring also records why the election doesn't take one candidate per
+  distinct key set. Any one allowed signer, or an unavailable declaration,
+  satisfies an outcome, so that rule would not prove every key either. It
+  would again count one authority twice, and cost a producer that renames and
   rotates in one transition one extra outcome for each further key set. And
   where the two rules differ, no witness satisfies both.
-- The same docstring said a skipped anchor is "already active, so it has
-  nothing new to prove". That holds for the authority, not its keys: an
-  active class that rotates to a key no anchor held before contributes no
-  candidate either, bounded by the same code-pinning rule. It now says so.
-- Tests pin both shapes with real tokens, and what can reach a passed-over
-  occurrence after activation. A Hypothesis property checks the election
-  against an independent oracle for every shape the classifier admits: each
-  class nothing trusts yet contributes exactly its newest occurrence, with
-  that occurrence's own bundle and anchor, in any update order and across
-  version numbers of two digits. The property asks the classifier, not the
-  election, which shapes are admitted, and the election may refuse only with
-  the classifier's own refusal, so an election that wrongly refuses an
-  admitted shape fails it. A separate test requires the reviewer's two
-  shapes to be admitted.
+- The same docstring called an anchor the election skips "already active, so
+  it has nothing new to prove". That holds for the authority, not its keys:
+  an active class that rotates to a key no anchor held before contributes no
+  candidate either, and the same code-pinning rule bounds that gap. The
+  docstring now says so.
+- Tests pin both shapes with real tokens and, after activation, what can
+  reach an occurrence the election passed over. A Hypothesis property checks
+  the election against an independent oracle for every shape the classifier
+  admits. Each class nothing trusts yet contributes its newest occurrence and
+  no other, with that occurrence's own bundle and anchor, in any update order
+  and across version numbers of two digits. The property asks the classifier,
+  not the election, which shapes to admit. The election may refuse only with
+  the classifier's own refusal, so an election that wrongly refuses a shape
+  the classifier admits fails the property. A separate test requires the
+  classifier to admit both shapes.
 
 ### The append gate protects a manifest directory outside the release root (#87)
 
