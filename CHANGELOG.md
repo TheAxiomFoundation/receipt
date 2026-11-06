@@ -10,10 +10,10 @@ input the package used to accept, or accept for the wrong reason.
 
 The docstrings correct claims that overstated the election, and tests pin the
 behavior; the package behaves as before. An auditor can now read in
-`receipt.tsa`'s own reference that the single supplemental candidate a
-pending-only class contributes settles which occurrence answers for the class,
-not which of its keys a token showed. The reference also says what bounds the
-gap.
+`receipt.tsa`'s own reference that the election, in picking one supplemental
+candidate for each pending-only class, settles which occurrence answers for the
+class, not which of its keys a token showed. The reference also says what
+bounds the gap.
 
 - The module docstring said the election picks the newest occurrence
   "because that is the anchor a witness will answer for once the transition
@@ -49,11 +49,11 @@ gap.
   spec pins, so no key the consumer did not pin can activate this way.
 - The docstring also records why the election doesn't take one candidate per
   distinct key set. Any one allowed signer, or an unavailable declaration,
-  satisfies an outcome, so one candidate per key set still wouldn't show every
-  key. Under that rule, the package would again count one authority twice, and
-  a producer that renames and rotates in one transition would owe one extra
-  outcome for each further key set. Where the two rules differ, no witness
-  satisfies both.
+  satisfies an outcome, so with one candidate per key set the outcomes still
+  wouldn't show every key. Under that rule, the package would again count one
+  authority twice, and a producer that renames and rotates in one transition
+  would owe one extra outcome for each further key set. Where the two rules
+  differ, no witness satisfies both.
 - The same docstring gave "already active, so it has nothing new to prove" as
   the reason `_supplemental_candidates` skips an anchor. That holds for the
   authority, not its keys: an active class that rotates to a key no anchor
