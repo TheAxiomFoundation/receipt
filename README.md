@@ -56,8 +56,8 @@ spec pin, the verdict also does not establish that the spec's code was trusted.
 
 `--spec` names a Python module that defines
 `SPEC = receipt.verify.VerificationSpec(...)`. The command executes that module
-in its own process to build the configuration every pass uses; it is not read
-as data. Verification itself is offline. Without `--expect-spec-sha256`, the
+in its own process to build the configuration every pass uses; it does not read
+it as data. Verification itself runs offline. Without `--expect-spec-sha256`, the
 code that runs is whatever the producer committed. It can change what the
 command prints and the exit status it returns, so the verdict is only as good
 as the spec the producer committed. Read the spec once, out of band, and pin
@@ -85,17 +85,19 @@ to stderr and no JSON.
 A CI job should fail on any status other than 0. Status 2 means the command
 refused before any pass ran. A status-1 verdict names the pass that failed:
 `history` for a rewritten release object or a base that is not an ancestor of
-the commit, and `custody` for a repository refused before anything was
-compared. A status-2 refusal with `"stage": "base-ref"` means this clone does
+the commit, and `custody` for a repository the reader refused before it compared
+anything. A status-2 refusal with `"stage": "base-ref"` means this clone does
 not resolve the base: the job did not fetch the ref it names, the recorded ref
-is wrong, or the history that held it is gone. The last is what a force-push
-that rewrote the history leaves behind, even in a full clone, so status 2 does
-not clear the history. Fetch the base and run again before drawing a
-conclusion, and treat a base that cannot be fetched as a possible rewrite. The
-base is resolved as `<ref>^{commit}`, so pass a commit ID or a ref, not a
-`:/<text>` search. A shallow clone, which `actions/checkout` makes by default,
-is refused before the base is read, with status 1 and `shallow repositories
-are unsupported`; use `fetch-depth: 0`. `--help` and `--version` exit 0.
+is wrong, or the history that held it is gone. After a force-push drops that
+history, a full clone that does not hold the base cannot resolve it, so status 2
+does not clear the history. A clone that still holds the old commit resolves it,
+and the history pass refuses it as a non-ancestor with status 1. Fetch the base
+and run again before drawing a conclusion, and treat a base you cannot fetch as
+a possible rewrite. The command resolves the base as `<ref>^{commit}`, so pass a
+commit ID or a ref, not a `:/<text>` search. The reader refuses a shallow clone,
+which `actions/checkout` makes by default, before it reads the base, with status
+1 and `shallow repositories are unsupported`; use `fetch-depth: 0`. `--help` and
+`--version` exit 0.
 
 ## What this verdict speaks for
 
