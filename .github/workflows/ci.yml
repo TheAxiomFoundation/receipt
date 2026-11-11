@@ -1,5 +1,19 @@
 name: CI
 
+# receipt runs the system `openssl` for its RFC 3161 and certificate checks
+# (tsa.py, release_chain.py, sign.py) and parses what `openssl ts -reply
+# -text` prints (release_chain.py), so the OpenSSL on the runner is part of
+# what these jobs test. The runner labels are pinned rather than
+# ubuntu-latest, which GitHub moved from Ubuntu 24.04 (OpenSSL 3.0.13) to
+# 26.04 (OpenSSL 3.5.5) between 2026-10-19 and 2026-11-19
+# (actions/runner-images#14748) and will move again with no commit here.
+# `test` runs on 26.04 (OpenSSL 3.5); `test-openssl-3-0` keeps the 3.0 line
+# that 24.04 users still have. Each job checks the OpenSSL line it expects,
+# so a changed image fails by name instead of testing another version.
+# Keep the `test` job's name and matrix: the default branch's ruleset
+# requires "test (3.11)", "test (3.12)" and "test (3.13)". When GitHub
+# previews the next Ubuntu LTS, add a job for it.
+
 on:
   push:
   pull_request:
@@ -9,7 +23,7 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     strategy:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
@@ -18,5 +32,23 @@ jobs:
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Check the OpenSSL line under test
+        run: |
+          openssl version
+          openssl version | grep -q '^OpenSSL 3\.5\.' || { echo "::error::expected OpenSSL 3.5.x on this runner; update this job and the note at the top"; exit 1; }
+      - run: uv sync --extra dev
+      - run: uv run pytest -q
+
+  test-openssl-3-0:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          python-version: "3.13"
+      - name: Check the OpenSSL line under test
+        run: |
+          openssl version
+          openssl version | grep -q '^OpenSSL 3\.0\.' || { echo "::error::expected OpenSSL 3.0.x on this runner; update this job and the note at the top"; exit 1; }
       - run: uv sync --extra dev
       - run: uv run pytest -q
