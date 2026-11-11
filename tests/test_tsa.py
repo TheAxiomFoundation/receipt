@@ -9735,3 +9735,238 @@ def test_every_public_witness_entry_asks_the_callers_clock_once(
         assert entry(wall.replace(tzinfo=clock)), name
         asked[name] = clock.calls
     assert asked == dict.fromkeys(entries, 1)
+
+
+class _OffsetOverride(datetime):
+    """A ``datetime`` subclass whose own ``utcoffset`` answers ``answer``."""
+
+    answer: Any = None
+
+    def utcoffset(self) -> Any:
+        return type(self).answer
+
+
+class _YearOverride(datetime):
+    """A ``datetime`` subclass whose ``year`` attribute lies."""
+
+    @property
+    def year(self) -> int:  # type: ignore[override]
+        return 2000
+
+
+class _MethodOverride(datetime):
+    """A ``datetime`` subclass whose wall-time methods lie and whose
+    ``replace`` and ``astimezone`` fail."""
+
+    def date(self) -> Any:  # type: ignore[override]
+        return datetime(2000, 1, 1).date()
+
+    def time(self) -> Any:  # type: ignore[override]
+        return datetime(2000, 1, 1).time()
+
+    def timetz(self) -> Any:  # type: ignore[override]
+        return datetime(2000, 1, 1, tzinfo=UTC).timetz()
+
+    def replace(self, *args: Any, **kwargs: Any) -> Any:  # type: ignore[override]
+        raise RuntimeError("replace is not available")
+
+    def astimezone(self, tz: Any = None) -> Any:  # type: ignore[override]
+        raise RuntimeError("astimezone is not available")
+
+
+@pytest.mark.parametrize("field", ["now", "gen_time"])
+@pytest.mark.parametrize(
+    "override",
+    [
+        type("IntOffset", (_OffsetOverride,), {"answer": 3600}),
+        type("FiveDays", (_OffsetOverride,), {"answer": timedelta(days=5)}),
+        type("OneHour", (_OffsetOverride,), {"answer": timedelta(hours=1)}),
+        _YearOverride,
+        _MethodOverride,
+    ],
+    ids=[
+        "utcoffset-int",
+        "utcoffset-five-days",
+        "utcoffset-one-hour",
+        "year",
+        "methods",
+    ],
+)
+def test_a_datetime_subclass_cannot_answer_for_its_tzinfo(
+    field: str, override: type[datetime]
+) -> None:
+    """``value.utcoffset()`` called a subclass's override and did not check
+    its answer: an ``int`` escaped as ``TypeError`` and five days moved the
+    instant. The offset and the wall time are now read through
+    ``datetime``'s own methods, as ``astimezone`` read the tzinfo, so each
+    of these decides exactly as the same plain UTC time, including one
+    whose ``date``, ``time`` and ``timetz`` lie and whose ``replace`` and
+    ``astimezone`` raise (reviews of #98)."""
+
+    plain = {
+        "now": datetime(2026, 9, 27, 12, 30, tzinfo=UTC),
+        "gen_time": datetime(2026, 9, 27, 12, 0, tzinfo=UTC),
+    }
+    arguments = dict(plain)
+    arguments[field] = override.combine(
+        plain[field].date(), plain[field].timetz()
+    )
+
+    def decide(**times: datetime) -> str | None:
+        try:
+            validate_token_time(
+                {"recordedAt": "2026-09-27T11:59:00Z"},
+                times["gen_time"],
+                now=times["now"],
+                max_future_seconds=0,
+                max_token_lead_seconds=300,
+            )
+        except TsaError as exc:
+            return str(exc)
+        return None
+
+    assert decide(**plain) is None
+    assert decide(**arguments) is None
+
+
+class _ClaimsToBeADatetime:
+    """Not a ``datetime``, though ``isinstance`` takes its word that it is."""
+
+    @property  # type: ignore[misc]
+    def __class__(self) -> type:
+        return datetime
+
+    def utcoffset(self) -> timedelta:
+        return timedelta(0)
+
+    def astimezone(self, tz: Any = None) -> datetime:
+        return datetime(2026, 9, 27, 12, 30, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("field", ["now", "gen_time"])
+def test_an_object_that_claims_to_be_a_datetime_is_refused_as_not_one(
+    field: str,
+) -> None:
+    """``isinstance`` reads ``__class__``, which an object can define, so
+    one that claims to be a ``datetime`` passed the type check. 0.6.1 then
+    took what its ``astimezone`` returned as the verification time and
+    raised ``TypeError`` comparing it as a genTime, and this branch's
+    earlier commits raised ``AttributeError`` reading a ``datetime`` field
+    it lacks. The check now asks the object's type (review of #98)."""
+
+    pretender = _ClaimsToBeADatetime()
+    assert isinstance(pretender, datetime)
+    times: dict[str, Any] = {
+        "now": datetime(2026, 9, 27, 12, 30, tzinfo=UTC),
+        "gen_time": datetime(2026, 9, 27, 12, 0, tzinfo=UTC),
+    }
+    times[field] = pretender
+    label = "verification time" if field == "now" else "RFC 3161 genTime"
+    with pytest.raises(TsaError) as caught:
+        validate_token_time(
+            {"recordedAt": "2026-09-27T11:59:00Z"},
+            times["gen_time"],
+            now=times["now"],
+            max_future_seconds=0,
+            max_token_lead_seconds=300,
+        )
+    assert str(caught.value) == (
+        f"{label} must be a timezone-aware datetime: {pretender!r}"
+    )
+
+
+class _ClaimsToBeTheCurrentTime(_ClaimsToBeADatetime):
+    """Claims through ``__class__`` to be a ``datetime``, and gives the
+    current time when asked for it in a zone."""
+
+    def astimezone(self, tz: Any = None) -> datetime:
+        return datetime.now(UTC).astimezone(tz)
+
+
+class _HasAnAstimezone:
+    """Not a ``datetime`` and doesn't claim to be one, but answers
+    ``astimezone`` with the current time, as an ``arrow.Arrow`` does."""
+
+    def astimezone(self, tz: Any = None) -> datetime:
+        return datetime.now(UTC).astimezone(tz)
+
+
+_NOT_A_DATETIME = [0, "", False, [], 5, "x", _HasAnAstimezone(), _ClaimsToBeTheCurrentTime()]
+_NOT_A_DATETIME_IDS = [
+    "zero", "empty-string", "false", "empty-list", "int", "string", "astimezone", "pretender"
+]
+
+
+@pytest.mark.parametrize("now", _NOT_A_DATETIME, ids=_NOT_A_DATETIME_IDS)
+def test_every_public_witness_entry_refuses_a_time_that_is_not_a_datetime(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...], now: object
+) -> None:
+    """0.6.1's three entries passed ``now or datetime.now(UTC)`` on, so they
+    used the current time in place of a ``now`` Python treats as false,
+    took what an ``astimezone`` method returned, and raised
+    ``AttributeError`` for the rest. With a valid token, the falsy, the
+    ``astimezone`` and the pretender cases verified. Each entry now refuses
+    every one of them by name, with or without a token to check (review of
+    #98)."""
+
+    message = f"verification time must be a timezone-aware datetime: {now!r}"
+    tree = build_witness_tree(tmp_path / "token", local_anchors[:1])
+    anchor = local_anchors[0]
+    with pytest.raises(TsaError) as caught:
+        verify_tree(tree, now=now)
+    assert str(caught.value) == message
+    with pytest.raises(TsaError) as caught:
+        verify_step(tree.record, spec=tree.spec, records=tree.records, now=now)
+    assert str(caught.value) == message
+    with pytest.raises(TsaError) as caught:
+        verify_timestamp_token(
+            tree.record,
+            claim_against(tree, tree.reference, anchor, tree.tokens[anchor.anchor_id]),
+            tree.reference,
+            spec=tree.spec,
+            records=tree.records,
+            now=now,  # type: ignore[arg-type]
+        )
+    assert str(caught.value) == message
+    unavailable = build_witness_tree(tmp_path / "none", local_anchors[:1], available=False)
+    with pytest.raises(TsaError) as caught:
+        verify_tree(unavailable, now=now)
+    assert str(caught.value) == message
+    # The default is the control.
+    assert verify_tree(tree).status == "available"
+    assert verify_tree(unavailable).status == "unavailable"
+
+
+@pytest.mark.parametrize(
+    ("raised", "refused"),
+    [(ValueError, True), (TypeError, True), (RuntimeError, False), (KeyError, False)],
+    ids=["ValueError", "TypeError", "RuntimeError", "KeyError"],
+)
+def test_a_tzinfo_s_own_exception_is_refused_only_where_datetime_s_would_be(
+    raised: type[Exception], refused: bool
+) -> None:
+    """Python cannot tell a tzinfo's own ``ValueError`` or ``TypeError`` from
+    the ones ``datetime`` raises for an offset it rejects, so both refuse by
+    name; any other exception is the caller's code failing and propagates,
+    as the docstring of ``_utc_instant`` says."""
+
+    class Raising(tzinfo):
+        def utcoffset(self, dt: datetime | None) -> timedelta:
+            raise raised("from the tzinfo")
+
+        def dst(self, dt: datetime | None) -> None:
+            return None
+
+    now = datetime(2026, 9, 27, 12, 30, tzinfo=Raising())
+    expected: type[BaseException] = TsaError if refused else raised
+    with pytest.raises(expected) as caught:
+        validate_token_time(
+            {"recordedAt": "2026-09-27T11:59:00Z"},
+            datetime(2026, 9, 27, 12, 0, tzinfo=UTC),
+            now=now,
+            max_future_seconds=0,
+            max_token_lead_seconds=300,
+        )
+    if refused:
+        assert str(caught.value) == f"verification time has no valid UTC offset: {now!r}"
+        assert isinstance(caught.value.__cause__, raised)
