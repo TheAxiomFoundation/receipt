@@ -10239,3 +10239,40 @@ def test_every_public_witness_entry_refuses_an_unusable_aware_verification_time(
             records=tree.records,
             now=now,
         )
+
+
+def test_every_public_witness_entry_asks_the_callers_clock_once(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...]
+) -> None:
+    """The entry points checked ``now`` and ``validate_token_time`` read it
+    again, so a clock answering +01:00 and then ``None`` passed the check
+    and was refused as naive by the second reading. Each entry now passes
+    on the UTC instant it checked, and the caller's tzinfo is asked once."""
+
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    anchor = local_anchors[0]
+    wall = (datetime.now(UTC) + timedelta(days=1)).replace(tzinfo=None)
+    entries: dict[str, Callable[[datetime], bool]] = {
+        "verify_witness": lambda now: verify_tree(tree, now=now).status == "available",
+        "verify_witness_step": lambda now: verify_step(
+            tree.record, spec=tree.spec, records=tree.records, now=now
+        ).status
+        == "available",
+        "verify_timestamp_token": lambda now: isinstance(
+            verify_timestamp_token(
+                tree.record,
+                claim_against(tree, tree.reference, anchor, tree.tokens[anchor.anchor_id]),
+                tree.reference,
+                spec=tree.spec,
+                records=tree.records,
+                now=now,
+            ),
+            TokenEvidence,
+        ),
+    }
+    asked = {}
+    for name, entry in entries.items():
+        clock = _ScriptedZone(timedelta(hours=1), None)
+        assert entry(wall.replace(tzinfo=clock)), name
+        asked[name] = clock.calls
+    assert asked == dict.fromkeys(entries, 1)
