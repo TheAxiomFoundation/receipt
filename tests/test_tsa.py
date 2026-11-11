@@ -9735,3 +9735,101 @@ def test_every_public_witness_entry_asks_the_callers_clock_once(
         assert entry(wall.replace(tzinfo=clock)), name
         asked[name] = clock.calls
     assert asked == dict.fromkeys(entries, 1)
+
+
+class _OffsetOverride(datetime):
+    """A ``datetime`` subclass whose own ``utcoffset`` answers ``answer``."""
+
+    answer: Any = None
+
+    def utcoffset(self) -> Any:
+        return type(self).answer
+
+
+class _YearOverride(datetime):
+    """A ``datetime`` subclass whose ``year`` attribute lies."""
+
+    @property
+    def year(self) -> int:  # type: ignore[override]
+        return 2000
+
+
+@pytest.mark.parametrize("field", ["now", "gen_time"])
+@pytest.mark.parametrize(
+    "override",
+    [
+        type("IntOffset", (_OffsetOverride,), {"answer": 3600}),
+        type("FiveDays", (_OffsetOverride,), {"answer": timedelta(days=5)}),
+        type("OneHour", (_OffsetOverride,), {"answer": timedelta(hours=1)}),
+        _YearOverride,
+    ],
+    ids=["utcoffset-int", "utcoffset-five-days", "utcoffset-one-hour", "year"],
+)
+def test_a_datetime_subclass_cannot_answer_for_its_tzinfo(
+    field: str, override: type[datetime]
+) -> None:
+    """``value.utcoffset()`` called a subclass's override and did not check
+    its answer: an ``int`` escaped as ``TypeError`` and five days moved the
+    instant. The offset and the wall time are now read through
+    ``datetime``'s own methods, as ``astimezone`` read the tzinfo, so each
+    of these decides exactly as the same plain UTC time (review of #98)."""
+
+    plain = {
+        "now": datetime(2026, 9, 27, 12, 30, tzinfo=UTC),
+        "gen_time": datetime(2026, 9, 27, 12, 0, tzinfo=UTC),
+    }
+    arguments = dict(plain)
+    arguments[field] = override.combine(
+        plain[field].date(), plain[field].timetz()
+    )
+
+    def decide(**times: datetime) -> str | None:
+        try:
+            validate_token_time(
+                {"recordedAt": "2026-09-27T11:59:00Z"},
+                times["gen_time"],
+                now=times["now"],
+                max_future_seconds=0,
+                max_token_lead_seconds=300,
+            )
+        except TsaError as exc:
+            return str(exc)
+        return None
+
+    assert decide(**plain) is None
+    assert decide(**arguments) is None
+
+
+@pytest.mark.parametrize(
+    ("raised", "refused"),
+    [(ValueError, True), (TypeError, True), (RuntimeError, False), (KeyError, False)],
+    ids=["ValueError", "TypeError", "RuntimeError", "KeyError"],
+)
+def test_a_tzinfo_s_own_exception_is_refused_only_where_datetime_s_would_be(
+    raised: type[Exception], refused: bool
+) -> None:
+    """Python cannot tell a tzinfo's own ``ValueError`` or ``TypeError`` from
+    the ones ``datetime`` raises for an offset it rejects, so both refuse by
+    name; any other exception is the caller's code failing and propagates,
+    as the docstring of ``_utc_instant`` says."""
+
+    class Raising(tzinfo):
+        def utcoffset(self, dt: datetime | None) -> timedelta:
+            raise raised("from the tzinfo")
+
+        def dst(self, dt: datetime | None) -> None:
+            return None
+
+    now = datetime(2026, 9, 27, 12, 30, tzinfo=Raising())
+    expected: type[BaseException] = TsaError if refused else raised
+    with pytest.raises(expected) as caught:
+        validate_token_time(
+            {"recordedAt": "2026-09-27T11:59:00Z"},
+            datetime(2026, 9, 27, 12, 0, tzinfo=UTC),
+            now=now,
+            max_future_seconds=0,
+            max_token_lead_seconds=300,
+        )
+    if refused:
+        assert str(caught.value) == f"verification time has no valid UTC offset: {now!r}"
+        assert isinstance(caught.value.__cause__, raised)

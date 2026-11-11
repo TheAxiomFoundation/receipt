@@ -1599,29 +1599,27 @@ def _utc_instant(value: datetime, label: str) -> datetime:
     time read in the process's time zone -- what the naive refusal exists
     to stop. An offset ``datetime`` itself rejects (a day or more, or not a
     ``timedelta``) raised ``ValueError`` or ``TypeError`` from the check and
-    now refuses by name (delta review of #83, findings 7 and 10). An
-    exception a tzinfo raises of its own still propagates: it is the
-    caller's code failing, not a time this module could decide.
+    now refuses by name (delta review of #83, findings 7 and 10), and so
+    does a tzinfo that raises ``ValueError`` or ``TypeError`` itself, which
+    Python cannot tell apart from those. Any other exception a tzinfo
+    raises propagates: it is the caller's code failing, not a time this
+    module could decide.
+
+    The offset and the wall time are read through ``datetime``'s own
+    methods, not the value's, so a subclass that overrides ``utcoffset``
+    cannot skip the offset's validation and one that overrides ``year`` or
+    another field cannot move the instant (review of #98).
     """
 
     if not isinstance(value, datetime):
         raise TsaError(f"{label} must be a timezone-aware datetime: {value!r}")
     try:
-        offset = value.utcoffset()
+        offset = datetime.utcoffset(value)
     except (TypeError, ValueError) as exc:
         raise TsaError(f"{label} has no valid UTC offset: {value!r}") from exc
     if offset is None:
         raise TsaError(f"{label} must be a timezone-aware datetime: {value!r}")
-    wall = datetime(
-        value.year,
-        value.month,
-        value.day,
-        value.hour,
-        value.minute,
-        value.second,
-        value.microsecond,
-        tzinfo=UTC,
-    )
+    wall = datetime.combine(datetime.date(value), datetime.time(value), tzinfo=UTC)
     try:
         return wall - offset
     except OverflowError as exc:
