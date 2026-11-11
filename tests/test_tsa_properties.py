@@ -10,7 +10,7 @@ CI explores the same examples every time and a failure is reproducible.
 from __future__ import annotations
 
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 
 import pytest
 from hypothesis import HealthCheck, event, example, given, settings, strategies as st
@@ -607,3 +607,105 @@ def test_the_reviewer_shapes_are_admitted_and_elect_their_newest_occurrence(
     reference = bundle_reference(first_version + len(REVIEWER_ACTIVE) + len(pending) - 1)
     assert result == {(reference["path"], newest): (reference, {"id": newest})}
     assert result == elected_by_oracle(bundles)
+
+
+# ---------------------------------------------------------------------------
+# One reading of each offset decides the instant (delta review of #83,
+# findings 7 and 10).
+
+
+class ScriptedZone(tzinfo):
+    """A tzinfo whose ``utcoffset`` gives ``answers`` in turn, then the last
+    one ever after; ``calls`` counts how often it was asked."""
+
+    def __init__(self, *answers: object) -> None:
+        self.answers = answers
+        self.calls = 0
+
+    def utcoffset(self, dt: datetime | None) -> object:
+        answer = self.answers[min(self.calls, len(self.answers) - 1)]
+        self.calls += 1
+        return answer
+
+    def dst(self, dt: datetime | None) -> None:
+        return None
+
+    def tzname(self, dt: datetime | None) -> str:
+        return "scripted"
+
+    def __repr__(self) -> str:
+        return f"ScriptedZone{self.answers!r}"
+
+
+DAY = timedelta(hours=24)
+valid_offsets = st.timedeltas(
+    min_value=-DAY + timedelta(microseconds=1), max_value=DAY - timedelta(microseconds=1)
+)
+offset_answers = (
+    valid_offsets
+    | st.none()
+    | st.timedeltas(min_value=DAY, max_value=3 * DAY)
+    | st.timedeltas(min_value=-3 * DAY, max_value=-DAY)
+    | st.integers(min_value=-(10**6), max_value=10**6)
+    | st.text(max_size=8)
+)
+walls = st.datetimes(
+    min_value=datetime(1, 1, 1),
+    max_value=datetime(9999, 12, 31, 23, 59, 59, 999999),
+)
+
+
+@PROPERTY
+@given(
+    st.sampled_from(["now", "gen_time"]),
+    walls,
+    st.lists(offset_answers, min_size=1, max_size=4),
+    mid_range,
+    allowances,
+    allowances,
+)
+def test_validate_token_time_decides_on_one_reading_of_each_offset(
+    field: str,
+    wall: datetime,
+    answers: list[object],
+    other: datetime,
+    future: int,
+    lead: int,
+) -> None:
+    """However a tzinfo's answers change from call to call,
+    ``validate_token_time`` asks it once, raises nothing but TsaError, and
+    decides exactly as it does for a fixed zone carrying that one answer: a
+    ``None`` refuses as naive and an answer ``datetime`` rejects refuses by
+    name. Before, the aware check and ``astimezone`` each asked, a second
+    ``None`` read the time as the process's local time, and a rejected
+    answer escaped as ``ValueError`` or ``TypeError``."""
+
+    def decide(value: datetime) -> str | None:
+        arguments = {"now": other, "gen_time": other, field: value}
+        try:
+            tsa.validate_token_time(
+                {"recordedAt": other.isoformat()},
+                **arguments,
+                max_future_seconds=future,
+                max_token_lead_seconds=lead,
+            )
+        except tsa.TsaError as exc:
+            return str(exc)
+        return None
+
+    zone = ScriptedZone(*answers)
+    value = wall.replace(tzinfo=zone)
+    actual = decide(value)
+    assert zone.calls == 1
+    label = "verification time" if field == "now" else "RFC 3161 genTime"
+    first = answers[0]
+    if first is None:
+        assert actual == f"{label} must be a timezone-aware datetime: {value!r}"
+    elif not isinstance(first, timedelta) or abs(first) >= DAY:
+        assert actual == f"{label} has no valid UTC offset: {value!r}"
+    else:
+        fixed = wall.replace(tzinfo=timezone(first))
+        expected = decide(fixed)
+        if expected is not None:
+            expected = expected.replace(repr(fixed), repr(value))
+        assert actual == expected

@@ -26,7 +26,7 @@ import stat
 import subprocess
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any
 
 import pytest
@@ -10095,4 +10095,147 @@ def test_a_gen_time_outside_the_utc_range_is_refused() -> None:
             now=datetime(2026, 9, 27, 12, 30, tzinfo=UTC),
             max_future_seconds=0,
             max_token_lead_seconds=300,
+        )
+
+
+# --- delta review of #83, findings 5, 7 and 10: one reading of the offset
+
+
+class _ScriptedZone(tzinfo):
+    """A tzinfo whose ``utcoffset`` gives ``answers`` in turn, then the last
+    one ever after; ``calls`` counts how often it was asked."""
+
+    def __init__(self, *answers: Any) -> None:
+        self.answers = answers
+        self.calls = 0
+
+    def utcoffset(self, dt: datetime | None) -> Any:
+        answer = self.answers[min(self.calls, len(self.answers) - 1)]
+        self.calls += 1
+        return answer
+
+    def dst(self, dt: datetime | None) -> None:
+        return None
+
+    def tzname(self, dt: datetime | None) -> str:
+        return "scripted"
+
+    def __repr__(self) -> str:
+        return f"_ScriptedZone{self.answers!r}"
+
+
+@pytest.mark.parametrize("field", ["now", "gen_time"])
+@pytest.mark.parametrize(
+    "answer",
+    [timedelta(hours=24), -timedelta(hours=24), 3600, "+01:00"],
+    ids=["plus-one-day", "minus-one-day", "int", "str"],
+)
+def test_an_offset_datetime_rejects_is_refused_by_name(field: str, answer: Any) -> None:
+    """A tzinfo answering an offset ``datetime`` itself rejects -- a day or
+    more, or not a ``timedelta`` -- raised ``ValueError`` or ``TypeError``
+    out of ``validate_token_time`` (delta review of #83, finding 7)."""
+
+    valid = datetime(2026, 9, 27, 12, tzinfo=UTC)
+    value = datetime(2026, 9, 27, 12, tzinfo=_ScriptedZone(answer))
+    arguments = {"now": valid, "gen_time": valid, field: value}
+    label = "verification time" if field == "now" else "RFC 3161 genTime"
+    with pytest.raises(TsaError) as caught:
+        validate_token_time(
+            {"recordedAt": "2026-09-27T11:59:00Z"},
+            **arguments,
+            max_future_seconds=0,
+            max_token_lead_seconds=300,
+        )
+    assert str(caught.value) == f"{label} has no valid UTC offset: {value!r}"
+
+
+@pytest.mark.parametrize("zone", ["UTC", "America/Los_Angeles", "Asia/Tokyo"])
+def test_a_tzinfo_that_changes_its_answer_is_read_once_in_every_time_zone(
+    monkeypatch: pytest.MonkeyPatch, zone: str
+) -> None:
+    """The aware check asked the tzinfo for its offset and ``astimezone``
+    asked again, reading a ``None`` from the second call as the process's
+    local time. A clock answering +01:00 and then ``None`` therefore had
+    12:30 read in the process's time zone: the token below was accepted
+    under ``TZ=UTC`` and refused as postdating 03:30 under ``TZ=Asia/Tokyo``.
+    One reading now decides the instant in every zone."""
+
+    import time
+
+    clock = _ScriptedZone(timedelta(hours=1), None)
+    monkeypatch.setenv("TZ", zone)
+    time.tzset()
+    try:
+        with pytest.raises(TsaError) as caught:
+            validate_token_time(
+                {"recordedAt": "2026-09-27T11:00:00Z"},
+                datetime(2026, 9, 27, 12, 0, tzinfo=UTC),
+                now=datetime(2026, 9, 27, 12, 30, tzinfo=clock),
+                max_future_seconds=0,
+                max_token_lead_seconds=300,
+            )
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+    assert str(caught.value) == (
+        "RFC 3161 genTime 2026-09-27T12:00:00Z postdates verification time "
+        "2026-09-27T11:30:00Z"
+    )
+    assert clock.calls == 1
+
+
+_UNUSABLE_AWARE_NOWS = [
+    datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=14))),
+    datetime(2026, 9, 27, 12, tzinfo=_ScriptedZone(timedelta(hours=24))),
+]
+_UNUSABLE_AWARE_NOW_IDS = ["year-0", "offset-of-a-day"]
+
+
+@pytest.mark.parametrize(
+    "now", [_NAIVE_NOW, *_UNUSABLE_AWARE_NOWS], ids=["naive", *_UNUSABLE_AWARE_NOW_IDS]
+)
+def test_a_witness_with_no_token_refuses_an_unusable_verification_time(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...], now: datetime
+) -> None:
+    """0.6.1 returned this witness's ``unavailable`` evidence whatever
+    ``now`` was, since no token's time was checked. The time is now checked
+    before the witness is read, so an unusable clock refuses whether or not
+    a token was produced (delta review of #83, finding 5)."""
+
+    tree = build_witness_tree(tmp_path, local_anchors[:1], available=False)
+    assert verify_tree(tree).status == "unavailable"
+    assert verify_tree(tree, now=datetime.now(UTC)).status == "unavailable"
+    with pytest.raises(TsaError, match="^verification time "):
+        verify_tree(tree, now=now)
+    with pytest.raises(TsaError, match="^verification time "):
+        verify_step(tree.record, spec=tree.spec, records=tree.records, now=now)
+
+
+@pytest.mark.parametrize("now", _UNUSABLE_AWARE_NOWS, ids=_UNUSABLE_AWARE_NOW_IDS)
+def test_every_public_witness_entry_refuses_an_unusable_aware_verification_time(
+    tmp_path: pathlib.Path, local_anchors: tuple[LocalAnchor, ...], now: datetime
+) -> None:
+    """The out-of-range test above reaches ``validate_token_time`` and
+    ``verify_witness``; this one holds ``verify_witness_step`` and
+    ``verify_timestamp_token`` to the same refusals (delta review of #83,
+    finding 10)."""
+
+    tree = build_witness_tree(tmp_path, local_anchors[:1])
+    anchor = local_anchors[0]
+    message = (
+        "^verification time (is outside the representable UTC range|"
+        "has no valid UTC offset): "
+    )
+    with pytest.raises(TsaError, match=message):
+        verify_tree(tree, now=now)
+    with pytest.raises(TsaError, match=message):
+        verify_step(tree.record, spec=tree.spec, records=tree.records, now=now)
+    with pytest.raises(TsaError, match=message):
+        verify_timestamp_token(
+            tree.record,
+            claim_against(tree, tree.reference, anchor, tree.tokens[anchor.anchor_id]),
+            tree.reference,
+            spec=tree.spec,
+            records=tree.records,
+            now=now,
         )

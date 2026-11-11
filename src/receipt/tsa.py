@@ -1761,13 +1761,40 @@ def _utc_instant(value: datetime, label: str) -> datetime:
     years 1 to 9999 -- ``datetime(1, 1, 1, tzinfo=+14:00)`` -- raised
     OverflowError from ``astimezone`` (0.6.2 review, found beside L2 finding
     7 by the crash-to-refusal sweep).
+
+    The offset is read once, and the instant is the wall time less that
+    reading. ``astimezone`` asks the tzinfo again, and reads a ``None`` from
+    that second call as the process's local time, so a tzinfo that answered
+    the aware check with an offset and ``astimezone`` with ``None`` had its
+    time read in the process's time zone -- what the naive refusal exists
+    to stop. An offset ``datetime`` itself rejects (a day or more, or not a
+    ``timedelta``) raised ``ValueError`` or ``TypeError`` from the check and
+    now refuses by name (delta review of #83, findings 7 and 10). An
+    exception a tzinfo raises of its own still propagates: it is the
+    caller's code failing, not a time this module could decide.
     """
 
-    if not isinstance(value, datetime) or value.utcoffset() is None:
+    if not isinstance(value, datetime):
         raise TsaError(f"{label} must be a timezone-aware datetime: {value!r}")
     try:
-        return value.astimezone(UTC)
-    except (OverflowError, ValueError) as exc:
+        offset = value.utcoffset()
+    except (TypeError, ValueError) as exc:
+        raise TsaError(f"{label} has no valid UTC offset: {value!r}") from exc
+    if offset is None:
+        raise TsaError(f"{label} must be a timezone-aware datetime: {value!r}")
+    wall = datetime(
+        value.year,
+        value.month,
+        value.day,
+        value.hour,
+        value.minute,
+        value.second,
+        value.microsecond,
+        tzinfo=UTC,
+    )
+    try:
+        return wall - offset
+    except OverflowError as exc:
         raise TsaError(
             f"{label} is outside the representable UTC range: {value!r}"
         ) from exc
