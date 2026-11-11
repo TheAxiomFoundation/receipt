@@ -1563,7 +1563,7 @@ def _creation_claims(payload: dict[str, Any]) -> list[tuple[str, datetime]]:
     return claims
 
 
-def _require_aware_verification_time(now: datetime | None) -> None:
+def _require_aware_verification_time(now: datetime | None) -> datetime | None:
     """Refuse a verification time that does not say which instant it is.
 
     ``astimezone`` reads a naive ``datetime`` as the process's local time,
@@ -1572,11 +1572,16 @@ def _require_aware_verification_time(now: datetime | None) -> None:
     input nobody named (0.6.2 review, L2 finding 7). The record's own time
     claims already refuse a missing timezone; the caller's clock is held to
     the same rule. ``None`` still means "now, in UTC".
+
+    Returns the instant in UTC, which the entry points pass on in place of
+    the caller's value, so the caller's tzinfo is asked for its offset once
+    per call: a second reading inside ``validate_token_time`` could get a
+    different answer from the one checked here (delta review of #83).
     """
 
     if now is None:
-        return
-    _utc_instant(now, "verification time")
+        return None
+    return _utc_instant(now, "verification time")
 
 
 def _utc_instant(value: datetime, label: str) -> datetime:
@@ -1586,13 +1591,40 @@ def _utc_instant(value: datetime, label: str) -> datetime:
     years 1 to 9999 -- ``datetime(1, 1, 1, tzinfo=+14:00)`` -- raised
     OverflowError from ``astimezone`` (0.6.2 review, found beside L2 finding
     7 by the crash-to-refusal sweep).
+
+    The offset is read once, and the instant is the wall time less that
+    reading. ``astimezone`` asks the tzinfo again, and reads a ``None`` from
+    that second call as the process's local time, so a tzinfo that answered
+    the aware check with an offset and ``astimezone`` with ``None`` had its
+    time read in the process's time zone -- what the naive refusal exists
+    to stop. An offset ``datetime`` itself rejects (a day or more, or not a
+    ``timedelta``) raised ``ValueError`` or ``TypeError`` from the check and
+    now refuses by name (delta review of #83, findings 7 and 10), and so
+    does a tzinfo that raises ``ValueError`` or ``TypeError`` itself, which
+    Python cannot tell apart from those. Any other exception a tzinfo
+    raises propagates: it is the caller's code failing, not a time this
+    module could decide.
+
+    The offset and the wall time are read through ``datetime``'s own
+    methods, not the value's, so a subclass that overrides ``utcoffset``
+    cannot skip the offset's validation and one that overrides ``year``,
+    ``date`` or another field cannot move the instant. The type check asks
+    ``type(value)``, because ``isinstance`` takes an object's word for its
+    ``__class__`` (reviews of #98).
     """
 
-    if not isinstance(value, datetime) or value.utcoffset() is None:
+    if not issubclass(type(value), datetime):
         raise TsaError(f"{label} must be a timezone-aware datetime: {value!r}")
     try:
-        return value.astimezone(UTC)
-    except (OverflowError, ValueError) as exc:
+        offset = datetime.utcoffset(value)
+    except (TypeError, ValueError) as exc:
+        raise TsaError(f"{label} has no valid UTC offset: {value!r}") from exc
+    if offset is None:
+        raise TsaError(f"{label} must be a timezone-aware datetime: {value!r}")
+    wall = datetime.combine(datetime.date(value), datetime.time(value), tzinfo=UTC)
+    try:
+        return wall - offset
+    except OverflowError as exc:
         raise TsaError(
             f"{label} is outside the representable UTC range: {value!r}"
         ) from exc
@@ -1617,7 +1649,7 @@ def validate_token_time(
     """
 
     current = _utc_instant(now, "verification time")
-    _utc_instant(gen_time, "RFC 3161 genTime")
+    gen_time = _utc_instant(gen_time, "RFC 3161 genTime")
     if gen_time - current > _allowance(max_future_seconds):
         raise TsaError(
             f"RFC 3161 genTime {_format_utc(gen_time)} postdates verification "
@@ -2725,7 +2757,7 @@ def verify_timestamp_token(
     maintenance release (peer review, fifth gate round one).
     """
 
-    _require_aware_verification_time(now)
+    now = _require_aware_verification_time(now)
     named_records = records
     records = records.resolve()
     evidence, _identity = _verify_timestamp_token(
@@ -4490,7 +4522,7 @@ def _verify_witness_with_updates(
         raise TypeError(
             "supply transition_bundle_updates or prior_pending_updates, not both"
         )
-    _require_aware_verification_time(now)
+    now = _require_aware_verification_time(now)
     if records is not None:
         named_records = records
     elif len(path.parents) >= 2:
