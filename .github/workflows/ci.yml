@@ -2,17 +2,17 @@ name: CI
 
 # receipt runs the system `openssl` for its RFC 3161 and certificate checks
 # (tsa.py, release_chain.py) and, when the `cryptography` package is
-# missing, for Ed25519 signatures (sign.py); release_chain.py parses what
-# `openssl ts -reply -text` prints. So the OpenSSL on the runner is part of
-# what these jobs test. The runner labels are pinned rather than
-# ubuntu-latest, which GitHub moves from Ubuntu 24.04 (OpenSSL 3.0.13) to
-# 26.04 (OpenSSL 3.5.5) between 2026-10-19 and 2026-11-19
-# (actions/runner-images#14748) and will move again with no commit here.
+# missing, to verify Ed25519 signatures (sign.py); release_chain.py parses
+# what `openssl ts -reply -text` prints. So the OpenSSL on the runner is
+# part of what these jobs test. The jobs name their Ubuntu release, because
+# GitHub moves ubuntu-latest from Ubuntu 24.04 (OpenSSL 3.0.13) to 26.04
+# (OpenSSL 3.5.5) between 2026-10-19 and 2026-11-19
+# (actions/runner-images#14748) and will move it again with no commit here.
 # `test` runs on 26.04 (OpenSSL 3.5); `test-openssl-3-0` keeps the 3.0 line
 # that 24.04 users still have. Each job checks the OpenSSL line it expects,
-# so a changed image fails by name instead of testing another version, and
-# pytest's -rs prints each skip's reason, since one test skips on what
-# OpenSSL prints.
+# so a changed image stops the job, with an error that names the expected
+# line, before any test runs. pytest's -rs prints each skip's reason, since
+# one test skips on what OpenSSL prints.
 # Keep the `test` job's name and matrix: the default branch's ruleset
 # requires "test (3.11)", "test (3.12)" and "test (3.13)". When GitHub
 # previews the next Ubuntu LTS, add a job for it.
