@@ -59,6 +59,19 @@ def test_the_fixture_values_still_construct() -> None:
     assert set(built.anchors) == {"alpha"}
 
 
+# --- the manifest schema pin ------------------------------------------------
+
+
+@pytest.mark.parametrize("value", [None, "", b"t", 1])
+def test_a_schema_pin_that_names_no_schema_refuses_at_construction(
+    value: object,
+) -> None:
+    """An empty pin would admit a manifest whose ``schemaVersion`` is empty."""
+
+    with pytest.raises(ReleaseChainError, match="ChainSpec schema_version"):
+        chain(schema_version=value)
+
+
 # --- the producer pin -------------------------------------------------------
 
 

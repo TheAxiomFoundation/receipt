@@ -291,6 +291,9 @@ class ChainSpec:
         except NamePolicyError as exc:
             raise ReleaseChainError(str(exc)) from exc
         _sha256(self.producer_spki_sha256, "ChainSpec producer_spki_sha256")
+        # An empty schema pin matches a manifest whose schemaVersion is also
+        # empty, so validate_manifest_schema would admit an unnamed schema.
+        _strict_string(self.schema_version, "ChainSpec schema_version")
         if not isinstance(self.anchors, Mapping) or not self.anchors:
             raise ReleaseChainError(
                 "ChainSpec anchors must be a non-empty mapping of TSA name to "
