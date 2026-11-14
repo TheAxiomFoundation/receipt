@@ -1201,6 +1201,8 @@ def verify_receipt(
     the anchor and satisfied the signer pins (see _receipt_bytes).
     """
 
+    if now is not None:
+        now = _verifier_instant(now)
     if tsa not in spec.anchors:
         raise ReleaseChainError(f"unknown TSA receipt kind {tsa!r}")
     _sha256(manifest_digest, "manifest digest")
@@ -1293,7 +1295,7 @@ def verify_receipt(
             raise ReleaseChainError(
                 f"RFC 3161 policy is not pinned for {tsa}: {policy_oid!r}"
             )
-        current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        current = datetime.now(timezone.utc) if now is None else now
         # A difference of two instants is always a representable timedelta;
         # current + 300 s is not, for a verification time in the last five
         # minutes of year 9999, and raised OverflowError.
@@ -1360,6 +1362,8 @@ def verify_release_receipts(
 ) -> dict[str, datetime]:
     """Verify both receipts and their chronology for one manifest."""
 
+    if now is not None:
+        now = _verifier_instant(now)
     if set(receipt_paths) != set(spec.anchors):
         raise ReleaseChainError(
             f"release must have exactly {' and '.join(spec.anchors)} receipt paths"
@@ -1409,6 +1413,26 @@ def verify_release_receipts(
                 f"{clock_skew_seconds}s skew"
             )
     return receipt_times
+
+
+def _verifier_instant(now: datetime) -> datetime:
+    """The caller's verification time in UTC, or a refusal.
+
+    ``now.astimezone(timezone.utc)`` read a naive ``now`` as the process's
+    local time, so one chain verified under ``TZ=UTC`` and failed as
+    postdating its verifier time under ``TZ=Asia/Tokyo``; an aware ``now``
+    outside years 1 to 9999 raised ``OverflowError``; and the current time
+    took the place of a non-datetime that Python treats as false (``0``,
+    ``""``) (reviews of #98). This reads it as ``receipt.tsa`` reads its
+    verification time: one reading of the offset, and a refusal by name when
+    the time names no instant. Each entry point reads it before it reads a
+    file or runs OpenSSL, and passes the UTC instant on.
+    """
+
+    try:
+        return _tsa._utc_instant(now, "verifier time")
+    except _tsa.TsaError as exc:
+        raise ReleaseChainError(str(exc)) from exc
 
 
 def _allowance(seconds: int) -> timedelta:
@@ -2142,6 +2166,11 @@ def verify_release_chain(
         raise ReleaseChainError(
             "allow_pending_append requires historical state verification"
         )
+    # Before any file or OpenSSL call, and so before the empty-chain return
+    # below, which returned a verdict for a naive or year-0 ``now`` (review
+    # of #98).
+    if now is not None:
+        now = _verifier_instant(now)
 
     try:
         _tsa._require_supported_openssl()
@@ -2204,7 +2233,7 @@ def verify_release_chain(
     records: list[ReleaseRecord] = []
     previous_hash: str | None = None
     previous_times: dict[str, datetime] | None = None
-    verification_now = now or datetime.now(timezone.utc)
+    verification_now = datetime.now(timezone.utc) if now is None else now
     for expected_index, (path, receipt_paths, producer_signature_path) in enumerate(
         enumerated
     ):

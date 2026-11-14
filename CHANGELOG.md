@@ -462,13 +462,47 @@ Claims corrected, with no change in behavior:
 
 New refusals, each of an input 0.6.1 accepted or crashed on:
 
-- `receipt.tsa`: a verification time without a UTC offset (`astimezone` read
-  it as local time, so the verdict followed the process's time zone), or one
-  whose UTC instant falls outside years 1 to 9999 (was `OverflowError`); a bare
-  record filename with no `records=` (was `IndexError`). The duplicate
+- `receipt.tsa`: a verification time that is not a `datetime`, one without
+  a UTC offset (`astimezone` read it as local time, so the verdict followed
+  the process's time zone), one whose UTC instant falls outside years 1 to
+  9999 (was `OverflowError`), or one whose `tzinfo` gives an offset
+  `datetime` rejects, a day or more or not a `timedelta` (was `ValueError`
+  or `TypeError`). For a time that is not a `datetime`, 0.6.1's
+  `verify_witness`, `verify_witness_step` and `verify_timestamp_token` used
+  the current time if Python treats it as false (`0`, `""`, `False`, `[]`),
+  used what its `astimezone` method returned if it had one (an
+  `arrow.Arrow`, or an object that claims through `__class__` to be a
+  `datetime`), and otherwise raised `AttributeError`. On a witness with no
+  token to check, 0.6.1 returned its verdict for each of these times.
+  Called directly, `validate_token_time` refuses the same times as `now`
+  (0.6.1 used what an `astimezone` method returned and otherwise raised
+  `AttributeError`), and holds the genTime to the same rules (0.6.1
+  accepted a genTime that compares with a `datetime`, such as an
+  `arrow.Arrow`, and otherwise raised `TypeError`, `OverflowError` or
+  `ValueError`, except where an earlier check already refused the record
+  for another reason). Each check reads a time's UTC offset once, so a
+  `tzinfo` whose answer changes between calls cannot
+  make it read the time as the process's local time. A bare record
+  filename with no `records=` refuses (was `IndexError`). The duplicate
   token-path rule keys on Unicode's canonical caseless match, so eleven
   spellings APFS stores as one entry are one path to it, as every spelling
   the old key joined still is.
+- `receipt.release_chain`: the same verification times, passed as `now` to
+  `verify_receipt`, `verify_release_receipts` or `verify_release_chain`.
+  0.6.1 read a naive `now` as local time, so the same chain and the same
+  naive `now` verified under `TZ=UTC` and `TZ=America/Los_Angeles` and
+  failed as postdating the verifier time under `TZ=Asia/Tokyo`. An
+  out-of-range `now` raised `OverflowError`, and a rejected offset
+  `ValueError` or `TypeError`. For a `now` that is not a `datetime`, 0.6.1
+  used the current time if Python treats it as false (`0`, `""`, `False`,
+  `[]`), used what its `astimezone` method returned if it had one, and
+  otherwise raised `AttributeError`, so a falsy `now` or an `arrow.Arrow`
+  set to the current time verified the chain.
+  Each entry reads `now` as `receipt.tsa` reads its
+  verification time, before it reads a file or runs OpenSSL, and names why
+  it refuses. With no release and `require_chain=False`, 0.6.1's
+  `verify_release_chain` returned a verdict with no releases whatever `now`
+  was; it now refuses an unusable `now` there too.
 - `receipt.snapshot`: in the ASCII-folded attribute reading, the attributes
   file is the entry whose name folds to `.gitattributes` (a case-insensitive
   checkout applies `.GITATTRIBUTES`), and two such entries in one directory
@@ -500,9 +534,7 @@ New refusals, each of an input 0.6.1 accepted or crashed on:
   lowercase hex characters; presented key ids must be `str`; without
   `cryptography`, the OpenSSL fallback refuses a key that is not an Ed25519
   PEM public key (a DER SPKI, a private key, a P-224 key), as the primary path
-  does, and refuses a signature over the empty message, which no OpenSSL
-  command it can rely on verifies, as that rather than as a failed signature;
-  `read_producer_public_key` reads only inside the anchor directory,
+  does; `read_producer_public_key` reads only inside the anchor directory,
   without following links; a bytes-subclass signature's refusal names its
   type rather than its length.
 - `receipt._names`: a portable component is at most 255 bytes, and pinned
@@ -519,6 +551,18 @@ Inputs that now verify, each refused in 0.6.1 for a reason that was not true:
   compiled without the loader's `__future__` flags and executed as a module
   registered in `sys.modules`. On Python 3.11 to 3.13 a spec's module-level
   annotations are therefore evaluated, as they are when the file runs.
+
+Without `cryptography`, the OpenSSL fallback verifies a signature over the
+empty message only where the installed OpenSSL decides one. After the key
+and pin checks, it runs `pkeyutl` on RFC 8032's empty-message test vector,
+and goes on to the caller's signature only if OpenSSL accepts the vector's
+signature and refuses it with one bit flipped. OpenSSL 4.1 passes, so a
+valid signature over the empty message verifies there, as in 0.6.1 and
+0.6.2. OpenSSL 3.6 fails `pkeyutl` on every empty message, so 0.6.1 and
+0.6.2 refused every such signature, valid or not, as a failed signature;
+the fallback now refuses it and names why: this OpenSSL does not verify a
+signature over the empty message. With `cryptography`, a valid signature
+over the empty message verifies.
 
 `verify_commit` logs the certificate's `subjectAlternativeName` that gh
 enforced, even if the caller's `buildConfigURI` is also allowlisted, and
@@ -591,7 +635,8 @@ inputs that did not crash before include corrected fractional instant text,
 refusal of genTimes with nonzero digits past the sixth fractional digit, and
 refusal of JSON nested more than 128 deep, including JSON 0.6.1 accepted.
 The properties sample typed parser and time-check inputs: bytes, strings,
-dictionary payloads, aware datetimes and integer allowances. They do not
+dictionary payloads, aware datetimes, tzinfos whose answers change between
+calls or that `datetime` rejects, and integer allowances. They do not
 establish totality for arbitrary public helper arguments.
 
 - A timestamp token whose genTime carries fractional seconds exactly

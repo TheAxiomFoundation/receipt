@@ -15,11 +15,13 @@ import pathlib
 import os
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import FrozenInstanceError, dataclass, replace
 from types import SimpleNamespace
 
 import pytest
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -3239,17 +3241,136 @@ def test_forced_openssl_path_refuses_what_the_cryptography_path_refuses(
         ) == ("accepted", "")
 
 
-def test_forced_openssl_path_names_why_it_cannot_verify_the_empty_message(
+def _openssl_on_path_verifies_an_empty_message() -> bool:
+    """Whether the ``openssl`` on PATH decides a fresh Ed25519 signature over
+    ``b""``, asked directly and independently of ``receipt.sign``: it must
+    accept the signature and refuse a zeroed one."""
+
+    private_key = Ed25519PrivateKey.generate()
+    public_pem = private_key.public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    with tempfile.TemporaryDirectory() as name:
+        directory = pathlib.Path(name)
+        (directory / "key.pem").write_bytes(public_pem)
+        (directory / "empty").write_bytes(b"")
+
+        def verifies(signature: bytes) -> bool:
+            (directory / "sig").write_bytes(signature)
+            return (
+                subprocess.run(
+                    [
+                        "openssl", "pkeyutl", "-verify", "-pubin",
+                        "-inkey", str(directory / "key.pem"), "-rawin",
+                        "-in", str(directory / "empty"),
+                        "-sigfile", str(directory / "sig"),
+                    ],
+                    capture_output=True,
+                    env={**os.environ, "OPENSSL_CONF": "/dev/null"},
+                ).returncode
+                == 0
+            )
+
+        return verifies(private_key.sign(b"")) and not verifies(bytes(64))
+
+
+def test_forced_openssl_path_decides_the_empty_message_where_openssl_can(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """0.6.2 review, L7 finding 6: ``pkeyutl -rawin`` cannot take zero bytes.
+    """0.6.2 review, L7 finding 6, and review of #98.
 
-    The fallback refused a valid signature over ``b""`` as "signature
-    verification failed", blaming the signature for a tool limit, while the
-    cryptography path accepted it. No OpenSSL command the fallback can rely
-    on verifies the empty message (``dgst -verify`` did with OpenSSL 3.6 and
-    refused a valid signature on the CI runners), so it still refuses, on
-    every version, and says why.
+    0.6.1 handed the empty message to ``pkeyutl -rawin``. OpenSSL 3.6 cannot
+    take zero bytes there and fails whatever the signature, so a valid
+    signature was refused as "signature verification failed", blaming the
+    signature for the tool; OpenSSL 4.1 decides it. A refusal on every
+    OpenSSL refused, on 4.1, a valid signature 0.6.1 and the cryptography
+    path accept. The fallback now verifies the empty message wherever the
+    OpenSSL on PATH decides one, agreeing with the cryptography path, and
+    elsewhere refuses it with the reason that is true. Which case applies is
+    asked of that OpenSSL directly, not of ``receipt.sign``.
+    """
+
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl is not installed")
+    capable = _openssl_on_path_verifies_an_empty_message()
+    private_key_pem, public_key_pem = generate_signing_keypair()
+    _, other_public_key_pem = generate_signing_keypair()
+    signature = sign_payload(private_key_pem, b"", domain=b"")
+    cases = [
+        (key, candidate)
+        for key in (public_key_pem, other_public_key_pem)
+        for candidate in (signature, bytes(64))
+    ]
+    primary = {
+        case: _outcome(lambda case=case: _verify(b"", case[1], case[0], pin=None))[0]
+        for case in cases
+    }
+    assert primary[(public_key_pem, signature)] == "accepted"
+    assert list(primary.values()).count("accepted") == 1
+    monkeypatch.setattr(sign_module, "CRYPTOGRAPHY_AVAILABLE", False)
+    reason = (
+        "producer Ed25519 signature over an empty message for artifact.sig "
+        "cannot be verified without the cryptography package: this OpenSSL "
+        "does not verify a signature over the empty message"
+    )
+    for case in cases:
+        outcome = _outcome(lambda case=case: _verify(b"", case[1], case[0], pin=None))
+        if capable:
+            assert outcome[0] == primary[case], case
+            if outcome[0] == "refused":
+                assert outcome[1] == (
+                    "producer Ed25519 signature verification failed for artifact.sig"
+                )
+        else:
+            assert outcome == ("refused", reason)
+    # A pin mismatch is still reported first, as on the cryptography path.
+    assert _outcome(
+        lambda: _verify(b"", signature, other_public_key_pem, pin=_spki_pin(public_key_pem))
+    )[1].startswith("producer public-key SPKI is not code-pinned")
+
+
+def test_the_empty_message_check_trusts_only_an_openssl_that_decides_the_vector(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The check passes only when OpenSSL accepts RFC 8032's empty-message
+    signature and refuses it with one bit flipped: an OpenSSL that fails
+    both cannot verify the empty message, and one that accepts both does
+    not check it."""
+
+    def run_with(accepts: Callable[[bytes], bool]) -> bool:
+        def fake(arguments: list[str], **_: object) -> bytes:
+            signature = pathlib.Path(arguments[arguments.index("-sigfile") + 1]).read_bytes()
+            if not accepts(signature):
+                raise SignError("refused")
+            return b""
+
+        monkeypatch.setattr(sign_module, "_producer_openssl_binary", fake)
+        directory = tmp_path / str(len(list(tmp_path.iterdir())))
+        directory.mkdir()
+        return sign_module._openssl_decides_the_empty_message(directory, {})
+
+    vector = sign_module._EMPTY_MESSAGE_VECTOR_SIGNATURE
+    assert run_with(lambda signature: signature == vector) is True
+    assert run_with(lambda signature: True) is False
+    assert run_with(lambda signature: False) is False
+    assert run_with(lambda signature: signature != vector) is False
+
+
+def test_the_fallback_hands_the_empty_message_to_openssl_after_the_key_checks_and_only_where_it_decides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both branches and their place, on any OpenSSL.
+
+    The test above runs whichever branch the OpenSSL on PATH selects, and
+    OpenSSL 3.5 and 3.6 select the refusal, so on those hosts nothing ran
+    the branch that verifies (review of #98). Here the capability answer is
+    scripted, and ``pkeyutl`` is a stand-in that accepts only the true
+    signature. Asked yes, the fallback hands the empty message to
+    ``pkeyutl`` as it does any payload: the true signature verifies and a
+    zeroed one fails as a signature. Asked no, it refuses with the reason
+    that is true, and ``pkeyutl`` never runs. It asks only after the
+    key-type and pin checks, whose refusals stay first and stay as they
+    were.
     """
 
     if shutil.which("openssl") is None:
@@ -3257,25 +3378,100 @@ def test_forced_openssl_path_names_why_it_cannot_verify_the_empty_message(
     private_key_pem, public_key_pem = generate_signing_keypair()
     _, other_public_key_pem = generate_signing_keypair()
     signature = sign_payload(private_key_pem, b"", domain=b"")
+    ec_public_pem = (
+        ec.generate_private_key(ec.SECP256R1())
+        .public_key()
+        .public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    )
+    monkeypatch.setattr(sign_module, "CRYPTOGRAPHY_AVAILABLE", False)
+    real_binary = sign_module._producer_openssl_binary
+    handed: list[bytes] = []
+    asked: list[bool] = []
+
+    def binary(arguments: list[str], **kwargs: object) -> bytes:
+        if arguments[0] != "pkeyutl":
+            return real_binary(arguments, **kwargs)  # type: ignore[arg-type]
+        handed.append(
+            pathlib.Path(arguments[arguments.index("-in") + 1]).read_bytes()
+        )
+        presented = pathlib.Path(
+            arguments[arguments.index("-sigfile") + 1]
+        ).read_bytes()
+        if presented != signature:
+            raise SignError("pkeyutl refused")
+        return b""
+
+    def answering(answer: bool) -> Callable[[pathlib.Path, dict[str, str]], bool]:
+        def decides(temporary: pathlib.Path, environment: dict[str, str]) -> bool:
+            asked.append(answer)
+            return answer
+
+        return decides
+
+    monkeypatch.setattr(sign_module, "_producer_openssl_binary", binary)
+    monkeypatch.setattr(
+        sign_module, "_openssl_decides_the_empty_message", answering(True)
+    )
     assert _outcome(lambda: _verify(b"", signature, public_key_pem, pin=None)) == (
         "accepted",
         "",
     )
-    monkeypatch.setattr(sign_module, "CRYPTOGRAPHY_AVAILABLE", False)
-    reason = (
-        "producer Ed25519 signature over an empty message for artifact.sig "
-        "cannot be verified without the cryptography package"
+    assert _outcome(lambda: _verify(b"", bytes(64), public_key_pem, pin=None)) == (
+        "refused",
+        "producer Ed25519 signature verification failed for artifact.sig",
     )
-    for key in (public_key_pem, other_public_key_pem):
-        for candidate in (signature, bytes(64)):
-            assert _outcome(lambda: _verify(b"", candidate, key, pin=None)) == (
-                "refused",
-                reason,
-            )
-    # A pin mismatch is still reported first, as on the cryptography path.
+    assert handed == [b"", b""]
+    assert asked == [True, True]
+
+    handed.clear()
+    asked.clear()
+    monkeypatch.setattr(
+        sign_module, "_openssl_decides_the_empty_message", answering(False)
+    )
+    assert _outcome(lambda: _verify(b"", signature, public_key_pem, pin=None)) == (
+        "refused",
+        "producer Ed25519 signature over an empty message for artifact.sig "
+        "cannot be verified without the cryptography package: this OpenSSL "
+        "does not verify a signature over the empty message",
+    )
+    assert handed == []
+    assert asked == [False]
+
+    asked.clear()
+    assert _outcome(lambda: _verify(b"", signature, ec_public_pem, pin=None)) == (
+        "refused",
+        "producer public key is not Ed25519: producer-ed25519.pub",
+    )
     assert _outcome(
-        lambda: _verify(b"", signature, other_public_key_pem, pin=_spki_pin(public_key_pem))
-    )[1].startswith("producer public-key SPKI is not code-pinned")
+        lambda: _verify(
+            b"", signature, other_public_key_pem, pin=_spki_pin(public_key_pem)
+        )
+    )[1].startswith("producer public-key SPKI is not code-pinned: ")
+    assert asked == []
+    assert handed == []
+
+
+def test_the_empty_message_vector_is_rfc_8032_test_1() -> None:
+    """The constants are RFC 8032 section 7.1 TEST 1: its secret key derives
+    the public key and signs the empty message to the signature, which
+    cryptography verifies, and the flipped copy the check uses fails."""
+
+    secret = Ed25519PrivateKey.from_private_bytes(
+        bytes.fromhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
+    )
+    public = secret.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+    assert public == sign_module._EMPTY_MESSAGE_VECTOR_PUBLIC_KEY
+    assert secret.sign(b"") == sign_module._EMPTY_MESSAGE_VECTOR_SIGNATURE
+    key = Ed25519PublicKey.from_public_bytes(public)
+    key.verify(sign_module._EMPTY_MESSAGE_VECTOR_SIGNATURE, b"")
+    vector = sign_module._EMPTY_MESSAGE_VECTOR_SIGNATURE
+    with pytest.raises(InvalidSignature):
+        key.verify(vector[:63] + bytes([vector[63] ^ 1]), b"")
 
 
 def test_forced_openssl_path_agrees_with_cryptography_over_short_payloads(
