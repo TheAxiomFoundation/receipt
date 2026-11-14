@@ -273,7 +273,10 @@ class ChainSpec:
         text tried to slice a prefix off ``None``. An empty ``anchors``
         mapping is the same shape of hole: the receipt-set equality check
         passes vacuously, no witness is ever verified, and the verdict
-        reports "the 0 pinned RFC 3161 authorities". A spec that pins
+        reports "the 0 pinned RFC 3161 authorities". ``schema_version`` has
+        the same hole: ``validate_manifest_schema`` accepts a manifest whose
+        ``schemaVersion`` equals it, so an empty pin passes an empty schema
+        and a ``None`` pin passes a null one. A spec that pins
         nothing is a configuration error, not a policy, and it refuses here
         rather than producing a verdict that reads like custody.
         """
@@ -291,8 +294,6 @@ class ChainSpec:
         except NamePolicyError as exc:
             raise ReleaseChainError(str(exc)) from exc
         _sha256(self.producer_spki_sha256, "ChainSpec producer_spki_sha256")
-        # An empty schema pin matches a manifest whose schemaVersion is also
-        # empty, so validate_manifest_schema would admit an unnamed schema.
         _strict_string(self.schema_version, "ChainSpec schema_version")
         if not isinstance(self.anchors, Mapping) or not self.anchors:
             raise ReleaseChainError(

@@ -9,10 +9,10 @@ input the package used to accept, or accept for the wrong reason.
 ### `ChainSpec` refuses a manifest schema pin that names no schema
 
 A `ChainSpec` that constructs now names the manifest schema it accepts.
-`validate_manifest_schema` compares a manifest's `schemaVersion` with the
-spec's pin, and `ChainSpec` used to take any pin: an empty pin passed
-manifests whose `schemaVersion` was empty, and a `None` pin passed manifests
-whose `schemaVersion` was null. `CorpusSpec` already refused an empty schema.
+`validate_manifest_schema` accepts a manifest whose `schemaVersion` equals the
+spec's pin. `ChainSpec` took any pin, so an empty pin passed manifests with an
+empty `schemaVersion`, and a `None` pin passed manifests with a null one.
+`CorpusSpec` already refused an empty schema.
 
 - `ChainSpec` refuses a `schema_version` that is not a non-empty string at
   construction: `ChainSpec schema_version must be a string and non-empty`.
