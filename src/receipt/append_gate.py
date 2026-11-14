@@ -68,6 +68,14 @@ class AppendGateSpec:
     data_surface: frozenset[str]
     assertion_content_keys: tuple[str, ...]
 
+    def __post_init__(self) -> None:
+        """Refuse a prefix schema pin that names no schema at construction,
+        where the consumer can see that the fault lies in their own
+        configuration. :func:`_assert_prefix_schema_pin_names_a_schema` gives
+        the reason."""
+
+        _assert_prefix_schema_pin_names_a_schema(self)
+
 
 @dataclass(frozen=True)
 class _CandidateTree:
@@ -167,6 +175,27 @@ def _assert_release_paths_are_subdirectories(spec: AppendGateSpec) -> None:
     ):
         if not relative.parts:
             raise AppendError(f"{label} must be a subdirectory of the candidate root")
+
+
+def _assert_prefix_schema_pin_names_a_schema(spec: AppendGateSpec) -> None:
+    """Refuse a spec whose prefix schema pin is not a non-empty string.
+
+    ``check_prefix`` accepts a prefix manifest whose ``schemaVersion``
+    equals ``prefix_schema_version``, and it reads a missing
+    ``schemaVersion`` as ``None``. Under a ``None`` pin, a manifest with no
+    ``schemaVersion`` passed that check, and under an empty pin, one with an
+    empty ``schemaVersion`` did. ``AppendGateSpec.__post_init__`` makes this
+    refusal at construction; the gate's entry makes it again for any object
+    that did not come through that constructor.
+    """
+
+    if (
+        type(spec.prefix_schema_version) is not str
+        or not spec.prefix_schema_version
+    ):
+        raise AppendError(
+            "AppendGateSpec prefix_schema_version must be a string and non-empty"
+        )
 
 
 # M1 record, _is_protected row 149-170: append owns surface matching and confinement.
@@ -1648,6 +1677,7 @@ def verify_append_gate_verdict(
     except ReleaseChainError as exc:
         raise AppendError(str(exc)) from exc
     _assert_release_paths_are_subdirectories(spec)
+    _assert_prefix_schema_pin_names_a_schema(spec)
     if base_ref is not None and (
         type(commit) is not str or re.fullmatch(r"[0-9a-f]{40}", commit) is None
     ):

@@ -6,6 +6,28 @@ input the package used to accept, or accept for the wrong reason.
 
 ## 0.7.0 (unreleased)
 
+### `AppendGateSpec` refuses a prefix schema pin that names no schema
+
+An `AppendGateSpec` that constructs now names the prefix manifest schema it
+accepts, and the append gate refuses at entry a spec whose pin names none. The
+gate compares a ledger's prefix manifest `schemaVersion` with the spec's
+`prefix_schema_version`, reading a missing `schemaVersion` as `None`, and
+`AppendGateSpec` took any pin. Under a `None` pin, a manifest with no
+`schemaVersion` passed that comparison, and under an empty pin, one with an
+empty `schemaVersion` passed it.
+
+- `AppendGateSpec` refuses a `prefix_schema_version` that is not a non-empty
+  string at construction, with `AppendError` and the message
+  `AppendGateSpec prefix_schema_version must be a string and non-empty`.
+  Tests cover `None`, the empty string, bytes and an integer, and fail without
+  the check.
+- `verify_append_gate` and `verify_append_gate_verdict` make the same refusal,
+  with the same message, before they read the candidate, for a spec that did
+  not come through that constructor, as they already do for its release
+  paths. Tests cover a `None` and an empty pin on a spec changed after
+  construction and on a duck-typed spec, each beside a prefix manifest that
+  pin would match, and fail without the entry check.
+
 ### `ChainSpec` refuses a manifest schema pin that names no schema
 
 A `ChainSpec` that constructs now names the manifest schema it accepts.
