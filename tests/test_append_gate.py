@@ -1937,6 +1937,54 @@ def test_an_ordinary_spec_names_a_subdirectory_for_every_release_path(
     )
 
 
+@pytest.mark.parametrize("value", [None, "", b"t", 1])
+def test_a_prefix_schema_pin_that_names_no_schema_refuses_at_construction(
+    value: object,
+) -> None:
+    """Under a ``None`` pin, a prefix manifest with no ``schemaVersion``
+    passed the schema check, and under an empty pin, one with an empty
+    ``schemaVersion`` did."""
+
+    with pytest.raises(AppendError) as refusal:
+        replace(GATE_SPEC, prefix_schema_version=value)
+    assert str(refusal.value) == (
+        "AppendGateSpec prefix_schema_version must be a string and non-empty"
+    )
+
+
+@pytest.mark.parametrize("value", [None, ""], ids=["none", "empty"])
+@pytest.mark.parametrize("route", ["setattr", "namespace"])
+def test_the_gate_entry_refuses_a_prefix_schema_pin_that_names_no_schema(
+    tmp_path: pathlib.Path, route: str, value: object
+) -> None:
+    """A spec that did not come through ``AppendGateSpec.__post_init__``
+    meets the same refusal at the gate's entry. The candidate's prefix
+    manifest is one the pin would match: no ``schemaVersion`` under a
+    ``None`` pin, an empty one under an empty pin."""
+
+    candidate = base_repository(tmp_path)
+    manifest_path = candidate.root / CHAIN_SPEC.prefix_relative
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if value is None:
+        del manifest["schemaVersion"]
+    else:
+        manifest["schemaVersion"] = value
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    append_one_row(candidate)
+
+    if route == "setattr":
+        spec = replace(GATE_SPEC)
+        object.__setattr__(spec, "prefix_schema_version", value)
+    else:
+        spec = SimpleNamespace(**{**vars(GATE_SPEC), "prefix_schema_version": value})
+
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate, spec)  # type: ignore[arg-type]
+    assert str(refusal.value) == (
+        "AppendGateSpec prefix_schema_version must be a string and non-empty"
+    )
+
+
 # The public gate retains the existing refusal for redirecting Git variables
 # present at entry. Separate invariance cases inject them after that guard and
 # bind the snapshot reader's own scrubbed child environment.
