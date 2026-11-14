@@ -6,6 +6,19 @@ input the package used to accept, or accept for the wrong reason.
 
 ## 0.7.0 (unreleased)
 
+### `ChainSpec` refuses a manifest schema pin that names no schema
+
+A `ChainSpec` that constructs now names the manifest schema it accepts.
+`validate_manifest_schema` accepts a manifest whose `schemaVersion` equals the
+spec's pin. `ChainSpec` took any pin, so an empty pin passed manifests with an
+empty `schemaVersion`, and a `None` pin passed manifests with a null one.
+`CorpusSpec` already refused an empty schema.
+
+- `ChainSpec` refuses a `schema_version` that is not a non-empty string at
+  construction: `ChainSpec schema_version must be a string and non-empty`.
+  Tests cover `None`, the empty string, bytes and an integer, and fail without
+  the check.
+
 ### `receipt verify` documents its exit statuses, and an unresolvable `--base-ref` exits 2 (#36)
 
 From the exit status alone, a CI job can now tell a history the comparison
