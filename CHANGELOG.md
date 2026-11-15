@@ -26,7 +26,34 @@ empty `schemaVersion` passed it.
   not come through that constructor, as they already do for its release
   paths. Tests cover a `None` and an empty pin on a spec changed after
   construction and on a duck-typed spec, each beside a prefix manifest that
-  pin would match, and fail without the entry check.
+  pin would match, and fail without both the entry check and the one
+  `check_prefix` makes (below).
+
+### `check_prefix` refuses a prefix schema pin that names no schema
+
+`check_prefix` now makes the gate's entry refusal itself, before it compares
+a prefix manifest's `schemaVersion` with the spec's pin. The entry above
+guarded the gate, but a caller can reach `check_prefix` without the gate, and
+such a call with a spec that did not come through the `AppendGateSpec`
+constructor still compared an unchecked pin: under a `None` pin, it accepted
+a manifest with no `schemaVersion`.
+
+- `check_prefix` refuses a `prefix_schema_version` that is not a non-empty
+  string before it reads the manifest, with `AppendError` and the message
+  `AppendGateSpec prefix_schema_version must be a string and non-empty`.
+  Tests cover a `None`, an empty, an integer, a `str`-subclass and a `str`
+  enumeration pin, each beside a zero-row manifest that pin would match, a
+  bytes pin, and a `None` pin beside text that is not JSON, and fail without
+  the check.
+- New tests hold four behaviors of the entry above that no test held: the
+  pin must be a `str` itself, so a `str` subclass or a `str` enumeration
+  member equal to a valid pin refuses at construction and at the gate's
+  entry; the gate's entry refuses bytes and integer pins, as the constructor
+  does; the gate's entry refuses before it reads the candidate, with and
+  without a base, so the pin's refusal comes first even for a commit the
+  repository does not hold; and against a base, the gate's entry refuses the
+  pin of a gate-only proposal, which returns before `check_prefix`, so the
+  entry's check is the only one on that route.
 
 ### `ChainSpec` refuses a manifest schema pin that names no schema
 

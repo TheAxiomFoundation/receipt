@@ -14,6 +14,7 @@ so they can prove that neither the working tree nor index is a verdict subject.
 
 from __future__ import annotations
 
+import enum
 import hashlib
 import json
 import os
@@ -1952,6 +1953,68 @@ def test_a_prefix_schema_pin_that_names_no_schema_refuses_at_construction(
     )
 
 
+class _SubclassPin(str):
+    """A ``str`` subclass, which an exact type check refuses and
+    ``isinstance`` would not."""
+
+
+class _EnumPin(str, enum.Enum):
+    """A ``str`` enumeration: each member is a ``str`` instance that equals
+    its value."""
+
+    PREFIX = GATE_SPEC.prefix_schema_version
+
+
+# Each equals the fixture's own pin, so the fixture's prefix manifest is one
+# it would match.
+STR_SUBCLASS_PINS = [
+    pytest.param(_SubclassPin(GATE_SPEC.prefix_schema_version), id="subclass"),
+    pytest.param(_EnumPin.PREFIX, id="enum"),
+]
+NOT_EXACTLY_A_STRING_PINS = [
+    pytest.param(b"t", id="bytes"),
+    pytest.param(1, id="integer"),
+    *STR_SUBCLASS_PINS,
+]
+# Every kind of pin the constructor refuses.
+PINS_THE_CONSTRUCTOR_REFUSES = [
+    pytest.param(None, id="none"),
+    pytest.param("", id="empty"),
+    *NOT_EXACTLY_A_STRING_PINS,
+]
+
+
+@pytest.mark.parametrize("value", STR_SUBCLASS_PINS)
+def test_a_prefix_schema_pin_of_a_str_subclass_refuses_at_construction(
+    value: str,
+) -> None:
+    """The pin's type is ``str`` itself, as ``ChainSpec.schema_version``'s
+    is: the schema check is an equality, and a subclass can define its own.
+    Each pin here is a ``str`` instance equal to the fixture's own."""
+
+    assert isinstance(value, str)
+    assert value == GATE_SPEC.prefix_schema_version
+    with pytest.raises(AppendError) as refusal:
+        replace(GATE_SPEC, prefix_schema_version=value)
+    assert str(refusal.value) == (
+        "AppendGateSpec prefix_schema_version must be a string and non-empty"
+    )
+
+
+def spec_that_skipped_the_constructor(route: str, value: object) -> AppendGateSpec:
+    """The fixture spec with ``value`` as its prefix schema pin, built
+    without ``AppendGateSpec.__post_init__``: a constructed spec changed
+    afterwards, or a duck-typed object with the same fields."""
+
+    if route == "setattr":
+        spec = replace(GATE_SPEC)
+        object.__setattr__(spec, "prefix_schema_version", value)
+        return spec
+    return SimpleNamespace(  # type: ignore[return-value]
+        **{**vars(GATE_SPEC), "prefix_schema_version": value}
+    )
+
+
 @pytest.mark.parametrize("value", [None, ""], ids=["none", "empty"])
 @pytest.mark.parametrize("route", ["setattr", "namespace"])
 def test_the_gate_entry_refuses_a_prefix_schema_pin_that_names_no_schema(
@@ -1972,14 +2035,159 @@ def test_the_gate_entry_refuses_a_prefix_schema_pin_that_names_no_schema(
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     append_one_row(candidate)
 
-    if route == "setattr":
-        spec = replace(GATE_SPEC)
-        object.__setattr__(spec, "prefix_schema_version", value)
-    else:
-        spec = SimpleNamespace(**{**vars(GATE_SPEC), "prefix_schema_version": value})
+    with pytest.raises(AppendError) as refusal:
+        run_push_gate(candidate, spec_that_skipped_the_constructor(route, value))
+    assert str(refusal.value) == (
+        "AppendGateSpec prefix_schema_version must be a string and non-empty"
+    )
+
+
+@pytest.mark.parametrize("value", NOT_EXACTLY_A_STRING_PINS)
+@pytest.mark.parametrize("route", ["setattr", "namespace"])
+def test_the_gate_entry_refuses_a_prefix_schema_pin_that_is_not_exactly_a_string(
+    tmp_path: pathlib.Path, route: str, value: object
+) -> None:
+    """The entry check asks for the constructor's exact type as well as a
+    non-empty value. The candidate's prefix manifest is one an integer or
+    ``str``-subclass pin would match: ``schemaVersion`` ``1`` under the pin
+    ``1``, the fixture's own under a pin equal to it. No JSON
+    ``schemaVersion`` equals a bytes pin, so that case holds which refusal
+    the gate makes."""
+
+    candidate = base_repository(tmp_path)
+    if type(value) is int:
+        manifest_path = candidate.root / CHAIN_SPEC.prefix_relative
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["schemaVersion"] = value
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+        )
+    append_one_row(candidate)
 
     with pytest.raises(AppendError) as refusal:
-        run_push_gate(candidate, spec)  # type: ignore[arg-type]
+        run_push_gate(candidate, spec_that_skipped_the_constructor(route, value))
+    assert str(refusal.value) == (
+        "AppendGateSpec prefix_schema_version must be a string and non-empty"
+    )
+
+
+@pytest.mark.parametrize("value", PINS_THE_CONSTRUCTOR_REFUSES)
+@pytest.mark.parametrize("route", ["setattr", "namespace"])
+@pytest.mark.parametrize(
+    "gate",
+    [pytest.param(run_push_gate, id="push"), pytest.param(run_gate, id="base")],
+)
+def test_the_gate_entry_refuses_a_prefix_schema_pin_before_it_reads_the_candidate(
+    tmp_path: pathlib.Path, gate: Callable[..., str], route: str, value: object
+) -> None:
+    """The entry check comes before the gate selects the candidate commit,
+    so it reports a spec's fault whatever the candidate holds, on the push
+    path and against a base. The commit named here does not exist: under
+    the fixture's own pin the gate refuses that it cannot resolve it, and
+    under a pin the constructor refuses, the pin's refusal comes first.
+    Where the gate goes on to ``check_prefix``, that call makes the same
+    refusal later, but a gate-only proposal against a base returns before
+    it. This test and the gate-only test below hold the entry's own check."""
+
+    candidate = base_repository(tmp_path)
+    absent = hashlib.sha1(b"a commit this repository does not hold").hexdigest()
+
+    with pytest.raises(AppendError) as unresolved:
+        gate(candidate, commit=absent)
+    assert str(unresolved.value) == f"cannot resolve commit '{absent}'"
+
+    with pytest.raises(AppendError) as refusal:
+        gate(
+            candidate,
+            spec=spec_that_skipped_the_constructor(route, value),
+            commit=absent,
+        )
+    assert str(refusal.value) == (
+        "AppendGateSpec prefix_schema_version must be a string and non-empty"
+    )
+
+
+@pytest.mark.parametrize("value", PINS_THE_CONSTRUCTOR_REFUSES)
+@pytest.mark.parametrize("route", ["setattr", "namespace"])
+def test_the_gate_entry_refuses_a_prefix_schema_pin_on_a_gate_only_proposal(
+    tmp_path: pathlib.Path, route: str, value: object
+) -> None:
+    """Against a base, a proposal that changes only the gate surface gets
+    its verdict before the gate reads the ledger or the prefix manifest.
+    ``check_prefix`` never runs for that proposal, so the entry's check is
+    the only one that refuses its spec's pin. A spec built by the same
+    route with the fixture's own pin keeps the gate-only verdict."""
+
+    candidate = base_repository(tmp_path)
+    add_gate_file(candidate)
+    oid = commit_candidate(candidate)
+
+    accepted = spec_that_skipped_the_constructor(
+        route, GATE_SPEC.prefix_schema_version
+    )
+    assert run_gate(candidate, spec=accepted, commit=oid) == (
+        "thesis-facts append check OK: gate-only proposal; DATA_SURFACE "
+        f"unchanged; GATE_SURFACE changes=['{GATE_FILE}']"
+    )
+
+    with pytest.raises(AppendError) as refusal:
+        run_gate(
+            candidate,
+            spec=spec_that_skipped_the_constructor(route, value),
+            commit=oid,
+        )
+    assert str(refusal.value) == (
+        "AppendGateSpec prefix_schema_version must be a string and non-empty"
+    )
+
+
+@pytest.mark.parametrize("value", PINS_THE_CONSTRUCTOR_REFUSES)
+@pytest.mark.parametrize("route", ["setattr", "namespace"])
+def test_check_prefix_refuses_a_prefix_schema_pin_that_names_no_schema(
+    route: str, value: object
+) -> None:
+    """A caller can reach ``check_prefix`` without the gate, so it makes
+    the refusal itself before it compares, and asks for the constructor's
+    exact type. The manifest is a zero-row prefix that passes every other
+    check and that the pin would match: no ``schemaVersion`` under a
+    ``None`` pin, an empty one under an empty pin, ``1`` under the pin
+    ``1``, and the fixture's own under a ``str``-subclass pin equal to it.
+    No JSON ``schemaVersion`` equals a bytes pin, so that case, beside the
+    fixture's own, holds which refusal ``check_prefix`` makes."""
+
+    manifest: dict[str, Any] = {
+        "prefixLineCount": 0,
+        "lineSha256s": [],
+        "prefixSha256": hashlib.sha256(b"\n").hexdigest(),
+    }
+    if type(value) in (int, str):
+        manifest["schemaVersion"] = value
+    elif value is not None:
+        manifest["schemaVersion"] = GATE_SPEC.prefix_schema_version
+    candidate = SimpleNamespace(spec=spec_that_skipped_the_constructor(route, value))
+
+    with pytest.raises(AppendError) as refusal:
+        append_gate.check_prefix([], json.dumps(manifest), candidate)
+    assert str(refusal.value) == (
+        "AppendGateSpec prefix_schema_version must be a string and non-empty"
+    )
+
+
+@pytest.mark.parametrize("route", ["setattr", "namespace"])
+def test_check_prefix_refuses_a_prefix_schema_pin_before_it_reads_the_manifest(
+    route: str,
+) -> None:
+    """The pin is the caller's own configuration, so ``check_prefix`` refuses
+    it before it reads the candidate's manifest. Text that is not JSON,
+    which the fixture's own pin refuses by that name, meets the pin's
+    refusal under one that names no schema."""
+
+    with pytest.raises(AppendError, match="^prefix manifest is not valid JSON: "):
+        append_gate.check_prefix([], "{", SimpleNamespace(spec=GATE_SPEC))
+
+    candidate = SimpleNamespace(spec=spec_that_skipped_the_constructor(route, None))
+    with pytest.raises(AppendError) as refusal:
+        append_gate.check_prefix([], "{", candidate)
     assert str(refusal.value) == (
         "AppendGateSpec prefix_schema_version must be a string and non-empty"
     )
