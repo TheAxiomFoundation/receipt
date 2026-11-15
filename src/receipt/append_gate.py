@@ -186,7 +186,8 @@ def _assert_prefix_schema_pin_names_a_schema(spec: AppendGateSpec) -> None:
     ``schemaVersion`` passed that check, and under an empty pin, one with an
     empty ``schemaVersion`` did. ``AppendGateSpec.__post_init__`` makes this
     refusal at construction; the gate's entry makes it again for any object
-    that did not come through that constructor.
+    that did not come through that constructor, and ``check_prefix`` makes it
+    before it compares, for a call that did not come through the gate.
     """
 
     if (
@@ -545,6 +546,11 @@ def effective_current_rows(
 def check_prefix(
     lines: list[str], prefix_text: str, candidate: _CandidateTree
 ) -> dict[str, Any]:
+    """Check the ledger's first rows against the candidate's prefix manifest
+    and return the manifest, refusing first, as the gate's entry does, a spec
+    whose prefix schema pin names no schema."""
+
+    _assert_prefix_schema_pin_names_a_schema(candidate.spec)
     # The caller supplies the selected prefix blob once, so the refusals below
     # retain their established order over authenticated bytes.
     #
