@@ -24,6 +24,7 @@ in refusals.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import os
 import pathlib
@@ -60,6 +61,17 @@ PRODUCER_SIGNATURE_BYTES = 64
 #: AlgorithmIdentifier id-Ed25519, BIT STRING of 32 key bytes. 44 bytes whole.
 _ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
 _PEM_LABEL = re.compile(rb"-----BEGIN ([^\r\n-]+)-----")
+
+#: RFC 8032, section 7.1, TEST 1: an Ed25519 public key and its signature over
+#: the empty message. The OpenSSL fallback asks the installed OpenSSL to decide
+#: this signature, and the same signature with one bit of S flipped, before it
+#: trusts that OpenSSL with an empty message.
+_EMPTY_MESSAGE_VECTOR_PUBLIC_KEY = bytes.fromhex(
+    "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+)
+_EMPTY_MESSAGE_VECTOR_SIGNATURE = bytes.fromhex(
+    "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+)
 
 
 class SignError(ValueError):
@@ -208,18 +220,23 @@ def _verify_producer_signature_with_openssl(
                     f"{computed_spki_sha256}"
                 )
 
-        if not payload:
-            # ``pkeyutl -rawin`` cannot allocate a zero-byte one-shot buffer,
-            # and ``dgst -verify`` verified an empty message with OpenSSL 3.6
-            # but refused a valid one on the CI runners' OpenSSL, so no command
-            # this fallback can rely on verifies the empty message. It
-            # was refused as "signature verification failed", blaming the
-            # signature for the tool (0.6.2 review, L7 finding 6). It is still
-            # refused, on every OpenSSL, with the reason that is true; the
-            # cryptography path verifies it.
+        if not payload and not _openssl_decides_the_empty_message(
+            temporary, environment
+        ):
+            # Whether ``pkeyutl -verify -rawin`` can decide a signature over
+            # the empty message depends on the OpenSSL. OpenSSL 3.6 cannot
+            # allocate its zero-byte one-shot buffer and fails whatever the
+            # signature; OpenSSL 4.1 decides it. 0.6.1 reported the failure
+            # as "signature verification failed", blaming the signature for
+            # the tool (0.6.2 review, L7 finding 6), and a refusal on every
+            # OpenSSL then refused, on 4.1, a valid signature 0.6.1 had
+            # accepted (review of #98). So an OpenSSL that decides RFC 8032's
+            # empty-message vector verifies the empty message like any other,
+            # and any other refuses it with the reason that is true.
             raise SignError(
                 f"producer Ed25519 signature over an empty message for {label} "
-                "cannot be verified without the cryptography package"
+                "cannot be verified without the cryptography package: this "
+                "OpenSSL does not verify a signature over the empty message"
             )
         command = [
             "pkeyutl",
@@ -243,6 +260,59 @@ def _verify_producer_signature_with_openssl(
             raise SignError(
                 f"producer Ed25519 signature verification failed for {label}"
             ) from exc
+
+
+def _openssl_decides_the_empty_message(
+    temporary: pathlib.Path, environment: dict[str, str]
+) -> bool:
+    """Whether this OpenSSL decides an Ed25519 signature over ``b""``.
+
+    It must accept RFC 8032's empty-message vector and refuse the same
+    vector with one bit of S flipped. An OpenSSL that fails both cannot
+    verify the empty message; one that accepts both does not check it.
+    """
+
+    probe = temporary / "empty-message-check"
+    probe.mkdir()
+    key_path = probe / "vector-public-key.pem"
+    message_path = probe / "empty-message"
+    key_path.write_bytes(
+        b"-----BEGIN PUBLIC KEY-----\n"
+        + base64.encodebytes(_ED25519_SPKI_PREFIX + _EMPTY_MESSAGE_VECTOR_PUBLIC_KEY)
+        + b"-----END PUBLIC KEY-----\n"
+    )
+    message_path.write_bytes(b"")
+    tampered = _EMPTY_MESSAGE_VECTOR_SIGNATURE[:63] + bytes(
+        [_EMPTY_MESSAGE_VECTOR_SIGNATURE[63] ^ 1]
+    )
+
+    def verifies(name: str, signature: bytes) -> bool:
+        signature_path = probe / name
+        signature_path.write_bytes(signature)
+        try:
+            _producer_openssl_binary(
+                [
+                    "pkeyutl",
+                    "-verify",
+                    "-pubin",
+                    "-inkey",
+                    str(key_path),
+                    "-rawin",
+                    "-in",
+                    str(message_path),
+                    "-sigfile",
+                    str(signature_path),
+                ],
+                environment=environment,
+                label="empty-message check",
+            )
+        except SignError:
+            return False
+        return True
+
+    return verifies("vector.sig", _EMPTY_MESSAGE_VECTOR_SIGNATURE) and not verifies(
+        "tampered.sig", tampered
+    )
 
 
 def read_producer_public_key(

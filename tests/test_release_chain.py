@@ -28,6 +28,7 @@ that does not.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -35,8 +36,9 @@ import pathlib
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 
 import pytest
 
@@ -3269,3 +3271,326 @@ def test_a_verification_time_at_the_top_of_the_range_is_decided(
 
     spec = load_spec(repo / "verification/spec.py").verification
     assert verify_release_chain(repo, spec=spec.chain, now=now).releases
+
+
+class _OffsetAnswer(tzinfo):
+    """A tzinfo that answers ``utcoffset`` with a fixed value, which
+    ``datetime`` may reject."""
+
+    def __init__(self, answer: object) -> None:
+        self._answer = answer
+
+    def utcoffset(self, value: datetime | None) -> object:
+        return self._answer
+
+    def dst(self, value: datetime | None) -> timedelta | None:
+        return None
+
+    def tzname(self, value: datetime | None) -> str:
+        return repr(self._answer)
+
+
+class _AnswersAstimezone:
+    """Not a ``datetime``, but gives the current time when asked for it in
+    a zone, as an ``arrow.Arrow`` does."""
+
+    def astimezone(self, tz: object = None) -> datetime:
+        return datetime.now(timezone.utc).astimezone(tz)  # type: ignore[arg-type]
+
+    def __repr__(self) -> str:
+        return "_AnswersAstimezone()"
+
+
+class _ClaimsToBeADatetime(_AnswersAstimezone):
+    """Claims through ``__class__`` to be a ``datetime``, which
+    ``isinstance`` takes its word for."""
+
+    @property  # type: ignore[misc]
+    def __class__(self) -> type:
+        return datetime
+
+    def __repr__(self) -> str:
+        return "_ClaimsToBeADatetime()"
+
+
+@contextlib.contextmanager
+def _process_time_zone(name: str):
+    """Run the body with the process's local time zone set to ``name``."""
+
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = name
+    time.tzset()
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
+
+
+def _verify_with_now(entry: str, repo: pathlib.Path, now: object) -> object:
+    """Call one public release-chain verifier on ``repo``'s first release."""
+
+    spec = load_spec(repo / "verification/spec.py").verification
+    if entry == "chain":
+        return verify_release_chain(
+            repo, spec=spec.chain, now=now  # type: ignore[arg-type]
+        )
+    manifest_path = sorted((repo / "releases/manifests").glob("*.json"))[0]
+    manifest_bytes = manifest_path.read_bytes()
+    digest = hashlib.sha256(manifest_bytes).hexdigest()
+    receipt_paths = {
+        tsa: manifest_path.with_name(manifest_path.stem + f".{tsa}.tsr")
+        for tsa in spec.chain.anchors
+    }
+    if entry == "receipts":
+        return release_chain.verify_release_receipts(
+            json.loads(manifest_bytes),
+            digest,
+            receipt_paths,
+            spec=spec.chain,
+            anchor_dir=repo / ANCHOR_DIR,
+            enforce_production_pins=True,
+            clock_skew_seconds=300,
+            now=now,  # type: ignore[arg-type]
+        )
+    tsa = sorted(spec.chain.anchors)[0]
+    return verify_receipt(
+        digest,
+        receipt_paths[tsa],
+        tsa,
+        spec=spec.chain,
+        anchor_dir=repo / ANCHOR_DIR,
+        enforce_production_pins=True,
+        now=now,  # type: ignore[arg-type]
+    )
+
+
+_RELEASE_CHAIN_ENTRIES = ["chain", "receipts", "receipt"]
+
+
+@pytest.mark.parametrize("entry", _RELEASE_CHAIN_ENTRIES)
+@pytest.mark.parametrize("zone", ["UTC", "Asia/Tokyo", "America/Los_Angeles"])
+def test_a_naive_verifier_time_is_refused_in_every_time_zone(
+    repo: pathlib.Path, entry: str, zone: str
+) -> None:
+    """``now.astimezone(timezone.utc)`` read a naive verifier time as the
+    process's local time, so the same chain and the same naive ``now``
+    verified under ``TZ=UTC`` and ``TZ=America/Los_Angeles`` and were refused
+    as postdating the verifier time under ``TZ=Asia/Tokyo`` (review of
+    #98). A naive time names no instant; every entry refuses it, by name,
+    whatever the process's time zone."""
+
+    naive_now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with _process_time_zone(zone):
+        with pytest.raises(
+            ReleaseChainError,
+            match="verifier time must be a timezone-aware datetime",
+        ):
+            _verify_with_now(entry, repo, naive_now)
+
+
+_OUT_OF_RANGE = "verifier time is outside the representable UTC range"
+_NO_VALID_OFFSET = "verifier time has no valid UTC offset"
+_NOT_AWARE = "verifier time must be a timezone-aware datetime"
+
+_UNUSABLE_VERIFIER_TIMES = [
+    pytest.param(
+        datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=1))),
+        _OUT_OF_RANGE,
+        id="year-0",
+    ),
+    pytest.param(
+        datetime.max.replace(tzinfo=timezone(timedelta(hours=-1))),
+        _OUT_OF_RANGE,
+        id="year-10000",
+    ),
+    pytest.param(
+        datetime(2026, 1, 1, tzinfo=_OffsetAnswer(timedelta(hours=24))),
+        _NO_VALID_OFFSET,
+        id="day-long-offset",
+    ),
+    pytest.param(
+        datetime(2026, 1, 1, tzinfo=_OffsetAnswer(3600)),
+        _NO_VALID_OFFSET,
+        id="int-offset",
+    ),
+    pytest.param("2026-01-01T00:00:00Z", _NOT_AWARE, id="string"),
+    pytest.param(0, _NOT_AWARE, id="zero"),
+    pytest.param("", _NOT_AWARE, id="empty-string"),
+    pytest.param(False, _NOT_AWARE, id="false"),
+    pytest.param(_AnswersAstimezone(), _NOT_AWARE, id="astimezone"),
+    pytest.param(_ClaimsToBeADatetime(), _NOT_AWARE, id="pretender"),
+]
+
+
+@pytest.mark.parametrize("entry", _RELEASE_CHAIN_ENTRIES)
+@pytest.mark.parametrize(("now", "reason"), _UNUSABLE_VERIFIER_TIMES)
+def test_an_unusable_verifier_time_is_refused_by_name(
+    repo: pathlib.Path, entry: str, now: object, reason: str
+) -> None:
+    """An aware verifier time outside years 1 to 9999 in UTC raised
+    ``OverflowError``, a rejected offset raised ``ValueError`` or
+    ``TypeError``, and a string raised ``AttributeError``. ``now or
+    datetime.now(utc)`` put the current time in place of a non-datetime
+    that Python treats as false, so ``0``, ``""`` and ``False`` verified,
+    and ``astimezone`` answered for any object that had it, so one giving
+    the current time verified whether or not it claimed to be a
+    ``datetime`` (reviews of #98). Each is a ``ReleaseChainError`` now."""
+
+    with pytest.raises(ReleaseChainError, match=reason):
+        _verify_with_now(entry, repo, now)
+
+
+@pytest.mark.parametrize("require_chain", [False, True])
+@pytest.mark.parametrize(
+    ("now", "reason"),
+    [
+        pytest.param(datetime(2026, 1, 1), _NOT_AWARE, id="naive"),
+        *_UNUSABLE_VERIFIER_TIMES,
+    ],
+)
+def test_a_chain_with_no_release_refuses_an_unusable_verifier_time(
+    repo: pathlib.Path,
+    tmp_path: pathlib.Path,
+    now: object,
+    reason: str,
+    require_chain: bool,
+) -> None:
+    """``verify_release_chain`` read ``now`` after its empty-chain return,
+    so with no release and ``require_chain=False`` it returned a verdict
+    with no releases for a naive, a string or a year-0 ``now`` (review of
+    #98). It reads ``now`` first, so the time refuses whatever the tree
+    holds."""
+
+    spec = load_spec(repo / "verification/spec.py").verification
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(ReleaseChainError, match=reason):
+        verify_release_chain(
+            empty,
+            spec=spec.chain,
+            require_chain=require_chain,
+            now=now,  # type: ignore[arg-type]
+        )
+
+
+class _ScriptedOffset(tzinfo):
+    """Answers ``utcoffset`` from a script, one answer per call, and counts
+    the calls; the last answer repeats."""
+
+    def __init__(self, *answers: timedelta | None) -> None:
+        self.answers = answers
+        self.calls = 0
+
+    def utcoffset(self, value: datetime | None) -> timedelta | None:
+        answer = self.answers[min(self.calls, len(self.answers) - 1)]
+        self.calls += 1
+        return answer
+
+    def dst(self, value: datetime | None) -> timedelta | None:
+        return None
+
+    def tzname(self, value: datetime | None) -> str:
+        return "scripted"
+
+
+@pytest.mark.parametrize("entry", _RELEASE_CHAIN_ENTRIES)
+def test_every_release_chain_entry_asks_the_callers_clock_once(
+    repo: pathlib.Path, entry: str
+) -> None:
+    """Each entry reads the caller's ``now`` once and passes the UTC
+    instant on, so a clock that answers ``+01:00`` and then ``None`` decides
+    as a fixed ``+01:00`` clock, under ``TZ=Asia/Tokyo`` as anywhere. An
+    entry that handed the caller's value down read it again in each
+    receipt, and a ``None`` from that reading made it naive (review of
+    #98)."""
+
+    wall = (datetime.now(timezone.utc) + timedelta(hours=1)).replace(tzinfo=None)
+    fixed = _verify_with_now(
+        entry, repo, wall.replace(tzinfo=timezone(timedelta(hours=1)))
+    )
+    zone = _ScriptedOffset(timedelta(hours=1), None)
+    with _process_time_zone("Asia/Tokyo"):
+        scripted = _verify_with_now(entry, repo, wall.replace(tzinfo=zone))
+    assert zone.calls == 1
+    if entry == "chain":
+        assert len(scripted.releases) == len(fixed.releases)  # type: ignore[attr-defined]
+    else:
+        assert scripted == fixed
+
+
+@pytest.mark.parametrize("entry", ["receipts", "receipt"])
+def test_a_receipt_entry_refuses_its_verifier_time_before_reading_a_file(
+    repo: pathlib.Path, tmp_path: pathlib.Path, entry: str
+) -> None:
+    """With a receipt that does not exist and an empty manifest, each
+    receipt entry still refuses for the naive verifier time: it reads
+    ``now`` before any file, and the refusal does not depend on the files
+    it was given. The next test pins the same order in
+    ``verify_release_chain``."""
+
+    spec = load_spec(repo / "verification/spec.py").verification
+    missing = tmp_path / "missing.tsr"
+    naive = datetime(2026, 1, 1)
+    with pytest.raises(ReleaseChainError, match=_NOT_AWARE):
+        if entry == "receipts":
+            release_chain.verify_release_receipts(
+                {},
+                "0" * 64,
+                {tsa: missing for tsa in spec.chain.anchors},
+                spec=spec.chain,
+                anchor_dir=tmp_path / "anchors",
+                enforce_production_pins=True,
+                clock_skew_seconds=300,
+                now=naive,
+            )
+        else:
+            verify_receipt(
+                "0" * 64,
+                missing,
+                sorted(spec.chain.anchors)[0],
+                spec=spec.chain,
+                anchor_dir=tmp_path / "anchors",
+                enforce_production_pins=True,
+                now=naive,
+            )
+
+
+def test_verify_release_chain_refuses_its_verifier_time_before_openssl_or_a_path(
+    repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``verify_release_chain`` reads ``now`` before it asks OpenSSL for
+    its version, walks the configured paths or lists the manifests, so a
+    naive time refuses for the time whatever the host's OpenSSL and the
+    tree hold. Reading it later still refused, but for the first of those
+    checks to fail (review of #98)."""
+
+    def must_not_run(*arguments: object, **keywords: object) -> None:
+        raise AssertionError("ran before the verifier time was read")
+
+    spec = load_spec(repo / "verification/spec.py").verification
+    monkeypatch.setattr(release_chain._tsa, "_require_supported_openssl", must_not_run)
+    monkeypatch.setattr(release_chain, "assert_no_symlinked_release_root", must_not_run)
+    monkeypatch.setattr(release_chain, "assert_manifest_directory_regular", must_not_run)
+    monkeypatch.setattr(release_chain, "_enumerate_manifest_files", must_not_run)
+    with pytest.raises(ReleaseChainError, match=_NOT_AWARE):
+        verify_release_chain(repo, spec=spec.chain, now=datetime(2026, 1, 1))
+
+
+@pytest.mark.parametrize("entry", _RELEASE_CHAIN_ENTRIES)
+def test_an_aware_verifier_time_decides_as_its_utc_instant(
+    repo: pathlib.Path, entry: str
+) -> None:
+    """The same instant in UTC and at +09:00 gives the same verdict."""
+
+    instant = datetime.now(timezone.utc)
+    tokyo = instant.astimezone(timezone(timedelta(hours=9)))
+    in_utc = _verify_with_now(entry, repo, instant)
+    in_tokyo = _verify_with_now(entry, repo, tokyo)
+    if entry == "chain":
+        assert len(in_utc.releases) == len(in_tokyo.releases)  # type: ignore[attr-defined]
+    else:
+        assert in_utc == in_tokyo
